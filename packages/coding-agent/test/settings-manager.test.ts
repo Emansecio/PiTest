@@ -275,6 +275,72 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("load-time validation warnings", () => {
+		const globalSettingsPath = join(agentDir, "settings.json");
+
+		function writeGlobal(obj: unknown): void {
+			writeFileSync(globalSettingsPath, JSON.stringify(obj, null, 2));
+		}
+
+		function warnings(manager: SettingsManager): string[] {
+			return manager.drainErrors().map((e) => e.error.message);
+		}
+
+		it("warns on an unknown top-level key with a nearest-match suggestion", () => {
+			writeGlobal({ verifcation: { enabled: true } });
+			const messages = warnings(SettingsManager.create(projectDir, agentDir));
+			expect(
+				messages.some(
+					(m) => m.includes('Unknown setting "verifcation"') && m.includes('did you mean "verification"'),
+				),
+			).toBe(true);
+		});
+
+		it("warns on an unknown nested key one level deep", () => {
+			writeGlobal({ verification: { enabld: true } });
+			const messages = warnings(SettingsManager.create(projectDir, agentDir));
+			expect(messages.some((m) => m.includes('Unknown setting "verification.enabld"'))).toBe(true);
+		});
+
+		it("does NOT warn on a legacy key handled by migrateSettings", () => {
+			writeGlobal({ queueMode: "all", websockets: true });
+			const messages = warnings(SettingsManager.create(projectDir, agentDir));
+			expect(messages.some((m) => m.includes("queueMode") || m.includes("websockets"))).toBe(false);
+		});
+
+		it("does NOT warn on a known top-level or nested key", () => {
+			writeGlobal({ theme: "dark", verification: { enabled: false, maxAttempts: 3 } });
+			const messages = warnings(SettingsManager.create(projectDir, agentDir));
+			expect(messages).toEqual([]);
+		});
+
+		it("warns exactly once when a provided value is clamped", () => {
+			writeGlobal({ terminal: { imageWidthCells: 9999 } });
+			const messages = warnings(SettingsManager.create(projectDir, agentDir));
+			const clamps = messages.filter((m) => m.includes("terminal.imageWidthCells"));
+			expect(clamps).toHaveLength(1);
+			expect(clamps[0]).toContain("9999");
+			expect(clamps[0]).toContain("400");
+		});
+
+		it("does NOT warn when a coerced setting is merely absent", () => {
+			writeGlobal({ theme: "dark" });
+			const messages = warnings(SettingsManager.create(projectDir, agentDir));
+			expect(messages.some((m) => m.includes("imageWidthCells") || m.includes("frequentFiles"))).toBe(false);
+		});
+
+		it("warns on an invalid enum value but not on a valid one", () => {
+			writeGlobal({ doubleEscapeAction: "nope" });
+			const messages = warnings(SettingsManager.create(projectDir, agentDir));
+			expect(messages.some((m) => m.includes("doubleEscapeAction") && m.includes("tree"))).toBe(true);
+		});
+
+		it("keeps editorClosedBottom default false (runtime is the source of truth)", () => {
+			writeGlobal({ theme: "dark" });
+			expect(SettingsManager.create(projectDir, agentDir).getEditorClosedBottom()).toBe(false);
+		});
+	});
+
 	describe("project settings directory creation", () => {
 		it("should not create .pit folder when only reading project settings", () => {
 			// Create agent dir with global settings, but NO .pit folder in project

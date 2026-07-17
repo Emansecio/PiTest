@@ -17,7 +17,7 @@ Edit directly or use `/settings` for common options.
 |---------|------|---------|-------------|
 | `defaultProvider` | string | - | Default provider (e.g., `"anthropic"`, `"openai"`) |
 | `defaultModel` | string | - | Default model ID |
-| `defaultThinkingLevel` | string | - | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"` |
+| `defaultThinkingLevel` | string | - | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`, `"ultra"` |
 | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level |
 
@@ -56,9 +56,11 @@ See also [Model Cycling](#model-cycling) for `enabledModels` format.
 | `quietStartup` | boolean | `false` | Hide startup header |
 | `doubleEscapeAction` | string | `"tree"` | Action for double-escape: `"tree"`, `"fork"`, or `"none"` |
 | `treeFilterMode` | string | `"default"` | Default filter for `/tree`: `"default"`, `"no-tools"`, `"user-only"`, `"labeled-only"`, `"all"` |
-| `editorPaddingX` | number | `0` | Horizontal padding for input editor (0-3) |
+| `editorPaddingX` | number | `1` | Horizontal padding for input editor (0-3) |
+| `cardPaddingX` | number | `1` | Horizontal padding inside card frames (welcome + tool blocks) (0-3) |
 | `autocompleteMaxVisible` | number | `5` | Max visible items in autocomplete dropdown (3-20) |
-| `editorClosedBottom` | boolean | `true` | Draw a closed `╰───` bottom rule on the input editor (card-like frame). Set `false` for the historical blank separator |
+| `editorClosedBottom` | boolean | `false` | Draw a closed `╰───` bottom rule on the input editor (card-like frame). Default `false` is a single hairline above the input; set `true` to restore the closed frame |
+| `footerDensity` | string | `"calm"` | Footer metrics density: `"calm"` hides power-only segments (still shows abnormal safety chips like no-rails/no-compact/overthink/recovery); `"full"` keeps the dense legacy footer |
 | `assistantReadingColumns` | number | `120` | Reading-column cap (cols) for assistant prose. `0` = full width; a positive value (clamped 40-200) wraps long answers at that measure. Tool/bash/code blocks are never capped |
 | `showHardwareCursor` | boolean | `false` | Show terminal cursor |
 | `cursorBlink` | boolean | `true` | Blink the input editor's block cursor while focused |
@@ -137,11 +139,14 @@ By default (no `modelRoles.compact`), Pit may still pick a small-class sibling f
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `retry.enabled` | boolean | `true` | Enable automatic agent-level retry on transient errors |
-| `retry.maxRetries` | number | `3` | Maximum agent-level retry attempts |
-| `retry.baseDelayMs` | number | `2000` | Base delay for agent-level exponential backoff (2s, 4s, 8s) |
+| `retry.maxRetries` | number | `5` | Maximum agent-level retry attempts |
+| `retry.baseDelayMs` | number | `2000` | Base delay for agent-level exponential backoff (2s, 4s, 8s, 16s, capped at 30s) |
+| `retry.cooldownMs` | number | `300000` | Cooldown before a model that failed in a fallback chain is retried (5m) |
+| `retry.fallbackChains` | object | `{}` | Per-role fallback model chains (`role → model[]`), consumed by the model resolver |
 | `retry.provider.timeoutMs` | number | SDK default | Provider/SDK request timeout in milliseconds |
 | `retry.provider.maxRetries` | number | SDK default | Provider/SDK retry attempts |
 | `retry.provider.maxRetryDelayMs` | number | `60000` | Max server-requested delay before failing (60s) |
+| `retry.provider.idleTimeoutMs` | number | `120000` | Max body inactivity (ms) on the raw provider stream before failing as retryable |
 
 When a provider requests a retry delay longer than `retry.provider.maxRetryDelayMs` (e.g., Google's "quota will reset after 5h"), the request fails immediately with an informative error instead of waiting silently. Set to `0` to disable the cap.
 
@@ -166,9 +171,9 @@ When a provider requests a retry delay longer than `retry.provider.maxRetryDelay
 |---------|------|---------|-------------|
 | `steeringMode` | string | `"one-at-a-time"` | How steering messages are sent: `"all"` or `"one-at-a-time"` |
 | `followUpMode` | string | `"one-at-a-time"` | How follow-up messages are sent: `"all"` or `"one-at-a-time"` |
-| `transport` | string | `"auto"` | Preferred transport for providers that support multiple transports: `"sse"`, `"websocket"`, or `"auto"` |
+| `transport` | string | `"auto"` | Preferred transport for providers that support multiple transports: `"sse"`, `"websocket"`, `"websocket-cached"`, or `"auto"` |
 
-Legacy keys `queueMode` and `websockets` are still accepted on load: `queueMode` migrates to `steeringMode` (and `followUpMode` when absent), and `websockets: true|false` migrates to `transport: "websocket"|"sse"`. Migrated files are written back to disk on load.
+Legacy keys `queueMode` and `websockets` are still accepted on load: `queueMode` migrates to `steeringMode` (and `followUpMode` when absent), and `websockets: true|false` migrates to `transport: "websocket"|"sse"`. The legacy `retry.maxDelayMs` key migrates to `retry.provider.maxRetryDelayMs`. Migrated files are written back to disk on load.
 
 ### Minimal tool surface
 
@@ -258,9 +263,18 @@ Paths in `~/.pit/agent/settings.json` resolve relative to `~/.pit/agent`. Paths 
 | `skills` | string[] | `[]` | Local skill file paths or directories |
 | `prompts` | string[] | `[]` | Local prompt template paths or directories |
 | `themes` | string[] | `[]` | Local theme file paths or directories |
-| `enableSkillCommands` | boolean | `true` | Register skills as `/skill:name` commands |
+| `enableSkillCommands` | boolean | `true` | Register each skill as a `/<name>` slash command (e.g. skill `brave-search` → `/brave-search`). A skill whose name collides with a built-in/template/extension command is skipped |
 
 Arrays support glob patterns and exclusions. Use `!pattern` to exclude. Use `+path` to force-include an exact path and `-path` to force-exclude an exact path.
+
+#### skillDiscovery
+
+Opt out of duplicate skill trees discovered outside Pit's own dirs. Equivalent to the env kill-switches (`PIT_NO_CLAUDE_CODE_SKILLS`, `PIT_NO_LEGACY_SKILLS`); either the setting or the env flag disables the source (OR).
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `skillDiscovery.noClaudeCode` | boolean | `false` | Skip Claude Code skill trees (`~/.claude`). Also set by `PIT_NO_CLAUDE_CODE_SKILLS` (or `PIT_DISABLE_CLAUDE_CODE_SKILLS`) |
+| `skillDiscovery.noLegacy` | boolean | `false` | Skip legacy skill trees (`.codex` / `.gemini` dirs). Also set by `PIT_NO_LEGACY_SKILLS` |
 
 #### packages
 
@@ -349,11 +363,22 @@ After a code-modifying turn, Pit can run the project check command and self-corr
 | `verification.enabled` | boolean | `true` | Run the verification gate after code-modifying turns |
 | `verification.command` | string | `null` | Check command; `null` auto-detects from `package.json` scripts (check/typecheck/lint/test) |
 | `verification.maxAttempts` | number | `2` | Fix attempts before giving up and reporting the failure (min 1) |
-| `verification.timeoutMs` | number | `180000` | Timeout for the check command (min 1000) |
+| `verification.timeoutMs` | number | `180000` | Timeout for the check command. Floor 50ms so an explicitly configured short timeout is honored |
 | `verification.visual` | boolean | `true` | Nudge to `preview` when a rendered artifact changed but was never viewed |
 | `verification.functionalWeb` | boolean | `true` | Native functional web DoD (navigate/a11y/click/fill/console); fail-open without Chrome |
 | `verification.functionalWebTimeoutMs` | number | `45000` | Timeout for one functional web check pass |
 | `verification.functionalWebMaxInteractions` | number | `3` | Max click/fill interactions per functional web check |
+
+### Pending Checks
+
+Long-running project checks can be backgrounded and drained at end of turn; Pit waits for them to settle and self-corrects on failure.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `pendingChecks.enabled` | boolean | `true` | Drain backgrounded checks at end of turn. Forced off by `PIT_NO_PENDING_CHECKS=1` (env wins) |
+| `pendingChecks.maxWaitMs` | number | `900000` | Max time to wait for a backgrounded check to settle (15m). Floor 50ms so an explicitly configured short wait is honored |
+| `pendingChecks.maxFixAttempts` | number | `2` | Fix attempts before giving up and reporting the failure (floor 0) |
+| `pendingChecks.pollIntervalMs` | number | `500` | How often the end-of-turn drain re-checks whether a backgrounded check has settled (floor 5ms; mainly a test seam) |
 
 ### Eval
 
@@ -402,6 +427,14 @@ also in `/settings`. Kill-switch: `PIT_NO_FUSION=1`.
 | `grep.engine` | string | `"fff"` | `"fff"` uses the warm in-memory `@ff-labs/fff-node` index for `grep` and `find` (falls back to ripgrep / fd when unavailable or unsupported). `"rg"` forces ripgrep for grep and fd for find. Outside a git work tree, `fff` always falls back — the native index drops dotfiles and goes stale without git |
 
 The env var `PIT_GREP_ENGINE=fff\|rg` overrides settings (env wins). The same switch governs both `grep` and `find`.
+
+### ast_grep backend
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `astGrep.engine` | string | `"napi"` | `"napi"` runs the ast-grep engine in-process via the optional `@ast-grep/napi` package for built-in languages, falling back to the `ast-grep` CLI for other languages / unsupported queries / when the package is absent. `"cli"` forces the CLI |
+
+The env var `PIT_ASTGREP_ENGINE=napi\|cli` overrides settings (env wins). See [token-economy-tuning.md](../../../docs/token-economy-tuning.md) for the full `PIT_*` catalog.
 
 ### LSP
 
@@ -511,6 +544,15 @@ The `search_tool_bm25` tool is always registered; these settings gate auto-seedi
 | `toolFeedback.failureBudget.enabled` | boolean | `true` | Inject a forceful steer when a single tool (by name) exhausts its per-turn failure budget |
 | `toolFeedback.failureBudget.maxPerTurn` | number | `3` | Failures of one tool (by name) allowed in a turn before the steer fires |
 | `toolFeedback.failureBudget.carryover` | boolean | `true` | Carry per-tool failure counts into the next turn with half-life decay instead of resetting them to zero |
+| `toolFeedback.todoCadenceReminder.enabled` | boolean | `true` | Inject a sync reminder when an `in_progress` todo goes stale without an update |
+| `toolFeedback.todoCadenceReminder.threshold` | number | `3` | Turns a todo may sit `in_progress` without an update before the reminder fires |
+| `toolFeedback.todoCadenceReminder.cooldownMs` | number | `30000` | Minimum gap between reminders |
+| `toolFeedback.overthinkGuard.enabled` | boolean | `true` | Live guard that interrupts a stream when one thinking block exceeds a token estimate without any tool call. Also disabled by `PIT_NO_OVERTHINK_GUARD=1` — the setting and the env flag are two independent kill paths |
+| `toolFeedback.overthinkGuard.tokenThreshold` | number | unset | Override threshold (est. tokens) for all models; when unset, the weak/strong defaults apply |
+| `toolFeedback.overthinkGuard.weakTokenThreshold` | number | `1000` | Threshold (est. tokens) for open/weak providers |
+| `toolFeedback.overthinkGuard.strongTokenThreshold` | number | `2500` | Threshold (est. tokens) for native frontier providers |
+| `toolFeedback.overthinkGuard.maxRetriesPerTurn` | number | `2` | Interrupt injections per turn before bailing |
+| `toolFeedback.overthinkGuard.watchTextDelta` | boolean | unset | When unset, weak/open providers watch `text_delta`; frontier providers do not |
 
 The **failure budget** tracks how many times each tool (keyed by name, regardless of
 arguments or error text) has failed in the current turn. Once a tool hits `maxPerTurn`
@@ -529,11 +571,33 @@ not want failures from an earlier step to trigger an early escalation later.
 |---------|------|---------|-------------|
 | `engineeringStyle` | string | `"karpathy"` | Style pack appended to the system prompt's `Guidelines:` section. `"karpathy"` applies the Karpathy LLM-coding guideline bullets; `"default"` is a no-op. Unknown values resolve to `"karpathy"` |
 
+### Autonomous Goal
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `goal.maxAutoIterations` | number | `50` | Safety cap on autonomous goal continuations spawned from a single user prompt. Hitting it pauses the goal so the user can resume. Coerced to a strictly-positive integer so a bad value cannot disable the backstop |
+
 ### Time-Traveling Stream Rules (TTSR)
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `ttsrRules` | array | `[]` | Off by default. Each rule: `{ name, regex, message, scope?, disabled? }`. On the first regex match against the model's stream the turn is aborted and `message` is injected before the retry. `scope` is `"assistant_text"` (default), `"tool_args"`, or `"any"` |
+
+### Environment overrides
+
+A few `PIT_*` env flags silently shadow a settings key at resolve time. The precedence differs per pair, so it is called out explicitly below. This is only the subset that maps 1:1 to a documented setting — see [token-economy-tuning.md](../../../docs/token-economy-tuning.md) for the full `PIT_*` catalog.
+
+| Env flag | Shadows setting | Precedence |
+|----------|-----------------|------------|
+| `PIT_CLEAR_ON_SHRINK` | `terminal.clearOnShrink` | Setting wins; env is only the fallback default when the setting is unset |
+| `PIT_HARDWARE_CURSOR` | `showHardwareCursor` | Setting wins; env is only the fallback default when the setting is unset |
+| `PIT_NO_PENDING_CHECKS` | `pendingChecks.enabled` | Env wins — `=1` forces the checks off regardless of the setting |
+| `PIT_NO_OVERTHINK_GUARD` | `toolFeedback.overthinkGuard.enabled` | Two independent kill paths — either the setting (`enabled: false`) or the env flag disables the guard |
+| `PIT_NO_CLAUDE_CODE_SKILLS` | `skillDiscovery.noClaudeCode` | OR — either the setting or the env flag opts out (also `PIT_DISABLE_CLAUDE_CODE_SKILLS`) |
+| `PIT_NO_LEGACY_SKILLS` | `skillDiscovery.noLegacy` | OR — either the setting or the env flag opts out |
+| `PIT_GREP_ENGINE` | `grep.engine` | Env wins (`fff`\|`rg`) |
+| `PIT_ASTGREP_ENGINE` | `astGrep.engine` | Env wins (`napi`\|`cli`) |
+| `PIT_NO_CHROME_DEVTOOLS` | `chromeDevtools.enabled` | Env wins — `=1` disables the whole subsystem regardless of the setting |
 
 ## Example
 

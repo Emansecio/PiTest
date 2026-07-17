@@ -1,4 +1,4 @@
-import { recordDiagnostic, type Transport } from "@pit/ai";
+import { recordDiagnostic, suggestClosest, type Transport } from "@pit/ai";
 import { existsSync, mkdirSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
@@ -515,8 +515,10 @@ export interface Settings {
 	 */
 	footerDensity?: "calm" | "full";
 	/**
-	 * Draw a closed `╰───` bottom rule on the input editor. Default true
-	 * (card-like frame). Set false for the historical blank separator.
+	 * Draw a closed `╰───` bottom rule on the input editor. Default false — a
+	 * single hairline above the input (Pi-reference open layout). Set true to
+	 * restore the card-like closed frame. (The getter is the source of truth:
+	 * `editorClosedBottom === true`, i.e. absent → false.)
 	 */
 	editorClosedBottom?: boolean;
 	/**
@@ -615,6 +617,125 @@ export interface Settings {
 	/** Autonomous goal-continuation behavior. */
 	goal?: GoalSettings;
 }
+
+/**
+ * Known top-level `Settings` keys, used ONLY by the load-time unknown-key
+ * validation pass (see `validateUnknownTopLevelKeys`). TypeScript interfaces do
+ * not exist at runtime, so this set must be maintained by hand.
+ *
+ * IMPORTANT: keep this in exact sync with the `Settings` interface above — when
+ * you add or remove a top-level setting, update this set in the same edit.
+ * Missing an entry here would make a real setting warn as "unknown"; a stale
+ * entry would let a removed key pass silently. Legacy keys consumed by
+ * `migrateSettings` (queueMode, websockets, …) are intentionally absent: they
+ * are rewritten/deleted before validation runs, so they never reach this check.
+ */
+const KNOWN_SETTINGS_KEYS: ReadonlySet<string> = new Set<keyof Settings>([
+	"defaultProvider",
+	"defaultModel",
+	"defaultThinkingLevel",
+	"transport",
+	"steeringMode",
+	"followUpMode",
+	"theme",
+	"compaction",
+	"branchSummary",
+	"retry",
+	"verification",
+	"pendingChecks",
+	"hideThinkingBlock",
+	"shellPath",
+	"quietStartup",
+	"footerDensity",
+	"editorClosedBottom",
+	"onboarding",
+	"shellCommandPrefix",
+	"npmCommand",
+	"packages",
+	"extensions",
+	"skills",
+	"prompts",
+	"themes",
+	"enableSkillCommands",
+	"terminal",
+	"images",
+	"enabledModels",
+	"doubleEscapeAction",
+	"treeFilterMode",
+	"thinkingBudgets",
+	"editorPaddingX",
+	"cardPaddingX",
+	"autocompleteMaxVisible",
+	"assistantReadingColumns",
+	"showHardwareCursor",
+	"cursorBlink",
+	"streamingSmoothing",
+	"markdown",
+	"warnings",
+	"sessionDir",
+	"permissions",
+	"hooks",
+	"mcp",
+	"memory",
+	"toolFeedback",
+	"engineeringStyle",
+	"frequentFiles",
+	"modelRoles",
+	"ttsrRules",
+	"hindsight",
+	"toolDiscovery",
+	"skillDiscovery",
+	"webSearch",
+	"grep",
+	"astGrep",
+	"eval",
+	"lsp",
+	"debug",
+	"fusion",
+	"agentMessaging",
+	"chromeDevtools",
+	"toolActivity",
+	"goal",
+] satisfies (keyof Settings)[]);
+
+/**
+ * Known sub-keys for a handful of high-traffic nested settings objects. Only
+ * these sections are validated one level deep (a full recursive schema is out
+ * of scope); the same hand-sync rule as `KNOWN_SETTINGS_KEYS` applies. Sections
+ * not listed here accept any nested key without warning (forward-compat).
+ */
+const KNOWN_NESTED_SETTINGS_KEYS: ReadonlyMap<string, ReadonlySet<string>> = new Map<string, ReadonlySet<string>>([
+	["retry", new Set(["enabled", "maxRetries", "baseDelayMs", "provider", "fallbackChains", "cooldownMs"])],
+	["lsp", new Set(["enabled", "diagnosticsOnWrite", "formatOnWrite"])],
+	["pendingChecks", new Set(["enabled", "maxWaitMs", "maxFixAttempts", "pollIntervalMs"])],
+	[
+		"verification",
+		new Set([
+			"enabled",
+			"command",
+			"maxAttempts",
+			"timeoutMs",
+			"visual",
+			"functionalWeb",
+			"functionalWebTimeoutMs",
+			"functionalWebMaxInteractions",
+		]),
+	],
+	["compaction", new Set(["enabled", "reserveTokens", "keepRecentTokens", "selfCorrection"])],
+	[
+		"toolFeedback",
+		new Set([
+			"errorReflection",
+			"doomLoopReminder",
+			"stagnationReminder",
+			"crossErrorReminder",
+			"failureBudget",
+			"todoCadenceReminder",
+			"overthinkGuard",
+		]),
+	],
+	["chromeDevtools", new Set(["enabled", "debugPort", "host", "launchBrowser", "binaryPath"])],
+]);
 
 export interface GoalSettings {
 	/**
@@ -822,6 +943,7 @@ export class SettingsManager {
 		this.projectSettingsLoadError = projectLoadError;
 		this.errors = [...initialErrors];
 		this.recomputeSettings();
+		this.validateLoadedSettings();
 	}
 
 	/**
@@ -834,6 +956,138 @@ export class SettingsManager {
 	private recomputeSettings(): void {
 		const merged = deepMergeSettings(this.globalSettings, this.projectSettings);
 		this.settings = deepMergeSettings(merged, this.sessionOverrides as Settings);
+	}
+
+	/**
+	 * Validate the freshly-loaded settings once per load/recompute-from-disk and
+	 * push any problems into the `drainErrors` channel (surfaced as startup
+	 * warnings, never errors — extra keys may be intentional forward-compat).
+	 *
+	 * Runs only on the two file-backed scopes and on the merged effective view;
+	 * NOT on every `save()`/`applyOverrides()` recompute, so it stays a
+	 * once-per-load pass and never touches the constantly-called getters. Legacy
+	 * keys are already migrated away before this runs, so they never warn.
+	 */
+	private validateLoadedSettings(): void {
+		this.validateUnknownKeys("global", this.globalSettings);
+		this.validateUnknownKeys("project", this.projectSettings);
+		this.validateCoercedValues();
+	}
+
+	private pushWarning(scope: SettingsScope, message: string): void {
+		this.errors.push({ scope, error: new Error(message) });
+	}
+
+	/** Top-level + one-level-deep unknown-key detection for a single scope's file. */
+	private validateUnknownKeys(scope: SettingsScope, scoped: Settings): void {
+		for (const key of Object.keys(scoped)) {
+			if (!KNOWN_SETTINGS_KEYS.has(key)) {
+				const suggestion = suggestClosest(key, [...KNOWN_SETTINGS_KEYS], {
+					maxDistance: 4,
+					prefixMinOverlap: 64,
+				});
+				const hint = suggestion ? ` — did you mean "${suggestion}"?` : "";
+				this.pushWarning(scope, `Unknown setting "${key}" in ${scope} settings${hint}`);
+				continue;
+			}
+			const knownNested = KNOWN_NESTED_SETTINGS_KEYS.get(key);
+			if (!knownNested) continue;
+			const value = (scoped as Record<string, unknown>)[key];
+			if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
+			for (const nestedKey of Object.keys(value)) {
+				if (knownNested.has(nestedKey)) continue;
+				const suggestion = suggestClosest(nestedKey, [...knownNested], {
+					maxDistance: 4,
+					prefixMinOverlap: 64,
+				});
+				const hint = suggestion ? ` — did you mean "${key}.${suggestion}"?` : "";
+				this.pushWarning(scope, `Unknown setting "${key}.${nestedKey}" in ${scope} settings${hint}`);
+			}
+		}
+	}
+
+	/**
+	 * Warn when a value that WAS present in the stored settings got coerced or
+	 * clamped to a different effective value (invalid → replaced), so a typo no
+	 * longer silently reverts to the default. Absent values (undefined → default)
+	 * are not coercions and never warn. Re-runs the exact same helper the getter
+	 * uses and compares, so validation can never drift from the getter's behavior.
+	 *
+	 * NOTE: keep this list in sync with the posInt/nonNegInt/clampInt/oneOf sites
+	 * in the getters below — each coerced setting should appear here exactly once.
+	 */
+	private validateCoercedValues(): void {
+		const s = this.settings;
+		const check = (label: string, raw: unknown, effective: unknown): void => {
+			if (raw === undefined) return;
+			if (Object.is(raw, effective)) return;
+			this.pushWarning(
+				"global",
+				`Setting "${label}" has invalid value ${JSON.stringify(raw)}; using ${JSON.stringify(effective)} instead`,
+			);
+		};
+
+		const ff = s.frequentFiles;
+		check("frequentFiles.topN", ff?.topN, posInt(ff?.topN, 10));
+		check("frequentFiles.minHits", ff?.minHits, nonNegInt(ff?.minHits, 2));
+		check("frequentFiles.maxFiles", ff?.maxFiles, posInt(ff?.maxFiles, 256));
+
+		const tf = s.toolFeedback;
+		const dl = tf?.doomLoopReminder;
+		check("toolFeedback.doomLoopReminder.threshold", dl?.threshold, posInt(dl?.threshold, 2));
+		check("toolFeedback.doomLoopReminder.cooldownMs", dl?.cooldownMs, nonNegInt(dl?.cooldownMs, 30000));
+		const sr = tf?.stagnationReminder;
+		check("toolFeedback.stagnationReminder.softThreshold", sr?.softThreshold, posInt(sr?.softThreshold, 12));
+		check("toolFeedback.stagnationReminder.hardThreshold", sr?.hardThreshold, posInt(sr?.hardThreshold, 25));
+		check("toolFeedback.stagnationReminder.cooldownMs", sr?.cooldownMs, nonNegInt(sr?.cooldownMs, 30000));
+		const ce = tf?.crossErrorReminder;
+		check("toolFeedback.crossErrorReminder.threshold", ce?.threshold, posInt(ce?.threshold, 3));
+		check("toolFeedback.crossErrorReminder.cooldownMs", ce?.cooldownMs, nonNegInt(ce?.cooldownMs, 30000));
+		const fb = tf?.failureBudget;
+		check("toolFeedback.failureBudget.maxPerTurn", fb?.maxPerTurn, posInt(fb?.maxPerTurn, 3));
+		const tc = tf?.todoCadenceReminder;
+		check("toolFeedback.todoCadenceReminder.threshold", tc?.threshold, posInt(tc?.threshold, 3));
+		check("toolFeedback.todoCadenceReminder.cooldownMs", tc?.cooldownMs, nonNegInt(tc?.cooldownMs, 30000));
+		const og = tf?.overthinkGuard;
+		if (og?.tokenThreshold !== undefined) {
+			check("toolFeedback.overthinkGuard.tokenThreshold", og.tokenThreshold, posInt(og.tokenThreshold, 1000));
+		}
+		check(
+			"toolFeedback.overthinkGuard.weakTokenThreshold",
+			og?.weakTokenThreshold,
+			posInt(og?.weakTokenThreshold, 1000),
+		);
+		check(
+			"toolFeedback.overthinkGuard.strongTokenThreshold",
+			og?.strongTokenThreshold,
+			posInt(og?.strongTokenThreshold, 2500),
+		);
+		check("toolFeedback.overthinkGuard.maxRetriesPerTurn", og?.maxRetriesPerTurn, posInt(og?.maxRetriesPerTurn, 2));
+
+		check("goal.maxAutoIterations", s.goal?.maxAutoIterations, posInt(s.goal?.maxAutoIterations, 50));
+		check("terminal.imageWidthCells", s.terminal?.imageWidthCells, clampInt(s.terminal?.imageWidthCells, 1, 400, 60));
+		check(
+			"doubleEscapeAction",
+			s.doubleEscapeAction,
+			oneOf(s.doubleEscapeAction, ["fork", "tree", "none"] as const, "tree"),
+		);
+		check("toolActivity", s.toolActivity, oneOf(s.toolActivity, ["grouped", "legacy"] as const, "grouped"));
+		check(
+			"treeFilterMode",
+			s.treeFilterMode,
+			oneOf(s.treeFilterMode, ["default", "no-tools", "user-only", "labeled-only", "all"] as const, "default"),
+		);
+
+		// assistantReadingColumns: <= 0 is a documented "disable cap" sentinel, not a
+		// coercion; only a non-number or an out-of-band positive value is invalid.
+		const arc = s.assistantReadingColumns;
+		if (arc !== undefined) {
+			if (typeof arc !== "number" || !Number.isFinite(arc)) {
+				check("assistantReadingColumns", arc, DEFAULT_ASSISTANT_READING_COLUMNS);
+			} else if (arc > 0) {
+				check("assistantReadingColumns", arc, clampInt(arc, 40, 200, DEFAULT_ASSISTANT_READING_COLUMNS));
+			}
+		}
 	}
 
 	/** Create a SettingsManager that loads from files */
@@ -1018,6 +1272,7 @@ export class SettingsManager {
 		}
 
 		this.recomputeSettings();
+		this.validateLoadedSettings();
 	}
 
 	/**
@@ -1759,6 +2014,10 @@ export class SettingsManager {
 
 	getToolActivity(): "grouped" | "legacy" {
 		return oneOf(this.settings.toolActivity, ["grouped", "legacy"] as const, "grouped");
+	}
+
+	setToolActivity(mode: "grouped" | "legacy"): void {
+		this.setTopLevel("toolActivity", mode);
 	}
 
 	setDoubleEscapeAction(action: "fork" | "tree" | "none"): void {

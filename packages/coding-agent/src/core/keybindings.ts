@@ -1,3 +1,4 @@
+import { recordDiagnostic } from "@pit/ai";
 import {
 	type Keybinding,
 	type KeybindingDefinitions,
@@ -248,7 +249,13 @@ function isLegacyKeybindingName(key: string): key is keyof typeof KEYBINDING_NAM
 	return key in KEYBINDING_NAME_MIGRATIONS;
 }
 
-function toKeybindingsConfig(value: unknown): KeybindingsConfig {
+function describeBindingType(value: unknown): string {
+	if (value === null) return "null";
+	if (Array.isArray(value)) return "an array with non-string entries";
+	return typeof value;
+}
+
+function toKeybindingsConfig(value: unknown, problems?: string[]): KeybindingsConfig {
 	if (!isRecord(value)) return {};
 
 	const config: KeybindingsConfig = {};
@@ -259,7 +266,13 @@ function toKeybindingsConfig(value: unknown): KeybindingsConfig {
 		}
 		if (Array.isArray(binding) && binding.every((entry) => typeof entry === "string")) {
 			config[key] = binding as KeyId[];
+			continue;
 		}
+		// Dropped as malformed instead of silently vanishing: a binding must be a
+		// key string or an array of key strings.
+		problems?.push(
+			`Ignoring keybinding "${key}": value must be a key string or an array of key strings, got ${describeBindingType(binding)}`,
+		);
 	}
 	return config;
 }
@@ -304,13 +317,64 @@ function orderKeybindingsConfig(config: Record<string, unknown>): Record<string,
 	return ordered;
 }
 
-function loadRawConfig(path: string): Record<string, unknown> | undefined {
+function loadRawConfig(path: string, problems?: string[]): Record<string, unknown> | undefined {
 	if (!existsSync(path)) return undefined;
+	let contents: string;
 	try {
-		const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
-		return isRecord(parsed) ? parsed : undefined;
-	} catch {
+		contents = readFileSync(path, "utf-8");
+	} catch (error) {
+		problems?.push(`Could not read keybindings.json: ${(error as Error).message}`);
 		return undefined;
+	}
+	try {
+		const parsed = JSON.parse(contents) as unknown;
+		if (!isRecord(parsed)) {
+			problems?.push("keybindings.json must be a JSON object of { binding: keys } entries; ignoring it");
+			return undefined;
+		}
+		return parsed;
+	} catch (error) {
+		problems?.push(`Invalid JSON in keybindings.json: ${(error as Error).message}`);
+		return undefined;
+	}
+}
+
+// Warnings from the most recent keybindings load (parse failures, dropped
+// malformed entries, and effective-config conflicts). Overwritten on every
+// load/reload; read via `getKeybindingsLoadWarnings()`.
+let lastLoadWarnings: string[] = [];
+
+/**
+ * Warnings collected during the most recent keybindings load: a parse failure
+ * (with the JSON error), each dropped malformed entry (with why), and every
+ * key bound to multiple actions in the effective config. These are ALSO routed
+ * through the process-global runtime-diagnostics channel (@pit/ai), so they are
+ * visible via `/diagnostics` without any interactive-mode wiring. Returns a copy.
+ */
+export function getKeybindingsLoadWarnings(): string[] {
+	return [...lastLoadWarnings];
+}
+
+function collectConflictWarnings(manager: TuiKeybindingsManager, problems: string[]): void {
+	for (const conflict of manager.getConflicts()) {
+		problems.push(
+			`Keybinding conflict: key "${conflict.key}" is bound to multiple actions (${conflict.keybindings.join(", ")}); only one will take effect`,
+		);
+	}
+}
+
+function publishKeybindingsLoadWarnings(problems: string[]): void {
+	lastLoadWarnings = problems;
+	for (const problem of problems) {
+		// Level "warn": non-fatal (behavior is unchanged, warnings only). The
+		// interactive live bridge only surfaces error-level events, so these reach
+		// the user through the `/diagnostics` command rather than a startup banner.
+		recordDiagnostic({
+			category: "error.isolated",
+			level: "warn",
+			source: "keybindings.load",
+			context: { note: problem },
+		});
 	}
 }
 
@@ -324,23 +388,30 @@ export class KeybindingsManager extends TuiKeybindingsManager {
 
 	static create(agentDir: string = getAgentDir()): KeybindingsManager {
 		const configPath = join(agentDir, "keybindings.json");
-		const userBindings = KeybindingsManager.loadFromFile(configPath);
-		return new KeybindingsManager(userBindings, configPath);
+		const problems: string[] = [];
+		const userBindings = KeybindingsManager.loadFromFile(configPath, problems);
+		const manager = new KeybindingsManager(userBindings, configPath);
+		collectConflictWarnings(manager, problems);
+		publishKeybindingsLoadWarnings(problems);
+		return manager;
 	}
 
 	reload(): void {
 		if (!this.configPath) return;
-		this.setUserBindings(KeybindingsManager.loadFromFile(this.configPath));
+		const problems: string[] = [];
+		this.setUserBindings(KeybindingsManager.loadFromFile(this.configPath, problems));
+		collectConflictWarnings(this, problems);
+		publishKeybindingsLoadWarnings(problems);
 	}
 
 	getEffectiveConfig(): KeybindingsConfig {
 		return this.getResolvedBindings();
 	}
 
-	private static loadFromFile(path: string): KeybindingsConfig {
-		const rawConfig = loadRawConfig(path);
+	private static loadFromFile(path: string, problems?: string[]): KeybindingsConfig {
+		const rawConfig = loadRawConfig(path, problems);
 		if (!rawConfig) return {};
-		return toKeybindingsConfig(migrateKeybindingsConfig(rawConfig).config);
+		return toKeybindingsConfig(migrateKeybindingsConfig(rawConfig).config, problems);
 	}
 }
 
