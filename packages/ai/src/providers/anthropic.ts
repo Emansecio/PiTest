@@ -33,6 +33,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { DEFAULT_IDLE_TIMEOUT_MS, raceReadWithIdle } from "../utils/idle-timeout.ts";
 import { finalizeStreamingJson, parseJsonWithRepair } from "../utils/json-parse.ts";
+import { sanitizeJoinedTextMemo, sanitizeSurrogatesMemo } from "../utils/sanitize-memo.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { SseChunkBuffer } from "../utils/sse-chunk-reader.ts";
 import { resolveStreamTimeouts } from "../utils/stream-timeouts.ts";
@@ -159,9 +160,11 @@ function convertContentBlocks(content: (TextContent | ImageContent)[]):
 		}
 		textParts.push((c as TextContent).text);
 	}
-	// If only text blocks, return as concatenated string for simplicity
+	// If only text blocks, return as concatenated string for simplicity.
+	// Memoized on the stable content array (revalidated by per-part string refs)
+	// so unchanged tool-result blocks are not re-scanned every turn.
 	if (!hasImages) {
-		return sanitizeSurrogates(textParts.join("\n"));
+		return sanitizeJoinedTextMemo(content, textParts);
 	}
 
 	// Mixed/image content: build blocks in one pass, tracking whether any text
@@ -181,7 +184,7 @@ function convertContentBlocks(content: (TextContent | ImageContent)[]):
 	for (const block of content) {
 		if (block.type === "text") {
 			hasText = true;
-			blocks.push({ type: "text", text: sanitizeSurrogates(block.text) });
+			blocks.push({ type: "text", text: sanitizeSurrogatesMemo(block, block.text) });
 		} else {
 			blocks.push({
 				type: "image",
@@ -1109,7 +1112,7 @@ function convertMessages(
 				if (msg.content.trim().length > 0) {
 					params.push({
 						role: "user",
-						content: sanitizeSurrogates(msg.content),
+						content: sanitizeSurrogatesMemo(msg, msg.content),
 					});
 				}
 			} else {
@@ -1119,7 +1122,7 @@ function convertMessages(
 				const filteredBlocks: ContentBlockParam[] = [];
 				for (const item of msg.content) {
 					if (item.type === "text") {
-						const text = sanitizeSurrogates(item.text);
+						const text = sanitizeSurrogatesMemo(item, item.text);
 						if (text.trim().length === 0) continue;
 						filteredBlocks.push({ type: "text", text });
 					} else {
@@ -1153,7 +1156,7 @@ function convertMessages(
 					if (block.text.trim().length === 0) continue;
 					blocks.push({
 						type: "text",
-						text: sanitizeSurrogates(block.text),
+						text: sanitizeSurrogatesMemo(block, block.text),
 					});
 				} else if (block.type === "thinking") {
 					// Redacted thinking: pass the opaque payload back as redacted_thinking
@@ -1171,12 +1174,12 @@ function convertMessages(
 					if (!block.thinkingSignature || block.thinkingSignature.trim().length === 0) {
 						blocks.push({
 							type: "text",
-							text: sanitizeSurrogates(block.thinking),
+							text: sanitizeSurrogatesMemo(block, block.thinking),
 						});
 					} else {
 						blocks.push({
 							type: "thinking",
-							thinking: sanitizeSurrogates(block.thinking),
+							thinking: sanitizeSurrogatesMemo(block, block.thinking),
 							signature: block.thinkingSignature,
 						});
 					}

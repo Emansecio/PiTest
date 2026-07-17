@@ -334,12 +334,57 @@ interface SpareShell {
 	env: NodeJS.ProcessEnv;
 	/** Set by the 'error'/'exit' listeners below — a dead spare must never be handed out. */
 	dead: boolean;
+	/** Idle-eviction timer (see SPARE_IDLE_TTL_MS). Cleared when the spare is
+	 * consumed, evicted, dies, or the pool is disposed. */
+	ttlHandle: NodeJS.Timeout | undefined;
 }
 
-/** At most one pre-spawned shell waits at a time; consuming it immediately
- * kicks off the next one so a burst of calls degrades to (at worst) the
- * direct-spawn cost every OTHER call, never worse than before pooling. */
-let spareShell: SpareShell | undefined;
+// A SMALL pool of pre-spawned shells, one per recently-used spawn context. On a
+// hit the taken slot is refilled asynchronously, so back-to-back same-context
+// calls always hit; keeping several slots lets alternating contexts (e.g. two
+// cwds) each stay warm. Bounded by the pool size (LRU-evict the oldest beyond
+// it) and by an idle TTL, so on Windows an idle spare — a live process holding
+// an open handle on its cwd — cannot pin a transient directory indefinitely.
+const sparePool: SpareShell[] = [];
+
+// Default number of pre-warmed spares kept live at once. Override with
+// PIT_BASH_SPARE_POOL; `0` (or any non-positive / invalid value) disables
+// pooling entirely (every call pays the direct-spawn cost, as before pooling).
+const BASH_SPARE_POOL_SIZE = 2;
+
+// Idle lifetime of an un-consumed spare. A spare that is never taken within this
+// window is killed and dropped — bounding, on Windows, how long an idle process
+// can hold an open handle on its (possibly since-deleted) cwd. Consuming or
+// refilling a context resets this; a steadily-used context is always warm.
+const SPARE_IDLE_TTL_MS = 30_000;
+
+// Test-only override for the idle TTL so suites can exercise eviction without a
+// 30s wait. No prod path sets this.
+let spareIdleTtlOverrideMs: number | undefined;
+function spareIdleTtlMs(): number {
+	return spareIdleTtlOverrideMs ?? SPARE_IDLE_TTL_MS;
+}
+export function _setBashSpareIdleTtlForTest(ms: number | undefined): void {
+	spareIdleTtlOverrideMs = ms;
+}
+
+function resolveSparePoolSize(): number {
+	const raw = process.env.PIT_BASH_SPARE_POOL;
+	if (raw === undefined || raw === "") return BASH_SPARE_POOL_SIZE;
+	const n = Number(raw);
+	if (!Number.isFinite(n) || n <= 0) return 0;
+	return Math.floor(n);
+}
+
+/** Remove a spare from the pool (if present) and clear its idle timer. */
+function removeFromPool(spare: SpareShell): void {
+	const idx = sparePool.indexOf(spare);
+	if (idx !== -1) sparePool.splice(idx, 1);
+	if (spare.ttlHandle) {
+		clearTimeout(spare.ttlHandle);
+		spare.ttlHandle = undefined;
+	}
+}
 
 function envsEqual(a: NodeJS.ProcessEnv, b: NodeJS.ProcessEnv): boolean {
 	if (a === b) return true;
@@ -377,7 +422,7 @@ function spawnSpareShell(shell: string, args: string[], cwd: string, env: NodeJS
 		stdio: ["pipe", "pipe", "pipe"],
 		windowsHide: true,
 	});
-	const spare: SpareShell = { child, shell, args, cwd, env, dead: false };
+	const spare: SpareShell = { child, shell, args, cwd, env, dead: false, ttlHandle: undefined };
 	if (child.pid) trackDetachedChildPid(child.pid);
 	// A spare that dies before ever being consumed (bad shell/cwd, killed
 	// while idle, ...) must not be handed out, and must not leak a tracked
@@ -385,18 +430,43 @@ function spawnSpareShell(shell: string, args: string[], cwd: string, env: NodeJS
 	const onDead = () => {
 		spare.dead = true;
 		if (child.pid) untrackDetachedChildPid(child.pid);
-		if (spareShell === spare) spareShell = undefined;
+		removeFromPool(spare);
 	};
 	child.once("error", onDead);
 	child.once("exit", onDead);
 	return spare;
 }
 
-/** Fire-and-forget pre-spawn of the next spare. Never overwrites a live one
- * (only one spare is kept at a time) — safe to call unconditionally. */
+/** Kill and drop a spare that was never consumed within its idle window. */
+function evictSpare(spare: SpareShell): void {
+	removeFromPool(spare);
+	if (spare.dead) return;
+	spare.dead = true;
+	if (spare.child.pid) {
+		untrackDetachedChildPid(spare.child.pid);
+		killProcessTree(spare.child.pid);
+	}
+}
+
+/** Fire-and-forget pre-spawn of a spare for `context`. A no-op when pooling is
+ * disabled or a live spare for this exact context already waits; otherwise adds
+ * one and LRU-evicts the oldest beyond the pool size. Safe to call
+ * unconditionally. */
 function prewarmSpareShell(shell: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): void {
-	if (spareShell && !spareShell.dead) return;
-	spareShell = spawnSpareShell(shell, args, cwd, env);
+	const size = resolveSparePoolSize();
+	if (size <= 0) return;
+	// Already have a live spare for this exact context — one is enough.
+	if (sparePool.some((s) => !s.dead && spawnContextsMatch(s, shell, args, cwd, env))) return;
+	const spare = spawnSpareShell(shell, args, cwd, env);
+	spare.ttlHandle = setTimeout(() => evictSpare(spare), spareIdleTtlMs());
+	spare.ttlHandle.unref?.();
+	sparePool.push(spare);
+	// Bound the pool: newest is at the back, so evict from the front (least
+	// recently warmed) until we're within the (possibly just-lowered) size.
+	while (sparePool.length > size) {
+		const victim = sparePool[0];
+		evictSpare(victim);
+	}
 }
 
 // Test-only visibility into hit/miss decisions. bash's own `$$` cannot be used
@@ -406,55 +476,53 @@ function prewarmSpareShell(shell: string, args: string[], cwd: string, env: Node
 let sparePoolHitsForTest = 0;
 let sparePoolMissesForTest = 0;
 
-/** Take the current spare if its spawn context matches exactly. A live but
- * mismatched spare (most commonly a different cwd) is killed here rather
- * than reused — a mismatched spare must never be papered over with an
- * injected `cd`, since that would silently run the command somewhere the
- * caller didn't ask for if the kill/respawn raced a concurrent user of the
- * same slot. Returns undefined (caller falls back to a direct spawn) when
- * there is no usable spare. */
+/** Take a pooled spare whose spawn context matches exactly, removing it from the
+ * pool. A context with no live matching spare is a miss (caller falls back to a
+ * direct spawn); mismatched spares for OTHER contexts are left in place so an
+ * alternating workload keeps each context warm. A mismatch is never papered over
+ * with an injected `cd` — that would silently run the command somewhere the
+ * caller didn't ask for. */
 function takeMatchingSpareShell(
 	shell: string,
 	args: string[],
 	cwd: string,
 	env: NodeJS.ProcessEnv,
 ): SpareShell | undefined {
-	const spare = spareShell;
-	if (!spare || spare.dead) {
+	const idx = sparePool.findIndex((s) => !s.dead && spawnContextsMatch(s, shell, args, cwd, env));
+	if (idx === -1) {
 		sparePoolMissesForTest++;
 		return undefined;
 	}
-	spareShell = undefined;
-	if (!spawnContextsMatch(spare, shell, args, cwd, env)) {
-		if (spare.child.pid) killProcessTree(spare.child.pid);
-		sparePoolMissesForTest++;
-		return undefined;
-	}
+	const spare = sparePool[idx];
+	removeFromPool(spare);
 	sparePoolHitsForTest++;
 	return spare;
 }
 
-/** Kill and discard the pending spare, if any — called on session/process
- * shutdown so a spare that was never consumed can't leak a process. */
+/** Kill and discard every pooled spare — called on session/process shutdown so
+ * a spare that was never consumed can't leak a process (or, on Windows, keep an
+ * open handle on its cwd). */
 export function disposeBashSparePool(): void {
-	const spare = spareShell;
-	spareShell = undefined;
-	if (!spare || spare.dead) return;
-	if (spare.child.pid) killProcessTree(spare.child.pid);
+	// evictSpare mutates sparePool, so drain a copy.
+	for (const spare of [...sparePool]) evictSpare(spare);
 }
 
-/** Test-only: force the pool back to empty without killing anything (tests
- * manage their own child lifecycles). No prod path calls this. */
+/** Test-only: force the pool back to empty without killing the child processes
+ * (tests manage their own child lifecycles). Idle timers ARE cleared so they
+ * can't fire against a drained pool. No prod path calls this. */
 export function _resetBashSparePoolForTest(): void {
-	spareShell = undefined;
+	for (const spare of sparePool) {
+		if (spare.ttlHandle) clearTimeout(spare.ttlHandle);
+	}
+	sparePool.length = 0;
 	sparePoolHitsForTest = 0;
 	sparePoolMissesForTest = 0;
 }
 
-/** Test-only: inspect the current spare without consuming it. No prod path calls this. */
-export function _peekBashSparePoolForTest(): { pid: number | undefined; cwd: string; dead: boolean } | undefined {
-	if (!spareShell) return undefined;
-	return { pid: spareShell.child.pid, cwd: spareShell.cwd, dead: spareShell.dead };
+/** Test-only: inspect the pooled spares (oldest → newest) without consuming any.
+ * No prod path calls this. */
+export function _peekBashSparePoolForTest(): Array<{ pid: number | undefined; cwd: string; dead: boolean }> {
+	return sparePool.map((s) => ({ pid: s.child.pid, cwd: s.cwd, dead: s.dead }));
 }
 
 /** Test-only: count of takeMatchingSpareShell decisions since the last reset —
@@ -512,9 +580,9 @@ export function createLocalBashOperations(options?: {
 						});
 				if (spare) {
 					// The spare's wrapper is already blocked reading its stdin for exactly
-					// this — hand it the real command and close the pipe (EOF). The slot is
-					// empty again now that it was taken — line up the NEXT spare in the
-					// background, off this call's critical path.
+					// this — hand it the real command and close the pipe (EOF). This context
+					// no longer has a spare — refill it in the background, off this call's
+					// critical path, so the next same-context call hits again.
 					child.stdin?.end(command);
 					prewarmSpareShell(shell, args, cwd, effectiveEnv);
 				} else {

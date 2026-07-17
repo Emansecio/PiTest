@@ -13,6 +13,7 @@ import {
 	adaptivePruneThreshold,
 	type CompactionSettings,
 	cloneToolResultMessagesForPrune,
+	effectiveKeepRecentTokens,
 	estimateCompactionFrameTokens,
 	estimateTextTokens,
 	estimateToolSurfaceTokens,
@@ -35,7 +36,6 @@ import {
 	prepareCompaction,
 	proactivePruneFloor,
 	shouldCompact,
-	shouldCompactSoft,
 	sumMessageTokens,
 } from "./compaction/index.ts";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "./extensions/index.js";
@@ -145,6 +145,53 @@ export function parseMidTurnPressureRatio(raw: string | undefined): number {
 const MID_TURN_PRESSURE_RATIO = parseMidTurnPressureRatio(
 	typeof process !== "undefined" ? process.env.PIT_MID_TURN_PRESSURE_RATIO : undefined,
 );
+
+/**
+ * Multiplier on the predictive soft band that gates BACKGROUND compaction.
+ * `shouldCompactSoft` fires one `keepRecentTokens` window below the hard
+ * threshold; this widens that band so the predictive path starts earlier — while
+ * the user is still reading the just-finished turn — and the cheap sibling-model
+ * summary is far more likely to be ready before the next send (avoiding a visible
+ * synchronous compaction wait at the hard wall). 1.0 = identical to the legacy
+ * soft band; >1.0 fires earlier. Override via PIT_COMPACT_SOFT_RATIO
+ * (clamped [1.0, 4.0]); a non-numeric value falls back to the default. Parsed
+ * once at load. The synchronous hard-threshold path is untouched (safety net).
+ */
+const DEFAULT_COMPACT_SOFT_RATIO = 1.5;
+
+export function parseCompactSoftRatio(raw: string | undefined): number {
+	if (raw === undefined || raw === "") return DEFAULT_COMPACT_SOFT_RATIO;
+	const parsed = Number(raw);
+	if (!Number.isFinite(parsed)) return DEFAULT_COMPACT_SOFT_RATIO;
+	return Math.min(4, Math.max(1, parsed));
+}
+
+const COMPACT_SOFT_RATIO = parseCompactSoftRatio(
+	typeof process !== "undefined" ? process.env.PIT_COMPACT_SOFT_RATIO : undefined,
+);
+
+/**
+ * Widened predictive soft trigger for the background compaction path. A superset
+ * of `shouldCompactSoft` (equal at ratio 1.0): fires the same way but starting a
+ * wider band below the hard threshold, so summarization runs during idle read
+ * time. Like `shouldCompactSoft`, it yields to the synchronous hard path at/over
+ * the hard threshold (returns false there) so the two never race the same window.
+ */
+export function shouldStartBackgroundCompaction(
+	contextTokens: number,
+	contextWindow: number,
+	settings: CompactionSettings,
+	ratio: number = COMPACT_SOFT_RATIO,
+): boolean {
+	if (!settings.enabled) return false;
+	if (!Number.isFinite(contextWindow) || contextWindow <= 0) return false;
+	const reserve = computeDynamicReserve(contextWindow, settings.reserveTokens);
+	const hardThreshold = contextWindow - reserve;
+	if (contextTokens > hardThreshold) return false; // hard (synchronous) path owns this
+	const band = effectiveKeepRecentTokens(settings.keepRecentTokens, contextWindow) * ratio;
+	const softThreshold = hardThreshold - band;
+	return softThreshold > 0 && contextTokens > softThreshold;
+}
 
 /** Stable session surface compaction reads; implemented by AgentSession. */
 export interface CompactionHost {
@@ -888,7 +935,7 @@ export async function checkCompaction(
 		!ctx.backgroundCompactionPromise &&
 		!ctx.host.isCompacting &&
 		!ctx.host.isStreaming &&
-		shouldCompactSoft(contextTokens, contextWindow, settings)
+		shouldStartBackgroundCompaction(contextTokens, contextWindow, settings)
 	) {
 		ctx.backgroundCompactionPromise = runAutoCompaction(ctx, "threshold", false)
 			.catch(() => false)

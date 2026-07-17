@@ -1,6 +1,7 @@
 import { accessSync, constants, realpathSync } from "node:fs";
 import * as os from "node:os";
 import { isAbsolute, join as pathJoin, resolve as resolvePath } from "node:path";
+import { LruMap } from "../lru-map.ts";
 
 /**
  * True on filesystems that are case-insensitive by default (Windows, macOS).
@@ -8,6 +9,18 @@ import { isAbsolute, join as pathJoin, resolve as resolvePath } from "node:path"
  * tool actually operates on.
  */
 export const FS_CASE_INSENSITIVE = process.platform === "win32" || process.platform === "darwin";
+
+/**
+ * Bounded LRU memo of `realpathSync.native`, keyed by the case-folded INPUT path
+ * and storing the case-folded realpath result. The syscall is invoked on hot
+ * paths — read dedupe, every `FileMtimeStore.get/set`, and the file-mutation
+ * queue — so it is memoized here rather than re-stat'd on every call. Bounded so
+ * a long-lived process touching many distinct paths can't grow it without limit.
+ * Shared with file-mutation-queue.ts, which previously kept its own identical
+ * cache.
+ */
+const REALPATH_CACHE_MAX = 2048;
+const realpathCache = new LruMap<string, string>(REALPATH_CACHE_MAX);
 
 /**
  * Canonical map/set KEY for an already-resolved absolute path.
@@ -19,18 +32,37 @@ export const FS_CASE_INSENSITIVE = process.platform === "win32" || process.platf
  * doesn't exist yet, permissions) it falls back to the input, so a brand-new
  * path still gets a stable key.
  *
+ * The realpath result is memoized in a bounded LRU (pure memoization — same key
+ * for the same input), so repeated calls on the hot paths above don't re-issue
+ * the syscall.
+ *
  * KEY ONLY. Callers must never substitute this for the path the tool receives,
  * nor surface it in a user-visible message: it is a normalized identity for
  * map/set membership, not the real (case-/link-preserving) path.
  */
 export function canonicalPathKey(absPath: string): string {
+	const lookupKey = FS_CASE_INSENSITIVE ? absPath.toLowerCase() : absPath;
+	const cached = realpathCache.get(lookupKey);
+	if (cached !== undefined) return cached;
 	let real = absPath;
 	try {
 		real = realpathSync.native(absPath);
 	} catch {
 		// Non-existent / unreadable path — keep the resolved input as the key.
 	}
-	return FS_CASE_INSENSITIVE ? real.toLowerCase() : real;
+	const key = FS_CASE_INSENSITIVE ? real.toLowerCase() : real;
+	realpathCache.set(lookupKey, key);
+	return key;
+}
+
+/** Test-only: current realpath cache size. */
+export function _realpathCacheSizeForTest(): number {
+	return realpathCache.size;
+}
+
+/** Test-only: clear the realpath cache between tests. */
+export function _resetRealpathCacheForTest(): void {
+	realpathCache.clear();
 }
 
 /**

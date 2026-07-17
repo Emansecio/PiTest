@@ -14,6 +14,8 @@
  */
 
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
+import { open as openFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { Agent, AgentEvent, AgentMessage, AgentState, AgentTool, ThinkingLevel } from "@pit/agent-core";
@@ -726,6 +728,11 @@ export class AgentSession implements CompactionHost, FusionHost {
 	private _composerPromptText = "";
 	private _composerLastReadPath: string | undefined;
 	private _composerLastReadContent: string | undefined;
+	// Monotonic capture token: the async best-effort exemplar read (see
+	// _handleToolExecutionEnd) only writes its result back if it is still the
+	// latest capture, so an in-flight read of an older file can never clobber a
+	// fresher read's path/content pairing.
+	private _composerCaptureSeq = 0;
 	// Promise returned by the in-flight `computeFrequentFiles` call. Tracked so
 	// `dispose()` can await it before returning, otherwise the spawned `git`
 	// child still holds the cwd and `rmSync(tempDir)` in tests fails with EBUSY.
@@ -1559,6 +1566,38 @@ export class AgentSession implements CompactionHost, FusionHost {
 		}
 	}
 
+	/**
+	 * Async twin of `_readComposerFile`: same bounded (COMPOSER_FILE_READ_MAX_BYTES)
+	 * best-effort read, but off the main thread via fs.promises so a large fallback
+	 * read never blocks the event loop between tool-end and the next provider call.
+	 * Used only by the fire-and-forget exemplar capture in `_handleToolExecutionEnd`;
+	 * the synchronous version is retained for the composer's injected `readFile`
+	 * callback, which must return synchronously.
+	 */
+	private async _readComposerFileAsync(relPath: string): Promise<string | null> {
+		const abs = isAbsolute(relPath) ? relPath : resolve(this._cwd, relPath);
+		let handle: FileHandle | undefined;
+		try {
+			handle = await openFile(abs, "r");
+			const buf = Buffer.allocUnsafe(COMPOSER_FILE_READ_MAX_BYTES);
+			const { bytesRead } = await handle.read(buf, 0, COMPOSER_FILE_READ_MAX_BYTES, 0);
+			if (bytesRead === 0) return "";
+			// See _readComposerFile: decoder.write() (no end()) drops a dangling
+			// partial UTF-8 sequence at the cap instead of emitting U+FFFD.
+			return new StringDecoder("utf8").write(buf.subarray(0, bytesRead));
+		} catch {
+			return null;
+		} finally {
+			if (handle !== undefined) {
+				try {
+					await handle.close();
+				} catch {
+					// already closed / never fully opened
+				}
+			}
+		}
+	}
+
 	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
 		return this._modelRegistry;
@@ -2360,6 +2399,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 				// capture for cheap import extraction; content failure just drops that layer.
 				if (fileOp.op === "read" && !isContextComposerDisabled()) {
 					this._composerLastReadPath = fileOp.path;
+					const captureSeq = ++this._composerCaptureSeq;
 					// Prefer the read tool's own output: it just decoded this file for the
 					// model, so reusing it avoids a second (and, for a huge file, unbounded)
 					// disk read on the main thread. Only set when that read was "clean"
@@ -2367,8 +2407,27 @@ export class AgentSession implements CompactionHost, FusionHost {
 					// truncation past the cap, dedupe/binary/notebook paths, ...) falls back
 					// to the bounded direct read below.
 					const readDetails = event.result?.details as ReadToolDetails | undefined;
-					this._composerLastReadContent =
-						readDetails?.rawFileContent ?? this._readComposerFile(fileOp.path) ?? undefined;
+					const rawContent = readDetails?.rawFileContent;
+					if (rawContent !== undefined) {
+						this._composerLastReadContent = rawContent;
+					} else if (isTruthyEnvFlag(process.env.PIT_NO_ASYNC_COMPOSER_CAPTURE)) {
+						// Kill-switch: original synchronous bounded fallback read.
+						this._composerLastReadContent = this._readComposerFile(fileOp.path) ?? undefined;
+					} else {
+						// Async, fire-and-forget bounded fallback (default). Clear now so the
+						// NEW path is never paired with the PREVIOUS file's content while the
+						// read is in flight (composeContext resolves imports against
+						// recentReadPath's dir). This capture is best-effort/fail-open: if the
+						// read hasn't settled by the very next prompt build the import layer is
+						// simply absent that turn, then present for later builds. The seq guard
+						// ensures a slow read of an older file can't clobber a fresher capture.
+						this._composerLastReadContent = undefined;
+						void this._readComposerFileAsync(fileOp.path).then((content) => {
+							if (content != null && this._composerCaptureSeq === captureSeq) {
+								this._composerLastReadContent = content;
+							}
+						});
+					}
 				}
 			}
 			armVerificationGate(this._verificationGate, event.toolName, args, {
@@ -3855,7 +3914,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 							const t = setTimeout(() => {
 								abort.signal.removeEventListener("abort", onAbort);
 								res();
-							}, 500);
+							}, settings.pollIntervalMs);
 							abort.signal.addEventListener("abort", onAbort, { once: true });
 						});
 					}

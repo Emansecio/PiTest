@@ -947,6 +947,18 @@ export async function computeEditsDiff(
 interface BaseCacheEntry {
 	key: string;
 	normalizedContent: string;
+	// Stored alongside the normalized base so the `edit` execute() path can
+	// reconstruct the exact on-disk bytes (bom + line ending) it would have read,
+	// not just the LF-normalized body the diff needs.
+	bom: string;
+	lineEnding: "\r\n" | "\n" | "\r";
+}
+
+/** Base content plus the metadata needed to write the file back byte-faithfully. */
+export interface CachedEditBase {
+	normalizedContent: string;
+	bom: string;
+	lineEnding: "\r\n" | "\n" | "\r";
 }
 
 const BASE_CACHE_MAX_ENTRIES = 2;
@@ -965,20 +977,53 @@ export function __resetEditDiffBaseCache(): void {
 	baseCacheDiskReads = 0;
 }
 
-function getCachedBase(key: string): string | undefined {
+function getCachedBaseEntry(key: string): BaseCacheEntry | undefined {
 	const idx = baseCache.findIndex((entry) => entry.key === key);
 	if (idx === -1) return undefined;
 	// Move to most-recently-used position.
 	const [entry] = baseCache.splice(idx, 1);
 	baseCache.push(entry);
-	return entry.normalizedContent;
+	return entry;
 }
 
-function putCachedBase(key: string, normalizedContent: string): void {
+function putCachedBase(key: string, normalizedContent: string, bom: string, lineEnding: "\r\n" | "\n" | "\r"): void {
 	const existing = baseCache.findIndex((entry) => entry.key === key);
 	if (existing !== -1) baseCache.splice(existing, 1);
-	baseCache.push({ key, normalizedContent });
+	baseCache.push({ key, normalizedContent, bom, lineEnding });
 	while (baseCache.length > BASE_CACHE_MAX_ENTRIES) baseCache.shift();
+}
+
+function baseCacheKey(absolutePath: string, mtimeMs: number): string {
+	return `${absolutePath} ${mtimeMs}`;
+}
+
+/**
+ * Look up the streaming-preview base cache by (absolutePath, mtimeMs). Returns
+ * the cached base (normalized body + bom + line ending) only on an EXACT mtime
+ * match — a cache hit means the file is byte-for-byte what the preview read, so
+ * `edit`'s execute() can skip re-reading the whole file. A mismatch/miss returns
+ * undefined and the caller reads from disk. Refreshes LRU recency on a hit.
+ */
+export function getCachedBaseForEdit(absolutePath: string, mtimeMs: number): CachedEditBase | undefined {
+	const entry = getCachedBaseEntry(baseCacheKey(absolutePath, mtimeMs));
+	if (!entry) return undefined;
+	return { normalizedContent: entry.normalizedContent, bom: entry.bom, lineEnding: entry.lineEnding };
+}
+
+/**
+ * Seed/refresh the base cache for (absolutePath, mtimeMs). Called by `edit`'s
+ * execute() both after its own read (warming the cache for a subsequent preview)
+ * and after a successful write with the POST-edit content keyed by the new mtime
+ * — the latter supersedes any stale pre-edit entry sharing that mtime tick.
+ */
+export function putCachedBaseForEdit(
+	absolutePath: string,
+	mtimeMs: number,
+	normalizedContent: string,
+	bom: string,
+	lineEnding: "\r\n" | "\n" | "\r",
+): void {
+	putCachedBase(baseCacheKey(absolutePath, mtimeMs), normalizedContent, bom, lineEnding);
 }
 
 /**
@@ -1006,14 +1051,17 @@ export async function computeEditsDiffWithBaseCache(
 		let normalizedContent: string | undefined;
 		try {
 			const stats = await stat(absolutePath);
-			const key = `${absolutePath} ${stats.mtimeMs}`;
-			normalizedContent = getCachedBase(key);
-			if (normalizedContent === undefined) {
+			const key = baseCacheKey(absolutePath, stats.mtimeMs);
+			const cached = getCachedBaseEntry(key);
+			if (cached !== undefined) {
+				normalizedContent = cached.normalizedContent;
+			} else {
 				const rawContent = await readFile(absolutePath, "utf-8");
 				baseCacheDiskReads++;
-				const { text: content } = stripBom(rawContent);
+				const { bom, text: content } = stripBom(rawContent);
+				const lineEnding = detectLineEnding(content);
 				normalizedContent = normalizeToLF(content);
-				putCachedBase(key, normalizedContent);
+				putCachedBase(key, normalizedContent, bom, lineEnding);
 			}
 		} catch {
 			// stat/read failed after the access check (race, transient FS error):

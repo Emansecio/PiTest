@@ -1011,6 +1011,19 @@ function buildToolMap(tools: AgentTool<any>[] | undefined): Map<string, AgentToo
 	return map;
 }
 
+/**
+ * Kill-switch for the mixed-batch partition (Change 2). When set, a batch that
+ * contains ANY sequential tool runs entirely through executeToolCallsSequential —
+ * the pre-partition behavior — serializing the parallel-safe calls alongside the
+ * sequential ones. `PIT_NO_BATCH_PARTITION=1` restores that.
+ */
+function isBatchPartitionDisabled(): boolean {
+	const raw = typeof process !== "undefined" ? process.env.PIT_NO_BATCH_PARTITION : undefined;
+	if (!raw) return false;
+	const v = raw.toLowerCase();
+	return v === "1" || v === "true" || v === "yes";
+}
+
 async function executeToolCalls(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
@@ -1020,15 +1033,26 @@ async function executeToolCalls(
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
 	const toolMap = buildToolMap(currentContext.tools);
-	// Short-circuit when execution mode is already forced sequential — avoids
-	// the per-call toolMap.get() probe on every tool in the batch.
-	const forceSequential = config.toolExecution === "sequential";
-	const hasSequentialToolCall =
-		forceSequential || toolCalls.some((tc) => toolMap.get(tc.name)?.executionMode === "sequential");
-	if (hasSequentialToolCall) {
+	// `toolExecution: "sequential"` forces the whole run serial — no partition,
+	// no per-call probe.
+	if (config.toolExecution === "sequential") {
 		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, toolMap, config, signal, emit);
 	}
-	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, toolMap, config, signal, emit);
+	// Count sequential-mode calls to decide the routing:
+	//  - none      → fully parallel (fast path).
+	//  - all       → fully sequential (nothing to overlap; keep old semantics).
+	//  - mixed     → partition, unless the kill-switch pins the old all-sequential path.
+	let sequentialCount = 0;
+	for (const tc of toolCalls) {
+		if (toolMap.get(tc.name)?.executionMode === "sequential") sequentialCount++;
+	}
+	if (sequentialCount === 0) {
+		return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, toolMap, config, signal, emit);
+	}
+	if (sequentialCount === toolCalls.length || isBatchPartitionDisabled()) {
+		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, toolMap, config, signal, emit);
+	}
+	return executeToolCallsPartitioned(currentContext, assistantMessage, toolCalls, toolMap, config, signal, emit);
 }
 
 type ExecutedToolCallBatch = {
@@ -1217,6 +1241,180 @@ async function executeToolCallsParallel(
 	return {
 		messages,
 		terminate: shouldTerminateToolBatch(orderedFinalizedCalls),
+	};
+}
+
+/**
+ * Mixed-batch executor (Change 2): the batch contains both parallel-safe and
+ * sequential-mode tools. Rather than serialize the whole batch because one tool
+ * is sequential, split it:
+ *   - parallel-safe subset → the parallel machinery (concurrent), and
+ *   - sequential subset → serial, in its original relative order,
+ * running the parallel subset to completion FIRST (design (a) — the safe default:
+ * sequential mode exists for tools that must not interleave, so we never start a
+ * sequential tool until the concurrent siblings have settled).
+ *
+ * Invariants preserved from the two single-mode paths:
+ *   - Tool-RESULT message emission (message_start/message_end) is deferred and
+ *     replayed in the ORIGINAL toolCall order, across both subsets, so the JSONL
+ *     leaf-pointer ordering stays deterministic regardless of completion order.
+ *   - Abort mid-sequential-subset synthesizes "Operation aborted" results for the
+ *     still-unrun sequential tools, mirroring executeToolCallsSequential. (The
+ *     parallel subset has already fully settled by then, so only trailing
+ *     sequential slots can be unfilled.)
+ */
+async function executeToolCallsPartitioned(
+	currentContext: AgentContext,
+	assistantMessage: AssistantMessage,
+	toolCalls: AgentToolCall[],
+	toolMap: Map<string, AgentTool<any>>,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+): Promise<ExecutedToolCallBatch> {
+	// Partition by original index so results can be re-interleaved afterward.
+	const parallelIndices: number[] = [];
+	const sequentialIndices: number[] = [];
+	toolCalls.forEach((tc, i) => {
+		if (toolMap.get(tc.name)?.executionMode === "sequential") sequentialIndices.push(i);
+		else parallelIndices.push(i);
+	});
+
+	const finalizedByIndex = new Array<FinalizedToolCallOutcome | undefined>(toolCalls.length).fill(undefined);
+
+	// --- Parallel-safe subset: same two-phase concurrency as executeToolCallsParallel,
+	// minus the result-message emit (deferred to the merged replay below). ---
+	const parallelCalls = parallelIndices.map((i) => toolCalls[i]);
+	const preparations = await Promise.all(
+		parallelCalls.map(async (toolCall) => {
+			await emit({
+				type: "tool_execution_start",
+				toolCallId: toolCall.id,
+				toolName: toolCall.name,
+				args: toolCall.arguments,
+			});
+			const preparation = await prepareToolCall(
+				currentContext,
+				assistantMessage,
+				toolCall,
+				toolMap,
+				config,
+				signal,
+				emit,
+			);
+			return { toolCall, preparation };
+		}),
+	);
+	const parallelFinalized = await Promise.all(
+		preparations.map(async ({ toolCall, preparation }) => {
+			if (preparation.kind === "immediate") {
+				const finalized = await finalizeImmediatePreparation(toolCall, preparation, config, emit);
+				await emitToolExecutionEnd(finalized, emit);
+				return finalized;
+			}
+			const { signal: toolSignal, release } = makePerToolSignal(toolCall.id, signal, config);
+			try {
+				const executed = await executePreparedToolCall(preparation, toolSignal, emit, config);
+				const finalized = await finalizeExecutedToolCall(
+					currentContext,
+					assistantMessage,
+					preparation,
+					executed,
+					config,
+					toolSignal,
+					emit,
+				);
+				await emitToolExecutionEnd(finalized, emit);
+				return finalized;
+			} finally {
+				release();
+			}
+		}),
+	);
+	parallelIndices.forEach((origIdx, k) => {
+		finalizedByIndex[origIdx] = parallelFinalized[k];
+	});
+
+	// --- Sequential subset: serial, in original relative order, with early-abort. ---
+	let aborted = false;
+	for (const origIdx of sequentialIndices) {
+		const toolCall = toolCalls[origIdx];
+		await emit({
+			type: "tool_execution_start",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			args: toolCall.arguments,
+		});
+		const preparation = await prepareToolCall(
+			currentContext,
+			assistantMessage,
+			toolCall,
+			toolMap,
+			config,
+			signal,
+			emit,
+		);
+		let finalized: FinalizedToolCallOutcome;
+		if (preparation.kind === "immediate") {
+			finalized = await finalizeImmediatePreparation(toolCall, preparation, config, emit);
+		} else {
+			const { signal: toolSignal, release } = makePerToolSignal(toolCall.id, signal, config);
+			try {
+				const executed = await executePreparedToolCall(preparation, toolSignal, emit, config);
+				finalized = await finalizeExecutedToolCall(
+					currentContext,
+					assistantMessage,
+					preparation,
+					executed,
+					config,
+					toolSignal,
+					emit,
+				);
+			} finally {
+				release();
+			}
+		}
+		await emitToolExecutionEnd(finalized, emit);
+		finalizedByIndex[origIdx] = finalized;
+		if (signal?.aborted) {
+			aborted = true;
+			break;
+		}
+	}
+
+	// Abort synthesis: fill any still-unrun slots (only trailing sequential ones
+	// can be empty — the parallel subset settled above) with aborted results, in
+	// original order, mirroring executeToolCallsSequential.
+	if (aborted) {
+		for (let i = 0; i < toolCalls.length; i++) {
+			if (finalizedByIndex[i]) continue;
+			const skipped = toolCalls[i];
+			await emit({
+				type: "tool_execution_start",
+				toolCallId: skipped.id,
+				toolName: skipped.name,
+				args: skipped.arguments,
+			});
+			const abortedOutcome: FinalizedToolCallOutcome = {
+				toolCall: skipped,
+				result: createErrorToolResult("Operation aborted"),
+				isError: true,
+			};
+			await emitToolExecutionEnd(abortedOutcome, emit);
+			finalizedByIndex[i] = abortedOutcome;
+		}
+	}
+
+	// Every slot is now filled. Replay result messages in ORIGINAL toolCall order.
+	const orderedFinalized = finalizedByIndex as FinalizedToolCallOutcome[];
+	const messages = orderedFinalized.map(createToolResultMessage);
+	for (const msg of messages) {
+		await emitToolResultMessage(msg, emit);
+	}
+
+	return {
+		messages,
+		terminate: shouldTerminateToolBatch(orderedFinalized),
 	};
 }
 

@@ -1,15 +1,11 @@
-import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { FS_CASE_INSENSITIVE } from "./path-utils.ts";
+import { canonicalPathKey } from "./path-utils.ts";
+
+// Re-export the shared realpath-cache test seams so existing importers of this
+// module keep working after the cache moved into path-utils.ts.
+export { _realpathCacheSizeForTest, _resetRealpathCacheForTest } from "./path-utils.ts";
 
 const fileMutationQueues = new Map<string, Promise<void>>();
-const realpathCache = new Map<string, string>();
-
-// Bound the realpath cache so a long-lived process touching many distinct paths
-// can't grow it without limit. Map preserves insertion order, so the oldest
-// entry is the first key; a cache hit refreshes recency (delete+set) to make it
-// a simple LRU rather than FIFO.
-const REALPATH_CACHE_MAX = 2048;
 
 /**
  * Resolve `filePath` to the mutation-queue KEY: the real (symlink-collapsed)
@@ -17,10 +13,10 @@ const REALPATH_CACHE_MAX = 2048;
  * doesn't yet (e.g. `write` about to create a new file) — case-folded on
  * case-insensitive filesystems (win32/darwin) either way, so two callers that
  * reference the same file with different casing (`Foo.ts` vs `foo.ts`) always
- * serialize through the same queue. Same "canonical key" contract as
- * {@link canonicalPathKey} in path-utils.ts; reimplemented locally (rather
- * than calling it) so the realpath syscall stays cached across this
- * per-mutation hot path instead of re-stat'ing on every call.
+ * serialize through the same queue. Delegates to {@link canonicalPathKey}, whose
+ * bounded LRU keeps the realpath syscall cached across this per-mutation hot
+ * path instead of re-stat'ing on every call (the cache is now shared with the
+ * `FileMtimeStore` / read-dedupe callers that key off the same helper).
  *
  * `filePath` MUST already be an absolute path: this resolves purely against
  * `process.cwd()` (via node:path's `resolve`), never a tool's own `cwd`
@@ -29,39 +25,7 @@ const REALPATH_CACHE_MAX = 2048;
  * a custom extension tool must do the same (see docs/extensions.md).
  */
 function getMutationQueueKey(filePath: string): string {
-	const resolvedPath = resolve(filePath);
-	const lookupKey = FS_CASE_INSENSITIVE ? resolvedPath.toLowerCase() : resolvedPath;
-	const cached = realpathCache.get(lookupKey);
-	if (cached !== undefined) {
-		// Refresh recency.
-		realpathCache.delete(lookupKey);
-		realpathCache.set(lookupKey, cached);
-		return cached;
-	}
-	let resolvedReal: string;
-	try {
-		resolvedReal = realpathSync.native(resolvedPath);
-	} catch {
-		// Non-existent / unreadable path — key off the resolved input.
-		resolvedReal = resolvedPath;
-	}
-	const key = FS_CASE_INSENSITIVE ? resolvedReal.toLowerCase() : resolvedReal;
-	if (realpathCache.size >= REALPATH_CACHE_MAX) {
-		const oldest = realpathCache.keys().next().value;
-		if (oldest !== undefined) realpathCache.delete(oldest);
-	}
-	realpathCache.set(lookupKey, key);
-	return key;
-}
-
-/** Test-only: current realpath cache size. */
-export function _realpathCacheSizeForTest(): number {
-	return realpathCache.size;
-}
-
-/** Test-only: clear the realpath cache between tests. */
-export function _resetRealpathCacheForTest(): void {
-	realpathCache.clear();
+	return canonicalPathKey(resolve(filePath));
 }
 
 /**

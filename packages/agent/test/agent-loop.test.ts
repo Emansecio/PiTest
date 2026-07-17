@@ -1059,27 +1059,28 @@ describe("agentLoop with AgentMessage", () => {
 		expect(toolResultIds).toEqual(["tool-1", "tool-2"]);
 	});
 
-	it("should force sequential execution when one of multiple tools has executionMode=sequential", async () => {
+	it("partitions a mixed batch: parallel-safe tools overlap, sequential runs serialized, results in original order", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		const executionOrder: string[] = [];
-		let releaseSlow: (() => void) | undefined;
-		const slowDone = new Promise<void>((resolve) => {
-			releaseSlow = resolve;
+		let parallelObserved = false;
+		let fastAResolved = false;
+		let releaseFastA: (() => void) | undefined;
+		const fastAGate = new Promise<void>((resolve) => {
+			releaseFastA = resolve;
 		});
 
-		const slowTool: AgentTool<typeof toolSchema, { value: string }> = {
-			name: "slow",
-			label: "Slow",
-			description: "Slow tool",
+		// Sequential tool sits FIRST in the batch, yet with partitioning the two
+		// parallel-safe siblings run (and overlap) before it.
+		const seqTool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "seq",
+			label: "Seq",
+			description: "Sequential tool",
 			parameters: toolSchema,
 			executionMode: "sequential",
 			async execute(_toolCallId, params) {
-				executionOrder.push(`slow:${params.value}`);
-				if (params.value === "a") {
-					await slowDone;
-				}
+				executionOrder.push(`seq:${params.value}`);
 				return {
-					content: [{ type: "text", text: `slow: ${params.value}` }],
+					content: [{ type: "text", text: `seq: ${params.value}` }],
 					details: { value: params.value },
 				};
 			},
@@ -1088,11 +1089,20 @@ describe("agentLoop with AgentMessage", () => {
 		const fastTool: AgentTool<typeof toolSchema, { value: string }> = {
 			name: "fast",
 			label: "Fast",
-			description: "Fast tool",
+			description: "Parallel-safe tool",
 			parameters: toolSchema,
 			// no executionMode = defaults to parallel
 			async execute(_toolCallId, params) {
 				executionOrder.push(`fast:${params.value}`);
+				if (params.value === "a") {
+					await fastAGate;
+					fastAResolved = true;
+				}
+				// If b runs while a is still parked, the two parallel-safe tools
+				// truly overlapped.
+				if (params.value === "b" && !fastAResolved) {
+					parallelObserved = true;
+				}
 				return {
 					content: [{ type: "text", text: `fast: ${params.value}` }],
 					details: { value: params.value },
@@ -1103,14 +1113,14 @@ describe("agentLoop with AgentMessage", () => {
 		const context: AgentContext = {
 			systemPrompt: "",
 			messages: [],
-			tools: [slowTool, fastTool],
+			tools: [seqTool, fastTool],
 		};
 
-		const userPrompt: AgentMessage = createUserMessage("run both");
+		const userPrompt: AgentMessage = createUserMessage("run all");
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
-			// parallel by default, but slowTool forces sequential
+			// parallel by default; seqTool forces the batch to partition
 		};
 
 		let callIndex = 0;
@@ -1120,13 +1130,14 @@ describe("agentLoop with AgentMessage", () => {
 				if (callIndex === 0) {
 					const message = createAssistantMessage(
 						[
-							{ type: "toolCall", id: "tool-1", name: "slow", arguments: { value: "a" } },
-							{ type: "toolCall", id: "tool-2", name: "fast", arguments: { value: "b" } },
+							{ type: "toolCall", id: "tool-1", name: "seq", arguments: { value: "s" } },
+							{ type: "toolCall", id: "tool-2", name: "fast", arguments: { value: "a" } },
+							{ type: "toolCall", id: "tool-3", name: "fast", arguments: { value: "b" } },
 						],
 						"toolUse",
 					);
 					mockStream.push({ type: "done", reason: "toolUse", message });
-					setTimeout(() => releaseSlow?.(), 20);
+					setTimeout(() => releaseFastA?.(), 20);
 				} else {
 					const message = createAssistantMessage([{ type: "text", text: "done" }]);
 					mockStream.push({ type: "done", reason: "stop", message });
@@ -1141,9 +1152,197 @@ describe("agentLoop with AgentMessage", () => {
 			events.push(event);
 		}
 
-		// Fast tool should NOT run before slow tool finishes
-		expect(executionOrder[0]).toBe("slow:a");
+		const toolResultIds = events.flatMap((event) =>
+			event.type === "message_end" && event.message.role === "toolResult" ? [event.message.toolCallId] : [],
+		);
+		const turnToolResultIds = events.flatMap((event) =>
+			event.type === "turn_end" ? event.toolResults.map((r) => r.toolCallId) : [],
+		);
+
+		// The two parallel-safe tools overlapped each other...
+		expect(parallelObserved).toBe(true);
+		// ...and both ran before the sequential tool (design (a): parallel subset first).
+		expect(executionOrder.indexOf("seq:s")).toBe(executionOrder.length - 1);
+		expect(executionOrder).toContain("fast:a");
 		expect(executionOrder).toContain("fast:b");
+		// Result + turn-end ordering follow the ORIGINAL toolCall order across subsets.
+		expect(toolResultIds).toEqual(["tool-1", "tool-2", "tool-3"]);
+		expect(turnToolResultIds).toEqual(["tool-1", "tool-2", "tool-3"]);
+	});
+
+	it("PIT_NO_BATCH_PARTITION restores all-sequential execution for a mixed batch", async () => {
+		const prev = process.env.PIT_NO_BATCH_PARTITION;
+		process.env.PIT_NO_BATCH_PARTITION = "1";
+		try {
+			const toolSchema = Type.Object({ value: Type.String() });
+			let parallelObserved = false;
+			let fastAResolved = false;
+			let releaseFastA: (() => void) | undefined;
+			const fastAGate = new Promise<void>((resolve) => {
+				releaseFastA = resolve;
+			});
+
+			const seqTool: AgentTool<typeof toolSchema, { value: string }> = {
+				name: "seq",
+				label: "Seq",
+				description: "Sequential tool",
+				parameters: toolSchema,
+				executionMode: "sequential",
+				async execute(_toolCallId, params) {
+					return { content: [{ type: "text", text: `seq: ${params.value}` }], details: { value: params.value } };
+				},
+			};
+			const fastTool: AgentTool<typeof toolSchema, { value: string }> = {
+				name: "fast",
+				label: "Fast",
+				description: "Parallel-safe tool",
+				parameters: toolSchema,
+				async execute(_toolCallId, params) {
+					if (params.value === "a") {
+						await fastAGate;
+						fastAResolved = true;
+					}
+					if (params.value === "b" && !fastAResolved) {
+						parallelObserved = true;
+					}
+					return { content: [{ type: "text", text: `fast: ${params.value}` }], details: { value: params.value } };
+				},
+			};
+
+			const context: AgentContext = { systemPrompt: "", messages: [], tools: [seqTool, fastTool] };
+			const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+
+			let callIndex = 0;
+			const stream = agentLoop([createUserMessage("run all")], context, config, undefined, () => {
+				const mockStream = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (callIndex === 0) {
+						const message = createAssistantMessage(
+							[
+								{ type: "toolCall", id: "tool-1", name: "seq", arguments: { value: "s" } },
+								{ type: "toolCall", id: "tool-2", name: "fast", arguments: { value: "a" } },
+								{ type: "toolCall", id: "tool-3", name: "fast", arguments: { value: "b" } },
+							],
+							"toolUse",
+						);
+						mockStream.push({ type: "done", reason: "toolUse", message });
+						setTimeout(() => releaseFastA?.(), 20);
+					} else {
+						mockStream.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "done" }]),
+						});
+					}
+					callIndex++;
+				});
+				return mockStream;
+			});
+
+			const events: AgentEvent[] = [];
+			for await (const event of stream) {
+				events.push(event);
+			}
+
+			const toolResultIds = events.flatMap((event) =>
+				event.type === "message_end" && event.message.role === "toolResult" ? [event.message.toolCallId] : [],
+			);
+			// Kill-switch: whole batch runs sequentially, so the two fast tools never overlap.
+			expect(parallelObserved).toBe(false);
+			// Result order is still the original toolCall order.
+			expect(toolResultIds).toEqual(["tool-1", "tool-2", "tool-3"]);
+		} finally {
+			if (prev === undefined) delete process.env.PIT_NO_BATCH_PARTITION;
+			else process.env.PIT_NO_BATCH_PARTITION = prev;
+		}
+	});
+
+	it("partitioned batch: abort mid sequential-subset synthesizes aborted results in original order", async () => {
+		const toolSchema = Type.Object({});
+		let seqAStarted = false;
+		let fastRan = false;
+
+		const fastTool: AgentTool<typeof toolSchema, undefined> = {
+			name: "fast",
+			label: "Fast",
+			description: "Parallel-safe; completes before the abort",
+			parameters: toolSchema,
+			async execute() {
+				fastRan = true;
+				return { content: [{ type: "text", text: "fast-done" }], details: undefined };
+			},
+		};
+		const seqA: AgentTool<typeof toolSchema, undefined> = {
+			name: "seqA",
+			label: "SeqA",
+			description: "Sequential; parks until aborted",
+			parameters: toolSchema,
+			executionMode: "sequential",
+			async execute(_toolCallId, _params, signal) {
+				seqAStarted = true;
+				await new Promise<void>((_resolve, reject) => {
+					signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+				});
+				return { content: [{ type: "text", text: "should-not-finish" }], details: undefined };
+			},
+		};
+		const seqB: AgentTool<typeof toolSchema, undefined> = {
+			name: "seqB",
+			label: "SeqB",
+			description: "Sequential; must get a synthetic aborted result",
+			parameters: toolSchema,
+			executionMode: "sequential",
+			async execute() {
+				return { content: [{ type: "text", text: "should-not-run" }], details: undefined };
+			},
+		};
+
+		const runAbort = new AbortController();
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [fastTool, seqA, seqB] };
+		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+
+		const stream = agentLoop([createUserMessage("go")], context, config, runAbort.signal, () => {
+			const mockStream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage(
+					[
+						{ type: "toolCall", id: "tc-fast", name: "fast", arguments: {} },
+						{ type: "toolCall", id: "tc-a", name: "seqA", arguments: {} },
+						{ type: "toolCall", id: "tc-b", name: "seqB", arguments: {} },
+					],
+					"toolUse",
+				);
+				mockStream.push({ type: "done", reason: "toolUse", message });
+			});
+			return mockStream;
+		});
+
+		const toolResults: Array<{ toolCallId: string; isError?: boolean; content: unknown }> = [];
+		const orderedIds: string[] = [];
+		const consume = (async () => {
+			for await (const event of stream) {
+				if (event.type === "message_end" && event.message.role === "toolResult") {
+					orderedIds.push(event.message.toolCallId);
+					toolResults.push({
+						toolCallId: event.message.toolCallId,
+						isError: event.message.isError,
+						content: event.message.content,
+					});
+				}
+			}
+		})();
+
+		await vi.waitFor(() => expect(seqAStarted).toBe(true));
+		runAbort.abort();
+		await consume;
+
+		// Parallel subset completed before the abort landed on the sequential subset.
+		expect(fastRan).toBe(true);
+		// All three calls get a result, emitted in ORIGINAL order.
+		expect(orderedIds).toEqual(["tc-fast", "tc-a", "tc-b"]);
+		const b = toolResults.find((r) => r.toolCallId === "tc-b");
+		expect(b?.isError).toBe(true);
+		expect(JSON.stringify(b?.content)).toContain("Operation aborted");
 	});
 
 	it("should allow parallel execution when all tools have executionMode=parallel", async () => {

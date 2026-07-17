@@ -5,6 +5,7 @@ import { access as fsAccess, readFile as fsReadFile, stat as fsStat } from "fs/p
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
 import { writeFileAtomic } from "../../utils/atomic-write.ts";
+import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import type { ToolDefinition } from "../extensions/types.js";
 import { attachPostWriteDiagnostics, capturePreWriteDiagnostics } from "../lsp/writethrough.ts";
 import { getCurrentPreviewQueue } from "../preview-queue.ts";
@@ -17,7 +18,9 @@ import {
 	type EditDiffError,
 	type EditDiffResult,
 	generateDiffString,
+	getCachedBaseForEdit,
 	normalizeToLF,
+	putCachedBaseForEdit,
 	restoreLineEndings,
 	stripBom,
 } from "./edit-diff.ts";
@@ -30,7 +33,7 @@ import {
 } from "./edit-preview-shared.ts";
 import { type FileMtimeStore, refreshFileMtime } from "./file-mtime-store.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
-import { attachOmissionWarning } from "./lazy-omission-attach.ts";
+import { applyOmissionWarning, startOmissionWarning } from "./lazy-omission-attach.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { getFilePathArg } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -309,11 +312,13 @@ export function createEditToolDefinition(
 			const absolutePath = resolveToCwd(path, cwd);
 
 			let __written: string | undefined;
-			// Captured for the post-write lazy-omission scan (LF-normalized base/new
-			// from the edit engine — the right comparison inputs for "new placeholder
-			// vs original"). Set only on a real write, not on the preview path.
-			let __omissionBase: string | undefined;
-			let __omissionNew: string | undefined;
+			// The lazy-omission scan (CPU-bound over full old+new content) is kicked
+			// off concurrently with the write + integrity stat and awaited at
+			// result-assembly time, so it overlaps the write I/O instead of adding
+			// serial latency after it. Stays undefined on the preview / error paths
+			// (no scan), so the assembly step splices nothing there — identical result
+			// content to before. Set only on a real write.
+			let __omissionWarningPromise: Promise<string> | undefined;
 			const diagnosticsBaseline =
 				input.preview === true ? undefined : await capturePreWriteDiagnostics(absolutePath, cwd, signal);
 			const writeResult = await withFileMutationQueue(
@@ -362,43 +367,74 @@ export function createEditToolDefinition(
 									return;
 								}
 
-								// Snapshot the mtime this preview will be staged against (only
-								// needed when staging — see the preview branch below), so the
-								// eventual apply() (run later, from `resolve`) can detect the file
-								// changing between staging and commit and refuse to blindly
-								// overwrite it instead of silently discarding that change.
-								let stagedMtimeMs: number | undefined;
-								if (ops === defaultEditOperations && input.preview === true) {
+								// One mtime snapshot serves two consumers on the default FS: the
+								// preview staleness re-check (staging only — see the preview
+								// branch below, which lets apply() detect the file changing
+								// between staging and commit and refuse to blindly overwrite it)
+								// and the (absolutePath, mtimeMs) base-content cache key. Skip the
+								// stat when neither needs it (custom ops, or non-preview with the
+								// base cache disabled) so those paths keep their exact old cost.
+								const baseCacheEnabled =
+									ops === defaultEditOperations && !isTruthyEnvFlag(process.env.PIT_NO_EDIT_BASE_CACHE);
+								let currentMtimeMs: number | undefined;
+								if (ops === defaultEditOperations && (input.preview === true || baseCacheEnabled)) {
 									try {
-										stagedMtimeMs = (await fsStat(absolutePath)).mtimeMs;
+										currentMtimeMs = (await fsStat(absolutePath)).mtimeMs;
 									} catch {
-										// stat failed — staleness re-check at apply time is skipped, not fatal.
+										// stat failed — staleness re-check + cache reuse skipped, not fatal.
+									}
+								}
+								const stagedMtimeMs: number | undefined = input.preview === true ? currentMtimeMs : undefined;
+
+								// Reuse the base content the streaming preview already read for this
+								// exact (path, mtime) instead of re-reading the whole file. Gated on
+								// exact mtime equality: a hit means the bytes are unchanged since the
+								// preview read. On miss/disabled, read from disk and warm the cache.
+								let bom: string;
+								let originalEnding: "\r\n" | "\n" | "\r";
+								let normalizedContent: string;
+								const cachedBase =
+									baseCacheEnabled && currentMtimeMs !== undefined
+										? getCachedBaseForEdit(absolutePath, currentMtimeMs)
+										: undefined;
+								if (cachedBase) {
+									bom = cachedBase.bom;
+									originalEnding = cachedBase.lineEnding;
+									normalizedContent = cachedBase.normalizedContent;
+								} else {
+									// Read the file.
+									const buffer = await ops.readFile(absolutePath);
+									const rawContent = buffer.toString("utf-8");
+									// Check if aborted after reading.
+									if (aborted) {
+										return;
+									}
+									// Strip BOM before matching. The model will not include an invisible BOM in oldText.
+									const stripped = stripBom(rawContent);
+									bom = stripped.bom;
+									originalEnding = detectLineEnding(stripped.text);
+									normalizedContent = normalizeToLF(stripped.text);
+									if (baseCacheEnabled && currentMtimeMs !== undefined) {
+										putCachedBaseForEdit(
+											absolutePath,
+											currentMtimeMs,
+											normalizedContent,
+											bom,
+											originalEnding,
+										);
 									}
 								}
 
-								// Read the file.
-								const buffer = await ops.readFile(absolutePath);
-								const rawContent = buffer.toString("utf-8");
-
-								// Check if aborted after reading.
+								// Check if aborted after obtaining the base content.
 								if (aborted) {
 									return;
 								}
 
-								// Strip BOM before matching. The model will not include an invisible BOM in oldText.
-								const { bom, text: content } = stripBom(rawContent);
-								const originalEnding = detectLineEnding(content);
-								const normalizedContent = normalizeToLF(content);
 								const { baseContent, newContent } = applyEditsToNormalizedContent(
 									normalizedContent,
 									edits,
 									path,
 								);
-
-								// Check if aborted before writing.
-								if (aborted) {
-									return;
-								}
 
 								const finalContent = bom + restoreLineEndings(newContent, originalEnding);
 								const diffResult = generateDiffString(baseContent, newContent);
@@ -445,6 +481,13 @@ export function createEditToolDefinition(
 									return;
 								}
 
+								// Kick off the lazy-omission scan now that its inputs (base/new
+								// content) are ready, so the CPU-bound scan overlaps the staleNote
+								// stat + write I/O below instead of running serially after the
+								// result is assembled. Awaited at result-assembly time; the warning
+								// still lands inline in the result, so content is unchanged.
+								__omissionWarningPromise = startOmissionWarning(baseContent, newContent, absolutePath, cwd);
+
 								// Stale-read note: if the file changed on disk since the model last
 								// read it this session, the edit still applies to the CURRENT content,
 								// but content the model wasn't shown may have moved — flag it.
@@ -473,8 +516,6 @@ export function createEditToolDefinition(
 								if (signal) signal.removeEventListener("abort", onAbort);
 
 								__written = finalContent;
-								__omissionBase = baseContent;
-								__omissionNew = newContent;
 
 								// Cheap post-write integrity check (local FS only): confirm the
 								// byte count on disk matches what we wrote, catching a silent
@@ -492,6 +533,13 @@ export function createEditToolDefinition(
 										// Refresh the observed mtime so our own write isn't later flagged as
 										// a stale external change by the next edit of this path.
 										if (mtimeStore) mtimeStore.set(absolutePath, st.mtimeMs);
+										// Update the base cache to the POST-edit content keyed by the new
+										// mtime. This both warms the cache for the next edit/preview of the
+										// unchanged file and supersedes any stale pre-edit entry that shares
+										// this mtime tick, so a follow-up execute() never reuses old bytes.
+										if (baseCacheEnabled) {
+											putCachedBaseForEdit(absolutePath, st.mtimeMs, newContent, bom, originalEnding);
+										}
 									} catch {
 										// stat failed — non-fatal; skip the note rather than fail the edit.
 									}
@@ -532,7 +580,11 @@ export function createEditToolDefinition(
 				signal,
 				diagnosticsBaseline,
 			);
-			return attachOmissionWarning(diagResult, absolutePath, __omissionBase, __omissionNew, cwd);
+			// Await the concurrently-running omission scan (started at write time) and
+			// splice its warning inline — same channel/order as the diagnostics above,
+			// so the result content is byte-identical to the serial version.
+			const omissionWarning = __omissionWarningPromise ? await __omissionWarningPromise : "";
+			return applyOmissionWarning(diagResult, omissionWarning);
 		},
 		renderCall(args, theme, context) {
 			const component = getOrCreateEditCallComponent(
