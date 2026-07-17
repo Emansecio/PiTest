@@ -197,6 +197,13 @@ export async function captureSnapshot(absolutePath: string, tool: string): Promi
 		const st = await stat(absolutePath);
 		if (!st.isFile()) return;
 		mtimeMs = st.mtimeMs;
+		// Skip a byte-identical duplicate: if the newest snapshot already captured
+		// this exact (mtime, size), re-reading and re-writing the same bytes buys
+		// nothing (undo/rewind restore to identical content either way).
+		const latest = await getLatestSnapshot(absolutePath);
+		if (latest && latest.meta.mtimeMs === mtimeMs && latest.meta.size === st.size) {
+			return;
+		}
 		bytes = await readFile(absolutePath);
 	} catch (err) {
 		// ENOENT = the file does not exist yet → the turn is CREATING it. Record a
@@ -227,7 +234,9 @@ export async function captureSnapshot(absolutePath: string, tool: string): Promi
 		await writeFile(join(dir, `${stamp}.snap`), bytes);
 		await writeFile(join(dir, `${stamp}.json`), JSON.stringify(meta));
 		await enforcePerFileCap(dir);
-		await maybeRunAgeGc();
+		// Age-GC is best-effort retention — run it detached so a periodic full-store
+		// stat sweep never blocks the mutation that triggered the capture.
+		void maybeRunAgeGc().catch(() => {});
 	} catch {
 		// Best-effort: never let a snapshot failure break the mutation it guards.
 	}

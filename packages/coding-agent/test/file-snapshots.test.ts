@@ -309,3 +309,26 @@ describe("direct captureSnapshot API", () => {
 		expect(await readFile(snap.snapPath)).toEqual(bytes);
 	});
 });
+
+describe("capture dedup (plan 015)", () => {
+	it("skips a byte-identical re-capture of an unchanged file", async () => {
+		const f = join(tmp, "dedup.txt");
+		await writeFile(f, "stable content");
+		await captureSnapshot(f, "edit");
+		// File is untouched — the newest snapshot already has this (mtime, size),
+		// so a second capture is a no-op.
+		await captureSnapshot(f, "edit");
+		expect((await listSnapshotsForFile(f)).length).toBe(1);
+	});
+
+	it("captures again after the file's bytes change (different size)", async () => {
+		const f = join(tmp, "changed.txt");
+		await writeFile(f, "short");
+		await captureSnapshot(f, "edit");
+		// Different length → size differs from the newest snapshot, so even with
+		// coarse mtime resolution the dedup check does not suppress this capture.
+		await writeFile(f, "a considerably longer body of text");
+		await captureSnapshot(f, "edit");
+		expect((await listSnapshotsForFile(f)).length).toBe(2);
+	});
+});
