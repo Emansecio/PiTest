@@ -16,6 +16,7 @@ import chalk from "chalk";
 import { type Args, type Mode, parseArgs, printHelp } from "./cli/args.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
+import { withTuiSignalGuard } from "./cli/with-tui-signal-guard.ts";
 
 import { APP_NAME, ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
 // Heavy mode-real-only graphs (agent-session-services pulls the full harness/SDK
@@ -515,31 +516,35 @@ async function promptForMissingSessionCwd(
 	const { KeybindingsManager } = await import("./core/keybindings.ts");
 	setKeybindings(KeybindingsManager.create());
 
-	return new Promise((resolve) => {
-		const ui = new TUI(new ProcessTerminal(), settingsManager.getShowHardwareCursor());
-		ui.setClearOnShrink(settingsManager.getClearOnShrink());
+	const ui = new TUI(new ProcessTerminal(), settingsManager.getShowHardwareCursor());
+	ui.setClearOnShrink(settingsManager.getClearOnShrink());
 
-		let settled = false;
-		const finish = (result: string | undefined) => {
-			if (settled) {
-				return;
-			}
-			settled = true;
-			ui.stop();
-			resolve(result);
-		};
+	return withTuiSignalGuard(
+		ui,
+		() =>
+			new Promise<string | undefined>((resolve) => {
+				let settled = false;
+				const finish = (result: string | undefined) => {
+					if (settled) {
+						return;
+					}
+					settled = true;
+					ui.stop();
+					resolve(result);
+				};
 
-		const selector = new ExtensionSelectorComponent(
-			formatMissingSessionCwdPrompt(issue),
-			["Continue", "Cancel"],
-			(option) => finish(option === "Continue" ? issue.fallbackCwd : undefined),
-			() => finish(undefined),
-			{ tui: ui },
-		);
-		ui.addChild(selector);
-		ui.setFocus(selector);
-		ui.start();
-	});
+				const selector = new ExtensionSelectorComponent(
+					formatMissingSessionCwdPrompt(issue),
+					["Continue", "Cancel"],
+					(option) => finish(option === "Continue" ? issue.fallbackCwd : undefined),
+					() => finish(undefined),
+					{ tui: ui },
+				);
+				ui.addChild(selector);
+				ui.setFocus(selector);
+				ui.start();
+			}),
+	);
 }
 
 export interface MainOptions {

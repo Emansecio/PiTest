@@ -1003,6 +1003,17 @@ export class InteractiveMode {
 	 * Initializes the UI, shows warnings, processes initial messages, and starts the interactive loop.
 	 */
 	async run(): Promise<void> {
+		try {
+			await this.runInner();
+		} finally {
+			// A throw escaping init() or the loop leaves the terminal in raw mode with
+			// no cursor and the loop dead. shutdown() already runs stop() (and exits),
+			// so only restore here when it did not fire.
+			if (!this.isShuttingDown) this.stop();
+		}
+	}
+
+	private async runInner(): Promise<void> {
 		await this.init();
 
 		const warningSettings = this.session.settingsManager.getWarnings();
@@ -4489,6 +4500,11 @@ export class InteractiveMode {
 	 */
 	private isShuttingDown = false;
 
+	// True only while the session is suspended (Ctrl+Z) between ui.stop() and the
+	// SIGCONT resume. The external-SIGINT shutdown handler checks this so a Ctrl+C
+	// in the terminal cannot kill the backgrounded process (ignoreSigint wins).
+	private isSuspended = false;
+
 	private async shutdown(): Promise<void> {
 		if (this.isShuttingDown) return;
 		this.isShuttingDown = true;
@@ -4559,13 +4575,20 @@ export class InteractiveMode {
 	private registerSignalHandlers(): void {
 		this.unregisterSignalHandlers();
 
-		const signals: NodeJS.Signals[] = ["SIGTERM"];
+		// SIGINT is routed to graceful shutdown too. In raw mode a keyboard Ctrl+C
+		// arrives as byte 0x03 (handled in-app), so this listener only fires for an
+		// EXTERNAL SIGINT (kill -INT, a `timeout` wrapper, IDE stop button, CI cancel)
+		// which would otherwise terminate under Node's default without restoring the
+		// terminal. While suspended (Ctrl+Z), the temporary ignoreSigint handler must
+		// win, so the SIGINT branch is a no-op then (see handleCtrlZ / isSuspended).
+		const signals: NodeJS.Signals[] = ["SIGTERM", "SIGINT"];
 		if (process.platform !== "win32") {
 			signals.push("SIGHUP");
 		}
 
 		for (const signal of signals) {
 			const handler = () => {
+				if (signal === "SIGINT" && this.isSuspended) return; // suspended: let ignoreSigint win
 				if (signal === "SIGHUP") {
 					this.emergencyTerminalExit();
 				}
@@ -4639,9 +4662,14 @@ export class InteractiveMode {
 		process.once("SIGCONT", () => {
 			clearInterval(suspendKeepAlive);
 			process.removeListener("SIGINT", ignoreSigint);
+			this.isSuspended = false;
 			this.ui.start();
 			this.ui.requestRender(true);
 		});
+
+		// Suppress the external-SIGINT shutdown handler for the suspended window so
+		// ignoreSigint (registered above) is the only thing that sees a Ctrl+C.
+		this.isSuspended = true;
 
 		try {
 			// Stop the TUI (restore terminal to normal mode)
@@ -4652,6 +4680,7 @@ export class InteractiveMode {
 		} catch (error) {
 			clearInterval(suspendKeepAlive);
 			process.removeListener("SIGINT", ignoreSigint);
+			this.isSuspended = false;
 			throw error;
 		}
 	}
@@ -7634,6 +7663,7 @@ Customize: \`${keybindingsPath}\` — \`/reload\` to apply.
 		this.footerDataProvider.dispose();
 		if (this.unsubscribe) {
 			this.unsubscribe();
+			this.unsubscribe = undefined;
 		}
 		if (this.diagnosticsUnsubscribe) {
 			this.diagnosticsUnsubscribe();

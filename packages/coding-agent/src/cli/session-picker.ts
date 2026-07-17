@@ -6,6 +6,7 @@ import { ProcessTerminal, setKeybindings, TUI } from "@pit/tui";
 import { KeybindingsManager } from "../core/keybindings.ts";
 import type { SessionInfo, SessionListProgress } from "../core/session-manager.ts";
 import { SessionSelectorComponent } from "../modes/interactive/components/session-selector.ts";
+import { withTuiSignalGuard } from "./with-tui-signal-guard.ts";
 
 type SessionsLoader = (onProgress?: SessionListProgress) => Promise<SessionInfo[]>;
 
@@ -14,41 +15,45 @@ export async function selectSession(
 	currentSessionsLoader: SessionsLoader,
 	allSessionsLoader: SessionsLoader,
 ): Promise<string | null> {
-	return new Promise((resolve) => {
-		const ui = new TUI(new ProcessTerminal());
-		const keybindings = KeybindingsManager.create();
-		setKeybindings(keybindings);
-		let resolved = false;
+	const ui = new TUI(new ProcessTerminal());
+	const keybindings = KeybindingsManager.create();
+	setKeybindings(keybindings);
+	return withTuiSignalGuard(
+		ui,
+		() =>
+			new Promise((resolve) => {
+				let resolved = false;
 
-		const selector = new SessionSelectorComponent(
-			currentSessionsLoader,
-			allSessionsLoader,
-			(path: string) => {
-				if (!resolved) {
-					resolved = true;
-					ui.stop();
-					resolve(path);
-				}
-			},
-			() => {
-				if (!resolved) {
-					resolved = true;
-					ui.stop();
-					resolve(null);
-				}
-			},
-			() => {
-				ui.stop();
-				process.exit(0);
-			},
-			() => ui.requestRender(),
-			{ showRenameHint: false, keybindings },
-			undefined,
-			ui,
-		);
+				const selector = new SessionSelectorComponent(
+					currentSessionsLoader,
+					allSessionsLoader,
+					(path: string) => {
+						if (!resolved) {
+							resolved = true;
+							ui.stop();
+							resolve(path);
+						}
+					},
+					() => {
+						if (!resolved) {
+							resolved = true;
+							ui.stop();
+							resolve(null);
+						}
+					},
+					() => {
+						ui.stop();
+						process.exit(0);
+					},
+					() => ui.requestRender(),
+					{ showRenameHint: false, keybindings },
+					undefined,
+					ui,
+				);
 
-		ui.addChild(selector);
-		ui.setFocus(selector.getSessionList());
-		ui.start();
-	});
+				ui.addChild(selector);
+				ui.setFocus(selector.getSessionList());
+				ui.start();
+			}),
+	);
 }
