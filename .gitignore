@@ -72,3 +72,6 @@ hyperframes-pit-presentation/.thumbnails/
 
 # Nested reference clone (its own git repo — not part of this monorepo)
 everything-claude-code/
+
+# Bench eval run output (generated; the suite itself under bench/*.mts is tracked)
+bench/runs/
