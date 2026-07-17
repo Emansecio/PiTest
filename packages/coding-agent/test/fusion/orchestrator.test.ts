@@ -83,6 +83,7 @@ describe("runFusionTurn", () => {
 			userPrompt: "Q",
 			panel: PANEL,
 			staggerSameCliMs: 0,
+			bothThrottledBackoffMs: 0,
 			runMember: async (m) => {
 				calls++;
 				if (calls <= 2) return { member: m, ok: false, text: "", error: "HTTP 429: rate limit" };
@@ -104,6 +105,7 @@ describe("runFusionTurn", () => {
 			userPrompt: "Q",
 			panel: PANEL,
 			staggerSameCliMs: 0,
+			bothThrottledBackoffMs: 0,
 			runMember: async (m) => ({ member: m, ok: false, text: "", error: "overloaded: server busy" }),
 			runJudge: async () => EMPTY_JUDGE,
 			writer: async () => "unused",
@@ -146,6 +148,7 @@ describe("runFusionTurn", () => {
 			userPrompt: "Q",
 			panel: sameCliPanel,
 			staggerSameCliMs: 5,
+			bothThrottledBackoffMs: 0,
 			runMember: async (m) => {
 				calls++;
 				return { member: m, ok: false, text: "", error: "throttled" };

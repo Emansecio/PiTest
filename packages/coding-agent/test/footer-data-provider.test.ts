@@ -119,9 +119,14 @@ describe("FooterDataProvider reftable branch detection", () => {
 		statusPorcelainStdout = "";
 		vi.mocked(spawnSync).mockClear();
 		vi.mocked(execFile).mockClear();
+		// The debounce-coalescing tests must let the full watch-debounce window
+		// elapse to prove "exactly one refresh happened" — shrink it so that wait
+		// is 40ms instead of the production 500ms.
+		FooterDataProvider._setWatchDebounceMsForTest(40);
 	});
 
 	afterEach(() => {
+		FooterDataProvider._setWatchDebounceMsForTest(undefined);
 		process.chdir(originalCwd);
 		if (tempDir && existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true, force: true });
@@ -226,7 +231,9 @@ describe("FooterDataProvider reftable branch detection", () => {
 			writeFileSync(join(reftableDir, "tables.list"), "2\n");
 			writeFileSync(join(reftableDir, "tables.list"), "3\n");
 			await waitFor(() => vi.mocked(execFile).mock.calls.some((call) => call[1]?.[1] === "symbolic-ref"));
-			await new Promise((resolve) => setTimeout(resolve, 650));
+			// 3× the (test-shrunk) debounce window: long enough that a second
+			// refresh would have fired if coalescing were broken.
+			await new Promise((resolve) => setTimeout(resolve, 120));
 
 			const branchCalls = vi.mocked(execFile).mock.calls.filter((call) => call[1]?.[1] === "symbolic-ref");
 			expect(branchCalls.length).toBe(1);
@@ -403,7 +410,8 @@ describe("FooterDataProvider working-tree diff stats", () => {
 			provider.scheduleWorkingTreeRefresh();
 			provider.scheduleWorkingTreeRefresh();
 			await waitFor(() => vi.mocked(execFile).mock.calls.some((call) => call[1]?.[1] === "diff"));
-			await new Promise((resolve) => setTimeout(resolve, 650));
+			// 3× the (test-shrunk) debounce window — see the coalescing note above.
+			await new Promise((resolve) => setTimeout(resolve, 120));
 			const diffCalls = vi.mocked(execFile).mock.calls.filter((call) => call[1]?.[1] === "diff");
 			expect(diffCalls.length).toBe(1);
 		} finally {

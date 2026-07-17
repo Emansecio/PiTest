@@ -17,8 +17,11 @@ import { createHarness, getUserTexts, type Harness } from "./suite/harness.js";
 const FAILED_MARKER = "has FAILED";
 const RUNNING_MARKER = "is STILL running";
 
+// pollIntervalMs shrinks the drain's re-check cadence so a job that settles a few
+// ms after the turn ends is detected almost immediately instead of after a fixed
+// 500ms poll — the assertions (pass/fail/re-injection) are unchanged.
 const pendingChecksOn = {
-	pendingChecks: { enabled: true, maxWaitMs: 5000, maxFixAttempts: 1 },
+	pendingChecks: { enabled: true, maxWaitMs: 5000, maxFixAttempts: 1, pollIntervalMs: 20 },
 };
 
 function bgJob(over: Partial<BashBackgroundJob>): BashBackgroundJob {
@@ -77,7 +80,10 @@ describe("background-check guard", () => {
 
 	it("re-injects a 'still running' warning when the check never settles in time", async () => {
 		const harness = await createHarness({
-			settings: { pendingChecks: { enabled: true, maxWaitMs: 1000, maxFixAttempts: 1 } },
+			// Job never settles: the drain must wait out maxWaitMs and then warn. Keep
+			// that wait short (200ms) with a fast poll so the "still running" path is
+			// proven without a full second of real waiting.
+			settings: { pendingChecks: { enabled: true, maxWaitMs: 200, maxFixAttempts: 1, pollIntervalMs: 20 } },
 		});
 		harnesses.push(harness);
 		harness.setResponses([

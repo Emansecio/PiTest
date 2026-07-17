@@ -48,7 +48,13 @@ describe("lsp shutdown vs in-flight warmup (#26)", () => {
 	});
 
 	it("shutdownClientsForCwd kills a server still mid-initialize", async () => {
-		process.env.FAKE_LSP_INIT_DELAY_MS = "1500";
+		// Delay the initialize reply long enough that the handshake is still in
+		// flight when we call shutdown at t=300ms below. The client is registered in
+		// `clientLocks` synchronously, so the race is valid the moment getOrCreateClient
+		// returns; this only needs to outlast the 300ms pre-wait with margin. 600ms
+		// keeps a comfortable buffer while shutdownClientsForCwd (which awaits the
+		// in-flight lock) resolves in ~0.8s instead of ~1.6s.
+		process.env.FAKE_LSP_INIT_DELAY_MS = "600";
 		const cwd = mkdtempSync(join(tmpdir(), "pit-lsp-warmup-"));
 		cleanups.push(() => rmSync(cwd, { recursive: true, force: true }));
 

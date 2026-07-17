@@ -1,9 +1,27 @@
 import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { DefaultPackageManager, type ProgressEvent, type ResolvedResource } from "../src/core/package-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
+
+// Every test here resolves against a freshly-created temp agentDir, so the
+// resolve-cache is always a read miss — the only thing the cache does in this
+// suite is a stampTree fs-walk + JSON write after each live scan (pure waste,
+// ~25-30% of test wall). Cache behavior has its own coverage in
+// resolve-cache.test.ts; disable it here so we time the discovery logic itself.
+let previousResolveCacheEnv: string | undefined;
+beforeAll(() => {
+	previousResolveCacheEnv = process.env.PIT_NO_RESOLVE_CACHE;
+	process.env.PIT_NO_RESOLVE_CACHE = "1";
+});
+afterAll(() => {
+	if (previousResolveCacheEnv === undefined) {
+		delete process.env.PIT_NO_RESOLVE_CACHE;
+	} else {
+		process.env.PIT_NO_RESOLVE_CACHE = previousResolveCacheEnv;
+	}
+});
 
 function normalizeForMatch(value: string): string {
 	return value.replace(/\\/g, "/");

@@ -11,6 +11,7 @@ import {
 } from "../../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../../src/core/auth-storage.js";
 import { SessionManager } from "../../src/core/session-manager.js";
+import { SettingsManager } from "../../src/core/settings-manager.js";
 import type {
 	ExtensionAPI,
 	ExtensionFactory,
@@ -25,6 +26,12 @@ type RecordedSessionEvent =
 	| SessionBeforeForkEvent
 	| SessionShutdownEvent
 	| SessionStartEvent;
+
+// These characterization tests exercise session lifecycle / replacement, not LSP or
+// frequent-files. Booting each runtime with both disabled skips the LSP manager warmup
+// and a per-boot `git` frequent-files scan, trimming dead time from every session boot
+// without affecting any lifecycle event or persistence assertion below.
+const lightSettings = () => SettingsManager.inMemory({ lsp: { enabled: false }, frequentFiles: { enabled: false } });
 
 describe("AgentSessionRuntime characterization", () => {
 	const cleanups: Array<() => Promise<void> | void> = [];
@@ -58,6 +65,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const runtimeOptions = {
 			agentDir: tempDir,
 			authStorage,
+			settingsManager: lightSettings(),
 			model: options?.bootstrapModel === false ? undefined : faux.getModel(),
 			thinkingLevel: options?.bootstrapThinkingLevel === false ? undefined : undefined,
 			resourceLoaderOptions: {
@@ -347,6 +355,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const runtimeOptions = {
 			agentDir: tempDir,
 			authStorage,
+			settingsManager: lightSettings(),
 			model: faux.getModel(),
 			resourceLoaderOptions: {
 				extensionFactories: [
@@ -457,6 +466,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const otherRuntimeOptions = {
 			agentDir: tempDir,
 			authStorage: otherAuthStorage,
+			settingsManager: lightSettings(),
 			resourceLoaderOptions: {
 				extensionFactories: [
 					(pi: ExtensionAPI) => {
@@ -532,6 +542,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const otherRuntimeOptions = {
 			agentDir: tempDir,
 			authStorage: otherAuthStorage,
+			settingsManager: lightSettings(),
 			resourceLoaderOptions: {
 				extensionFactories: [
 					(pi: ExtensionAPI) => {

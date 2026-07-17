@@ -3,9 +3,12 @@
  * hard threshold + presend overflow) before panel/judge/writer stages.
  */
 
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Agent } from "@pit/agent-core";
 import { type AssistantMessage, getModel } from "@pit/ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../../src/core/agent-session.js";
 import * as compactionModule from "../../src/core/agent-session-compaction.js";
 import { AuthStorage } from "../../src/core/auth-storage.js";
@@ -15,6 +18,16 @@ import { SettingsManager } from "../../src/core/settings-manager.js";
 import { createTestResourceLoader } from "../utilities.js";
 
 const model = getModel("anthropic", "claude-sonnet-5")!;
+
+// Boot the session against an empty temp dir (no `.git`) instead of process.cwd().
+// A real-repo cwd makes the constructor kick off the living-repo-map + frequent-files
+// git scans over the whole monorepo — a ~6s cold compute that this compaction-preflight
+// test never exercises. An empty cwd + disabled lsp/frequentFiles skips all of it.
+const tmpCwd = mkdtempSync(join(tmpdir(), "pi-fusion-ce-"));
+
+afterAll(() => {
+	rmSync(tmpCwd, { recursive: true, force: true });
+});
 
 function createSession() {
 	const authStorage = AuthStorage.inMemory();
@@ -30,8 +43,11 @@ function createSession() {
 			},
 		}),
 		sessionManager: SessionManager.inMemory(),
-		settingsManager: SettingsManager.inMemory(),
-		cwd: process.cwd(),
+		settingsManager: SettingsManager.inMemory({
+			lsp: { enabled: false },
+			frequentFiles: { enabled: false },
+		}),
+		cwd: tmpCwd,
 		modelRegistry: ModelRegistry.inMemory(authStorage),
 		resourceLoader: createTestResourceLoader(),
 	});

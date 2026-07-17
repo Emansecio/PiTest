@@ -8,6 +8,7 @@ describe("getPendingChecksSettings", () => {
 			enabled: true,
 			maxWaitMs: 900_000,
 			maxFixAttempts: 2,
+			pollIntervalMs: 500,
 		});
 	});
 
@@ -19,6 +20,7 @@ describe("getPendingChecksSettings", () => {
 			enabled: false,
 			maxWaitMs: 60_000,
 			maxFixAttempts: 1,
+			pollIntervalMs: 500,
 		});
 	});
 });

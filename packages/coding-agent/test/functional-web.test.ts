@@ -37,6 +37,10 @@ function mockMgr(overrides: Partial<ChromeDevtoolsManager> = {}): ChromeDevtools
 	return base as unknown as ChromeDevtoolsManager;
 }
 
+// Zero out the fixed settle/interaction sleeps: the ChromeDevtoolsManager is
+// fully mocked, so the real page-reaction waits only add dead wall-clock time.
+const FAST_TIMINGS = { settleMs: 0, clickSettleMs: 0, fillSettleMs: 0 } as const;
+
 describe("functional-web", () => {
 	it("isFunctionalWebDisabled respects PIT_NO_FUNCTIONAL_WEB", () => {
 		expect(isFunctionalWebDisabled({} as NodeJS.ProcessEnv)).toBe(false);
@@ -89,6 +93,7 @@ describe("functional-web", () => {
 			mgr,
 			touchedVisual: true,
 			lastVisualFile: "/tmp/a.html",
+			...FAST_TIMINGS,
 			resolveUrl: async () => ({ url: "http://127.0.0.1:9/", label: "test" }),
 		});
 		expect(result.status).toBe("passed");
@@ -106,6 +111,7 @@ describe("functional-web", () => {
 			cwd: "/tmp",
 			mgr,
 			touchedVisual: true,
+			...FAST_TIMINGS,
 			resolveUrl: async () => ({ url: "http://127.0.0.1:9/", label: "test" }),
 		});
 		expect(result.status).toBe("failed");
@@ -122,6 +128,7 @@ describe("functional-web", () => {
 			cwd: "/tmp",
 			mgr,
 			touchedVisual: true,
+			...FAST_TIMINGS,
 			resolveUrl: async () => ({ url: "http://127.0.0.1:9/", label: "test" }),
 		});
 		expect(result.status).toBe("failed");
@@ -142,6 +149,7 @@ describe("functional-web", () => {
 			cwd: "/tmp",
 			mgr,
 			touchedVisual: true,
+			...FAST_TIMINGS,
 			resolveUrl: async () => ({ url: "http://127.0.0.1:9/", label: "test" }),
 		});
 		expect(result.status).toBe("failed");
@@ -158,6 +166,7 @@ describe("functional-web", () => {
 			cwd: "/tmp",
 			mgr,
 			touchedVisual: true,
+			...FAST_TIMINGS,
 			resolveUrl: async () => ({ url: "http://127.0.0.1:9/", label: "test" }),
 		});
 		expect(result.status).toBe("failed");

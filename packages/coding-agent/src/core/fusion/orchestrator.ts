@@ -12,6 +12,9 @@ export interface FusionTurnDeps {
 	runMember: (member: PanelMember) => Promise<PanelResult>;
 	/** Structured judge over the surviving results. */
 	runJudge: (userPrompt: string, results: PanelResult[]) => Promise<JudgeAnalysis>;
+	/** Backoff before the single coordinated retry when both members throttle together.
+	 * Injectable purely as a test seam; defaults to BOTH_THROTTLED_RETRY_BACKOFF_MS in prod. */
+	bothThrottledBackoffMs?: number;
 	/** Optional read-only fact-check of the surviving results against the code, before the
 	 * writer synthesizes. Returns undefined when verification is disabled or fails (fail-open). */
 	verify?: (
@@ -96,7 +99,7 @@ export async function runFusionTurn(deps: FusionTurnDeps): Promise<FusionTurnOut
 			source: "fusion.orchestrator",
 			context: { note: `backoffMs=${BOTH_THROTTLED_RETRY_BACKOFF_MS}` },
 		});
-		await delay(BOTH_THROTTLED_RETRY_BACKOFF_MS, signal);
+		await delay(deps.bothThrottledBackoffMs ?? BOTH_THROTTLED_RETRY_BACKOFF_MS, signal);
 		if (!signal?.aborted) {
 			results = await launchPanelMembers(deps);
 			survivors = results.filter((r) => r.ok);

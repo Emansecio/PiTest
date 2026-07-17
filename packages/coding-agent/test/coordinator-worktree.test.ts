@@ -13,14 +13,14 @@
  */
 
 import { execFile } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { Agent, AgentMessage, AgentTool } from "@pit/agent-core";
 import { type FauxProviderRegistration, fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@pit/ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { runWithAcceptance } from "../src/core/coordinator/acceptance.js";
 import { SubagentRegistry } from "../src/core/coordinator/registry.js";
@@ -35,9 +35,16 @@ async function git(cwd: string, ...args: string[]): Promise<void> {
 	await execFileP("git", args, { cwd });
 }
 
-/** Fresh temp git repo with one commit, so `git worktree add` has a HEAD. */
-async function initRepo(): Promise<string> {
-	const dir = mkdtempSync(join(tmpdir(), "pit-wt-test-"));
+/**
+ * A single committed git repo is built once (7 git spawns) and then cloned per
+ * test with a plain recursive filesystem copy — git repos are relocatable, so a
+ * fresh copy has an identical HEAD without paying the spawn cost again. This
+ * turns 6× initRepo (≈42 git spawns) into 1 template + 6 fast fs copies.
+ */
+let templateRepo: string | undefined;
+
+async function buildTemplateRepo(): Promise<string> {
+	const dir = mkdtempSync(join(tmpdir(), "pit-wt-template-"));
 	await git(dir, "init");
 	await git(dir, "config", "user.email", "test@test");
 	await git(dir, "config", "user.name", "test");
@@ -45,6 +52,25 @@ async function initRepo(): Promise<string> {
 	writeFileSync(join(dir, "README.md"), "hello");
 	await git(dir, "add", ".");
 	await git(dir, "commit", "-m", "init");
+	return dir;
+}
+
+beforeAll(async () => {
+	templateRepo = await buildTemplateRepo();
+});
+
+afterAll(() => {
+	if (templateRepo) {
+		rmSync(templateRepo, { recursive: true, force: true });
+		templateRepo = undefined;
+	}
+});
+
+/** Fresh temp git repo with one commit, so `git worktree add` has a HEAD. */
+async function initRepo(): Promise<string> {
+	const dir = mkdtempSync(join(tmpdir(), "pit-wt-test-"));
+	if (!templateRepo) throw new Error("template repo not initialized");
+	cpSync(templateRepo, dir, { recursive: true });
 	return dir;
 }
 

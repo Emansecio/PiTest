@@ -25,10 +25,11 @@ import { createGoalCompleteToolDefinition } from "../src/core/tools/goal-complet
 import { setCurrentVerificationProbe } from "../src/core/verification/verification.js";
 import { createHarness, getUserTexts, type Harness } from "./suite/harness.js";
 
-// Dorme além do timeoutMs configurado e sai VERDE — nada está quebrado.
+// Dorme além do timeoutMs configurado e sai VERDE — nada está quebrado. O sleep
+// só precisa ultrapassar o timeoutMs (150ms) para ser morto antes de terminar.
 const NODE_SLOW_OK = `node -e "setTimeout(()=>process.exit(0),4000)"`;
 // Verde rápido, mas lento o bastante para registrar um job "durante o gate".
-const NODE_MEDIUM_OK = `node -e "setTimeout(()=>process.exit(0),800)"`;
+const NODE_MEDIUM_OK = `node -e "setTimeout(()=>process.exit(0),200)"`;
 
 function bgJob(over: Partial<BashBackgroundJob>): BashBackgroundJob {
 	return {
@@ -57,7 +58,7 @@ describe("late-check regressions", () => {
 
 	it("gate: timeout do check é inconclusivo — sem fix turns, sem 'still failing'", async () => {
 		const harness = await createHarness({
-			settings: { verification: { command: NODE_SLOW_OK, maxAttempts: 1, timeoutMs: 800 } },
+			settings: { verification: { command: NODE_SLOW_OK, maxAttempts: 1, timeoutMs: 150 } },
 		});
 		harnesses.push(harness);
 		const file = join(harness.tempDir, "out.txt");
@@ -80,7 +81,7 @@ describe("late-check regressions", () => {
 
 	it("gate: check que estourou timeout não é re-executado nos turnos seguintes da sessão", async () => {
 		const harness = await createHarness({
-			settings: { verification: { command: NODE_SLOW_OK, maxAttempts: 1, timeoutMs: 700 } },
+			settings: { verification: { command: NODE_SLOW_OK, maxAttempts: 1, timeoutMs: 150 } },
 		});
 		harnesses.push(harness);
 		const fileA = join(harness.tempDir, "a.txt");
@@ -127,7 +128,9 @@ describe("late-check regressions", () => {
 
 	it("drain: check abandonado num turno anterior não ressurge no turno seguinte", async () => {
 		const harness = await createHarness({
-			settings: { pendingChecks: { enabled: true, maxWaitMs: 600, maxFixAttempts: 1 } },
+			// Job never terminates: the owner turn waits out maxWaitMs. Short wait +
+			// fast poll proves the "no resurgence" invariant without a real long sleep.
+			settings: { pendingChecks: { enabled: true, maxWaitMs: 200, maxFixAttempts: 1, pollIntervalMs: 20 } },
 		});
 		harnesses.push(harness);
 		harness.setResponses([
@@ -156,7 +159,7 @@ describe("late-check regressions", () => {
 		const harness = await createHarness({
 			settings: {
 				verification: { command: NODE_MEDIUM_OK, maxAttempts: 1, timeoutMs: 10_000 },
-				pendingChecks: { enabled: true, maxWaitMs: 5000, maxFixAttempts: 1 },
+				pendingChecks: { enabled: true, maxWaitMs: 5000, maxFixAttempts: 1, pollIntervalMs: 20 },
 			},
 		});
 		harnesses.push(harness);
@@ -181,7 +184,7 @@ describe("late-check regressions", () => {
 				setTimeout(() => {
 					job.exited = true;
 					job.exitCode = 0;
-				}, 200);
+				}, 50);
 			}
 		});
 

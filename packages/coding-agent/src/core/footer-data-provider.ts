@@ -125,7 +125,12 @@ function resolveBranchWithGitAsync(repoDir: string): Promise<string | null> {
  */
 export class FooterDataProvider {
 	private cwd: string;
-	private static readonly WATCH_DEBOUNCE_MS = 500;
+	private static WATCH_DEBOUNCE_MS = 500;
+	/** Test-only: shrink the watcher debounce so coalescing tests don't wait the
+	 * full production window. Pass `undefined` to restore the default. */
+	static _setWatchDebounceMsForTest(ms: number | undefined): void {
+		FooterDataProvider.WATCH_DEBOUNCE_MS = ms ?? 500;
+	}
 	private static readonly DIFF_POLL_MS = 5000;
 	/** Adaptive poll ceiling — an idle repo backs all the way off to once a minute. */
 	private static readonly DIFF_POLL_MAX_MS = 60_000;

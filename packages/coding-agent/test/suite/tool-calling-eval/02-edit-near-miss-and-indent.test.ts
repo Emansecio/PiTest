@@ -15,7 +15,15 @@ describe("edit tool: near-miss + indent-tolerant tiers (e2e)", () => {
 	});
 
 	async function makeHarness() {
-		const harness = await createHarness({ tools: [createEditTool(process.cwd())] });
+		// This suite exercises the edit tool's near-miss + indent-tolerant match tiers,
+		// not LSP writethrough. Post-write diagnostics are default-on and would spin up a
+		// TypeScript language server against the temp `.ts` file, then block ~4s on the
+		// DEFAULT_WAIT_MS timeout with no real project loaded. Disabling LSP removes that
+		// dead wait without touching any assertion here.
+		const harness = await createHarness({
+			tools: [createEditTool(process.cwd())],
+			settings: { lsp: { enabled: false } },
+		});
 		harnesses.push(harness);
 		return harness;
 	}

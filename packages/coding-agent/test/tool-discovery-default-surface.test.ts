@@ -11,13 +11,29 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getModel } from "@pit/ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { DefaultResourceLoader } from "../src/core/resource-loader.js";
 import { createAgentSession } from "../src/core/sdk.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { getCurrentToolDiscoveryIndex } from "../src/core/tool-discovery.js";
 import type { ToolDef } from "../src/core/tools/index.js";
+
+// Each session boot resolves against a fresh temp agentDir (always a cache read
+// miss), so the resolve-cache only adds a stampTree walk + JSON write per boot.
+// Cache behavior is covered by resolve-cache.test.ts; disable it here.
+let previousResolveCacheEnv: string | undefined;
+beforeAll(() => {
+	previousResolveCacheEnv = process.env.PIT_NO_RESOLVE_CACHE;
+	process.env.PIT_NO_RESOLVE_CACHE = "1";
+});
+afterAll(() => {
+	if (previousResolveCacheEnv === undefined) {
+		delete process.env.PIT_NO_RESOLVE_CACHE;
+	} else {
+		process.env.PIT_NO_RESOLVE_CACHE = previousResolveCacheEnv;
+	}
+});
 
 describe("tool discovery default surface", () => {
 	let tempDir: string;

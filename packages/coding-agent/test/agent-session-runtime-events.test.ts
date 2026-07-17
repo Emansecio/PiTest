@@ -11,6 +11,7 @@ import {
 } from "../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { SessionManager } from "../src/core/session-manager.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
 import type {
 	ExtensionFactory,
 	SessionBeforeForkEvent,
@@ -47,6 +48,9 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		const runtimeOptions = {
 			agentDir: tempDir,
 			authStorage,
+			// Lifecycle-event tests don't touch LSP or frequent-files; disabling both skips
+			// the LSP manager warmup and per-boot `git` frequent-files scan on every session.
+			settingsManager: SettingsManager.inMemory({ lsp: { enabled: false }, frequentFiles: { enabled: false } }),
 			model: faux.getModel(),
 			resourceLoaderOptions: {
 				extensionFactories: [extensionFactory],

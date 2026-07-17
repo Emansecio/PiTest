@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ExtensionRunner } from "../src/core/extensions/runner.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
@@ -10,6 +10,23 @@ import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import type { Skill } from "../src/core/skills.js";
 import { createSyntheticSourceInfo } from "../src/core/source-info.js";
+
+// Each reload() resolves against a fresh temp agentDir, so the resolve-cache is
+// always a read miss — it only adds a stampTree fs-walk + JSON write per scan
+// (the dominant cost of this suite's test execution). Cache behavior is proven
+// separately in resolve-cache.test.ts; disable it here to time discovery.
+let previousResolveCacheEnv: string | undefined;
+beforeAll(() => {
+	previousResolveCacheEnv = process.env.PIT_NO_RESOLVE_CACHE;
+	process.env.PIT_NO_RESOLVE_CACHE = "1";
+});
+afterAll(() => {
+	if (previousResolveCacheEnv === undefined) {
+		delete process.env.PIT_NO_RESOLVE_CACHE;
+	} else {
+		process.env.PIT_NO_RESOLVE_CACHE = previousResolveCacheEnv;
+	}
+});
 
 describe("DefaultResourceLoader", () => {
 	let tempDir: string;

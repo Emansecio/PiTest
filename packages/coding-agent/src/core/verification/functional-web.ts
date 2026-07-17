@@ -57,6 +57,14 @@ export interface FunctionalWebCheckOptions {
 	maxInteractions?: number;
 	timeoutMs?: number;
 	signal?: AbortSignal;
+	/**
+	 * Post-navigation / post-interaction settle delays (ms). Real runs use the
+	 * defaults so the page has time to react; injected small values let tests with
+	 * a fully-mocked ChromeDevtoolsManager skip the fixed waits.
+	 */
+	settleMs?: number;
+	clickSettleMs?: number;
+	fillSettleMs?: number;
 	/** Injected for tests. */
 	resolveUrl?: (input: {
 		cwd: string;
@@ -288,7 +296,7 @@ export async function runFunctionalWebCheck(options: FunctionalWebCheckOptions):
 		}
 
 		await mgr.navigate({ url: resolved.url, newTab: true }, signal);
-		await settle(mgr, SETTLE_DEFAULT_MS, signal);
+		await settle(mgr, options.settleMs ?? SETTLE_DEFAULT_MS, signal);
 
 		// Screenshot for evidence path (errors ignored — not required to pass).
 		try {
@@ -322,7 +330,7 @@ export async function runFunctionalWebCheck(options: FunctionalWebCheckOptions):
 			try {
 				await mgr.click(c.selector, signal);
 				interacted = true;
-				await delay(250, signal);
+				await delay(options.clickSettleMs ?? 250, signal);
 			} catch (err) {
 				findings.push({
 					phase: "click",
@@ -337,7 +345,7 @@ export async function runFunctionalWebCheck(options: FunctionalWebCheckOptions):
 			try {
 				await mgr.fill(c.selector, "pit-functional-check", signal);
 				interacted = true;
-				await delay(150, signal);
+				await delay(options.fillSettleMs ?? 150, signal);
 			} catch (err) {
 				findings.push({
 					phase: "fill",

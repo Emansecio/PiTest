@@ -54,7 +54,7 @@ describe("verification commands and auto-background policy", () => {
 			const def = createBashToolDefinition(process.cwd(), {
 				spawnHook: (ctx) => ({
 					...ctx,
-					command: 'node -e "setTimeout(()=>process.exit(0), 400)"',
+					command: 'node -e "setTimeout(()=>process.exit(0), 250)"',
 				}),
 			});
 			const ctx = {} as Parameters<typeof def.execute>[4];
@@ -63,8 +63,10 @@ describe("verification commands and auto-background policy", () => {
 				content: Array<{ type: string; text?: string }>;
 			};
 
-			// Waited for the full sleep (not promoted at 150ms).
-			expect(Date.now() - start).toBeGreaterThanOrEqual(300);
+			// Waited for the full sleep (not promoted at the 150ms threshold). The
+			// 200ms lower bound stays comfortably above 150ms, so a promotion would
+			// still be caught, while the 250ms sleep keeps the test short.
+			expect(Date.now() - start).toBeGreaterThanOrEqual(200);
 			const text = result.content[0]?.text ?? "";
 			expect(text).not.toMatch(/promoted to background id=/i);
 			expect(listBashBackgroundJobs()).toHaveLength(0);
