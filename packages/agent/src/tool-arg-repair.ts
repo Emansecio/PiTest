@@ -306,6 +306,11 @@ function strictNumeric(value: string, requireInteger: boolean): number | undefin
 	const n = Number(t);
 	if (!Number.isFinite(n)) return undefined;
 	if (requireInteger && !Number.isInteger(n)) return undefined;
+	// Refuse to coerce when the number cannot round-trip to its source text:
+	// large integers past 2^53 lose precision, and forms like "007"/"+5"/"1e3"
+	// would change surface value. Leave the string for validation instead.
+	if (requireInteger && !Number.isSafeInteger(n)) return undefined;
+	if (String(n) !== t) return undefined;
 	return n;
 }
 
@@ -499,7 +504,10 @@ function coerceObject(
 
 		// Empty string → null (nullable) or omit (optional). A field that legitimately
 		// accepts a string keeps "" (it is a valid value, not a misplaced placeholder).
-		if (val === "" && !effectiveTypes(propSchema).includes("string")) {
+		// An untyped field (schema `{}`) declares no concrete type, so "" is a valid
+		// value there too — only fire when at least one concrete type is declared.
+		const propTypes = effectiveTypes(propSchema);
+		if (val === "" && propTypes.length > 0 && !propTypes.includes("string")) {
 			if (isNullable(propSchema)) {
 				ensureOut()[key] = null;
 				repairs.push("empty_to_null");
