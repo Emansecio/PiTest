@@ -215,6 +215,55 @@ describe("destructive-command-guard: PowerShell / cmd vocabulary", () => {
 	});
 });
 
+describe("destructive-command-guard: self-terminating process kills", () => {
+	it("blocks taskkill /IM of a host runtime image — the exact incident command", () => {
+		// Git Bash mangles cmd flags to `//F` etc.; the guard must handle both.
+		expect(blocks("taskkill //F //IM node.exe //T")).toBe(true);
+		expect(blocks("taskkill /F /IM node.exe /T")).toBe(true);
+		expect(blocks("taskkill /IM pit.exe")).toBe(true);
+		expect(blocks("taskkill //F //IM claude.exe")).toBe(true);
+		expect(blocks("taskkill /F /IM *")).toBe(true); // wildcard kills everything
+	});
+
+	it("names the runtime and the terminal-corruption reason in the message", () => {
+		const msg = messageFor("taskkill //F //IM node.exe //T");
+		expect(msg).toMatch(/node\.exe/);
+		expect(msg).toMatch(/Pit host/);
+		expect(msg).toMatch(/TerminateProcess/);
+		expect(msg).toMatch(/netstat -ano/); // points at the correct narrow alternative
+	});
+
+	it("blocks a force tree-kill of a specific PID (can't prove it isn't the host tree)", () => {
+		// The FATAL command in the incident: taskkill //F //PID <n> //T.
+		expect(blocks("taskkill //F //PID 27156 //T")).toBe(true);
+		expect(blocks("taskkill /F /PID 14784 /T")).toBe(true);
+		expect(messageFor("taskkill //F //PID 27156 //T")).toMatch(/process TREE/);
+	});
+
+	it("allows a narrow, non-force PID kill and a non-host image", () => {
+		expect(blocks("taskkill /PID 27156")).toBe(false); // no force, no tree, no host image
+		expect(blocks("taskkill /F /PID 27156")).toBe(false); // force but no /T -> no tree descent
+		expect(blocks("taskkill /F /IM chrome.exe")).toBe(false); // not a Pit host runtime
+		expect(blocks("taskkill /F /IM someserver.exe /T")).toBe(false);
+	});
+
+	it("blocks pkill/killall of a host runtime (the unix analog from Git Bash)", () => {
+		expect(blocks("pkill -9 node")).toBe(true);
+		expect(blocks("killall node")).toBe(true);
+		expect(blocks("pkill tsx")).toBe(true);
+		expect(messageFor("pkill -9 node")).toMatch(/Pit host/);
+	});
+
+	it("allows pkill/killall of an unrelated process", () => {
+		expect(blocks("pkill -9 chrome")).toBe(false);
+		expect(blocks("killall nginx")).toBe(false);
+	});
+
+	it("catches a host-runtime kill hidden behind command substitution", () => {
+		expect(blocks("taskkill //F //IM node.exe //PID $(cat pid.txt)")).toBe(true);
+	});
+});
+
 describe("destructive-command-guard extension: fire-once", () => {
 	it("blocks a destructive+substitution call once, then allows the identical re-issue", () => {
 		const { api, fire } = makeFakePi();

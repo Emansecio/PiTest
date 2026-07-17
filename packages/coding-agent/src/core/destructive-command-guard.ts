@@ -337,6 +337,124 @@ function inspectClearContentSegment(segment: string): string | undefined {
 }
 
 /**
+ * Runtime image names that can host the Pit process itself. Pit runs on one of
+ * these (from src via `tsx` → `node`, or a built `pit` binary), so killing any of
+ * them BY IMAGE NAME terminates every process of that image on the machine —
+ * which necessarily includes the Pit host. `claude` is here because a co-hosted
+ * Claude Code process showed up as `claude.exe` in the incident that motivated
+ * this detector.
+ */
+const HOST_RUNTIME_IMAGES = new Set([
+	"node",
+	"node.exe",
+	"pit",
+	"pit.exe",
+	"tsx",
+	"tsx.exe",
+	"bun",
+	"bun.exe",
+	"deno",
+	"deno.exe",
+	"claude",
+	"claude.exe",
+]);
+
+/**
+ * Normalize a taskkill flag token to its bare letters. cmd.exe uses `/F`; under
+ * Git Bash (MSYS) the same call is typed `//F` (the double slash survives arg
+ * mangling); `-F` is also accepted by taskkill. All three collapse to `f`.
+ */
+function taskkillFlag(token: string): string {
+	return token
+		.replace(/^\/{1,2}/, "")
+		.replace(/^-/, "")
+		.toLowerCase();
+}
+
+/**
+ * Windows `taskkill` that force-kills the Pit host. Two footguns, both a
+ * confirm-once bump (never a hard block — re-issue runs it):
+ *   1. `/IM <host-runtime>` (or `/IM *`): kills EVERY process of a runtime that
+ *      hosts Pit — guaranteed to include this session.
+ *   2. `/F` + `/T` together (force tree-kill): `/F` is TerminateProcess
+ *      (uncatchable, so the TUI's terminal-restore teardown never runs and the
+ *      terminal is left in raw + mouse-reporting mode — the "random escape-
+ *      sequence spam" failure), and `/T` walks the process TREE, so if the target
+ *      PID is an ancestor of this shell it self-terminates Pit.
+ */
+function inspectTaskkillSegment(segment: string): string | undefined {
+	const m = /(?:^|[\s"'`])taskkill\b(.*)$/i.exec(segment);
+	if (!m) return undefined;
+	const tokens = tokenizeArgs(m[1].trim());
+
+	let force = false;
+	let tree = false;
+	let expectImage = false;
+	let hasPid = false;
+	const images: string[] = [];
+	for (const token of tokens) {
+		if (expectImage) {
+			images.push(cleanToken(token).toLowerCase());
+			expectImage = false;
+			continue;
+		}
+		if (token.startsWith("/") || token.startsWith("-")) {
+			const flag = taskkillFlag(token);
+			if (flag === "f") force = true;
+			else if (flag === "t") tree = true;
+			else if (flag === "im") expectImage = true;
+			else if (flag === "pid") hasPid = true;
+			else if (flag.startsWith("im:")) images.push(token.slice(token.indexOf(":") + 1).toLowerCase());
+		}
+	}
+
+	const hostImages = images.filter((img) => img === "*" || HOST_RUNTIME_IMAGES.has(img));
+	if (hostImages.length > 0) {
+		const forceNote = force
+			? " with /F (TerminateProcess — uncatchable, so the Pit TUI cannot restore the terminal and it is left echoing raw escape sequences)"
+			: "";
+		return (
+			`\`taskkill /IM ${hostImages.join(", ")}\`${forceNote} kills EVERY process of that runtime image — ` +
+			"including the Pit host this session runs under, self-terminating it. To free a port, resolve the " +
+			"specific PID (`netstat -ano | findstr :<port>`) and kill only that PID"
+		);
+	}
+
+	// Force tree-kill of a specific PID: can't tell from text alone whether the
+	// PID is an ancestor of this shell (that would need I/O the guard forbids), so
+	// bump once so the caller confirms the target isn't the Pit host's tree.
+	if (force && tree && hasPid) {
+		return (
+			"`taskkill /F /T` force-kills the target PID's entire process TREE. If that PID is an ancestor of " +
+			"this shell, it self-terminates Pit — and /F (TerminateProcess) is uncatchable, so the terminal is " +
+			"left in raw/mouse mode. Confirm the PID is not the Pit host's process tree"
+		);
+	}
+	return undefined;
+}
+
+/**
+ * Unix broad process kill (`pkill` / `killall`) targeting a Pit host runtime by
+ * name — the cross-platform analog of the taskkill /IM footgun, reachable from
+ * the Git Bash shell on Windows too. `pkill -9 node` / `killall node` kills every
+ * node process, including the Pit host.
+ */
+function inspectUnixProcessKillSegment(segment: string): string | undefined {
+	const m = /(?:^|[\s"'`])(pkill|killall)\b(.*)$/i.exec(segment);
+	if (!m) return undefined;
+	const verb = m[1].toLowerCase();
+	const tokens = tokenizeArgs(m[2].trim());
+	// The process name is the first non-flag token (pkill/killall match by name).
+	const names = tokens.filter((t) => !t.startsWith("-")).map((t) => cleanToken(t).toLowerCase());
+	if (!names.some((n) => HOST_RUNTIME_IMAGES.has(n))) return undefined;
+	const hit = names.filter((n) => HOST_RUNTIME_IMAGES.has(n));
+	return (
+		`\`${verb} ${hit.join(" ")}\` kills every process matching that runtime name — including the Pit host ` +
+		"this session runs under, self-terminating it. Target the specific PID (e.g. via `lsof -ti:<port>`) instead"
+	);
+}
+
+/**
  * Loose signatures for the destructive verbs we recognize, used ONLY to gate the
  * command-substitution opacity check (never to block on their own). Kept tied to
  * the specific verbs so a benign `echo $(date)` stays out of scope entirely.
@@ -351,6 +469,8 @@ const DESTRUCTIVE_VERB_HINTS: readonly RegExp[] = [
 	/\b(?:rd|rmdir)\b[^;&|]*\s\/s\b/i,
 	/\b(?:del|erase)\b[^;&|]*\s\/s\b/i,
 	/\bClear-Content\b/i,
+	/\btaskkill\b[^;&|]*(?:\/{1,2}|-)(?:im|f)\b/i,
+	/\b(?:pkill|killall)\b/i,
 ];
 
 /** True when the segment is shaped like one of our destructive verbs. */
@@ -444,6 +564,9 @@ export function groundDestructiveCommand(input: DestructiveCommandInput): Destru
 			const ps =
 				inspectRemoveItemSegment(inner) ?? inspectWindowsShellDelete(inner) ?? inspectClearContentSegment(inner);
 			if (ps) impacts.push(ps);
+
+			const kill = inspectTaskkillSegment(inner) ?? inspectUnixProcessKillSegment(inner);
+			if (kill) impacts.push(kill);
 
 			for (const { re, impact } of GIT_DESTRUCTIVE) {
 				// `--force-with-lease` is the SAFE force-push; drop it before the
