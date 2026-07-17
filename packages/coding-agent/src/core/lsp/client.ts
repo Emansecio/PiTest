@@ -11,7 +11,9 @@ import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import { recordDiagnostic } from "@pit/ai";
 import { waitForChildProcess } from "../../utils/child-process.ts";
+import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { killProcessTree } from "../../utils/shell.ts";
+import { truncateWithEllipsis } from "../../utils/surrogate.ts";
 import { LruMap } from "../lru-map.ts";
 import { applyWorkspaceEdit } from "./edits.ts";
 import { coalesceChunks } from "./frame-chunks.ts";
@@ -46,6 +48,65 @@ export const OPEN_FILES_LRU_CAP = 64;
 const clients = new Map<string, LspClient>();
 const clientLocks = new Map<string, Promise<LspClient>>();
 const fileOperationLocks = new Map<string, Promise<void>>();
+
+// =============================================================================
+// Boot-failure circuit breaker
+// =============================================================================
+
+// A language server that fails to spawn/initialize (missing binary, crash on
+// initialize, hang past the init timeout) has no failure memory in the base
+// design: every direct caller (writethrough, tool-actions, grounding-guard)
+// re-spawns from scratch, re-paying the full spawn + init-timeout cost on each
+// edit/tool call. This map remembers a genuine boot failure per client key so
+// that, while within a cooldown window, getOrCreateClient throws immediately
+// (cheap, no spawn) instead of re-spawning. After the window elapses one retry
+// is allowed; a repeat failure re-arms the cooldown.
+interface LspBootFailure {
+	failedAt: number;
+	reason: string;
+}
+const lspBootFailures = new Map<string, LspBootFailure>();
+
+/** Default cooldown after a boot failure before a single re-spawn is allowed. */
+const DEFAULT_BOOT_BREAKER_COOLDOWN_MS = 60_000;
+
+/** PIT_NO_LSP_BOOT_BREAKER=1 disables the breaker (always re-spawn, legacy behavior). */
+function bootBreakerDisabled(): boolean {
+	return isTruthyEnvFlag(process.env.PIT_NO_LSP_BOOT_BREAKER);
+}
+
+/** Cooldown window in ms; test/tuning override via PIT_LSP_BOOT_BREAKER_COOLDOWN_MS. */
+function bootBreakerCooldownMs(): number {
+	const raw = process.env.PIT_LSP_BOOT_BREAKER_COOLDOWN_MS;
+	if (raw !== undefined && raw.trim() !== "") {
+		const parsed = Number(raw);
+		if (Number.isFinite(parsed) && parsed >= 0) return Math.floor(parsed);
+	}
+	return DEFAULT_BOOT_BREAKER_COOLDOWN_MS;
+}
+
+/** True when a rejection was caused by an abort (user ESC / AbortSignal), not a genuine boot failure. */
+function isAbortRejection(err: unknown): boolean {
+	if (err instanceof Error) {
+		return err.name === "AbortError" || err.message === "aborted";
+	}
+	return false;
+}
+
+function bootFailureReason(err: unknown): string {
+	const message = err instanceof Error ? err.message : String(err);
+	return truncateWithEllipsis(message, 300);
+}
+
+/** Drop all remembered boot failures (config reload / dispose). */
+export function clearLspBootFailureMemory(): void {
+	lspBootFailures.clear();
+}
+
+/** Test-only reset for the boot-failure circuit breaker. */
+export function _resetLspFailureMemoryForTest(): void {
+	lspBootFailures.clear();
+}
 
 // Best-effort safety net: if the host exits without a graceful session dispose,
 // don't leak language-server processes. Registered lazily on first client.
@@ -405,7 +466,12 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
 /** Cap retained stderr so a chatty server can't grow memory unbounded. */
 const MAX_STDERR_BYTES = 64 * 1024;
 
-export async function getOrCreateClient(config: ServerConfig, cwd: string, initTimeoutMs?: number): Promise<LspClient> {
+export async function getOrCreateClient(
+	config: ServerConfig,
+	cwd: string,
+	initTimeoutMs?: number,
+	signal?: AbortSignal,
+): Promise<LspClient> {
 	registerExitHook();
 	// Key by what actually distinguishes the process, not just the raw command
 	// name. Two configs can share a command (e.g. one server and one linter both
@@ -422,6 +488,20 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 	}
 	const existingLock = clientLocks.get(key);
 	if (existingLock) return existingLock;
+
+	// Boot-failure circuit breaker: a recent genuine spawn/init failure for this
+	// exact key short-circuits here — no process spawn, no init-timeout wait —
+	// until the cooldown elapses. One retry is then allowed (delete now); a repeat
+	// failure re-arms the cooldown in the catch below.
+	if (!bootBreakerDisabled()) {
+		const failure = lspBootFailures.get(key);
+		if (failure) {
+			if (Date.now() - failure.failedAt < bootBreakerCooldownMs()) {
+				throw new Error(`LSP server "${keyCommand}" cooling down after boot failure: ${failure.reason}`);
+			}
+			lspBootFailures.delete(key);
+		}
+	}
 
 	// Assigned right after the IIFE below is created; the ownership guards inside
 	// (onExit / catch / finally) only run after real async work, so they always
@@ -540,7 +620,7 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 					initializationOptions: config.initOptions ?? {},
 					workspaceFolders: [{ uri: fileToUri(cwd), name: cwd.split(/[\\/]/).pop() ?? "workspace" }],
 				},
-				undefined,
+				signal,
 				initTimeoutMs,
 			)) as { capabilities?: unknown };
 
@@ -556,6 +636,12 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 			// replaced this failed attempt under the same key.
 			if (clients.get(key) === client) clients.delete(key);
 			killClientProcess(client);
+			// Arm the circuit breaker on a GENUINE spawn/init failure only. An abort
+			// (user ESC / caller AbortSignal) is not a server fault, so it must not
+			// suppress the next legitimate spawn.
+			if (!bootBreakerDisabled() && !signal?.aborted && !isAbortRejection(err)) {
+				lspBootFailures.set(key, { failedAt: Date.now(), reason: bootFailureReason(err) });
+			}
 			throw err;
 		} finally {
 			if (clientLocks.get(key) === selfLock) clientLocks.delete(key);

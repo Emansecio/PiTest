@@ -7,6 +7,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { globIterate } from "glob";
+import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { isEnoent, sleep, throwIfAborted } from "./internal.ts";
 import type {
 	CodeAction,
@@ -318,6 +319,107 @@ export function dedupeDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
 		unique.push(d);
 	}
 	return unique;
+}
+
+// =============================================================================
+// Silent-diagnostics memory
+// =============================================================================
+
+// Writethrough waits up to the full budget (~4s) for a publishDiagnostics that
+// only ever arrives from a *responsive* server — a silent linter, an
+// openFilesOnly server, or an out-of-project temp file inside a marker'd cwd
+// never publishes, so every such edit pays the full wait for nothing. This map
+// remembers, per (file + server) identity, how many consecutive waits expired
+// with no qualifying publish. Once the miss count crosses the threshold,
+// subsequent waits for that key short-circuit to a tiny grace instead of the
+// full budget. It is invalidated aggressively (any qualifying publish, a
+// project-loaded transition, config reload, or a TTL) so a file that legitimately
+// starts producing diagnostics is never permanently suppressed.
+interface DiagnosticsSilenceEntry {
+	misses: number;
+	lastMissAt: number;
+}
+const diagnosticsSilence = new Map<string, DiagnosticsSilenceEntry>();
+
+/** Consecutive silent waits before a key short-circuits to the grace window. */
+const SILENCE_MISS_THRESHOLD = 2;
+/** Grace wait (ms) once a key is deemed silent; responsive servers still early-exit sooner. */
+const DEFAULT_SILENCE_GRACE_MS = 150;
+/** A silence entry older than this is discarded so a stuck marker can't suppress forever. */
+const SILENCE_TTL_MS = 5 * 60_000;
+
+/** PIT_NO_LSP_SILENCE_MEMO=1 disables the short-circuit (always full wait). */
+function silenceMemoDisabled(): boolean {
+	return isTruthyEnvFlag(process.env.PIT_NO_LSP_SILENCE_MEMO);
+}
+
+/** Grace window in ms; test/tuning override via PIT_LSP_SILENCE_GRACE_MS. */
+function silenceGraceMs(): number {
+	const raw = process.env.PIT_LSP_SILENCE_GRACE_MS;
+	if (raw !== undefined && raw.trim() !== "") {
+		const parsed = Number(raw);
+		if (Number.isFinite(parsed) && parsed >= 0) return Math.floor(parsed);
+	}
+	return DEFAULT_SILENCE_GRACE_MS;
+}
+
+/** Stable identity for the silence marker: same (server + uri) the wait keys on. */
+export function diagnosticsSilenceKey(clientName: string, uri: string): string {
+	return `${clientName}:${uri}`;
+}
+
+/**
+ * Effective wait budget for `silenceKey`: the full `fullTimeoutMs` unless the key
+ * has crossed the silence threshold within the TTL, in which case a short grace
+ * (capped by the full budget). Expired entries are dropped here.
+ */
+export function effectiveDiagnosticsWaitMs(silenceKey: string, fullTimeoutMs: number): number {
+	if (silenceMemoDisabled()) return fullTimeoutMs;
+	const entry = diagnosticsSilence.get(silenceKey);
+	if (!entry) return fullTimeoutMs;
+	if (Date.now() - entry.lastMissAt > SILENCE_TTL_MS) {
+		diagnosticsSilence.delete(silenceKey);
+		return fullTimeoutMs;
+	}
+	if (entry.misses >= SILENCE_MISS_THRESHOLD) return Math.min(silenceGraceMs(), fullTimeoutMs);
+	return fullTimeoutMs;
+}
+
+/**
+ * Record the outcome of a diagnostics wait for `silenceKey`. A qualifying publish
+ * (`fresh`) clears the marker; a silent wait increments the miss counter.
+ */
+export function recordDiagnosticsWaitOutcome(silenceKey: string, fresh: boolean): void {
+	if (silenceMemoDisabled()) return;
+	if (fresh) {
+		diagnosticsSilence.delete(silenceKey);
+		return;
+	}
+	const entry = diagnosticsSilence.get(silenceKey);
+	if (entry) {
+		entry.misses += 1;
+		entry.lastMissAt = Date.now();
+	} else {
+		diagnosticsSilence.set(silenceKey, { misses: 1, lastMissAt: Date.now() });
+	}
+}
+
+/** Reset all silence markers for a server (its project-loaded transition). */
+export function resetDiagnosticsSilenceForClient(clientName: string): void {
+	const prefix = `${clientName}:`;
+	for (const memoKey of diagnosticsSilence.keys()) {
+		if (memoKey.startsWith(prefix)) diagnosticsSilence.delete(memoKey);
+	}
+}
+
+/** Drop all silence markers (config reload / dispose). */
+export function clearDiagnosticsSilenceMemo(): void {
+	diagnosticsSilence.clear();
+}
+
+/** Test-only reset for the silent-diagnostics memory. */
+export function _resetLspSilenceMemoryForTest(): void {
+	diagnosticsSilence.clear();
 }
 
 // =============================================================================

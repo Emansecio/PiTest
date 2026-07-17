@@ -20,16 +20,44 @@ import {
 import { getServersForFile } from "./config.ts";
 import { applyTextEditsToString } from "./edits.ts";
 import { getConfig, isProjectAwareLspServer } from "./manager.ts";
-import type { Diagnostic, ServerConfig, TextEdit } from "./types.ts";
+import type { Diagnostic, LspClient, ServerConfig, TextEdit } from "./types.ts";
 import {
 	dedupeDiagnostics,
+	diagnosticsSilenceKey,
+	effectiveDiagnosticsWaitMs,
 	fileToUri,
 	formatDiagnostic,
 	formatDiagnosticsSummary,
 	formatPathRelativeToCwd,
+	recordDiagnosticsWaitOutcome,
+	resetDiagnosticsSilenceForClient,
 	sortDiagnostics,
 	waitForDiagnosticsResult,
 } from "./utils.ts";
+
+// Cap a cold-boot `initialize` handshake during writethrough. Without it, a
+// server that hangs on initialize is bounded only by the 30s request default —
+// up to 30s of stall per edit, default-on. Session warmup pre-warms every
+// configured server (manager.warmupLspServers → getLspServers → all servers), so
+// the client is normally already live here and this cap never bites; it only
+// bounds the rare cold spawn (warmup skipped or the server died after warmup).
+// A timed-out init throws a plain request-timeout error, which arms the
+// boot-failure breaker in client.ts (a hang is treated as a boot failure).
+const WRITETHROUGH_INIT_TIMEOUT_MS = 4000;
+
+/**
+ * On first sight of a client, reset its silence markers when its project-loaded
+ * transition resolves: a file that produced no diagnostics *because the project
+ * was still loading* must not stay suppressed once the server is actually ready.
+ * The listener fires once per client (the transition is one-time); for an
+ * already-loaded client it runs immediately and is a harmless no-op.
+ */
+const silenceProjectLoadHooked = new WeakSet<LspClient>();
+function hookProjectLoadedSilenceReset(client: LspClient): void {
+	if (silenceProjectLoadHooked.has(client)) return;
+	silenceProjectLoadHooked.add(client);
+	client.projectLoaded.then(() => resetDiagnosticsSilenceForClient(client.name)).catch(() => {});
+}
 
 // =============================================================================
 // Session gate
@@ -100,7 +128,12 @@ export async function maybeFormat(
 
 	for (const [, serverConfig] of servers) {
 		try {
-			const client = await getOrCreateClient(serverConfig, cwd);
+			const client = await getOrCreateClient(
+				serverConfig,
+				cwd,
+				Math.min(FORMAT_TIMEOUT_MS, WRITETHROUGH_INIT_TIMEOUT_MS),
+				signal,
+			);
 			if (!client.serverCapabilities?.documentFormattingProvider) continue;
 			await syncContent(client, absolutePath, content, combined);
 			const edits = (await sendRequest(
@@ -193,17 +226,25 @@ export async function capturePreWriteDiagnostics(
 
 	await Promise.allSettled(
 		servers.map(async ([, serverConfig]) => {
-			const client = await getOrCreateClient(serverConfig, cwd);
+			const client = await getOrCreateClient(
+				serverConfig,
+				cwd,
+				Math.min(timeoutMs, WRITETHROUGH_INIT_TIMEOUT_MS),
+				signal,
+			);
+			hookProjectLoadedSilenceReset(client);
 			if (isProjectAwareLspServer(serverConfig)) await waitForProjectLoaded(client, combined);
 			const minVersion = client.diagnosticsVersion;
 			await refreshFile(client, absolutePath, combined);
 			const expectedDocumentVersion = client.openFiles.get(uri)?.version;
+			const silenceKey = diagnosticsSilenceKey(client.name, uri);
 			const result = await waitForDiagnosticsResult(client, uri, {
-				timeoutMs,
+				timeoutMs: effectiveDiagnosticsWaitMs(silenceKey, timeoutMs),
 				signal: combined,
 				minVersion,
 				expectedDocumentVersion,
 			});
+			recordDiagnosticsWaitOutcome(silenceKey, result.fresh);
 			if (!result.fresh) return;
 			freshServerCount += 1;
 			all.push(...result.diagnostics);
@@ -253,7 +294,13 @@ export async function getPostWriteDiagnostics(
 
 	await Promise.allSettled(
 		servers.map(async ([name, serverConfig]) => {
-			const client = await getOrCreateClient(serverConfig, cwd);
+			const client = await getOrCreateClient(
+				serverConfig,
+				cwd,
+				Math.min(timeoutMs, WRITETHROUGH_INIT_TIMEOUT_MS),
+				signal,
+			);
+			hookProjectLoadedSilenceReset(client);
 			if (isProjectAwareLspServer(serverConfig)) {
 				await waitForProjectLoaded(client, combined);
 			}
@@ -272,12 +319,14 @@ export async function getPostWriteDiagnostics(
 			await syncContent(client, absolutePath, content, combined);
 			const expectedDocumentVersion = client.openFiles.get(uri)?.version;
 			await notifySaved(client, absolutePath, combined);
+			const silenceKey = diagnosticsSilenceKey(client.name, uri);
 			const result = await waitForDiagnosticsResult(client, uri, {
-				timeoutMs,
+				timeoutMs: effectiveDiagnosticsWaitMs(silenceKey, timeoutMs),
 				signal: combined,
 				minVersion,
 				expectedDocumentVersion,
 			});
+			recordDiagnosticsWaitOutcome(silenceKey, result.fresh);
 			if (!result.fresh) return;
 			serverNames.push(name);
 			all.push(...result.diagnostics);

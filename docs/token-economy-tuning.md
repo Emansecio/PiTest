@@ -120,6 +120,20 @@ zero config; as variáveis abaixo são os kill-switches/knobs.
 | `PIT_EXIT_STDIO_GRACE_MS` | Graça base (ms) pós-`exit` esperando o `end` de stdout/stderr antes de finalizar um comando (caso Windows de pipe herdado por descendente). A base curta é ESTENDIDA em fatias até o teto de 100 ms apenas enquanto output ainda chega (sinal de flush de daemon), então comando rápido finaliza em ~25 ms e flush de daemon nunca é clipado. Teto = `max(100, base)`. | `25` | `utils/child-process.ts` `resolveExitStdioBaseGraceMs` | numérica (ms ≥ 0) |
 | `PIT_COMPACT_SOFT_RATIO` | Multiplicador da banda soft preditiva que dispara a compactação em BACKGROUND (sibling model barato, durante idle) antes do hard wall síncrono. `1.0` = banda legada (`shouldCompactSoft`); maior dispara mais cedo, tornando mais provável que o resumo esteja pronto antes do próximo send (evita a espera visível de compactação síncrona). Clamp `[1.0, 4.0]`; não numérico cai no default. O caminho hard síncrono permanece intocado como safety net. | `1.5` | `agent-session-compaction.ts` `parseCompactSoftRatio` / `shouldStartBackgroundCompaction` | numérica |
 
+### LSP — memória de falha/silêncio (auditoria adversarial 2026-07-17)
+
+Ambas on-by-default. Fecham dois impostos default-on do `diagnosticsOnWrite`:
+servidor travado no boot (até 30s/edição, agora capado em 4s + breaker) e
+servidor/arquivo que nunca publica diagnostics (4s/edição, agora ~150ms após
+2 misses). Invalidação: publish real, project-loaded, config reload, TTL 5min.
+
+| Variável | Efeito | Default | Onde é lida | Convenção |
+|---|---|---|---|---|
+| `PIT_NO_LSP_BOOT_BREAKER` | Desativa o circuit-breaker de falha de boot de servidor LSP — todo call volta a re-spawnar um servidor que falhou no spawn/init (comportamento legado). Sem a flag, falha genuína (abort do usuário nunca conta) entra em cooldown keyed por `command:args:initOptions:cwd`, com um retry após a janela. | OFF (breaker ligado) | `lsp/client.ts` `getOrCreateClient` | `isTruthyEnvFlag` |
+| `PIT_LSP_BOOT_BREAKER_COOLDOWN_MS` | Janela de cooldown (ms) após falha de boot antes de permitir um retry. | `60000` | `lsp/client.ts` | numérica |
+| `PIT_NO_LSP_SILENCE_MEMO` | Desativa o short-circuit de diagnostics silenciosos — toda edição volta a esperar os 4s completos mesmo em par arquivo+servidor que nunca publicou. | OFF (memo ligado) | `lsp/utils.ts` `effectiveDiagnosticsWaitMs` | `isTruthyEnvFlag` |
+| `PIT_LSP_SILENCE_GRACE_MS` | Espera de graça (ms) usada quando o par arquivo+servidor foi marcado silencioso (≥2 misses consecutivos). | `150` | `lsp/utils.ts` | numérica |
+
 ### Navegador nativo (chrome devtools) — auditoria 2026-07-16
 
 | Variável | Efeito | Default | Onde é lida | Convenção |

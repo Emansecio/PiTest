@@ -6,10 +6,17 @@
  */
 
 import { recordDiagnostic } from "@pit/ai";
-import { getOrCreateClient, setIdleTimeout, shutdownClientsForCwd, WARMUP_TIMEOUT_MS } from "./client.ts";
+import {
+	clearLspBootFailureMemory,
+	getOrCreateClient,
+	setIdleTimeout,
+	shutdownClientsForCwd,
+	WARMUP_TIMEOUT_MS,
+} from "./client.ts";
 import { type LspConfig, loadConfig, readLspConfigSourceMtimes } from "./config.ts";
 import { log } from "./internal.ts";
 import type { ServerConfig } from "./types.ts";
+import { clearDiagnosticsSilenceMemo } from "./utils.ts";
 
 // =============================================================================
 // Config Cache
@@ -46,6 +53,11 @@ export function getConfig(cwd: string): LspConfig {
 /** Drop a cached config (e.g. when config files change or session settings reload). */
 export function invalidateConfig(cwd: string): void {
 	configCache.delete(cwd);
+	// A config change can alter server commands/args/roots, so remembered boot
+	// failures and silent-diagnostics markers keyed on the old shape are stale —
+	// clear them so a reloaded config gets a clean spawn + full diagnostics wait.
+	clearLspBootFailureMemory();
+	clearDiagnosticsSilenceMemo();
 }
 
 // =============================================================================
