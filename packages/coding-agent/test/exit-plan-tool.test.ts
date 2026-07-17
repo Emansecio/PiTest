@@ -14,6 +14,7 @@ import { createExitPlanToolDefinition, type ExitPlanToolDetails } from "../src/c
 import { PlanManager, setCurrentPlanManager } from "../src/core/plan/plan-manager.ts";
 import {
 	type AskOptionsAnswer,
+	computeAutoAnswer,
 	createUserInputBus,
 	setCurrentUserInputBus,
 	type UserInputBus,
@@ -200,6 +201,31 @@ describe("exit_plan tool", () => {
 		expect(res.details.outcome).toBe("approved");
 		expect(res.details.artifactPath).toBeUndefined();
 		expect(res.content[0].text).toContain("could not be written");
+	});
+
+	it("auto-answer fallback picks 'Keep planning' — never approves (fail-closed ordering)", async () => {
+		// Simulates the interactive queue-collision path (handleAskRequest with a
+		// picker already open): the second request is resolved with the
+		// deterministic auto-answer, which picks the recommended-or-FIRST option.
+		// The first option must therefore be the safe one.
+		const dir = makeDir();
+		const checker = new PermissionChecker({ cwd: dir, mode: "plan", settings: {} });
+		proposePlan();
+		const bus = createUserInputBus();
+		setCurrentUserInputBus(bus);
+		bus.onRequest((req) => {
+			bus.resolve(req.requestId, computeAutoAnswer(req));
+		});
+		const res = await runExitPlan(dir, checker, { title: "Scaffold module" });
+		expect(checker.mode).toBe("plan");
+		expect(res.details.outcome).toBe("keep_planning");
+	});
+
+	it("is sequential so it never shares a parallel batch with another picker", () => {
+		const dir = makeDir();
+		const checker = new PermissionChecker({ cwd: dir, mode: "plan", settings: {} });
+		const def = createExitPlanToolDefinition({ cwd: dir, checker });
+		expect(def.executionMode).toBe("sequential");
 	});
 
 	it("real bus with a listener resolves through askOptions", async () => {

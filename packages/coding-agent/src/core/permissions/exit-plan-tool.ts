@@ -12,6 +12,12 @@
  * the recommended/first option. We therefore REFUSE to approve when no
  * interactive listener is bound, and never mark an option `recommended` — so
  * no headless path can leave plan mode without a real human choice.
+ * Two more layers keep that invariant when a listener IS bound: "Keep planning"
+ * is deliberately the FIRST option (every auto-answer fallback picks
+ * recommended-or-first — e.g. the interactive mode auto-resolves a second picker
+ * request that arrives while one is already open), and the tool runs
+ * `executionMode: "sequential"` so it never shares a parallel tool batch with
+ * another UserInputBus prompt in the first place.
  *
  * Fail-open on the durable artifact: the plan is written to
  * `.pit/plans/<timestamp>-<slug>.md` AFTER consent, which is the same harness-
@@ -136,6 +142,10 @@ export function createExitPlanToolDefinition(
 		],
 		parameters: exitPlanSchema,
 		sideEffect: "none",
+		// Never share a parallel batch with another UserInputBus prompt: a second
+		// concurrent picker request is auto-resolved with the first option, which
+		// must not be able to race an approval (see header).
+		executionMode: "sequential",
 		async execute(_toolCallId, input) {
 			const title = truncateWithEllipsis((input.title ?? "").trim(), TITLE_MAX);
 			const summary = input.summary?.trim() ? truncateWithEllipsis(input.summary.trim(), SUMMARY_MAX) : undefined;
@@ -187,14 +197,16 @@ export function createExitPlanToolDefinition(
 				};
 			}
 
-			// 4. Ask. No option is `recommended` — the auto-answer picks recommended,
-			//    and implicit approval would violate plan mode's read-only guarantee.
+			// 4. Ask. No option is `recommended` AND the safe choice is listed first —
+			//    every auto-answer fallback picks recommended-or-first, so any path
+			//    that bypasses a real human (headless bus, picker-collision
+			//    auto-resolve) lands on "Keep planning", never on approval.
 			const current = mgr.current();
 			const context = `${summary ? `${summary}\n\n` : ""}${mgr.render()}`;
 			const answer = await bus.askOptions({
 				question: "Approve this plan and switch to execution?",
 				context,
-				options: [{ label: APPROVE_LABEL }, { label: KEEP_LABEL }],
+				options: [{ label: KEEP_LABEL }, { label: APPROVE_LABEL }],
 				allowFreeform: true,
 				source: { toolCallId: _toolCallId, toolName: "exit_plan" },
 			});

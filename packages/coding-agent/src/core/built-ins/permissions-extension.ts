@@ -188,6 +188,14 @@ export function createPermissionsExtension(options: PermissionsExtensionOptions)
 				cwd: options.cwd,
 				checker,
 				onApproved: () => {
+					// v1 invariant (fusion-mode spec, "v1 cycle"): fusion rides on
+					// plan-mode only. Approval leaves plan, so it must also leave
+					// fusion — otherwise the next turn re-routes through the read-only
+					// panel instead of executing the approved plan (fusion·auto is
+					// unreachable via the cycle and must stay unreachable here).
+					if (pi.getOrchestration() === "fusion") {
+						pi.setOrchestration("solo");
+					}
 					refreshStatus(pi.getOrchestration());
 					onModeChange?.("auto");
 				},

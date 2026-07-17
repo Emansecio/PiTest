@@ -139,6 +139,10 @@ export function createAskToolDefinition(
 		],
 		parameters: askSchema,
 		prepareArguments: prepareAskArguments,
+		// One picker at a time: a second concurrent UserInputBus request is
+		// auto-resolved with the recommended/first option (never shown to the
+		// user). Sequential execution asks the questions one by one instead.
+		executionMode: "sequential",
 		async execute(toolCallId: string, input: AskToolInput) {
 			const question = input.question.trim();
 			const context = input.context?.trim() || undefined;
