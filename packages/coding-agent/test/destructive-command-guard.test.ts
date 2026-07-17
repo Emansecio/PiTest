@@ -242,9 +242,38 @@ describe("destructive-command-guard: self-terminating process kills", () => {
 
 	it("allows a narrow, non-force PID kill and a non-host image", () => {
 		expect(blocks("taskkill /PID 27156")).toBe(false); // no force, no tree, no host image
-		expect(blocks("taskkill /F /PID 27156")).toBe(false); // force but no /T -> no tree descent
+		expect(blocks("taskkill /F /PID 27156")).toBe(false); // force but no /T on a NON-self PID -> no bump
 		expect(blocks("taskkill /F /IM chrome.exe")).toBe(false); // not a Pit host runtime
 		expect(blocks("taskkill /F /IM someserver.exe /T")).toBe(false);
+	});
+
+	it("blocks a force-kill of THIS process's own PID even without /T (self-termination)", () => {
+		const self = String(process.pid);
+		expect(blocks(`taskkill /F /PID ${self}`)).toBe(true);
+		expect(blocks(`taskkill //F //PID ${self}`)).toBe(true); // Git Bash flag mangling
+		const msg = messageFor(`taskkill /F /PID ${self}`);
+		expect(msg).toMatch(/THIS Pit process/);
+		expect(msg).toMatch(/TerminateProcess/);
+	});
+
+	it("blocks the /FI filter forms — IMAGENAME eq <host> and PID eq <self>", () => {
+		expect(blocks('taskkill /F /FI "IMAGENAME eq node.exe"')).toBe(true);
+		expect(messageFor('taskkill /F /FI "IMAGENAME eq node.exe"')).toMatch(/node\.exe/);
+		const self = String(process.pid);
+		expect(blocks(`taskkill /F /FI "PID eq ${self}"`)).toBe(true);
+		expect(messageFor(`taskkill /F /FI "PID eq ${self}"`)).toMatch(/THIS Pit process/);
+		// A non-host image / non-self PID filter is left alone.
+		expect(blocks('taskkill /F /FI "IMAGENAME eq chrome.exe"')).toBe(false);
+		expect(blocks('taskkill /F /FI "PID eq 999999"')).toBe(false);
+	});
+
+	it("blocks a bare `kill` of THIS process's PID but not an unrelated numeric kill", () => {
+		const self = String(process.pid);
+		expect(blocks(`kill -9 ${self}`)).toBe(true);
+		expect(blocks(`kill ${self}`)).toBe(true);
+		expect(messageFor(`kill -9 ${self}`)).toMatch(/THIS Pit process/);
+		expect(blocks("kill -9 999999")).toBe(false); // unrelated job -> no bump
+		expect(blocks("kill 999999")).toBe(false);
 	});
 
 	it("blocks pkill/killall of a host runtime (the unix analog from Git Bash)", () => {

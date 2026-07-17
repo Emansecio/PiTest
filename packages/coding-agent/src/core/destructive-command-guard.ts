@@ -372,15 +372,18 @@ function taskkillFlag(token: string): string {
 }
 
 /**
- * Windows `taskkill` that force-kills the Pit host. Two footguns, both a
- * confirm-once bump (never a hard block — re-issue runs it):
+ * Windows `taskkill` that force-kills the Pit host. Footguns, each a confirm-once
+ * bump (never a hard block — re-issue runs it):
  *   1. `/IM <host-runtime>` (or `/IM *`): kills EVERY process of a runtime that
- *      hosts Pit — guaranteed to include this session.
- *   2. `/F` + `/T` together (force tree-kill): `/F` is TerminateProcess
- *      (uncatchable, so the TUI's terminal-restore teardown never runs and the
- *      terminal is left in raw + mouse-reporting mode — the "random escape-
- *      sequence spam" failure), and `/T` walks the process TREE, so if the target
- *      PID is an ancestor of this shell it self-terminates Pit.
+ *      hosts Pit — guaranteed to include this session. Also reachable via the
+ *      `/FI "IMAGENAME eq <name>"` filter form, which is folded into the same check.
+ *   2. `/F` on THIS process's PID (`/PID <process.pid>`, or `/FI "PID eq <pid>"`):
+ *      `/F` is TerminateProcess (uncatchable, so the TUI's terminal-restore teardown
+ *      never runs and the terminal is left in raw + mouse-reporting mode — the
+ *      "random escape-sequence spam" failure). Force-killing the host PID directly
+ *      self-terminates Pit even WITHOUT a tree walk, so this bumps with no /T needed.
+ *   3. `/F` + `/T` on a specific (non-self) PID: `/T` walks the process TREE, so if
+ *      the target PID is an ancestor of this shell it self-terminates Pit.
  */
 function inspectTaskkillSegment(segment: string): string | undefined {
 	const m = /(?:^|[\s"'`])taskkill\b(.*)$/i.exec(segment);
@@ -390,7 +393,9 @@ function inspectTaskkillSegment(segment: string): string | undefined {
 	let force = false;
 	let tree = false;
 	let expectImage = false;
-	let hasPid = false;
+	let expectFilter = false;
+	let expectPid = false;
+	let pidValue: string | undefined;
 	const images: string[] = [];
 	for (const token of tokens) {
 		if (expectImage) {
@@ -398,13 +403,32 @@ function inspectTaskkillSegment(segment: string): string | undefined {
 			expectImage = false;
 			continue;
 		}
+		if (expectPid) {
+			pidValue = cleanToken(token);
+			expectPid = false;
+			continue;
+		}
+		if (expectFilter) {
+			// The /FI filter form: a quoted expression like `"IMAGENAME eq node.exe"`
+			// or `"PID eq 12345"`. tokenizeArgs keeps the quoted span as one token, so
+			// cleanToken strips the surrounding quotes and we parse the equality here.
+			const filter = cleanToken(token);
+			const imgFilter = /^\s*IMAGENAME\s+eq\s+(.+?)\s*$/i.exec(filter);
+			if (imgFilter) images.push(imgFilter[1].toLowerCase());
+			const pidFilter = /^\s*PID\s+eq\s+(\d+)\s*$/i.exec(filter);
+			if (pidFilter) pidValue = pidFilter[1];
+			expectFilter = false;
+			continue;
+		}
 		if (token.startsWith("/") || token.startsWith("-")) {
 			const flag = taskkillFlag(token);
 			if (flag === "f") force = true;
 			else if (flag === "t") tree = true;
 			else if (flag === "im") expectImage = true;
-			else if (flag === "pid") hasPid = true;
+			else if (flag === "fi") expectFilter = true;
+			else if (flag === "pid") expectPid = true;
 			else if (flag.startsWith("im:")) images.push(token.slice(token.indexOf(":") + 1).toLowerCase());
+			else if (flag.startsWith("pid:")) pidValue = token.slice(token.indexOf(":") + 1);
 		}
 	}
 
@@ -420,10 +444,22 @@ function inspectTaskkillSegment(segment: string): string | undefined {
 		);
 	}
 
-	// Force tree-kill of a specific PID: can't tell from text alone whether the
-	// PID is an ancestor of this shell (that would need I/O the guard forbids), so
+	// Force-kill of THIS Pit process's PID (directly via /PID, or via the /FI "PID eq"
+	// filter). process.pid is knowable with no I/O, so this is the strongest non-noisy
+	// signal: force-killing the host PID self-terminates the session with an uncatchable
+	// TerminateProcess even without /T (no tree walk is needed to kill the host directly).
+	if (force && pidValue !== undefined && pidValue === String(process.pid)) {
+		return (
+			`\`taskkill /F /PID ${pidValue}\` targets THIS Pit process (pid ${process.pid}) — it self-terminates ` +
+			"the session with an uncatchable TerminateProcess, leaving the terminal in raw mode. Do not force-kill " +
+			"the host PID"
+		);
+	}
+
+	// Force tree-kill of a specific (non-self) PID: can't tell from text alone whether
+	// the PID is an ancestor of this shell (that would need I/O the guard forbids), so
 	// bump once so the caller confirms the target isn't the Pit host's tree.
-	if (force && tree && hasPid) {
+	if (force && tree && pidValue !== undefined) {
 		return (
 			"`taskkill /F /T` force-kills the target PID's entire process TREE. If that PID is an ancestor of " +
 			"this shell, it self-terminates Pit — and /F (TerminateProcess) is uncatchable, so the terminal is " +
@@ -451,6 +487,25 @@ function inspectUnixProcessKillSegment(segment: string): string | undefined {
 	return (
 		`\`${verb} ${hit.join(" ")}\` kills every process matching that runtime name — including the Pit host ` +
 		"this session runs under, self-terminating it. Target the specific PID (e.g. via `lsof -ti:<port>`) instead"
+	);
+}
+
+/**
+ * Bare Unix `kill [-<sig>] <pid>...` (reachable from Git Bash) targeting THIS Pit
+ * process by numeric PID. The guard can't tell without I/O whether an arbitrary PID
+ * is the host, so — unlike the /IM-style name kills — this bumps ONLY when a target
+ * PID equals process.pid (precise, non-noisy: a plain `kill 12345` of an unrelated
+ * job must NOT bump). The word-boundary anchor keeps `pkill`/`killall` (handled by
+ * inspectUnixProcessKillSegment) and any longer word from matching here.
+ */
+function inspectUnixKillSegment(segment: string): string | undefined {
+	const m = /(?:^|[\s"'`])kill\b(.*)$/i.exec(segment);
+	if (!m) return undefined;
+	const nums = tokenizeArgs(m[1].trim()).filter((t) => /^\d+$/.test(t));
+	if (!nums.includes(String(process.pid))) return undefined;
+	return (
+		`\`kill\` targets THIS Pit process (pid ${process.pid}) — it terminates the session and leaves the ` +
+		"terminal in raw mode. Do not kill the host PID"
 	);
 }
 
@@ -565,7 +620,8 @@ export function groundDestructiveCommand(input: DestructiveCommandInput): Destru
 				inspectRemoveItemSegment(inner) ?? inspectWindowsShellDelete(inner) ?? inspectClearContentSegment(inner);
 			if (ps) impacts.push(ps);
 
-			const kill = inspectTaskkillSegment(inner) ?? inspectUnixProcessKillSegment(inner);
+			const kill =
+				inspectTaskkillSegment(inner) ?? inspectUnixProcessKillSegment(inner) ?? inspectUnixKillSegment(inner);
 			if (kill) impacts.push(kill);
 
 			for (const { re, impact } of GIT_DESTRUCTIVE) {
