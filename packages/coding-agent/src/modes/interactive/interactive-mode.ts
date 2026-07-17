@@ -5461,6 +5461,11 @@ export class InteractiveMode {
 
 		if (typeof req.timeout === "number" && req.timeout > 0) {
 			timer = setTimeout(() => resolveOnce(computeAutoAnswer(req)), req.timeout);
+			// Unref so this auto-answer timer can never keep the event loop alive on
+			// its own. On shutdown the bus resolves via cancelAll("shutdown") without
+			// routing through resolveOnce, so this timer is otherwise neither cleared
+			// nor unref'd and would hold the loop up to req.timeout ms.
+			timer.unref?.();
 		}
 	}
 
@@ -7652,6 +7657,10 @@ Customize: \`${keybindingsPath}\` — \`/reload\` to apply.
 			clearTimeout(this._themePreviewInvalidateTimer);
 			this._themePreviewInvalidateTimer = undefined;
 		}
+		// Close the custom-theme fs.watch watcher on the normal teardown path too.
+		// The fatal path already does this; without it a normal quit leaves the
+		// FSWatcher open (a latent handle leak). Safe no-op when no watcher is active.
+		stopThemeWatcher();
 		this.ephemeralStatus.dispose();
 		this.stopStartupAnimation();
 		if (this.loadingAnimation) {
