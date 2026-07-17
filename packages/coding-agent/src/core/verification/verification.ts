@@ -236,6 +236,146 @@ export function detectSyntaxFallbackCommand(cwd: string, touchedFiles: readonly 
 	return parts.join(" && ");
 }
 
+// ---------------------------------------------------------------------------
+// Failing-file attribution.
+//
+// A CheckResult carries only the combined output, not which files failed. To
+// measure whether a gate failure escaped the files the turn actually touched
+// (the "cross-file escape" signal) we best-effort parse failing paths from the
+// common check formats, then keep only the ones that exist under `cwd`.
+// Conservative by design: a path we can't confirm on disk is dropped rather than
+// risk a false attribution, and the existence probe is capped so a pathological
+// output can't fan out into thousands of stat() calls.
+// ---------------------------------------------------------------------------
+
+/** Cap existsSync probes so a huge/adversarial output can't storm the filesystem. */
+const MAX_FAILING_FILE_PROBES = 20;
+
+/**
+ * Best-effort parse of failing file paths from a check command's combined output.
+ * Handles tsc/tsgo (`path(line,col): error TS…` and `path:line:col - error`),
+ * biome, eslint stylish, vitest FAIL lines, and go/rust/cargo formats. Returns
+ * only paths that exist under `cwd`, deduped and relativized (forward slashes).
+ */
+export function extractFailingFiles(output: string, cwd: string): string[] {
+	if (typeof output !== "string" || output.length === 0) return [];
+
+	const candidates = new Set<string>();
+	const add = (raw: string | undefined): void => {
+		if (!raw) return;
+		// Strip wrapping quotes/parens and trailing punctuation the formats add.
+		const cleaned = raw
+			.trim()
+			.replace(/^["'(]+/, "")
+			.replace(/["'):]+$/, "");
+		if (cleaned.length > 0) candidates.add(cleaned);
+	};
+
+	for (const rawLine of output.split(/\r?\n/)) {
+		const line = rawLine.trim();
+		if (line.length === 0) continue;
+
+		// tsc/tsgo classic: path(line,col): error TS1234: msg
+		let m = line.match(/^(.+?)\((\d+),(\d+)\):\s+(?:error|warning)\b/i);
+		if (m) {
+			add(m[1]);
+			continue;
+		}
+		// rust/cargo:  --> src/main.rs:12:5
+		m = line.match(/-->\s+(.+?):(\d+):(\d+)/);
+		if (m) {
+			add(m[1]);
+			continue;
+		}
+		// vitest / jest FAIL line:  FAIL  test/foo.test.ts > suite > case
+		m = line.match(/^(?:[×✗❯]\s*)?FAIL\s+(.+?)(?:\s+>|\s+\(|\s*$)/);
+		if (m) {
+			add(m[1]);
+			continue;
+		}
+		// path:line:col prefix (tsc pretty, biome, go, eslint compact). The path
+		// part forbids ':' so a Windows drive letter never bleeds in here — absolute
+		// eslint paths are caught by the bare-path branch below.
+		m = line.match(/^([^\s:][^:]*?\.[A-Za-z0-9]+):(\d+)(?::(\d+))?(?:\s|:|$)/);
+		if (m) {
+			add(m[1]);
+			continue;
+		}
+		// eslint stylish: a bare path line (absolute or ./-relative, has extension).
+		if (!/\s/.test(line) && /^(?:[A-Za-z]:[\\/]|\/|\.{1,2}[\\/]).*\.[A-Za-z0-9]+$/.test(line)) {
+			add(line);
+		}
+	}
+
+	const result: string[] = [];
+	const seen = new Set<string>();
+	let probes = 0;
+	for (const candidate of candidates) {
+		if (probes >= MAX_FAILING_FILE_PROBES) break;
+		probes++;
+		const abs = isAbsolute(candidate) ? candidate : resolve(cwd, candidate);
+		if (!existsSync(abs)) continue;
+		const rel = relative(cwd, abs).split("\\").join("/");
+		if (rel.length === 0 || rel.startsWith("..") || isAbsolute(rel)) continue;
+		if (seen.has(rel)) continue;
+		seen.add(rel);
+		result.push(rel);
+	}
+	return result;
+}
+
+/** How a gate failure's files relate to the files the turn edited. */
+export type CrossFileEscapeClassification = "all-touched" | "some-cross-file" | "all-cross-file" | "unattributed";
+
+export interface CrossFileEscapeAnalysis {
+	classification: CrossFileEscapeClassification;
+	/** Distinct failing files the parser attributed. */
+	failingCount: number;
+	/** Of those, how many the turn never touched. */
+	crossFileCount: number;
+	/** The cross-file paths (relativized), as the parser reported them. */
+	crossFiles: string[];
+}
+
+/** Canonical relative key for comparing paths regardless of abs/rel spelling or (Windows) case. */
+function toRelKey(filePath: string, cwd: string): string {
+	const abs = isAbsolute(filePath) ? filePath : resolve(cwd, filePath);
+	let rel = relative(cwd, abs);
+	if (rel.length === 0) rel = ".";
+	rel = rel.split("\\").join("/");
+	return process.platform === "win32" ? rel.toLowerCase() : rel;
+}
+
+/**
+ * Classify a gate failure by whether its failing files were touched this turn.
+ * `touchedFiles` are the raw paths the turn's file tools recorded (absolute or
+ * cwd-relative); both sides are canonicalized before comparison so Windows
+ * case/spelling differences don't cause a false cross-file attribution.
+ */
+export function classifyCrossFileEscape(
+	failingFiles: readonly string[],
+	touchedFiles: readonly string[],
+	cwd: string,
+): CrossFileEscapeAnalysis {
+	const touchedKeys = new Set(touchedFiles.map((f) => toRelKey(f, cwd)));
+	const crossFiles: string[] = [];
+	const seen = new Set<string>();
+	for (const file of failingFiles) {
+		const key = toRelKey(file, cwd);
+		if (seen.has(key)) continue;
+		seen.add(key);
+		if (!touchedKeys.has(key)) crossFiles.push(file);
+	}
+	const failingCount = seen.size;
+	const crossFileCount = crossFiles.length;
+	let classification: CrossFileEscapeClassification;
+	if (failingCount === 0) classification = "unattributed";
+	else if (crossFileCount === 0) classification = "all-touched";
+	else if (crossFileCount === failingCount) classification = "all-cross-file";
+	else classification = "some-cross-file";
+	return { classification, failingCount, crossFileCount, crossFiles };
+}
+
 /**
  * Run a check command (a shell command string, e.g. "npm run check") in `cwd`.
  * Captures combined output, honors an abort signal and a timeout, and never

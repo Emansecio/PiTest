@@ -9,6 +9,7 @@
  */
 
 import * as fs from "node:fs/promises";
+import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import {
 	getOrCreateClient,
 	notifySaved,
@@ -32,6 +33,7 @@ import {
 	recordDiagnosticsWaitOutcome,
 	resetDiagnosticsSilenceForClient,
 	sortDiagnostics,
+	uriToFile,
 	waitForDiagnosticsResult,
 } from "./utils.ts";
 
@@ -174,6 +176,93 @@ function filterBaselineDiagnostics(current: Diagnostic[], baseline: Diagnostic[]
 }
 
 // =============================================================================
+// Cross-file diagnostics surfacing
+// =============================================================================
+
+// The client stores EVERY publishDiagnostics keyed by canonical URI — including
+// package-level publishes for files OTHER than the one just edited (gopls et al.
+// re-check the whole package on save). The edited-file path above only reads the
+// edited URI's entry, so those cross-file entries sit unread. This surfaces the
+// ones that gained a NEW error because of this write, best-effort: we read
+// whatever is already in the map at collection time and NEVER add a wait for it.
+const CROSS_FILE_MAX_FILES = 3;
+const CROSS_FILE_MAX_DIAGS_PER_FILE = 2;
+
+interface CrossFileGroup {
+	uri: string;
+	newErrors: Diagnostic[];
+}
+
+/** PIT_NO_LSP_CROSS_FILE_SURFACE=1 reverts the appendix to edited-file-only. */
+function crossFileSurfaceDisabled(): boolean {
+	return isTruthyEnvFlag(process.env.PIT_NO_LSP_CROSS_FILE_SURFACE);
+}
+
+/**
+ * Fingerprint the diagnostics currently published for every URI OTHER than the
+ * edited one. Taken BEFORE the write's didChange so a post-write publish can be
+ * diffed against it — a URI absent here is treated as having had no diagnostics.
+ */
+function snapshotCrossFileBaseline(client: LspClient, editedUri: string): Map<string, Set<string>> {
+	const snapshot = new Map<string, Set<string>>();
+	for (const [uri, published] of client.diagnostics) {
+		if (uri === editedUri) continue;
+		snapshot.set(uri, new Set(published.diagnostics.map(diagnosticFingerprint)));
+	}
+	return snapshot;
+}
+
+/**
+ * Scan the client's diagnostics for URIs (other than the edited file) that now
+ * carry ERROR-severity diagnostics absent from `baseline` — the new errors this
+ * write introduced elsewhere. Pre-existing errors (already in baseline) are never
+ * resurfaced.
+ */
+function collectCrossFileNewErrors(
+	client: LspClient,
+	editedUri: string,
+	baseline: Map<string, Set<string>>,
+): CrossFileGroup[] {
+	const groups: CrossFileGroup[] = [];
+	for (const [uri, published] of client.diagnostics) {
+		if (uri === editedUri) continue;
+		const baselineKeys = baseline.get(uri);
+		const newErrors = published.diagnostics.filter(
+			(d) => (d.severity ?? 1) === 1 && !(baselineKeys?.has(diagnosticFingerprint(d)) ?? false),
+		);
+		if (newErrors.length > 0) groups.push({ uri, newErrors });
+	}
+	return groups;
+}
+
+/**
+ * Render the bounded cross-file appendix lines: at most CROSS_FILE_MAX_FILES
+ * files, CROSS_FILE_MAX_DIAGS_PER_FILE diagnostics each, paths relativized.
+ * Groups from multiple servers are merged per URI.
+ */
+function buildCrossFileMessages(groups: CrossFileGroup[], cwd: string): string[] {
+	if (groups.length === 0) return [];
+	const byUri = new Map<string, Diagnostic[]>();
+	for (const group of groups) {
+		const existing = byUri.get(group.uri);
+		if (existing) existing.push(...group.newErrors);
+		else byUri.set(group.uri, [...group.newErrors]);
+	}
+	const lines: string[] = [];
+	for (const [uri, diagnostics] of byUri) {
+		if (lines.length >= CROSS_FILE_MAX_FILES) break;
+		const unique = dedupeDiagnostics(diagnostics);
+		if (unique.length === 0) continue;
+		sortDiagnostics(unique);
+		const relPath = formatPathRelativeToCwd(uriToFile(uri), cwd);
+		const shown = unique.slice(0, CROSS_FILE_MAX_DIAGS_PER_FILE);
+		const detail = shown.map((d) => `  ${formatDiagnostic(d, relPath, cwd)}`).join("\n");
+		lines.push(`cross-file: ${relPath} — ${unique.length} new error(s):\n${detail}`);
+	}
+	return lines;
+}
+
+// =============================================================================
 // Public API
 // =============================================================================
 
@@ -183,6 +272,8 @@ export interface PostWriteDiagnostics {
 	errored: boolean;
 	messages: string[];
 	baselineCompared: boolean;
+	/** Bounded cross-file "new error" lines (see buildCrossFileMessages). */
+	crossFile: string[];
 }
 
 export interface PreWriteDiagnosticsBaseline {
@@ -291,6 +382,8 @@ export async function getPostWriteDiagnostics(
 	const baselineWasProvided = options?.baseline?.fresh === true;
 	let baselineCompared = baselineWasProvided;
 	const serverNames: string[] = [];
+	const crossFileEnabled = !crossFileSurfaceDisabled();
+	const crossFileGroups: CrossFileGroup[] = [];
 
 	await Promise.allSettled(
 		servers.map(async ([name, serverConfig]) => {
@@ -304,6 +397,9 @@ export async function getPostWriteDiagnostics(
 			if (isProjectAwareLspServer(serverConfig)) {
 				await waitForProjectLoaded(client, combined);
 			}
+			// Snapshot other-URI diagnostics BEFORE our didChange so post-write
+			// cross-file publishes can be diffed against a stable pre-write baseline.
+			const crossFileBaseline = crossFileEnabled ? snapshotCrossFileBaseline(client, uri) : undefined;
 			// No fresh caller-provided baseline: EVERY server contributes its own
 			// previously-published diagnostics. Gating on the shared mutable flag
 			// here would let only the first server contribute, and the others' old
@@ -327,13 +423,33 @@ export async function getPostWriteDiagnostics(
 				expectedDocumentVersion,
 			});
 			recordDiagnosticsWaitOutcome(silenceKey, result.fresh);
+			// Cross-file scan is independent of the edited-file wait outcome: read
+			// whatever proactive package-level publishes already landed in the map.
+			// No new wait is added — this is best-effort by design.
+			if (crossFileBaseline) {
+				crossFileGroups.push(...collectCrossFileNewErrors(client, uri, crossFileBaseline));
+			}
 			if (!result.fresh) return;
 			serverNames.push(name);
 			all.push(...result.diagnostics);
 		}),
 	);
 
-	if (serverNames.length === 0) return undefined;
+	const crossFile = buildCrossFileMessages(crossFileGroups, cwd);
+
+	if (serverNames.length === 0) {
+		// No fresh edited-file diagnostics, but a cross-file publish may still have
+		// arrived — surface it rather than dropping it.
+		if (crossFile.length === 0) return undefined;
+		return {
+			server: "",
+			summary: "no new issues",
+			errored: false,
+			messages: [],
+			baselineCompared: false,
+			crossFile,
+		};
+	}
 
 	// Deduplicate by range + message (different servers may report the same issue).
 	const unique = dedupeDiagnostics(all);
@@ -349,6 +465,7 @@ export async function getPostWriteDiagnostics(
 			errored: false,
 			messages: [],
 			baselineCompared,
+			crossFile,
 		};
 	}
 
@@ -360,6 +477,7 @@ export async function getPostWriteDiagnostics(
 		errored: reportable.some((d) => d.severity === 1),
 		messages,
 		baselineCompared,
+		crossFile,
 	};
 }
 
@@ -385,7 +503,7 @@ export async function attachPostWriteDiagnostics<R extends { content: Array<{ ty
 	} catch {
 		return result;
 	}
-	if (!diag || diag.messages.length === 0) return result;
+	if (!diag || (diag.messages.length === 0 && diag.crossFile.length === 0)) return result;
 	const appendix = formatPostWriteAppendix(diag, absolutePath, cwd);
 	if (appendix && result.content[0]?.type === "text") {
 		result.content[0].text = (result.content[0].text ?? "") + appendix;
@@ -403,16 +521,24 @@ export async function attachPostWriteDiagnostics<R extends { content: Array<{ ty
  * result to `isError` (that would make the model think the edit didn't apply).
  */
 function formatPostWriteAppendix(diag: PostWriteDiagnostics, absolutePath: string, cwd: string): string {
-	const body = diag.messages.join("\n");
-	if (!enforceDiagnosticsOnWrite || !diag.errored) {
-		const label = diag.baselineCompared ? "New LSP diagnostics" : "LSP diagnostics";
-		return `\n${label} (${diag.summary}):\n${body}`;
+	let appendix = "";
+	if (diag.messages.length > 0) {
+		const body = diag.messages.join("\n");
+		if (!enforceDiagnosticsOnWrite || !diag.errored) {
+			const label = diag.baselineCompared ? "New LSP diagnostics" : "LSP diagnostics";
+			appendix = `\n${label} (${diag.summary}):\n${body}`;
+		} else {
+			const rel = formatPathRelativeToCwd(absolutePath, cwd);
+			const source = diag.baselineCompared ? "This change introduced" : "LSP reported";
+			appendix =
+				`\nLSP check failed: ${source} ${diag.summary} in ${rel}. Fix the error(s) below before ` +
+				`your next change or declaring the task done; do not keep editing while ` +
+				`${rel} still has type errors:\n${body}`;
+		}
 	}
-	const rel = formatPathRelativeToCwd(absolutePath, cwd);
-	const source = diag.baselineCompared ? "This change introduced" : "LSP reported";
-	return (
-		`\nLSP check failed: ${source} ${diag.summary} in ${rel}. Fix the error(s) below before ` +
-		`your next change or declaring the task done; do not keep editing while ` +
-		`${rel} still has type errors:\n${body}`
-	);
+	// Cross-file errors this write introduced elsewhere in the package (bounded).
+	if (diag.crossFile.length > 0) {
+		appendix += `\nCross-file LSP errors introduced by this change (fix these too):\n${diag.crossFile.join("\n")}`;
+	}
+	return appendix;
 }

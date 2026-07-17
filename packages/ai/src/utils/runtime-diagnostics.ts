@@ -77,7 +77,11 @@ export type DiagnosticCategory =
 	// An under-specified mutating prompt got the ask-before-you-wander
 	// `<clarify_first>` directive appended for this turn (clarify nudge).
 	| "quality.clarify"
-	| "lsp.manager-overwrite";
+	| "lsp.manager-overwrite"
+	// A verification-gate failure was classified by whether its failing files were
+	// edited this turn (cross-file escape). `mechanism` carries the classification,
+	// `count`/`crossFileCount` the attribution counts.
+	| "verification.cross_file_escape";
 
 export interface DiagnosticContext {
 	/** Byte size involved (cap hit, payload, buffer depth). */
@@ -118,6 +122,10 @@ export interface DiagnosticContext {
 	 * for live prune today; typed so aggregators need not parse `note`.
 	 */
 	reclaimedTokens?: number;
+	/** Generic count for a classified event (e.g. failing-file total). */
+	count?: number;
+	/** How many of `count` were cross-file (failing files the turn never touched). */
+	crossFileCount?: number;
 }
 
 export interface DiagnosticEvent {

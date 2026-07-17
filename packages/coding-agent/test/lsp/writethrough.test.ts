@@ -59,6 +59,8 @@ describe("lsp writethrough — post-write diagnostics", () => {
 		setDiagnosticsOnWrite(false);
 		setEnforceDiagnosticsOnWrite(true);
 		setFormatOnWrite(false);
+		process.env.PIT_NO_LSP_CROSS_FILE_SURFACE = undefined;
+		delete process.env.PIT_NO_LSP_CROSS_FILE_SURFACE;
 	});
 
 	afterAll(async () => {
@@ -129,5 +131,58 @@ describe("lsp writethrough — post-write diagnostics", () => {
 		const out = await runWrite(cwd, "d.md", "# title\n");
 		expect(out).toContain("Successfully wrote");
 		expect(out).not.toContain("LSP diagnostics");
+	});
+
+	it("surfaces a NEW cross-file error introduced by the write (edited file excluded)", async () => {
+		setDiagnosticsOnWrite(true);
+		// Establish a clean baseline for the sibling first (no cross-file yet).
+		const first = await runWrite(cwd, "cf-edit.txt", "CROSS_CLEAR cf-victim.txt\n");
+		expect(first).not.toContain("cross-file:");
+		// Now the same edit introduces a fresh error in the sibling.
+		const out = await runWrite(cwd, "cf-edit.txt", "CROSS_ERROR cf-victim.txt\n");
+		expect(out).toContain("cross-file: cf-victim.txt — 1 new error(s):");
+		expect(out).toContain("cross error 0 in cf-victim.txt");
+		// The edited file is never reported as a cross-file entry.
+		expect(out).not.toContain("cross-file: cf-edit.txt");
+	});
+
+	it("does not resurface a PRE-EXISTING cross-file error", async () => {
+		setDiagnosticsOnWrite(true);
+		// Write #1 seeds the sibling error into the baseline.
+		await runWrite(cwd, "cf-edit2.txt", "CROSS_ERROR cf-pre.txt\n");
+		// Write #2 republishes the SAME error — it must not be surfaced again.
+		const out = await runWrite(cwd, "cf-edit2.txt", "CROSS_ERROR cf-pre.txt\n");
+		expect(out).not.toContain("cross-file:");
+	});
+
+	it("bounds cross-file output to 3 files and 2 diagnostics each", async () => {
+		setDiagnosticsOnWrite(true);
+		const out = await runWrite(
+			cwd,
+			"cf-edit3.txt",
+			["CROSS_ERROR cf1.txt 5", "CROSS_ERROR cf2.txt 5", "CROSS_ERROR cf3.txt 5", "CROSS_ERROR cf4.txt 5", ""].join(
+				"\n",
+			),
+		);
+		// Max 3 files (4th dropped), first-published win by map order.
+		const fileLines = out.split("\n").filter((l) => l.startsWith("cross-file:"));
+		expect(fileLines).toHaveLength(3);
+		expect(out).toContain("cross-file: cf1.txt");
+		expect(out).toContain("cross-file: cf2.txt");
+		expect(out).toContain("cross-file: cf3.txt");
+		expect(out).not.toContain("cross-file: cf4.txt");
+		// Header keeps the true count, but only 2 diagnostics are shown per file.
+		expect(out).toContain("cf1.txt — 5 new error(s):");
+		expect(out).toContain("cross error 1 in cf1.txt");
+		expect(out).not.toContain("cross error 2 in cf1.txt");
+	});
+
+	it("kill-switch PIT_NO_LSP_CROSS_FILE_SURFACE=1 reverts to edited-file-only", async () => {
+		setDiagnosticsOnWrite(true);
+		process.env.PIT_NO_LSP_CROSS_FILE_SURFACE = "1";
+		const out = await runWrite(cwd, "cf-ks.txt", "CROSS_ERROR cf-ks-victim.txt\n");
+		expect(out).not.toContain("cross-file:");
+		// Edited-file diagnostics still flow.
+		expect(out).toContain("fake diagnostic");
 	});
 });

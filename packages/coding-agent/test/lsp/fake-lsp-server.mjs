@@ -29,6 +29,52 @@ function publishDiagnostics(uri) {
 	});
 }
 
+// Derive a sibling URI (same directory) from the edited file's URI.
+function siblingUri(editedUri, name) {
+	const idx = editedUri.lastIndexOf("/");
+	return idx >= 0 ? editedUri.slice(0, idx + 1) + name : name;
+}
+
+// Cross-file test hook: the client sends the full document text on didOpen /
+// didChange. When that text carries directives, publish diagnostics for OTHER
+// URIs (like gopls publishing package-level diagnostics on save) so tests can
+// exercise the cross-file surfacing path:
+//   CROSS_ERROR <name> [count]  → publish `count` distinct errors for sibling <name>
+//   CROSS_CLEAR <name>          → publish an empty (clean) diagnostics set for it
+function publishCrossFile(editedUri, text) {
+	if (!editedUri || typeof text !== "string") return;
+	for (const line of text.split(/\r?\n/)) {
+		let m = line.match(/CROSS_ERROR\s+(\S+)(?:\s+(\d+))?/);
+		if (m) {
+			const name = m[1];
+			const count = m[2] ? Number.parseInt(m[2], 10) : 1;
+			const diagnostics = [];
+			for (let i = 0; i < count; i++) {
+				diagnostics.push({
+					range: { start: { line: i, character: 0 }, end: { line: i, character: 3 } },
+					severity: 1,
+					message: `cross error ${i} in ${name}`,
+					source: "fake",
+				});
+			}
+			send({
+				jsonrpc: "2.0",
+				method: "textDocument/publishDiagnostics",
+				params: { uri: siblingUri(editedUri, name), diagnostics },
+			});
+			continue;
+		}
+		m = line.match(/CROSS_CLEAR\s+(\S+)/);
+		if (m) {
+			send({
+				jsonrpc: "2.0",
+				method: "textDocument/publishDiagnostics",
+				params: { uri: siblingUri(editedUri, m[1]), diagnostics: [] },
+			});
+		}
+	}
+}
+
 // Test hook: delay the `initialize` reply so a test can race shutdown against a
 // still-warming-up client. Off unless FAKE_LSP_INIT_DELAY_MS is set.
 const INIT_DELAY_MS = Number.parseInt(process.env.FAKE_LSP_INIT_DELAY_MS ?? "0", 10) || 0;
@@ -70,9 +116,15 @@ function handle(msg) {
 			return;
 		case "textDocument/didOpen":
 		case "textDocument/didChange":
-		case "textDocument/didSave":
-			publishDiagnostics(msg.params?.textDocument?.uri);
+		case "textDocument/didSave": {
+			const uri = msg.params?.textDocument?.uri;
+			publishDiagnostics(uri);
+			// Full text arrives on didOpen (textDocument.text) and didChange
+			// (contentChanges[0].text); didSave carries none — drive cross-file off it.
+			const text = msg.params?.textDocument?.text ?? msg.params?.contentChanges?.[0]?.text;
+			publishCrossFile(uri, text);
 			return;
+		}
 		case "textDocument/hover":
 			send({ jsonrpc: "2.0", id: msg.id, result: { contents: { kind: "markdown", value: "HOVER: fake type info" } } });
 			return;

@@ -3,9 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+	classifyCrossFileEscape,
 	detectCheckCommand,
 	detectLocalTypecheckCommand,
 	detectSyntaxFallbackCommand,
+	extractFailingFiles,
 	runCheckCommand,
 } from "../src/core/verification/verification.js";
 
@@ -181,6 +183,90 @@ describe("verification module", () => {
 			expect(badCmd).not.toBeNull();
 			const badRun = await runCheckCommand(badCmd as string, dir, { timeoutMs: 10_000 });
 			expect(badRun.ok).toBe(false);
+		});
+	});
+
+	describe("extractFailingFiles", () => {
+		it("parses tsc/tsgo paren and pretty formats", async () => {
+			await mkdir(join(dir, "src"), { recursive: true });
+			await writeFile(join(dir, "src", "a.ts"), "export const x = 1;\n");
+			await writeFile(join(dir, "src", "b.ts"), "export const y = 2;\n");
+			const output = [
+				"src/a.ts(12,5): error TS2322: Type 'string' is not assignable to type 'number'.",
+				"src/b.ts:8:3 - error TS2304: Cannot find name 'foo'.",
+				"Found 2 errors.",
+			].join("\n");
+			expect(extractFailingFiles(output, dir).sort()).toEqual(["src/a.ts", "src/b.ts"]);
+		});
+
+		it("parses biome path:line:col headers", async () => {
+			await writeFile(join(dir, "file.ts"), "const a == b;\n");
+			const output = [
+				"file.ts:1:1 lint/suspicious/noDoubleEquals  FIXABLE  ━━━━━━━━━━",
+				"  × Use === instead of ==",
+				"Checked 1 file in 3ms. Found 1 error.",
+			].join("\n");
+			expect(extractFailingFiles(output, dir)).toEqual(["file.ts"]);
+		});
+
+		it("parses vitest FAIL lines", async () => {
+			await mkdir(join(dir, "test"), { recursive: true });
+			await writeFile(join(dir, "test", "math.test.ts"), "// test\n");
+			const output = [
+				" FAIL  test/math.test.ts > add > adds numbers",
+				"AssertionError: expected 3 to be 4",
+				" Test Files  1 failed (1)",
+			].join("\n");
+			expect(extractFailingFiles(output, dir)).toEqual(["test/math.test.ts"]);
+		});
+
+		it("dedupes repeated files and drops paths that do not exist", async () => {
+			await writeFile(join(dir, "real.ts"), "x\n");
+			const output = [
+				"real.ts:1:1 - error TS1: a",
+				"real.ts:2:1 - error TS2: b",
+				"ghost.ts:1:1 - error TS3: c",
+			].join("\n");
+			expect(extractFailingFiles(output, dir)).toEqual(["real.ts"]);
+		});
+
+		it("returns nothing for output with no recognizable file paths", () => {
+			expect(extractFailingFiles("all good, 0 errors", dir)).toEqual([]);
+			expect(extractFailingFiles("", dir)).toEqual([]);
+		});
+	});
+
+	describe("classifyCrossFileEscape", () => {
+		it("classifies all-touched when every failing file was edited", () => {
+			const r = classifyCrossFileEscape(["src/a.ts"], [join(dir, "src", "a.ts")], dir);
+			expect(r.classification).toBe("all-touched");
+			expect(r.crossFileCount).toBe(0);
+		});
+
+		it("classifies some-cross-file when only part was edited", () => {
+			const r = classifyCrossFileEscape(["src/a.ts", "src/b.ts"], [join(dir, "src", "a.ts")], dir);
+			expect(r.classification).toBe("some-cross-file");
+			expect(r.failingCount).toBe(2);
+			expect(r.crossFileCount).toBe(1);
+			expect(r.crossFiles).toEqual(["src/b.ts"]);
+		});
+
+		it("classifies all-cross-file when nothing failing was edited", () => {
+			const r = classifyCrossFileEscape(["src/a.ts", "src/b.ts"], [join(dir, "src", "other.ts")], dir);
+			expect(r.classification).toBe("all-cross-file");
+			expect(r.crossFileCount).toBe(2);
+		});
+
+		it("classifies unattributed when the parser found nothing", () => {
+			const r = classifyCrossFileEscape([], [join(dir, "src", "a.ts")], dir);
+			expect(r.classification).toBe("unattributed");
+			expect(r.failingCount).toBe(0);
+		});
+
+		it("matches abs vs rel spellings (and is case-insensitive on Windows)", () => {
+			const touched = process.platform === "win32" ? [join(dir, "SRC", "A.ts")] : [join(dir, "src", "a.ts")];
+			const r = classifyCrossFileEscape(["src/a.ts"], touched, dir);
+			expect(r.classification).toBe("all-touched");
 		});
 	});
 });

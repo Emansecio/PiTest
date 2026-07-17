@@ -133,6 +133,7 @@ servidor/arquivo que nunca publica diagnostics (4s/edição, agora ~150ms após
 | `PIT_LSP_BOOT_BREAKER_COOLDOWN_MS` | Janela de cooldown (ms) após falha de boot antes de permitir um retry. | `60000` | `lsp/client.ts` | numérica |
 | `PIT_NO_LSP_SILENCE_MEMO` | Desativa o short-circuit de diagnostics silenciosos — toda edição volta a esperar os 4s completos mesmo em par arquivo+servidor que nunca publicou. | OFF (memo ligado) | `lsp/utils.ts` `effectiveDiagnosticsWaitMs` | `isTruthyEnvFlag` |
 | `PIT_LSP_SILENCE_GRACE_MS` | Espera de graça (ms) usada quando o par arquivo+servidor foi marcado silencioso (≥2 misses consecutivos). | `150` | `lsp/utils.ts` | numérica |
+| `PIT_NO_LSP_CROSS_FILE_SURFACE` | Desativa o surfacing de diagnostics cross-file no apêndice do writethrough — volta a mostrar só o arquivo editado. Sem a flag, publishes de OUTROS arquivos que ganharam erros novos vs baseline (ex.: gopls publica por pacote) entram no apêndice do edit, limitados a 3 arquivos × 2 diagnostics, sem nenhuma espera adicional (best-effort: lê o que já chegou no map). | OFF (surfacing ligado) | `lsp/writethrough.ts` `crossFileSurfaceDisabled` | `isTruthyEnvFlag` |
 
 ### Navegador nativo (chrome devtools) — auditoria 2026-07-16
 

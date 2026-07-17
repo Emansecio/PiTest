@@ -277,8 +277,10 @@ import { functionalWebFixPrompt, runFunctionalWebCheck } from "./verification/fu
 import { pendingVerificationJobs } from "./verification/pending-checks.ts";
 import {
 	type CheckResult,
+	classifyCrossFileEscape,
 	detectCheckCommand,
 	detectSyntaxFallbackCommand,
+	extractFailingFiles,
 	getCurrentVerificationProbe,
 	runCheckCommand,
 	setCurrentVerificationProbe,
@@ -370,6 +372,7 @@ const COMPOSER_FILE_READ_MAX_BYTES = 256 * 1024;
 function verificationFixPrompt(
 	command: string,
 	result: { exitCode: number; output: string; timedOut: boolean },
+	crossFileNote?: string,
 ): string {
 	const tail = summarizeCheckFailure(result.output, command);
 	const status = result.timedOut ? "timed out" : `exited ${result.exitCode}`;
@@ -378,6 +381,7 @@ function verificationFixPrompt(
 		"",
 		`$ ${command}`,
 		tail || "(no output)",
+		...(crossFileNote ? ["", crossFileNote] : []),
 		"",
 		"Fix the underlying cause and keep going; don't report the work done until this check passes. If the failure is pre-existing and unrelated to this change, say so explicitly instead of forcing a fix.",
 	].join("\n");
@@ -4383,6 +4387,12 @@ export class AgentSession implements CompactionHost, FusionHost {
 				exitCode: result.exitCode,
 				willRetry,
 			});
+			// Cross-file-escape telemetry: did the failure implicate files this turn
+			// never edited? Best-effort parse the failing files, classify against the
+			// turn's touched-file set, record the signal, and (when there are any)
+			// tell the model which failing files it didn't touch — actionable context
+			// for free. Never throws; a parser miss just yields "unattributed".
+			const crossFileNote = this._recordCrossFileEscape(result.output);
 			if (!willRetry) {
 				// Fix budget exhausted with the check still red. Don't end the turn
 				// silently — the model may have already claimed "done". Inject a single
@@ -4398,11 +4408,43 @@ export class AgentSession implements CompactionHost, FusionHost {
 				return { fixesUsed: fixes, status: "exhausted" };
 			}
 			fixes++;
-			await this._promptOnce(verificationFixPrompt(command, result), {
+			await this._promptOnce(verificationFixPrompt(command, result, crossFileNote), {
 				expandPromptTemplates: false,
 				source: options?.source,
 			});
 			if (abort.signal.aborted) return { fixesUsed: fixes, status: "aborted" };
+		}
+	}
+
+	/**
+	 * Attribute a gate failure to files: classify which failing files the turn
+	 * never touched (the cross-file escape signal), record it as a diagnostic, and
+	 * return a one-line note for the fix prompt when any failing file was
+	 * untouched. Pure best-effort — swallows everything and returns undefined on
+	 * any error so it can never affect the gate flow.
+	 */
+	private _recordCrossFileEscape(output: string): string | undefined {
+		try {
+			const analysis = classifyCrossFileEscape(
+				extractFailingFiles(output, this._cwd),
+				Array.from(this._turnTouchedFilePaths),
+				this._cwd,
+			);
+			recordDiagnostic({
+				category: "verification.cross_file_escape",
+				level: "info",
+				source: "agent-session._runVerificationCheckPhase",
+				context: {
+					mechanism: analysis.classification,
+					count: analysis.failingCount,
+					crossFileCount: analysis.crossFileCount,
+				},
+			});
+			if (analysis.crossFileCount === 0) return undefined;
+			const shown = analysis.crossFiles.slice(0, 3).join(", ");
+			return `Note: ${analysis.crossFileCount} of the failing file(s) were not edited this turn: ${shown}`;
+		} catch {
+			return undefined;
 		}
 	}
 
