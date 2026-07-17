@@ -19,6 +19,7 @@ import {
 	type OverthinkInterruptInfo,
 	OverthinkTracker,
 } from "./overthink-guard.ts";
+import { repairToolArguments } from "./tool-arg-repair.ts";
 import { appendHintsToContent } from "./tool-error-hint-registry.ts";
 import { appendRepairNoteToContent, buildRepairNote } from "./tool-repair-note.ts";
 import type {
@@ -1615,6 +1616,18 @@ async function prepareToolCall(
 					args: activeToolCall.arguments,
 				});
 			}
+		}
+
+		// Tool-call JSON repair + schema coercion (native, default-on; kill-switch
+		// PIT_NO_TOOLCALL_REPAIR=1). Runs AFTER the curated rewrite registry (which
+		// wins) and BEFORE TypeBox validation: malformed/type-mismatched args are
+		// silently fixed so the call doesn't fail and burn a model round-trip.
+		// Returns the same `arguments` reference when nothing changed, so the
+		// validate fast-path and the repair-note diff (`toolCall.arguments` vs
+		// `finalArgs`) are unaffected on the common well-formed path.
+		const repaired = repairToolArguments(activeToolCall.arguments, tool.parameters, tool.name);
+		if (repaired.args !== activeToolCall.arguments) {
+			activeToolCall = { ...activeToolCall, arguments: repaired.args as Record<string, any> };
 		}
 
 		let finalArgs = validateToolArguments(tool, activeToolCall);

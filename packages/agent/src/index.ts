@@ -6,6 +6,8 @@ export * from "./agent-loop.ts";
 export * from "./overthink-guard.ts";
 export * from "./proxy.ts";
 export * from "./stable-args-fingerprint.ts";
+// Tool-call JSON repair + schema coercion (native, default-on)
+export * from "./tool-arg-repair.ts";
 // Proxy utilities
 // Tier 4 — post-hoc error hint registry
 export * from "./tool-error-hint-registry.ts";
