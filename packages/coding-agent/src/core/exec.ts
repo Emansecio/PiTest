@@ -62,6 +62,7 @@ export async function execCommand(
 		const proc = spawnProcess(command, args, {
 			cwd,
 			shell: false,
+			detached: process.platform !== "win32",
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 
@@ -106,7 +107,9 @@ export async function execCommand(
 			// Force kill the whole tree after a grace period if SIGTERM is ignored.
 			killTimer = setTimeout(() => {
 				killTimer = undefined;
-				if (!proc.killed && proc.pid !== undefined) {
+				// The child hasn't settled after the grace period → it ignored SIGTERM.
+				// (proc.killed is true the moment SIGTERM was SENT, so it can't gate this.)
+				if (!settled && proc.pid !== undefined) {
 					killProcessTree(proc.pid);
 				}
 			}, SIGKILL_GRACE_MS);

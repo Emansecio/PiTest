@@ -100,6 +100,7 @@ export async function runHook(
 		let stdout = "";
 		let stderr = "";
 		let killed = false;
+		let exited = false;
 		let resolved = false;
 		let killTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -138,7 +139,7 @@ export async function runHook(
 			try {
 				proc.kill("SIGTERM");
 				killTimer = setTimeout(() => {
-					if (!proc.killed) {
+					if (!exited) {
 						try {
 							// Reap the whole tree, not just the shell wrapper. With shell:true,
 							// `proc` is cmd.exe / sh -c, so a hook like `npm run typecheck`
@@ -213,6 +214,7 @@ export async function runHook(
 		});
 
 		proc.on("close", (code) => {
+			exited = true;
 			// Genuine process exit — the SIGKILL escalation is no longer needed. This is
 			// the only place killTimer is cleared; finish() deliberately leaves it armed
 			// so a SIGTERM-ignoring child still gets force-killed on the timeout/abort path.
