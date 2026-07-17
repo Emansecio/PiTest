@@ -14,6 +14,7 @@
 
 import { existsSync } from "node:fs";
 import { recordDiagnostic } from "@pit/ai";
+import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { sliceSafe } from "../../utils/surrogate.ts";
 import { redactHttpBody, redactHttpHeaders, redactHttpUrl } from "../security/redaction.ts";
 import {
@@ -31,7 +32,7 @@ import {
 	readDevToolsActivePort,
 	waitForOwnedProfile,
 } from "./chrome-launcher.ts";
-import { type ElementToSourceResult, resolveElementToSource } from "./element-to-source.ts";
+import { type ElementToSourceResult, type LspResolve, resolveElementToSource } from "./element-to-source.ts";
 
 export interface CdpConnectionLike {
 	send(
@@ -120,6 +121,16 @@ export interface ChromeDevtoolsDeps {
 	readActivePort?: () => DevToolsActivePort | undefined;
 	isOwned?: (host: string, port: number, browserPath: string, signal?: AbortSignal) => Promise<boolean>;
 	waitOwned?: (host: string, userDataDir: string, signal?: AbortSignal) => Promise<DevToolsActivePort | undefined>;
+	/**
+	 * OPTIONAL LSP refinement for elementToSource. When present, a resolved
+	 * source position is refined to its declaring symbol. Kept dependency-injected
+	 * so the chrome layer never imports the LSP modules directly. Currently unset
+	 * in production (see agent-session wiring note); the plumbing exists so it can
+	 * be supplied without touching this class.
+	 */
+	lspResolve?: LspResolve;
+	/** OPTIONAL override of the guarded external source-map fetcher (tests). */
+	elementSourceFetchText?: (url: string) => Promise<string | undefined>;
 }
 
 interface ConnState {
@@ -140,6 +151,11 @@ interface ConnState {
 	// lifetime. Bounded by BODY_CACHE_BUDGET (total) + BODY_CACHE_PER_ENTRY (each).
 	bodies: Map<string, { body: string; base64Encoded: boolean; bytes: number; truncated: boolean }>;
 	bodyBytes: number;
+	// Concurrency gate for the proactive body-cache fetches fired from
+	// Network.loadingFinished. Bounds in-flight getResponseBody calls (+ a FIFO
+	// wait queue) so a burst of cacheable responses can't flood CDP.
+	bodyFetchInFlight: number;
+	bodyFetchQueue: Array<() => void>;
 	unsubs: Array<() => void>;
 	// Memoized "renderer ready for synthetic input" gate (see ensureInputReady).
 	// One per connection: a freshly launched/navigated page drops Input.dispatch*
@@ -175,6 +191,22 @@ const INPUT_READY_MAX_MS = 2_000;
 // and hand downstream. A multi-hundred-MB asset would otherwise be copied into
 // the tool result / render / compaction and blow the heap. Truncate at this cap.
 const MAX_CDP_BODY_BYTES = 10 * 1024 * 1024;
+// Default screenshot format/quality when the caller doesn't specify (and the
+// PIT_NO_CHROME_SCREENSHOT_COMPRESS kill-switch is not set). JPEG q60 is a large
+// payload win over lossless PNG for a screenshot the model just glances at; the
+// tool schema still lets the model opt into png / a higher quality when it needs
+// pixel-exact detail.
+const SCREENSHOT_DEFAULT_JPEG_QUALITY = 60;
+// Cap the captured height of a full-page screenshot (CSS px) so an infinitely
+// tall page can't produce a multi-MB image. The tool result notes the truncation.
+const SCREENSHOT_FULLPAGE_MAX_CSS_PX = 4000;
+// Ceiling on the in-flight Network.getResponseBody calls the loadingFinished
+// handler fires, plus the pending queue that backs up behind them. Uncapped, a
+// burst of cacheable responses floods CDP with body fetches that contend with
+// foreground commands; a dropped body is just a later cache miss the code already
+// tolerates (falls back to a live getResponseBody).
+const CACHE_BODY_MAX_IN_FLIGHT = 4;
+const CACHE_BODY_MAX_PENDING = 256;
 
 function boundedText(value: string, maxBytes: number): { text: string; truncated: boolean; bytes: number } {
 	const buffer = Buffer.from(value, "utf8");
@@ -351,6 +383,77 @@ function remoteArgsToText(args: unknown): string {
 		.trim();
 }
 
+// --- Element-to-source external map fetch (loopback-guarded) ---------------
+
+// Bounds on the outbound source-map fetch used by elementToSource. External maps
+// are only fetched from loopback/dev origins, capped in size and time.
+const ELEMENT_SOURCE_FETCH_MAX_BYTES = 16 * 1024 * 1024;
+const ELEMENT_SOURCE_FETCH_TIMEOUT_MS = 4_000;
+
+/** Minimal text-returning fetch shape (FetchLike only exposes json()). */
+type TextFetchResponse = {
+	ok: boolean;
+	status: number;
+	text: () => Promise<string>;
+	headers?: { get(name: string): string | null };
+};
+type TextFetchLike = (input: string, init?: { signal?: AbortSignal }) => Promise<TextFetchResponse>;
+
+const defaultTextFetch: TextFetchLike = (input, init) => fetch(input, init) as unknown as Promise<TextFetchResponse>;
+
+/**
+ * True for a loopback hostname only: localhost, 127.0.0.0/8, or IPv6 [::1]. The
+ * element-to-source path refuses everything else so the agent can never fetch an
+ * arbitrary remote URL through it.
+ */
+export function isLoopbackHostname(hostname: string): boolean {
+	const h = hostname.toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
+	if (h === "localhost" || h === "::1") return true;
+	// 127.0.0.0/8 — any 127.x.y.z.
+	return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
+
+/**
+ * Build the guarded `fetchText` injected into element-to-source for EXTERNAL
+ * source maps. Refuses non-http(s) and non-loopback URLs, bounds the response by
+ * size and time, and honors the caller's abort signal. Returns undefined on any
+ * refusal/failure (the resolver then degrades to the transpiled position).
+ */
+export function createElementSourceFetchText(opts?: {
+	fetchImpl?: TextFetchLike;
+	signal?: AbortSignal;
+	maxBytes?: number;
+	timeoutMs?: number;
+}): (url: string) => Promise<string | undefined> {
+	const fetchImpl = opts?.fetchImpl ?? defaultTextFetch;
+	const maxBytes = opts?.maxBytes ?? ELEMENT_SOURCE_FETCH_MAX_BYTES;
+	const timeoutMs = opts?.timeoutMs ?? ELEMENT_SOURCE_FETCH_TIMEOUT_MS;
+	return async (url: string): Promise<string | undefined> => {
+		let parsed: URL;
+		try {
+			parsed = new URL(url);
+		} catch {
+			return undefined;
+		}
+		if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined;
+		if (!isLoopbackHostname(parsed.hostname)) return undefined;
+		const timeout = AbortSignal.timeout(timeoutMs);
+		const signal = opts?.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
+		try {
+			const res = await fetchImpl(url, { signal });
+			if (!res.ok) return undefined;
+			// Reject early on an oversized declared length; otherwise cap after reading.
+			const declared = Number(res.headers?.get?.("content-length") ?? "");
+			if (Number.isFinite(declared) && declared > maxBytes) return undefined;
+			const text = await res.text();
+			if (Buffer.byteLength(text, "utf8") > maxBytes) return undefined;
+			return text;
+		} catch {
+			return undefined;
+		}
+	};
+}
+
 export class ChromeDevtoolsManager {
 	private readonly host: string;
 	/** Effective CDP port — updated after owned-profile discover / reconnect. */
@@ -376,6 +479,8 @@ export class ChromeDevtoolsManager {
 		userDataDir: string,
 		signal?: AbortSignal,
 	) => Promise<DevToolsActivePort | undefined>;
+	private readonly lspResolve: LspResolve | undefined;
+	private readonly elementSourceFetchText: ((url: string) => Promise<string | undefined>) | undefined;
 
 	private selectedTarget: CdpTarget | undefined;
 	private readonly conns = new Map<string, ConnState>();
@@ -402,6 +507,8 @@ export class ChromeDevtoolsManager {
 			deps.isOwned ?? ((host, port, browserPath, signal) => isOwnedEndpoint(host, port, browserPath, { signal }));
 		this.waitOwned =
 			deps.waitOwned ?? ((host, userDataDir, signal) => waitForOwnedProfile(host, userDataDir, { signal }));
+		this.lspResolve = deps.lspResolve;
+		this.elementSourceFetchText = deps.elementSourceFetchText;
 	}
 
 	/**
@@ -754,7 +861,22 @@ export class ChromeDevtoolsManager {
 	 */
 	async elementToSource(selector: string, signal?: AbortSignal): Promise<ElementToSourceResult> {
 		const conn = await this.requireConn();
-		return resolveElementToSource({ send: (m, p, o) => conn.send(m, p, o), signal }, selector);
+		// Outbound external source-map fetch is loopback-guarded and default-ON;
+		// PIT_NO_CHROME_ELEMENT_SOURCE_FETCH=1 disables it (LSP refinement, if wired,
+		// still runs). Inline data: maps never need this and work regardless.
+		const fetchDisabled = isTruthyEnvFlag(process.env.PIT_NO_CHROME_ELEMENT_SOURCE_FETCH);
+		const fetchText = fetchDisabled
+			? undefined
+			: (this.elementSourceFetchText ?? createElementSourceFetchText({ signal }));
+		return resolveElementToSource(
+			{
+				send: (m, p, o) => conn.send(m, p, o),
+				signal,
+				...(fetchText ? { fetchText } : {}),
+				...(this.lspResolve ? { lspResolve: this.lspResolve } : {}),
+			},
+			selector,
+		);
 	}
 
 	/** DOM nodeId of the first element matching the selector. */
@@ -901,7 +1023,13 @@ export class ChromeDevtoolsManager {
 		const entry = state.networkById.get(requestId);
 		if (!entry || !isCacheableMime(entry.mimeType ?? "")) return;
 		if (conn.isClosed?.()) return;
+		// Bound in-flight fetches; drop (don't queue unboundedly) past the pending cap.
+		// A dropped body is just a later cache miss the reader already tolerates.
+		if (!(await this.acquireBodySlot(state))) return;
 		try {
+			// Re-check after (possibly) waiting for a slot: the request may have been
+			// evicted from the ring, or a concurrent fetch may already have cached it.
+			if (conn.isClosed?.() || state.bodies.has(requestId) || !state.networkById.has(requestId)) return;
 			const res = await conn.send("Network.getResponseBody", { requestId });
 			if (res?.base64Encoded) return;
 			const rawBody = typeof res?.body === "string" ? res.body : "";
@@ -926,7 +1054,36 @@ export class ChromeDevtoolsManager {
 			}
 		} catch {
 			// No body for this request (redirect / 204 / already gone) — ignore.
+		} finally {
+			this.releaseBodySlot(state);
 		}
+	}
+
+	/**
+	 * Acquire an in-flight slot for a proactive body fetch. Resolves true with a
+	 * slot held (immediately, or after waiting in the FIFO queue); resolves false
+	 * to signal the caller to DROP the fetch when the pending queue is already at
+	 * CACHE_BODY_MAX_PENDING. Every true acquire must be matched by releaseBodySlot.
+	 */
+	private acquireBodySlot(state: ConnState): Promise<boolean> {
+		if (state.bodyFetchInFlight < CACHE_BODY_MAX_IN_FLIGHT) {
+			state.bodyFetchInFlight++;
+			return Promise.resolve(true);
+		}
+		if (state.bodyFetchQueue.length >= CACHE_BODY_MAX_PENDING) return Promise.resolve(false);
+		return new Promise<boolean>((resolve) => {
+			state.bodyFetchQueue.push(() => {
+				state.bodyFetchInFlight++;
+				resolve(true);
+			});
+		});
+	}
+
+	/** Release a body-fetch slot and hand it to the next FIFO waiter, if any. */
+	private releaseBodySlot(state: ConnState): void {
+		state.bodyFetchInFlight = Math.max(0, state.bodyFetchInFlight - 1);
+		const next = state.bodyFetchQueue.shift();
+		if (next) next();
 	}
 
 	private async captureRequestPostData(conn: CdpConnectionLike, state: ConnState, requestId: string): Promise<void> {
@@ -1002,15 +1159,102 @@ export class ChromeDevtoolsManager {
 		return v;
 	}
 
-	async screenshot(input: { fullPage?: boolean }, signal?: AbortSignal): Promise<string> {
+	/**
+	 * Capture a screenshot. Default-ON compression (kill-switch
+	 * PIT_NO_CHROME_SCREENSHOT_COMPRESS=1 restores the legacy full-scale PNG):
+	 *  - format defaults to jpeg q60; the caller can force png or a custom quality.
+	 *  - the capture is clipped at CSS-pixel resolution (scale 1/devicePixelRatio)
+	 *    so a HiDPI display doesn't multiply the pixel count (and payload).
+	 *  - a full-page capture is height-capped at SCREENSHOT_FULLPAGE_MAX_CSS_PX; the
+	 *    returned `note` records any truncation.
+	 * Returns the base64 data plus the mimeType that matches the ACTUAL format.
+	 */
+	async screenshot(
+		input: { fullPage?: boolean; format?: "jpeg" | "png"; quality?: number },
+		signal?: AbortSignal,
+	): Promise<{ data: string; mimeType: string; note?: string }> {
 		const conn = await this.requireConn();
-		const res = await conn.send(
-			"Page.captureScreenshot",
-			{ format: "png", captureBeyondViewport: !!input.fullPage },
-			{ signal },
-		);
+		// Compression is the default; the kill-switch AND an explicit format/quality
+		// from the caller both bypass the jpeg/scale defaults. An explicit request is
+		// honored even under the kill-switch (the model asked for it on purpose).
+		const compress = !isTruthyEnvFlag(process.env.PIT_NO_CHROME_SCREENSHOT_COMPRESS);
+		const format: "jpeg" | "png" = input.format ?? (compress ? "jpeg" : "png");
+		const params: Record<string, unknown> = { format };
+		if (format === "jpeg") {
+			params.quality = Math.round(Math.max(1, Math.min(100, input.quality ?? SCREENSHOT_DEFAULT_JPEG_QUALITY)));
+		}
+
+		let note: string | undefined;
+		// Clip + scale only when compressing AND the caller didn't request lossless
+		// png (a png request usually means "I need exact pixels" — don't downscale).
+		const clamp = compress && format === "jpeg";
+		if (clamp) {
+			const metrics = await this.captureMetrics(conn, signal);
+			if (metrics) {
+				const scale = metrics.dpr > 0 ? 1 / metrics.dpr : 1;
+				if (input.fullPage) {
+					const height = Math.min(metrics.fullHeight, SCREENSHOT_FULLPAGE_MAX_CSS_PX);
+					if (metrics.fullHeight > height) {
+						note = `Full page truncated to ${height} of ${metrics.fullHeight} CSS px tall.`;
+					}
+					params.clip = { x: 0, y: 0, width: metrics.fullWidth, height, scale };
+					params.captureBeyondViewport = true;
+				} else {
+					params.clip = { x: 0, y: 0, width: metrics.viewportWidth, height: metrics.viewportHeight, scale };
+				}
+			} else if (input.fullPage) {
+				// Metrics unavailable — fall back to a full-scale beyond-viewport capture.
+				params.captureBeyondViewport = true;
+			}
+		} else {
+			params.captureBeyondViewport = !!input.fullPage;
+		}
+
+		const res = await conn.send("Page.captureScreenshot", params, { signal });
 		if (typeof res?.data !== "string") throw new Error("Screenshot returned no data.");
-		return res.data;
+		return { data: res.data, mimeType: format === "jpeg" ? "image/jpeg" : "image/png", ...(note ? { note } : {}) };
+	}
+
+	/**
+	 * Read the CSS-pixel viewport / full-content dimensions and devicePixelRatio in
+	 * one Runtime.evaluate, for screenshot clip+scale. Returns undefined (fail-soft)
+	 * when the page can't be measured; the caller then captures at full scale.
+	 */
+	private async captureMetrics(
+		conn: CdpConnectionLike,
+		signal?: AbortSignal,
+	): Promise<
+		{ dpr: number; viewportWidth: number; viewportHeight: number; fullWidth: number; fullHeight: number } | undefined
+	> {
+		try {
+			const expr = `(() => {
+				const dpr = window.devicePixelRatio || 1;
+				const de = document.documentElement;
+				const body = document.body;
+				const vw = Math.max(1, Math.ceil((de && de.clientWidth) || window.innerWidth || 1));
+				const vh = Math.max(1, Math.ceil(window.innerHeight || (de && de.clientHeight) || 1));
+				const fw = Math.max(vw, Math.ceil(Math.max(de ? de.scrollWidth : 0, body ? body.scrollWidth : 0)));
+				const fh = Math.max(vh, Math.ceil(Math.max(de ? de.scrollHeight : 0, body ? body.scrollHeight : 0)));
+				return { dpr, vw, vh, fw, fh };
+			})()`;
+			const res = await conn.send("Runtime.evaluate", { expression: expr, returnByValue: true }, { signal });
+			const v = res?.result?.value as
+				| { dpr?: unknown; vw?: unknown; vh?: unknown; fw?: unknown; fh?: unknown }
+				| null
+				| undefined;
+			if (!v || typeof v !== "object") return undefined;
+			const num = (x: unknown, fallback: number) =>
+				typeof x === "number" && Number.isFinite(x) && x > 0 ? x : fallback;
+			return {
+				dpr: num(v.dpr, 1),
+				viewportWidth: num(v.vw, 1),
+				viewportHeight: num(v.vh, 1),
+				fullWidth: num(v.fw, 1),
+				fullHeight: num(v.fh, 1),
+			};
+		} catch {
+			return undefined;
+		}
 	}
 
 	readConsole(input: { limit?: number; level?: string }): ConsoleLine[] {
@@ -1285,6 +1529,8 @@ export class ChromeDevtoolsManager {
 			pendingResponseExtra: new Map(),
 			bodies: new Map(),
 			bodyBytes: 0,
+			bodyFetchInFlight: 0,
+			bodyFetchQueue: [],
 			unsubs: [],
 		};
 		this.conns.set(target.id, state);

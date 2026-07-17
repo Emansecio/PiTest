@@ -84,6 +84,8 @@ export interface LaunchChromeOptions {
 	 */
 	port: number;
 	userDataDir: string;
+	/** Extra Chrome flags appended after our defaults (caller args win last). */
+	extraArgs?: string[];
 	spawnImpl?: (command: string, args: string[], options: Record<string, unknown>) => ChildProcess;
 	mkdir?: (dir: string) => void;
 }
@@ -97,6 +99,18 @@ export function launchChrome(opts: LaunchChromeOptions): number | undefined {
 		`--user-data-dir=${opts.userDataDir}`,
 		"--no-first-run",
 		"--no-default-browser-check",
+		// Background-tab rAF throttling silently stalls the double-rAF input-ready
+		// gate (see ChromeDevtoolsManager.ensureInputReady) and delays synthetic
+		// input on any tab that isn't foregrounded. These three flags remove that
+		// failure mode at the source for browsers WE launch; ensureInputReady stays
+		// as defense-in-depth for attach-mode Chromes started without them.
+		"--disable-background-timer-throttling",
+		"--disable-renderer-backgrounding",
+		"--disable-backgrounding-occluded-windows",
+		// Deterministic default viewport so screenshots / layout are reproducible.
+		"--window-size=1280,800",
+		// Caller-supplied extra args win last (append/override our defaults).
+		...(opts.extraArgs ?? []),
 	];
 	const spawnImpl = opts.spawnImpl ?? ((c, a, o) => spawn(c, a, o));
 	const child = spawnImpl(opts.binary, args, { detached: true, stdio: "ignore", windowsHide: false });

@@ -149,13 +149,13 @@ export function createPreviewToolDefinition(
 			try {
 				await mgr.navigate({ url: resolved.url, newTab: true }, signal);
 				await settle(mgr, input.waitMs ?? SETTLE_DEFAULT_MS, signal);
-				const data = await mgr.screenshot({ fullPage: input.fullPage }, signal);
+				const shot = await mgr.screenshot({ fullPage: input.fullPage }, signal);
 				const consoleErrors = mgr.readConsole({ level: "error", limit: 20 });
 				const network = mgr.readNetwork({ limit: 100 });
 				const failures = network.filter((e) => typeof e.status === "number" && e.status >= 400);
 				return {
 					content: [
-						{ type: "image", data, mimeType: "image/png" } as ImageContent,
+						{ type: "image", data: shot.data, mimeType: shot.mimeType } as ImageContent,
 						{ type: "text", text: buildSummary(resolved.label, consoleErrors, failures) } as TextContent,
 					],
 					details: {

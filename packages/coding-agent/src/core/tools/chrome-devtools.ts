@@ -133,7 +133,22 @@ const evaluateSchema = Type.Object(
 	{ additionalProperties: false },
 );
 const screenshotSchema = Type.Object(
-	{ fullPage: Type.Optional(Type.Boolean({ description: "Capture the full scrollable page (default false)." })) },
+	{
+		fullPage: Type.Optional(Type.Boolean({ description: "Capture the full scrollable page (default false)." })),
+		format: Type.Optional(
+			Type.Union([Type.Literal("jpeg"), Type.Literal("png")], {
+				description:
+					"Image format. Default jpeg (compact). Use png only when you need pixel-exact / lossless detail.",
+			}),
+		),
+		quality: Type.Optional(
+			Type.Number({
+				description: "JPEG quality 1-100 (default 60; ignored for png).",
+				minimum: 1,
+				maximum: 100,
+			}),
+		),
+	},
 	{ additionalProperties: false },
 );
 const consoleSchema = Type.Object(
@@ -358,15 +373,24 @@ export function createChromeScreenshotDefinition(): ToolDefinition<typeof screen
 	return buildChromeTool({
 		name: "chrome_devtools_screenshot",
 		activity: "navigation",
-		description: "Capture a PNG screenshot of the selected page (optionally the full page).",
+		description:
+			"Capture a screenshot of the selected page (optionally the full page). Defaults to a compact JPEG at CSS-pixel resolution; pass format:'png' (and/or a quality) for lossless/pixel-exact detail.",
 		snippet: "Screenshot the page",
-		guidelines: ["Select or navigate to a page first."],
+		guidelines: [
+			"Select or navigate to a page first.",
+			"Default is jpeg q60 — request format:'png' only when you truly need lossless pixels.",
+		],
 		schema: screenshotSchema,
 		run: async (mgr, input, signal) => {
-			const data = await mgr.screenshot({ fullPage: input.fullPage }, signal);
+			const shot = await mgr.screenshot(
+				{ fullPage: input.fullPage, format: input.format, quality: input.quality },
+				signal,
+			);
+			const scope = input.fullPage ? "full page" : "viewport";
+			const text = `Screenshot captured (${scope}).${shot.note ? ` ${shot.note}` : ""}`;
 			return ok([
-				{ type: "image", data, mimeType: "image/png" },
-				{ type: "text", text: `Screenshot captured (${input.fullPage ? "full page" : "viewport"}).` },
+				{ type: "image", data: shot.data, mimeType: shot.mimeType },
+				{ type: "text", text },
 			]);
 		},
 	});

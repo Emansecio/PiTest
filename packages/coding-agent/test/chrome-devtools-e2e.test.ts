@@ -136,7 +136,7 @@ suite("chrome_devtools real-Chrome E2E (PIT_CHROME_E2E=1)", () => {
 
 		// page text + screenshot
 		expect(await mgr.getPageText()).toContain("clicked:ola pit");
-		expect((await mgr.screenshot({})).length).toBeGreaterThan(1_000);
+		expect((await mgr.screenshot({})).data.length).toBeGreaterThan(1_000);
 
 		// network buffer + response body (request fired AFTER attach)
 		await mgr.evaluate("fetch('/api')");

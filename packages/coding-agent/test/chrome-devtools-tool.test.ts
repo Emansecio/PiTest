@@ -91,11 +91,26 @@ describe("chrome_devtools tools", () => {
 	});
 
 	it("screenshot returns an image content block", async () => {
-		const mgr = mockManager({ screenshot: vi.fn().mockResolvedValue("BASE64PNG") });
+		const mgr = mockManager({
+			screenshot: vi.fn().mockResolvedValue({ data: "BASE64JPEG", mimeType: "image/jpeg" }),
+		});
 		setCurrentChromeDevtoolsManager(mgr);
 		const res = await runExec(createChromeScreenshotDefinition(), { fullPage: true });
 		const image = res.content.find((c: any) => c.type === "image");
-		expect(image).toMatchObject({ type: "image", data: "BASE64PNG", mimeType: "image/png" });
+		expect(image).toMatchObject({ type: "image", data: "BASE64JPEG", mimeType: "image/jpeg" });
+	});
+
+	it("screenshot appends a truncation note from the manager", async () => {
+		const mgr = mockManager({
+			screenshot: vi.fn().mockResolvedValue({
+				data: "B64",
+				mimeType: "image/jpeg",
+				note: "Full page truncated to 4000 of 9000 CSS px tall.",
+			}),
+		});
+		setCurrentChromeDevtoolsManager(mgr);
+		const res = await runExec(createChromeScreenshotDefinition(), { fullPage: true });
+		expect(text(res)).toContain("truncated to 4000 of 9000");
 	});
 
 	it("read_network returns full bounded detail for a captured hop", async () => {

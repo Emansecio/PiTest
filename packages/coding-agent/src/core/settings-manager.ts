@@ -108,6 +108,13 @@ export interface PendingChecksSettings {
 	enabled?: boolean;
 	maxWaitMs?: number;
 	maxFixAttempts?: number;
+	/**
+	 * How often the end-of-turn drain re-checks whether a backgrounded check has
+	 * settled. Defaults to 500ms. Exposed mainly as a test seam so integration
+	 * tests can shrink the poll cadence (and thus detection latency) without
+	 * relying on real multi-hundred-ms sleeps.
+	 */
+	pollIntervalMs?: number;
 }
 
 export interface TerminalSettings {
@@ -1501,7 +1508,9 @@ export class SettingsManager {
 			enabled: v?.enabled ?? true,
 			command: v?.command ?? null,
 			maxAttempts: Math.max(1, v?.maxAttempts ?? 2),
-			timeoutMs: Math.max(1000, v?.timeoutMs ?? 180_000),
+			// Floor is a small sanity bound (not the old 1000ms) so an explicitly
+			// configured short timeout is honored — the default (180_000) is unchanged.
+			timeoutMs: Math.max(50, v?.timeoutMs ?? 180_000),
 			visual: v?.visual ?? true,
 			functionalWeb: v?.functionalWeb ?? true,
 			functionalWebTimeoutMs: Math.max(5_000, v?.functionalWebTimeoutMs ?? 45_000),
@@ -1509,13 +1518,21 @@ export class SettingsManager {
 		};
 	}
 
-	getPendingChecksSettings(): { enabled: boolean; maxWaitMs: number; maxFixAttempts: number } {
+	getPendingChecksSettings(): {
+		enabled: boolean;
+		maxWaitMs: number;
+		maxFixAttempts: number;
+		pollIntervalMs: number;
+	} {
 		const p = this.settings.pendingChecks;
 		const envOff = process.env.PIT_NO_PENDING_CHECKS === "1";
 		return {
 			enabled: envOff ? false : (p?.enabled ?? true),
-			maxWaitMs: Math.max(1000, p?.maxWaitMs ?? 900_000),
+			// Floor is a small sanity bound (not the old 1000ms) so an explicitly
+			// configured short wait is honored — the default (900_000) is unchanged.
+			maxWaitMs: Math.max(50, p?.maxWaitMs ?? 900_000),
 			maxFixAttempts: Math.max(0, p?.maxFixAttempts ?? 2),
+			pollIntervalMs: Math.max(5, p?.pollIntervalMs ?? 500),
 		};
 	}
 
@@ -2091,8 +2108,12 @@ export class SettingsManager {
 		const envHost = process.env.PIT_CHROME_DEVTOOLS_HOST || process.env.PI_CHROME_DEVTOOLS_HOST;
 		const envPort = process.env.PIT_CHROME_DEVTOOLS_PORT || process.env.PI_CHROME_DEVTOOLS_PORT;
 		const port = envPort && Number.isFinite(Number(envPort)) ? Number(envPort) : (raw?.debugPort ?? 9222);
+		// Env kill-switch wins over settings (same precedent as PIT_GREP_ENGINE /
+		// PIT_NO_CLAUDE_CODE_SKILLS): PIT_NO_CHROME_DEVTOOLS=1 disables the whole
+		// subsystem regardless of `chromeDevtools.enabled`.
+		const envDisabled = isTruthyEnvFlag(process.env.PIT_NO_CHROME_DEVTOOLS);
 		return {
-			enabled: raw?.enabled !== false,
+			enabled: !envDisabled && raw?.enabled !== false,
 			debugPort: port,
 			host: envHost || raw?.host || "127.0.0.1",
 			// Auto-launch Chrome (default ON) into a dedicated persistent profile.

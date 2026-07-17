@@ -87,6 +87,40 @@ describe("launchChrome", () => {
 		expect(args).toContain("--user-data-dir=/data/chrome");
 		expect(options).toMatchObject({ detached: true, stdio: "ignore" });
 	});
+
+	it("passes the background-throttling + window-size flags at launch", () => {
+		const child = { pid: 1, unref: vi.fn(), on: vi.fn() };
+		const spawnImpl = vi.fn().mockReturnValue(child);
+		launchChrome({
+			binary: "/bin/chrome",
+			port: 0,
+			userDataDir: "/data/chrome",
+			spawnImpl: spawnImpl as any,
+			mkdir: vi.fn(),
+		});
+		const args = spawnImpl.mock.calls[0]![1] as string[];
+		expect(args).toContain("--disable-background-timer-throttling");
+		expect(args).toContain("--disable-renderer-backgrounding");
+		expect(args).toContain("--disable-backgrounding-occluded-windows");
+		expect(args).toContain("--window-size=1280,800");
+	});
+
+	it("appends caller extraArgs last so they win", () => {
+		const child = { pid: 1, unref: vi.fn(), on: vi.fn() };
+		const spawnImpl = vi.fn().mockReturnValue(child);
+		launchChrome({
+			binary: "/bin/chrome",
+			port: 0,
+			userDataDir: "/data/chrome",
+			extraArgs: ["--window-size=800,600", "--proxy-server=127.0.0.1:8080"],
+			spawnImpl: spawnImpl as any,
+			mkdir: vi.fn(),
+		});
+		const args = spawnImpl.mock.calls[0]![1] as string[];
+		expect(args).toContain("--proxy-server=127.0.0.1:8080");
+		// Caller's window-size comes after our default, so a later-wins parser honors it.
+		expect(args.lastIndexOf("--window-size=800,600")).toBeGreaterThan(args.indexOf("--window-size=1280,800"));
+	});
 });
 
 describe("DevToolsActivePort ownership", () => {

@@ -461,4 +461,34 @@ describe("SettingsManager", () => {
 			expect(manager.getAstGrepSettings().engine).toBe("napi");
 		});
 	});
+
+	describe("getChromeDevtoolsSettings — PIT_NO_CHROME_DEVTOOLS kill-switch", () => {
+		let savedEnv: string | undefined;
+		beforeEach(() => {
+			savedEnv = process.env.PIT_NO_CHROME_DEVTOOLS;
+			delete process.env.PIT_NO_CHROME_DEVTOOLS;
+		});
+		afterEach(() => {
+			if (savedEnv === undefined) delete process.env.PIT_NO_CHROME_DEVTOOLS;
+			else process.env.PIT_NO_CHROME_DEVTOOLS = savedEnv;
+		});
+
+		it("is enabled by default", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getChromeDevtoolsSettings().enabled).toBe(true);
+		});
+
+		it("PIT_NO_CHROME_DEVTOOLS=1 disables regardless of settings.json", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ chromeDevtools: { enabled: true } }));
+			process.env.PIT_NO_CHROME_DEVTOOLS = "1";
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getChromeDevtoolsSettings().enabled).toBe(false);
+		});
+
+		it("a falsy PIT_NO_CHROME_DEVTOOLS leaves it enabled", () => {
+			process.env.PIT_NO_CHROME_DEVTOOLS = "0";
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getChromeDevtoolsSettings().enabled).toBe(true);
+		});
+	});
 });

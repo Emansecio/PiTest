@@ -1,7 +1,12 @@
 import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { CdpTarget } from "../src/core/chrome/cdp-client.js";
-import { type CdpConnectionLike, ChromeDevtoolsManager } from "../src/core/chrome/chrome-devtools-manager.js";
+import {
+	type CdpConnectionLike,
+	ChromeDevtoolsManager,
+	createElementSourceFetchText,
+	isLoopbackHostname,
+} from "../src/core/chrome/chrome-devtools-manager.js";
 
 class FakeConn implements CdpConnectionLike {
 	sent: Array<{ method: string; params?: Record<string, unknown> }> = [];
@@ -111,12 +116,15 @@ describe("ChromeDevtoolsManager", () => {
 		expect((await mgr.evaluate("x")).error).toContain("ReferenceError");
 	});
 
-	it("screenshot returns base64 png data", async () => {
+	it("screenshot returns base64 data with a matching mimeType", async () => {
 		const c = new FakeConn();
 		c.responses["Page.captureScreenshot"] = { data: "iVBORw0KGgo=" };
 		const { mgr } = setup({ preset: { p1: c } });
 		await mgr.selectPage("p1");
-		expect(await mgr.screenshot({ fullPage: true })).toBe("iVBORw0KGgo=");
+		const shot = await mgr.screenshot({ fullPage: true });
+		expect(shot.data).toBe("iVBORw0KGgo=");
+		// Default (compression on) is jpeg.
+		expect(shot.mimeType).toBe("image/jpeg");
 	});
 
 	it("buffers console and network events", async () => {
@@ -896,5 +904,286 @@ describe("ChromeDevtoolsManager.ensureBrowser", () => {
 		});
 		await expect(mgr.ensureBrowser()).rejects.toThrow(/Could not reach/);
 		expect(launch).not.toHaveBeenCalled();
+	});
+});
+
+describe("ChromeDevtoolsManager screenshot compression", () => {
+	function captureParams(c: FakeConn): Record<string, unknown> | undefined {
+		return c.sent.find((s) => s.method === "Page.captureScreenshot")?.params;
+	}
+
+	it("defaults to jpeg quality 60", async () => {
+		const c = new FakeConn();
+		c.responses["Page.captureScreenshot"] = { data: "AAAA" };
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		const shot = await mgr.screenshot({});
+		expect(shot.mimeType).toBe("image/jpeg");
+		expect(captureParams(c)).toMatchObject({ format: "jpeg", quality: 60 });
+	});
+
+	it("clips to CSS-pixel resolution (scale = 1/devicePixelRatio)", async () => {
+		const c = new FakeConn();
+		c.responses["Page.captureScreenshot"] = { data: "AAAA" };
+		c.responses["Runtime.evaluate"] = { result: { value: { dpr: 2, vw: 800, vh: 600, fw: 800, fh: 900 } } };
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		await mgr.screenshot({});
+		expect(captureParams(c)?.clip).toMatchObject({ x: 0, y: 0, width: 800, height: 600, scale: 0.5 });
+	});
+
+	it("caps a full-page capture height and reports the truncation", async () => {
+		const c = new FakeConn();
+		c.responses["Page.captureScreenshot"] = { data: "AAAA" };
+		c.responses["Runtime.evaluate"] = { result: { value: { dpr: 1, vw: 800, vh: 600, fw: 800, fh: 9000 } } };
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		const shot = await mgr.screenshot({ fullPage: true });
+		expect(captureParams(c)?.clip).toMatchObject({ height: 4000 });
+		expect(captureParams(c)?.captureBeyondViewport).toBe(true);
+		expect(shot.note).toMatch(/truncated to 4000 of 9000/);
+	});
+
+	it("honors an explicit quality and clamps it to 1-100", async () => {
+		const c = new FakeConn();
+		c.responses["Page.captureScreenshot"] = { data: "AAAA" };
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		await mgr.screenshot({ quality: 999 });
+		expect(captureParams(c)).toMatchObject({ format: "jpeg", quality: 100 });
+	});
+
+	it("opts into lossless png without clip/scale when format:'png'", async () => {
+		const c = new FakeConn();
+		c.responses["Page.captureScreenshot"] = { data: "AAAA" };
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		const shot = await mgr.screenshot({ format: "png" });
+		expect(shot.mimeType).toBe("image/png");
+		const params = captureParams(c)!;
+		expect(params.format).toBe("png");
+		expect(params.quality).toBeUndefined();
+		expect(params.clip).toBeUndefined();
+	});
+
+	it("PIT_NO_CHROME_SCREENSHOT_COMPRESS restores full-scale png", async () => {
+		const prev = process.env.PIT_NO_CHROME_SCREENSHOT_COMPRESS;
+		process.env.PIT_NO_CHROME_SCREENSHOT_COMPRESS = "1";
+		try {
+			const c = new FakeConn();
+			c.responses["Page.captureScreenshot"] = { data: "AAAA" };
+			const { mgr } = setup({ preset: { p1: c } });
+			await mgr.selectPage("p1");
+			const shot = await mgr.screenshot({ fullPage: true });
+			expect(shot.mimeType).toBe("image/png");
+			const params = captureParams(c)!;
+			expect(params.format).toBe("png");
+			expect(params.clip).toBeUndefined();
+			expect(params.captureBeyondViewport).toBe(true);
+		} finally {
+			if (prev === undefined) delete process.env.PIT_NO_CHROME_SCREENSHOT_COMPRESS;
+			else process.env.PIT_NO_CHROME_SCREENSHOT_COMPRESS = prev;
+		}
+	});
+});
+
+describe("isLoopbackHostname", () => {
+	it("accepts loopback hosts only", () => {
+		expect(isLoopbackHostname("localhost")).toBe(true);
+		expect(isLoopbackHostname("127.0.0.1")).toBe(true);
+		expect(isLoopbackHostname("127.5.6.7")).toBe(true);
+		expect(isLoopbackHostname("::1")).toBe(true);
+		expect(isLoopbackHostname("[::1]")).toBe(true);
+	});
+	it("rejects non-loopback hosts", () => {
+		expect(isLoopbackHostname("example.com")).toBe(false);
+		expect(isLoopbackHostname("10.0.0.1")).toBe(false);
+		expect(isLoopbackHostname("192.168.1.5")).toBe(false);
+		expect(isLoopbackHostname("0.0.0.0")).toBe(false);
+		expect(isLoopbackHostname("169.254.1.1")).toBe(false);
+	});
+});
+
+describe("createElementSourceFetchText", () => {
+	function mockRes(text: string, headers?: Record<string, string>) {
+		return {
+			ok: true,
+			status: 200,
+			text: async () => text,
+			headers: { get: (n: string) => headers?.[n.toLowerCase()] ?? null },
+		};
+	}
+
+	it("refuses a non-loopback URL without fetching", async () => {
+		const fetchImpl = vi.fn();
+		const fetchText = createElementSourceFetchText({ fetchImpl: fetchImpl as any });
+		expect(await fetchText("https://evil.example.com/app.js.map")).toBeUndefined();
+		expect(fetchImpl).not.toHaveBeenCalled();
+	});
+
+	it("refuses a non-http(s) URL", async () => {
+		const fetchImpl = vi.fn();
+		const fetchText = createElementSourceFetchText({ fetchImpl: fetchImpl as any });
+		expect(await fetchText("file:///etc/passwd")).toBeUndefined();
+		expect(fetchImpl).not.toHaveBeenCalled();
+	});
+
+	it("fetches a loopback URL and returns its text", async () => {
+		const fetchImpl = vi.fn().mockResolvedValue(mockRes('{"version":3}'));
+		const fetchText = createElementSourceFetchText({ fetchImpl: fetchImpl as any });
+		expect(await fetchText("http://localhost:3000/app.js.map")).toBe('{"version":3}');
+		expect(await fetchText("http://127.0.0.1:5173/x.map")).toBe('{"version":3}');
+		expect(fetchImpl).toHaveBeenCalled();
+	});
+
+	it("passes an abort signal (time bound) to the fetch", async () => {
+		const fetchImpl = vi.fn().mockResolvedValue(mockRes("{}"));
+		const fetchText = createElementSourceFetchText({ fetchImpl: fetchImpl as any, timeoutMs: 50 });
+		await fetchText("http://localhost/x.map");
+		const init = fetchImpl.mock.calls[0]?.[1] as { signal?: AbortSignal };
+		expect(init?.signal).toBeInstanceOf(AbortSignal);
+	});
+
+	it("rejects an oversized body (size bound)", async () => {
+		const big = "x".repeat(100);
+		const fetchImpl = vi.fn().mockResolvedValue(mockRes(big));
+		const fetchText = createElementSourceFetchText({ fetchImpl: fetchImpl as any, maxBytes: 10 });
+		expect(await fetchText("http://localhost/x.map")).toBeUndefined();
+	});
+
+	it("rejects on an oversized declared content-length", async () => {
+		const fetchImpl = vi.fn().mockResolvedValue(mockRes("small", { "content-length": "999999999" }));
+		const fetchText = createElementSourceFetchText({ fetchImpl: fetchImpl as any, maxBytes: 10 });
+		expect(await fetchText("http://localhost/x.map")).toBeUndefined();
+	});
+
+	it("returns undefined when the fetch throws (e.g. aborted timeout)", async () => {
+		const fetchImpl = vi.fn().mockRejectedValue(new DOMException("aborted", "AbortError"));
+		const fetchText = createElementSourceFetchText({ fetchImpl: fetchImpl as any });
+		expect(await fetchText("http://localhost/x.map")).toBeUndefined();
+	});
+});
+
+describe("ChromeDevtoolsManager cacheBody concurrency cap", () => {
+	class ThrottleConn extends FakeConn {
+		inFlight = 0;
+		maxInFlight = 0;
+		private releases: Array<() => void> = [];
+		override send(method: string, params?: Record<string, unknown>): Promise<any> {
+			if (method === "Network.getResponseBody") {
+				this.sent.push({ method, params });
+				this.inFlight++;
+				this.maxInFlight = Math.max(this.maxInFlight, this.inFlight);
+				return new Promise((resolve) => {
+					this.releases.push(() => {
+						this.inFlight--;
+						resolve({ body: '{"ok":true}', base64Encoded: false });
+					});
+				});
+			}
+			return super.send(method, params);
+		}
+		releaseOne(): void {
+			this.releases.shift()?.();
+		}
+		pending(): number {
+			return this.releases.length;
+		}
+	}
+
+	it("keeps at most 4 body fetches in flight and drains the FIFO queue", async () => {
+		const c = new ThrottleConn();
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		for (let i = 0; i < 10; i++) {
+			c.emit("Network.requestWillBeSent", {
+				requestId: `q${i}`,
+				request: { method: "GET", url: `http://a/api/${i}` },
+			});
+			c.emit("Network.responseReceived", {
+				requestId: `q${i}`,
+				response: { status: 200, mimeType: "application/json" },
+			});
+			c.emit("Network.loadingFinished", { requestId: `q${i}` });
+		}
+		await flush();
+		await flush();
+		// 10 cacheable bodies fired, but only 4 fetch concurrently.
+		expect(c.maxInFlight).toBe(4);
+		expect(c.inFlight).toBe(4);
+		expect(c.pending()).toBe(4);
+		// Drain: each release frees a slot for the next queued fetch, never exceeding 4.
+		for (let n = 0; n < 12; n++) {
+			c.releaseOne();
+			await flush();
+			await flush();
+		}
+		expect(c.maxInFlight).toBe(4);
+		expect(c.inFlight).toBe(0);
+		// Every body ended up cached (served without a further live fetch).
+		const body = await mgr.getResponseBody("q9");
+		expect(body.body).toContain("ok");
+	});
+});
+
+describe("ChromeDevtoolsManager.elementToSource wiring", () => {
+	function elementSourceConn(mapUrl: string): FakeConn {
+		const c = new FakeConn();
+		c.responses["DOM.getDocument"] = { root: { nodeId: 1 } };
+		c.responses["DOM.querySelector"] = { nodeId: 42 };
+		c.responses["DOM.resolveNode"] = { object: { objectId: "obj-1" } };
+		c.responses["DOMDebugger.getEventListeners"] = {
+			listeners: [{ type: "click", scriptId: "2", lineNumber: 3, columnNumber: 6 }],
+		};
+		c.responses["Debugger.getScriptSource"] = {
+			scriptSource: `0;\n//# sourceMappingURL=${mapUrl}\n`,
+			url: "http://x/app.js",
+		};
+		return c;
+	}
+
+	function setupWithDeps(c: FakeConn, deps: { elementSourceFetchText?: any; lspResolve?: any }) {
+		const targets: CdpTarget[] = [
+			{ id: "p1", type: "page", title: "A", url: "http://a", webSocketDebuggerUrl: "ws://p1" },
+		];
+		return new ChromeDevtoolsManager({
+			host: "h",
+			port: 9222,
+			list: async () => targets,
+			create: async (url) => ({ id: "n", type: "page", title: "n", url, webSocketDebuggerUrl: "ws://n" }),
+			close: async () => {},
+			connect: () => c,
+			...deps,
+		});
+	}
+
+	it("forwards the injected fetchText + lspResolve for an external source map", async () => {
+		const c = elementSourceConn("http://localhost:5173/app.js.map");
+		const fetchText = vi.fn().mockResolvedValue(undefined);
+		const lspResolve = vi.fn().mockResolvedValue(undefined);
+		const mgr = setupWithDeps(c, { elementSourceFetchText: fetchText, lspResolve });
+		await mgr.selectPage("p1");
+		await mgr.elementToSource("#e");
+		expect(fetchText).toHaveBeenCalledWith("http://localhost:5173/app.js.map");
+		// Map not retrievable → degrade to transpiled, and lspResolve still runs.
+		expect(lspResolve).toHaveBeenCalled();
+	});
+
+	it("PIT_NO_CHROME_ELEMENT_SOURCE_FETCH disables the outbound fetch (LSP stays)", async () => {
+		const prev = process.env.PIT_NO_CHROME_ELEMENT_SOURCE_FETCH;
+		process.env.PIT_NO_CHROME_ELEMENT_SOURCE_FETCH = "1";
+		try {
+			const c = elementSourceConn("http://localhost:5173/app.js.map");
+			const fetchText = vi.fn().mockResolvedValue(undefined);
+			const lspResolve = vi.fn().mockResolvedValue(undefined);
+			const mgr = setupWithDeps(c, { elementSourceFetchText: fetchText, lspResolve });
+			await mgr.selectPage("p1");
+			await mgr.elementToSource("#e");
+			expect(fetchText).not.toHaveBeenCalled();
+			expect(lspResolve).toHaveBeenCalled();
+		} finally {
+			if (prev === undefined) delete process.env.PIT_NO_CHROME_ELEMENT_SOURCE_FETCH;
+			else process.env.PIT_NO_CHROME_ELEMENT_SOURCE_FETCH = prev;
+		}
 	});
 });
