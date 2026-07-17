@@ -9,6 +9,13 @@ export interface SettingItem {
 	id: string;
 	/** Display label (left side) */
 	label: string;
+	/**
+	 * Optional section group. Consecutive items sharing a group render under a
+	 * single header; the header repeats at the top of the scroll window so the
+	 * active section is always labelled. Items are expected to be pre-sorted so
+	 * each group is contiguous.
+	 */
+	group?: string;
 	/** Optional description shown when selected */
 	description?: string;
 	/** Current value to display (right side) */
@@ -27,6 +34,8 @@ export interface SettingsListTheme {
 	hint: (text: string) => string;
 	/** Optional full-row background for the selected item. */
 	selectedBg?: (text: string) => string;
+	/** Optional style for group section headers. Falls back to `hint`. */
+	header?: (text: string) => string;
 }
 
 export interface SettingsListOptions {
@@ -143,10 +152,19 @@ export class SettingsList implements Component {
 		// Calculate max label width for alignment
 		const maxLabelWidth = this.getMaxLabelWidth();
 
-		// Render visible items
+		// Render visible items. Group headers render before the first visible item
+		// of each group; `prevGroup` starts undefined so the header for whatever
+		// group tops the scroll window is always shown, even mid-group.
+		const headerFn = this.theme.header ?? this.theme.hint;
+		let prevGroup: string | undefined;
 		for (let i = startIndex; i < endIndex; i++) {
 			const item = displayItems[i];
 			if (!item) continue;
+
+			if (item.group && item.group !== prevGroup) {
+				lines.push(truncateToWidth(headerFn(`  ${item.group}`), width, ""));
+			}
+			prevGroup = item.group;
 
 			const isSelected = i === this.selectedIndex;
 			const prefix = isSelected ? this.theme.cursor : "  ";
@@ -213,16 +231,39 @@ export class SettingsList implements Component {
 		} else if (kb.matches(data, "tui.select.down")) {
 			if (displayItems.length === 0) return;
 			this.selectedIndex = this.selectedIndex === displayItems.length - 1 ? 0 : this.selectedIndex + 1;
-		} else if (kb.matches(data, "tui.select.confirm") || data === " ") {
+		} else if (kb.matches(data, "tui.select.pageUp")) {
+			// Jump one window toward the top, clamped (no wrap — matches SelectList).
+			if (displayItems.length === 0) return;
+			this.selectedIndex = Math.max(0, this.selectedIndex - this.maxVisible);
+		} else if (kb.matches(data, "tui.select.pageDown")) {
+			// Jump one window toward the bottom, clamped (no wrap).
+			if (displayItems.length === 0) return;
+			this.selectedIndex = Math.min(displayItems.length - 1, this.selectedIndex + this.maxVisible);
+		} else if (kb.matches(data, "tui.select.home")) {
+			if (displayItems.length === 0) return;
+			this.selectedIndex = 0;
+		} else if (kb.matches(data, "tui.select.end")) {
+			if (displayItems.length === 0) return;
+			this.selectedIndex = displayItems.length - 1;
+		} else if (kb.matches(data, "tui.select.confirm") || (!this.searchEnabled && data === " ")) {
+			// Enter always activates. A bare space activates ONLY when search is off
+			// (legacy toggle behaviour); with search on, space is a query character so
+			// multi-word filters like "auto resize" work.
 			this.activateItem();
 		} else if (kb.matches(data, "tui.select.cancel")) {
-			this.onCancel();
-		} else if (this.searchEnabled && this.searchInput) {
-			const sanitized = data.replace(/ /g, "");
-			if (!sanitized) {
+			// Two-step Esc when searching: a non-empty filter is cleared first, and
+			// only a second Esc (empty filter) closes. Mirrors SelectorShell /
+			// model-selector so every selector behaves uniformly.
+			if (this.searchEnabled && this.searchInput && this.searchInput.getValue().length > 0) {
+				this.searchInput.setValue("");
+				this.applyFilter("");
 				return;
 			}
-			this.searchInput.handleInput(sanitized);
+			this.onCancel();
+		} else if (this.searchEnabled && this.searchInput) {
+			// Everything else is query text (spaces preserved). Input rejects control
+			// characters itself, so no pre-strip is needed.
+			this.searchInput.handleInput(data);
 			this.applyFilter(this.searchInput.getValue());
 		}
 	}

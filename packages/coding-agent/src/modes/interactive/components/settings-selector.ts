@@ -15,11 +15,27 @@ import type { WarningSettings } from "../../../core/settings-manager.ts";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.ts";
 import { HINT_SEPARATOR, keyDisplayText, keyHint } from "./keybinding-hints.ts";
 import { SelectorCard } from "./selector-card.ts";
+import { SelectorShell } from "./selector-shell.ts";
 
 const SETTINGS_SUBMENU_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
 	maxPrimaryColumnWidth: 32,
 };
+
+const THEME_SUBMENU_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
+	minPrimaryColumnWidth: 12,
+	maxPrimaryColumnWidth: 32,
+	emptyText: "No matching themes",
+};
+
+// Section headers for the grouped /settings list. Items are pushed in this order
+// so each group stays contiguous (SettingsList renders a header per group).
+const GROUP_APPEARANCE = "Appearance";
+const GROUP_EDITOR = "Editor";
+const GROUP_BEHAVIOR = "Behavior";
+const GROUP_MODELS = "Models & Providers";
+const GROUP_WARNINGS = "Warnings";
+const GROUP_ADVANCED = "Advanced";
 
 const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	off: "No reasoning",
@@ -58,6 +74,16 @@ export interface SettingsConfig {
 	warnings: WarningSettings;
 	fusionVerify: boolean;
 	fusionBrief: boolean;
+	// Pure-UI settings backed by existing settings-manager setters. Optional so the
+	// component compiles and renders (showing defaults) before the host wires the
+	// current values; the host should populate these from the matching getters.
+	cursorBlink?: boolean;
+	streamingSmoothing?: boolean;
+	editorClosedBottom?: boolean;
+	toolActivity?: "grouped" | "legacy";
+	footerDensity?: "calm" | "full";
+	cardPaddingX?: number;
+	assistantReadingColumns?: number;
 }
 
 export interface SettingsCallbacks {
@@ -85,6 +111,16 @@ export interface SettingsCallbacks {
 	onWarningsChange: (warnings: WarningSettings) => void;
 	onFusionVerifyChange: (enabled: boolean) => void;
 	onFusionBriefChange: (enabled: boolean) => void;
+	// Optional handlers for the pure-UI settings above. Optional-chained at the
+	// call site so the item toggles are inert (but visible) until the host wires
+	// them to the matching settings-manager setters + any live refresh.
+	onCursorBlinkChange?: (enabled: boolean) => void;
+	onStreamingSmoothingChange?: (enabled: boolean) => void;
+	onEditorClosedBottomChange?: (closed: boolean) => void;
+	onToolActivityChange?: (mode: "grouped" | "legacy") => void;
+	onFooterDensityChange?: (density: "calm" | "full") => void;
+	onCardPaddingXChange?: (padding: number) => void;
+	onAssistantReadingColumnsChange?: (columns: number) => void;
 	onCancel: () => void;
 }
 
@@ -104,8 +140,22 @@ class WarningSettingsSubmenu extends Container {
 			{
 				id: "anthropic-extra-usage",
 				label: "Anthropic extra usage",
-				description: "Warn when Anthropic subscription auth may use paid extra usage",
+				description: "Warn when Anthropic subscription auth may use paid extra usage (default: on)",
 				currentValue: (this.state.anthropicExtraUsage ?? true) ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
+				id: "new-version",
+				label: "New version",
+				description: 'Show a "new version available" banner at startup (default: off)',
+				currentValue: (this.state.newVersion ?? false) ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
+				id: "package-updates",
+				label: "Package updates",
+				description: 'Show a "package updates available" banner at startup (default: off)',
+				currentValue: (this.state.packageUpdates ?? false) ? "true" : "false",
 				values: ["true", "false"],
 			},
 		];
@@ -118,6 +168,14 @@ class WarningSettingsSubmenu extends Container {
 				switch (id) {
 					case "anthropic-extra-usage":
 						this.state = { ...this.state, anthropicExtraUsage: newValue === "true" };
+						onChange({ ...this.state });
+						break;
+					case "new-version":
+						this.state = { ...this.state, newVersion: newValue === "true" };
+						onChange({ ...this.state });
+						break;
+					case "package-updates":
+						this.state = { ...this.state, packageUpdates: newValue === "true" };
 						onChange({ ...this.state });
 						break;
 				}
@@ -216,241 +274,314 @@ export class SettingsSelectorComponent extends Container {
 		const followUpKey = keyDisplayText("app.message.followUp");
 		let currentWarnings = { ...config.warnings };
 
-		const items: SettingItem[] = [
-			{
-				id: "autocompact",
-				label: "Auto-compact",
-				description: "Automatically compact context when it gets too large",
-				currentValue: config.autoCompact ? "true" : "false",
-				values: ["true", "false"],
-			},
-			{
-				id: "steering-mode",
-				label: "Steering mode",
-				description:
-					"Enter while streaming queues steering messages. 'one-at-a-time': deliver one, wait for response. 'all': deliver all at once.",
-				currentValue: config.steeringMode,
-				values: ["one-at-a-time", "all"],
-			},
-			{
-				id: "follow-up-mode",
-				label: "Follow-up mode",
-				description: `${followUpKey} queues follow-up messages until agent stops. 'one-at-a-time': deliver one, wait for response. 'all': deliver all at once.`,
-				currentValue: config.followUpMode,
-				values: ["one-at-a-time", "all"],
-			},
-			{
-				id: "transport",
-				label: "Transport",
-				description: "Preferred transport for providers that support multiple transports",
-				currentValue: config.transport,
-				values: ["sse", "websocket", "websocket-cached", "auto"],
-			},
-			{
-				id: "hide-thinking",
-				label: "Hide thinking",
-				description: "Hide thinking blocks in assistant responses",
-				currentValue: config.hideThinkingBlock ? "true" : "false",
-				values: ["true", "false"],
-			},
-			{
-				id: "quiet-startup",
-				label: "Quiet startup",
-				description: "Disable verbose printing at startup",
-				currentValue: config.quietStartup ? "true" : "false",
-				values: ["true", "false"],
-			},
-			{
-				id: "fusion-verify",
-				label: "Fusion verify",
-				description: "Fact-check advisor claims against the code before the writer (Fusion mode)",
-				currentValue: config.fusionVerify ? "true" : "false",
-				values: ["true", "false"],
-			},
-			{
-				id: "fusion-brief",
-				label: "Fusion brief",
-				description: "Synthesizer rewrites the prompt for advisors before the panel (Fusion mode)",
-				currentValue: config.fusionBrief ? "true" : "false",
-				values: ["true", "false"],
-			},
-			{
-				id: "double-escape-action",
-				label: "Double-escape action",
-				description: "Action when pressing Escape twice with empty editor",
-				currentValue: config.doubleEscapeAction,
-				values: ["tree", "fork", "none"],
-			},
-			{
-				id: "tree-filter-mode",
-				label: "Tree filter mode",
-				description: "Default filter when opening /tree",
-				currentValue: config.treeFilterMode,
-				values: ["default", "no-tools", "user-only", "labeled-only", "all"],
-			},
-			{
-				id: "warnings",
-				label: "Warnings",
-				description: "Enable or disable individual warnings",
-				currentValue: "configure",
-				submenu: (_currentValue, done) =>
-					new WarningSettingsSubmenu(
-						currentWarnings,
-						(warnings) => {
-							currentWarnings = warnings;
-							callbacks.onWarningsChange(warnings);
-						},
-						() => done(),
-					),
-			},
-			{
-				id: "thinking",
-				label: "Thinking level",
-				description: "Reasoning depth for thinking-capable models",
-				currentValue: config.thinkingLevel,
-				submenu: (currentValue, done) =>
-					new SelectSubmenu(
-						"Thinking Level",
-						"Select reasoning depth for thinking-capable models",
-						config.availableThinkingLevels.map((level) => ({
-							value: level,
-							label: level,
-							description: THINKING_DESCRIPTIONS[level],
-						})),
-						currentValue,
-						(value) => {
-							callbacks.onThinkingLevelChange(value as ThinkingLevel);
-							done(value);
-						},
-						() => done(),
-					),
-			},
-			{
-				id: "theme",
-				label: "Theme",
-				description: "Color theme for the interface",
-				currentValue: config.currentTheme,
-				submenu: (currentValue, done) =>
-					new SelectSubmenu(
-						"Theme",
-						"Select color theme",
-						config.availableThemes.map((t) => ({
-							value: t,
-							label: t,
-						})),
-						currentValue,
-						(value) => {
-							callbacks.onThemeChange(value);
-							done(value);
-						},
-						() => {
-							// Restore original theme on cancel
-							callbacks.onThemePreview?.(currentValue);
-							done();
-						},
-						(value) => {
-							// Preview theme on selection change
-							callbacks.onThemePreview?.(value);
-						},
-					),
-			},
-		];
+		// Items are pushed in section order so each `group` stays contiguous and the
+		// SettingsList renders a single header per group. Descriptions carry the
+		// default in "(default: X)" form; hardcoded to keep lines short.
+		const items: SettingItem[] = [];
 
-		// Only show image toggle if terminal supports it
+		// ---- Appearance ----
+		items.push({
+			id: "theme",
+			group: GROUP_APPEARANCE,
+			label: "Theme",
+			description: "Color theme for the interface (default: dark)",
+			currentValue: config.currentTheme,
+			// Reuses the shared SelectorShell (search + shell grammar) inline so the
+			// reachable theme picker gets type-to-filter, matching /theme.
+			submenu: (currentValue, done) => {
+				const themeItems: SelectItem[] = config.availableThemes.map((t) => ({
+					value: t,
+					// Green ✓ marks the theme active when the picker opened.
+					label: t === currentValue ? `${t}${theme.fg("success", " ✓")}` : t,
+				}));
+				const list = new SelectList(themeItems, 10, getSelectListTheme(), THEME_SUBMENU_SELECT_LIST_LAYOUT);
+				const currentIndex = config.availableThemes.indexOf(currentValue);
+				if (currentIndex !== -1) list.setSelectedIndex(currentIndex);
+				list.onSelect = (item) => {
+					callbacks.onThemeChange(item.value);
+					done(item.value);
+				};
+				list.onSelectionChange = (item) => {
+					callbacks.onThemePreview?.(item.value);
+				};
+				return new SelectorShell(list, {
+					title: "Theme",
+					search: true,
+					embedded: true,
+					onCancel: () => {
+						// Restore the original theme on cancel.
+						callbacks.onThemePreview?.(currentValue);
+						done();
+					},
+				});
+			},
+		});
 		if (supportsImages) {
-			// Insert after autocompact
-			items.splice(1, 0, {
+			items.push({
 				id: "show-images",
+				group: GROUP_APPEARANCE,
 				label: "Show images",
-				description: "Render images inline in terminal",
+				description: "Render images inline in terminal (default: on)",
 				currentValue: config.showImages ? "true" : "false",
 				values: ["true", "false"],
 			});
-			items.splice(2, 0, {
+			items.push({
 				id: "image-width-cells",
+				group: GROUP_APPEARANCE,
 				label: "Image width",
-				description: "Preferred inline image width in terminal cells",
+				description: "Preferred inline image width in terminal cells (default: 60)",
 				currentValue: String(config.imageWidthCells),
 				values: ["60", "80", "120"],
 			});
 		}
-
-		// Image auto-resize toggle (always available, affects both attached and read images)
-		items.splice(supportsImages ? 3 : 1, 0, {
-			id: "auto-resize-images",
-			label: "Auto-resize images",
-			description: "Resize large images to 2000x2000 max for better model compatibility",
-			currentValue: config.autoResizeImages ? "true" : "false",
+		items.push({
+			id: "hide-thinking",
+			group: GROUP_APPEARANCE,
+			label: "Hide thinking",
+			description: "Hide thinking blocks in assistant responses (default: off)",
+			currentValue: config.hideThinkingBlock ? "true" : "false",
 			values: ["true", "false"],
 		});
-
-		// Block images toggle (always available, insert after auto-resize-images)
-		const autoResizeIndex = items.findIndex((item) => item.id === "auto-resize-images");
-		items.splice(autoResizeIndex + 1, 0, {
-			id: "block-images",
-			label: "Block images",
-			description: "Prevent images from being sent to LLM providers",
-			currentValue: config.blockImages ? "true" : "false",
-			values: ["true", "false"],
-		});
-
-		// Skill commands toggle (insert after block-images)
-		const blockImagesIndex = items.findIndex((item) => item.id === "block-images");
-		items.splice(blockImagesIndex + 1, 0, {
-			id: "skill-commands",
-			label: "Skill commands",
-			description: "Register skills as /name commands",
-			currentValue: config.enableSkillCommands ? "true" : "false",
-			values: ["true", "false"],
-		});
-
-		// Hardware cursor toggle (insert after skill-commands)
-		const skillCommandsIndex = items.findIndex((item) => item.id === "skill-commands");
-		items.splice(skillCommandsIndex + 1, 0, {
+		items.push({
 			id: "show-hardware-cursor",
+			group: GROUP_APPEARANCE,
 			label: "Show hardware cursor",
-			description: "Show the terminal cursor while still positioning it for IME support",
+			description: "Show the terminal cursor while still positioning it for IME support (default: off)",
 			currentValue: config.showHardwareCursor ? "true" : "false",
 			values: ["true", "false"],
 		});
+		items.push({
+			id: "cursor-blink",
+			group: GROUP_APPEARANCE,
+			label: "Cursor blink",
+			description: "Blink the input editor's block cursor while focused (default: on)",
+			currentValue: (config.cursorBlink ?? true) ? "true" : "false",
+			values: ["true", "false"],
+		});
+		items.push({
+			id: "footer-density",
+			group: GROUP_APPEARANCE,
+			label: "Footer density",
+			description: "Footer layout: calm (minimal) or full power-user (default: calm)",
+			currentValue: config.footerDensity ?? "calm",
+			values: ["calm", "full"],
+		});
+		items.push({
+			id: "card-padding",
+			group: GROUP_APPEARANCE,
+			label: "Card padding",
+			description: "Horizontal padding inside card frames, 0-3 (default: 1)",
+			currentValue: String(config.cardPaddingX ?? 1),
+			values: ["0", "1", "2", "3"],
+		});
+		items.push({
+			id: "assistant-reading-columns",
+			group: GROUP_APPEARANCE,
+			label: "Reading width",
+			description: "Reading-column cap for assistant prose; 0 = full width (default: 120)",
+			currentValue: String(config.assistantReadingColumns ?? 120),
+			values: ["0", "80", "100", "120", "160", "200"],
+		});
 
-		// Editor padding toggle (insert after show-hardware-cursor)
-		const hardwareCursorIndex = items.findIndex((item) => item.id === "show-hardware-cursor");
-		items.splice(hardwareCursorIndex + 1, 0, {
+		// ---- Editor ----
+		items.push({
 			id: "editor-padding",
+			group: GROUP_EDITOR,
 			label: "Editor padding",
-			description: "Horizontal padding for input editor (0-3)",
+			description: "Horizontal padding for input editor, 0-3 (default: 1)",
 			currentValue: String(config.editorPaddingX),
 			values: ["0", "1", "2", "3"],
 		});
-
-		// Autocomplete max visible toggle (insert after editor-padding)
-		const editorPaddingIndex = items.findIndex((item) => item.id === "editor-padding");
-		items.splice(editorPaddingIndex + 1, 0, {
+		items.push({
+			id: "editor-closed-bottom",
+			group: GROUP_EDITOR,
+			label: "Editor closed bottom",
+			description: "Draw a closed frame under the input instead of a single hairline (default: off)",
+			currentValue: (config.editorClosedBottom ?? false) ? "true" : "false",
+			values: ["true", "false"],
+		});
+		items.push({
 			id: "autocomplete-max-visible",
+			group: GROUP_EDITOR,
 			label: "Autocomplete max items",
-			description: "Max visible items in autocomplete dropdown (3-20)",
+			description: "Max visible items in autocomplete dropdown, 3-20 (default: 5)",
 			currentValue: String(config.autocompleteMaxVisible),
 			values: ["3", "5", "7", "10", "15", "20"],
 		});
-
-		// Clear on shrink toggle (insert after autocomplete-max-visible)
-		const autocompleteIndex = items.findIndex((item) => item.id === "autocomplete-max-visible");
-		items.splice(autocompleteIndex + 1, 0, {
-			id: "clear-on-shrink",
-			label: "Clear on shrink",
-			description: "Clear empty rows when content shrinks (may cause flicker)",
-			currentValue: config.clearOnShrink ? "true" : "false",
+		items.push({
+			id: "streaming-smoothing",
+			group: GROUP_EDITOR,
+			label: "Streaming smoothing",
+			description: "Reveal streamed text at a steady rate instead of provider-sized bursts (default: on)",
+			currentValue: (config.streamingSmoothing ?? true) ? "true" : "false",
 			values: ["true", "false"],
 		});
 
-		// Terminal progress toggle (insert after clear-on-shrink)
-		const clearOnShrinkIndex = items.findIndex((item) => item.id === "clear-on-shrink");
-		items.splice(clearOnShrinkIndex + 1, 0, {
+		// ---- Behavior ----
+		items.push({
+			id: "autocompact",
+			group: GROUP_BEHAVIOR,
+			label: "Auto-compact",
+			description: "Automatically compact context when it gets too large (default: on)",
+			currentValue: config.autoCompact ? "true" : "false",
+			values: ["true", "false"],
+		});
+		items.push({
+			id: "steering-mode",
+			group: GROUP_BEHAVIOR,
+			label: "Steering mode",
+			description:
+				"Enter while streaming queues steering messages. 'one-at-a-time': deliver one, wait; 'all': deliver together (default: one-at-a-time)",
+			currentValue: config.steeringMode,
+			values: ["one-at-a-time", "all"],
+		});
+		items.push({
+			id: "follow-up-mode",
+			group: GROUP_BEHAVIOR,
+			label: "Follow-up mode",
+			description: `${followUpKey} queues follow-up messages until agent stops. 'one-at-a-time': deliver one, wait; 'all': deliver together (default: one-at-a-time)`,
+			currentValue: config.followUpMode,
+			values: ["one-at-a-time", "all"],
+		});
+		items.push({
+			id: "double-escape-action",
+			group: GROUP_BEHAVIOR,
+			label: "Double-escape action",
+			description: "Action when pressing Escape twice with empty editor (default: tree)",
+			currentValue: config.doubleEscapeAction,
+			values: ["tree", "fork", "none"],
+		});
+		items.push({
+			id: "tree-filter-mode",
+			group: GROUP_BEHAVIOR,
+			label: "Tree filter mode",
+			description: "Default filter when opening /tree (default: default)",
+			currentValue: config.treeFilterMode,
+			values: ["default", "no-tools", "user-only", "labeled-only", "all"],
+		});
+		items.push({
+			id: "skill-commands",
+			group: GROUP_BEHAVIOR,
+			label: "Skill commands",
+			description: "Register skills as /name commands (default: on)",
+			currentValue: config.enableSkillCommands ? "true" : "false",
+			values: ["true", "false"],
+		});
+		items.push({
+			id: "tool-activity",
+			group: GROUP_BEHAVIOR,
+			label: "Tool activity",
+			description: "Tool call display: grouped activity cards or legacy per-call blocks (default: grouped)",
+			currentValue: config.toolActivity ?? "grouped",
+			values: ["grouped", "legacy"],
+		});
+		items.push({
+			id: "clear-on-shrink",
+			group: GROUP_BEHAVIOR,
+			label: "Clear on shrink",
+			description: "Clear empty rows when content shrinks; may cause flicker (default: off)",
+			currentValue: config.clearOnShrink ? "true" : "false",
+			values: ["true", "false"],
+		});
+		items.push({
 			id: "terminal-progress",
+			group: GROUP_BEHAVIOR,
 			label: "Terminal progress",
-			description: "Show OSC 9;4 progress indicators in the terminal tab bar",
+			description: "Show OSC 9;4 progress indicators in the terminal tab bar (default: off)",
 			currentValue: config.showTerminalProgress ? "true" : "false",
+			values: ["true", "false"],
+		});
+
+		// ---- Models & Providers ----
+		items.push({
+			id: "transport",
+			group: GROUP_MODELS,
+			label: "Transport",
+			description: "Preferred transport for providers that support multiple transports (default: auto)",
+			currentValue: config.transport,
+			values: ["sse", "websocket", "websocket-cached", "auto"],
+		});
+		items.push({
+			id: "thinking",
+			group: GROUP_MODELS,
+			label: "Thinking level",
+			description: "Reasoning depth for thinking-capable models",
+			currentValue: config.thinkingLevel,
+			submenu: (currentValue, done) =>
+				new SelectSubmenu(
+					"Thinking Level",
+					"Select reasoning depth for thinking-capable models",
+					config.availableThinkingLevels.map((level) => ({
+						value: level,
+						label: level,
+						description: THINKING_DESCRIPTIONS[level],
+					})),
+					currentValue,
+					(value) => {
+						callbacks.onThinkingLevelChange(value as ThinkingLevel);
+						done(value);
+					},
+					() => done(),
+				),
+		});
+
+		// ---- Warnings ----
+		items.push({
+			id: "warnings",
+			group: GROUP_WARNINGS,
+			label: "Warnings",
+			description: "Enable or disable individual startup warnings",
+			currentValue: "configure",
+			submenu: (_currentValue, done) =>
+				new WarningSettingsSubmenu(
+					currentWarnings,
+					(warnings) => {
+						currentWarnings = warnings;
+						callbacks.onWarningsChange(warnings);
+					},
+					() => done(),
+				),
+		});
+
+		// ---- Advanced ----
+		items.push({
+			id: "fusion-verify",
+			group: GROUP_ADVANCED,
+			label: "Fusion verify",
+			description: "Fact-check advisor claims against the code before the writer, Fusion mode (default: on)",
+			currentValue: config.fusionVerify ? "true" : "false",
+			values: ["true", "false"],
+		});
+		items.push({
+			id: "fusion-brief",
+			group: GROUP_ADVANCED,
+			label: "Fusion brief",
+			description: "Synthesizer rewrites the prompt for advisors before the panel, Fusion mode (default: on)",
+			currentValue: config.fusionBrief ? "true" : "false",
+			values: ["true", "false"],
+		});
+		items.push({
+			id: "auto-resize-images",
+			group: GROUP_ADVANCED,
+			label: "Auto-resize images",
+			description: "Resize large images to 2000x2000 max for better model compatibility (default: on)",
+			currentValue: config.autoResizeImages ? "true" : "false",
+			values: ["true", "false"],
+		});
+		items.push({
+			id: "block-images",
+			group: GROUP_ADVANCED,
+			label: "Block images",
+			description: "Prevent images from being sent to LLM providers (default: off)",
+			currentValue: config.blockImages ? "true" : "false",
+			values: ["true", "false"],
+		});
+		items.push({
+			id: "quiet-startup",
+			group: GROUP_ADVANCED,
+			label: "Quiet startup",
+			description: "Disable verbose printing at startup (default: off)",
+			currentValue: config.quietStartup ? "true" : "false",
 			values: ["true", "false"],
 		});
 
@@ -523,6 +654,29 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "terminal-progress":
 						callbacks.onShowTerminalProgressChange(newValue === "true");
+						break;
+					// Pure-UI settings — optional-chained so they stay inert (but
+					// visible) until the host wires the matching setters.
+					case "cursor-blink":
+						callbacks.onCursorBlinkChange?.(newValue === "true");
+						break;
+					case "streaming-smoothing":
+						callbacks.onStreamingSmoothingChange?.(newValue === "true");
+						break;
+					case "editor-closed-bottom":
+						callbacks.onEditorClosedBottomChange?.(newValue === "true");
+						break;
+					case "tool-activity":
+						callbacks.onToolActivityChange?.(newValue as "grouped" | "legacy");
+						break;
+					case "footer-density":
+						callbacks.onFooterDensityChange?.(newValue as "calm" | "full");
+						break;
+					case "card-padding":
+						callbacks.onCardPaddingXChange?.(parseInt(newValue, 10));
+						break;
+					case "assistant-reading-columns":
+						callbacks.onAssistantReadingColumnsChange?.(parseInt(newValue, 10));
 						break;
 				}
 			},

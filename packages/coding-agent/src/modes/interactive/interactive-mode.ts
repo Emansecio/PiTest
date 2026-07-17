@@ -95,7 +95,7 @@ export function extractChromeCommand(text: string): { matched: boolean; rest: st
 
 import { modeDisplayLabel } from "../../core/built-ins/permissions-extension.ts";
 import { getCurrentHindsightBank } from "../../core/hindsight/index.ts";
-import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
+import { type AppKeybinding, getKeybindingsLoadWarnings, KeybindingsManager } from "../../core/keybindings.ts";
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import { isHiddenModelProvider } from "../../core/model-registry.ts";
 import {
@@ -120,7 +120,7 @@ import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { type SessionContext, SessionManager } from "../../core/session-manager.ts";
 import type { ResolvedSkillDiscoverySettings } from "../../core/settings-manager.ts";
-import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
+import { BUILTIN_SLASH_COMMANDS, buildGroupedSlashHelp } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import {
@@ -146,6 +146,7 @@ import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
 import { ComposerChrome } from "./components/composer-chrome.ts";
+import { ConfigSelectorComponent } from "./components/config-selector.ts";
 import {
 	formatContextFilesHeader,
 	formatLoadedSectionHeader,
@@ -185,6 +186,7 @@ import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import { reducedMotionLoaderIndicator } from "./components/spinner-ticker.ts";
 import { StartupScreen } from "./components/startup-screen.ts";
+import { ThemeSelectorComponent } from "./components/theme-selector.ts";
 import { createTodoOverlay, type TodoOverlay } from "./components/todo-overlay.ts";
 import { workingPhaseLabel } from "./components/tool-activity.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
@@ -741,6 +743,7 @@ export class InteractiveMode {
 		const slashCommands: SlashCommand[] = BUILTIN_SLASH_COMMANDS.map((command) => ({
 			name: command.name,
 			description: command.description,
+			...(command.argumentHint && { argumentHint: command.argumentHint }),
 		}));
 		// Built-ins flagged `hidden` stay "known" (dispatched when typed, still shadow
 		// same-named extension/skill commands) but are dropped from the "/" menu.
@@ -752,13 +755,19 @@ export class InteractiveMode {
 		const modelCommand = slashCommands.find((command) => command.name === "model");
 		if (modelCommand) {
 			modelCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null => {
+				// Roles are first-class `/model` arguments (`/model plan`, `/model smol`)
+				// but were invisible in completion. Offer matching role names first.
+				const roleItems: AutocompleteItem[] = MODEL_ROLES.filter((role) =>
+					role.toLowerCase().includes(prefix.toLowerCase()),
+				).map((role) => ({ value: role, label: role, description: "role" }));
+
 				// Get available models (scoped or from registry)
 				const models =
 					this.session.scopedModels.length > 0
 						? this.session.modelRegistry.filterScopedModels(this.session.scopedModels).map((s) => s.model)
 						: this.session.modelRegistry.getAvailable();
 
-				if (models.length === 0) return null;
+				if (models.length === 0) return roleItems.length > 0 ? roleItems : null;
 
 				// Create items with provider/id format
 				const items = models.map((m) => ({
@@ -770,13 +779,14 @@ export class InteractiveMode {
 				// Fuzzy filter by model ID + provider (allows "opus anthropic" to match)
 				const filtered = fuzzyFilter(items, prefix, (item) => `${item.id} ${item.provider}`);
 
-				if (filtered.length === 0) return null;
-
-				return filtered.map((item) => ({
+				const modelItems: AutocompleteItem[] = filtered.map((item) => ({
 					value: item.label,
 					label: item.id,
 					description: item.provider,
 				}));
+
+				const combined = [...roleItems, ...modelItems];
+				return combined.length > 0 ? combined : null;
 			};
 		}
 
@@ -870,62 +880,18 @@ export class InteractiveMode {
 		this.headerContainer.addChild(this.startupContainer);
 
 		// Verbose startup hints + rotating tip — suppressed under quietStartup.
+		// Shown for the vanilla product (APP_NAME === "pit") too: the header used to
+		// be silenced there, which left the real product with an empty banner.
 		const isResumed = this.session.state.messages.length > 0;
-		if (APP_NAME !== "pit" && (this.options.verbose || !this.settingsManager.getQuietStartup())) {
-			// Build startup instructions using keybinding hint helpers
-			const hint = (keybinding: AppKeybinding, description: string) => keyHint(keybinding, description);
-
-			const expandedInstructions = [
-				hint("app.interrupt", "to interrupt"),
-				hint("app.clear", "to clear"),
-				rawKeyHint(`${keyText("app.clear")} twice`, "to exit"),
-				hint("app.exit", "to exit (empty)"),
-				hint("app.suspend", "to suspend"),
-				keyHint("tui.editor.deleteToLineEnd", "to delete to end"),
-				hint("app.thinking.cycle", "to cycle thinking level"),
-				rawKeyHint(`${keyText("app.model.cycleForward")}/${keyText("app.model.cycleBackward")}`, "to cycle models"),
-				hint("app.model.select", "to select model"),
-				hint("app.tools.expand", "to expand tools"),
-				hint("app.thinking.toggle", "to expand thinking"),
-				hint("app.editor.external", "for external editor"),
-				rawKeyHint("/", "for commands"),
-				rawKeyHint("!", "to run bash"),
-				rawKeyHint("!!", "to run bash (no context)"),
-				hint("app.message.followUp", "to queue follow-up"),
-				hint("app.message.dequeue", "to edit all queued messages"),
-				hint("app.clipboard.pasteImage", "to paste image"),
-				rawKeyHint("drop files", "to attach"),
-			].join("\n");
-			// Compact = a short essentials line + (first-run only) one rotating tip,
-			// instead of the old wall of shortcuts. The full list stays one expand away.
-			const essentials = [
-				rawKeyHint("/", "commands"),
-				rawKeyHint("!", "bash"),
-				hint("app.tools.expand", "more"),
-			].join(theme.fg("muted", HINT_SEPARATOR));
-			const startupTips = [
-				"drag files into the terminal to attach them",
-				`${keyText("app.model.cycleForward")} cycles models · ${keyText("app.model.select")} picks one`,
-				`/fusion pairs two advisors · ${keyText("app.permission.cycle")} cycles plan/auto/fusion`,
-				`ask "how does ${APP_NAME} work?" — it can explain and extend itself`,
-				`${keyText("app.editor.external")} opens your editor for long prompts`,
-				`${keyText("app.thinking.cycle")} cycles the thinking level`,
-				"paste an image to include it in your message",
-				`${keyText("app.message.followUp")} queues a follow-up while it works`,
-			];
-			const tip = theme.fg("dim", `tip: ${startupTips[Math.floor(Math.random() * startupTips.length)]}`);
-			const onboarding = theme.fg(
-				"dim",
-				`${APP_NAME} can explain its own features and look up its docs. Ask it how to use or extend ${APP_NAME}.`,
-			);
+		const headerText = this.buildStartupHeaderText(isResumed);
+		if (headerText) {
 			this.builtInHeader = new ExpandableText(
-				() => (isResumed ? essentials : `${essentials}\n${tip}`),
-				() => `${expandedInstructions}\n\n${onboarding}`,
+				headerText.collapsed,
+				headerText.expanded,
 				this.getStartupExpansionState(),
 				1,
 				0,
 			);
-
 			// Verbose hints render below the identity block.
 			this.headerContainer.addChild(this.builtInHeader);
 		} else {
@@ -936,6 +902,13 @@ export class InteractiveMode {
 		// No trailing spacer: every chat block (MessageShell) and loaded-resource
 		// section brings its own leading blank, so a header-owned gap doubled up
 		// into two dead lines between the banner and the first content.
+
+		// Keybindings load problems (parse failure, dropped entries, conflicts)
+		// used to be swallowed — surface them once at startup so a broken
+		// keybindings.json doesn't silently fall back to defaults.
+		for (const warning of getKeybindingsLoadWarnings()) {
+			this.showWarning(warning);
+		}
 
 		this.ui.addChild(this.chatVisibilityContainer);
 		this.ui.addChild(this.pendingMessagesContainer);
@@ -1201,6 +1174,66 @@ export class InteractiveMode {
 			this.ui.requestRender();
 		}, THEME_PREVIEW_INVALIDATE_MS);
 		(this._themePreviewInvalidateTimer as { unref?: () => void }).unref?.();
+	}
+
+	/**
+	 * Build the collapsed/expanded closures for the startup hint header, or return
+	 * null when hints are suppressed (quietStartup and not --verbose). Shown for
+	 * every app name including vanilla "pit". Extracted from `initialize()` so the
+	 * gating + text is unit-testable without a full session.
+	 */
+	private buildStartupHeaderText(isResumed: boolean): { collapsed: () => string; expanded: () => string } | null {
+		if (!(this.options.verbose || !this.settingsManager.getQuietStartup())) {
+			return null;
+		}
+		// Build startup instructions using keybinding hint helpers
+		const hint = (keybinding: AppKeybinding, description: string) => keyHint(keybinding, description);
+
+		const expandedInstructions = [
+			hint("app.interrupt", "to interrupt"),
+			hint("app.clear", "to clear"),
+			rawKeyHint(`${keyText("app.clear")} twice`, "to exit"),
+			hint("app.exit", "to exit (empty)"),
+			hint("app.suspend", "to suspend"),
+			keyHint("tui.editor.deleteToLineEnd", "to delete to end"),
+			hint("app.thinking.cycle", "to cycle thinking level"),
+			rawKeyHint(`${keyText("app.model.cycleForward")}/${keyText("app.model.cycleBackward")}`, "to cycle models"),
+			hint("app.model.select", "to select model"),
+			hint("app.tools.expand", "to expand tools"),
+			hint("app.thinking.toggle", "to expand thinking"),
+			hint("app.editor.external", "for external editor"),
+			rawKeyHint("/", "for commands"),
+			rawKeyHint("!", "to run bash"),
+			rawKeyHint("!!", "to run bash (no context)"),
+			hint("app.message.followUp", "to queue follow-up"),
+			hint("app.message.dequeue", "to edit all queued messages"),
+			hint("app.clipboard.pasteImage", "to paste image"),
+			rawKeyHint("drop files", "to attach"),
+		].join("\n");
+		// Compact = a short essentials line + (first-run only) one rotating tip,
+		// instead of the old wall of shortcuts. The full list stays one expand away.
+		const essentials = [rawKeyHint("/", "commands"), rawKeyHint("!", "bash"), hint("app.tools.expand", "more")].join(
+			theme.fg("muted", HINT_SEPARATOR),
+		);
+		const startupTips = [
+			"drag files into the terminal to attach them",
+			`${keyText("app.model.cycleForward")} cycles models · ${keyText("app.model.select")} picks one`,
+			`/fusion pairs two advisors · ${keyText("app.permission.cycle")} cycles plan/auto/fusion`,
+			`ask "how does ${APP_NAME} work?" — it can explain and extend itself`,
+			`${keyText("app.editor.external")} opens your editor for long prompts`,
+			`${keyText("app.thinking.cycle")} cycles the thinking level`,
+			"paste an image to include it in your message",
+			`${keyText("app.message.followUp")} queues a follow-up while it works`,
+		];
+		const tip = theme.fg("dim", `tip: ${startupTips[Math.floor(Math.random() * startupTips.length)]}`);
+		const onboarding = theme.fg(
+			"dim",
+			`${APP_NAME} can explain its own features and look up its docs. Ask it how to use or extend ${APP_NAME}.`,
+		);
+		return {
+			collapsed: () => (isResumed ? essentials : `${essentials}\n${tip}`),
+			expanded: () => `${expandedInstructions}\n\n${onboarding}`,
+		};
 	}
 
 	private getMarkdownThemeWithSettings(): MarkdownTheme {
@@ -3038,6 +3071,10 @@ export class InteractiveMode {
 			showStatus: (line) => this.showStatus(line),
 			getTodoSummaryText: () => this.session.todoSummaryText(),
 			showSettingsSelector: () => this.showSettingsSelector(),
+			showThemeSelector: () => this.showThemeSelector(),
+			showConfigSelector: () => this.showConfigSelector(),
+			showTreeSelector: () => this.showTreeSelector(),
+			showUserMessageSelector: () => this.showUserMessageSelector(),
 			handleSessionCommand: () => this.handleSessionCommand(),
 			handleCacheStatusCommand: () => this.handleCacheStatusCommand(),
 			handleDiagnosticsCommand: () => this.handleDiagnosticsCommand(),
@@ -5440,6 +5477,13 @@ export class InteractiveMode {
 					warnings: this.settingsManager.getWarnings(),
 					fusionVerify: this.settingsManager.getFusionSettings().verify,
 					fusionBrief: this.settingsManager.getFusionSettings().brief,
+					cursorBlink: this.settingsManager.getCursorBlink(),
+					streamingSmoothing: this.settingsManager.getStreamingSmoothing(),
+					editorClosedBottom: this.settingsManager.getEditorClosedBottom(),
+					toolActivity: this.settingsManager.getToolActivity(),
+					footerDensity: this.settingsManager.getFooterDensity(),
+					cardPaddingX: this.settingsManager.getCardPaddingX(),
+					assistantReadingColumns: this.settingsManager.getAssistantReadingColumns(),
 				},
 				{
 					onAutoCompactChange: (enabled) => {
@@ -5551,6 +5595,36 @@ export class InteractiveMode {
 					onFusionBriefChange: (enabled) => {
 						this.settingsManager.setFusionFlags({ brief: enabled });
 					},
+					onCursorBlinkChange: (enabled) => {
+						this.settingsManager.setCursorBlink(enabled);
+						this.defaultEditor.setCursorBlink(enabled);
+					},
+					onStreamingSmoothingChange: (enabled) => {
+						// Read per assistant message at render time — persisting is enough;
+						// the next message picks it up.
+						this.settingsManager.setStreamingSmoothing(enabled);
+					},
+					onEditorClosedBottomChange: (closed) => {
+						// Read at editor construction — applies from the next session.
+						this.settingsManager.setEditorClosedBottom(closed);
+					},
+					onToolActivityChange: (mode) => {
+						// Read per tool event at render time — future activity uses the new mode.
+						this.settingsManager.setToolActivity(mode);
+					},
+					onFooterDensityChange: (density) => {
+						this.settingsManager.setFooterDensity(density);
+						this.footer.setDensity(density);
+						this.ui.requestRender();
+					},
+					onCardPaddingXChange: (padding) => {
+						// Read at component construction — future cards use the new padding.
+						this.settingsManager.setCardPaddingX(padding);
+					},
+					onAssistantReadingColumnsChange: (columns) => {
+						// Read per assistant message — the next message picks it up.
+						this.settingsManager.setAssistantReadingColumns(columns);
+					},
 					onCancel: () => {
 						done();
 						this.ui.requestRender();
@@ -5558,6 +5632,85 @@ export class InteractiveMode {
 				},
 			);
 			return { component: selector, focus: selector.getSettingsList() };
+		});
+	}
+
+	/**
+	 * `/theme` — standalone theme picker with live preview. Selecting commits the
+	 * theme (mirrors the settings-selector `onThemeChange` path); Esc reverts to
+	 * whatever was active when the picker opened.
+	 */
+	private showThemeSelector(): void {
+		const currentTheme = this.settingsManager.getTheme() || "dark";
+		this.showSelector((done) => {
+			const selector = new ThemeSelectorComponent(
+				currentTheme,
+				(themeName) => {
+					const result = setTheme(themeName, true);
+					this.settingsManager.setTheme(themeName);
+					this.ui.invalidate();
+					this.invalidateLoaderInterruptSuffix();
+					this._cachedMarkdownTheme = undefined;
+					done();
+					if (!result.success) {
+						this.showError(`Failed to load theme "${themeName}": ${result.error}\nFell back to dark theme.`);
+					}
+					this.ui.requestRender();
+				},
+				() => {
+					// Esc: revert to the theme active when the picker opened.
+					setTheme(currentTheme, true);
+					this._cachedMarkdownTheme = undefined;
+					this.invalidateLoaderInterruptSuffix();
+					this.ui.invalidate();
+					done();
+					this.ui.requestRender();
+				},
+				(themeName) => this.previewTheme(themeName),
+				this.ui,
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
+	/**
+	 * `/config` — the Resource Configuration selector (enable/disable extensions,
+	 * skills, prompts, themes), the same component the `pit config` CLI shows.
+	 * Resolve the package paths first (async), then host it in place of the editor
+	 * like the other in-session selectors. In-session there is no process to exit,
+	 * so `onExit` just closes like `onClose`.
+	 */
+	private async showConfigSelector(): Promise<void> {
+		let resolvedPaths: Awaited<ReturnType<DefaultPackageManager["resolve"]>>;
+		try {
+			const packageManager = new DefaultPackageManager({
+				cwd: this.sessionManager.getCwd(),
+				agentDir: getAgentDir(),
+				settingsManager: this.settingsManager,
+			});
+			resolvedPaths = await packageManager.resolve();
+		} catch (error) {
+			this.showError(`Failed to load configuration: ${errMsg(error)}`);
+			return;
+		}
+		this.showSelector((done) => {
+			const selector = new ConfigSelectorComponent(
+				resolvedPaths,
+				this.settingsManager,
+				this.sessionManager.getCwd(),
+				getAgentDir(),
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+				() => this.ui.requestRender(),
+				() => this.ui.terminal.rows,
+			);
+			return { component: selector, focus: selector.getResourceList() };
 		});
 	}
 
@@ -5601,6 +5754,9 @@ export class InteractiveMode {
 			return;
 		}
 
+		// Nothing matched exactly (not a role, not a model id/provider) — fall back
+		// to the filtered picker, but say so instead of silently swapping the editor.
+		this.showStatus(`No exact match for "${searchTerm}" — opening picker`);
 		this.showModelSelector(searchTerm);
 	}
 
@@ -7061,12 +7217,7 @@ export class InteractiveMode {
 	}
 
 	private handleHelpCommand(): void {
-		const visible = BUILTIN_SLASH_COMMANDS.filter((command) => !command.hidden);
-		const rows = visible.map((command) => `| \`/${command.name}\` | ${command.description} |`).join("\n");
-		const help = `**Slash commands**
-| Command | Description |
-|---------|-------------|
-${rows}
+		const help = `${buildGroupedSlashHelp(BUILTIN_SLASH_COMMANDS)}
 
 Type \`/hotkeys\` for keyboard shortcuts.`;
 
@@ -7125,6 +7276,23 @@ Type \`/hotkeys\` for keyboard shortcuts.`;
 		const pasteImage = this.getAppKeyDisplay("app.clipboard.pasteImage");
 		const cyclePermission = this.getAppKeyDisplay("app.permission.cycle");
 
+		// Session-tree / -selector keybindings (active inside /tree, /fork, /resume).
+		const treeRename = this.getAppKeyDisplay("app.session.rename");
+		const treeDelete = this.getAppKeyDisplay("app.session.delete");
+		const treeEditLabel = this.getAppKeyDisplay("app.tree.editLabel");
+		const treeToggleTimestamp = this.getAppKeyDisplay("app.tree.toggleLabelTimestamp");
+		const treeFold = this.getAppKeyDisplay("app.tree.foldOrUp");
+		const treeUnfold = this.getAppKeyDisplay("app.tree.unfoldOrDown");
+		const treeFilterCycleForward = this.getAppKeyDisplay("app.tree.filter.cycleForward");
+		const treeFilterCycleBackward = this.getAppKeyDisplay("app.tree.filter.cycleBackward");
+
+		// Tilde-ify the keybindings path for a compact "Customize" footer line.
+		const agentDir = getAgentDir();
+		const home = os.homedir();
+		const keybindingsPath = `${
+			agentDir.startsWith(home) ? `~${agentDir.slice(home.length)}` : agentDir
+		}/keybindings.json`.replace(/\\/g, "/");
+
 		let hotkeys = `
 **Navigation**
 | Key | Action |
@@ -7174,6 +7342,18 @@ Type \`/hotkeys\` for keyboard shortcuts.`;
 | \`/\` | Slash commands |
 | \`!\` | Run bash command |
 | \`!!\` | Run bash command (excluded from context) |
+
+**Session tree** (inside \`/tree\`, \`/fork\`, \`/resume\`)
+| Key | Action |
+|-----|--------|
+| \`${treeFold}\` / \`${treeUnfold}\` | Fold / unfold branch (or move up / down) |
+| \`${treeEditLabel}\` | Edit the entry label |
+| \`${treeToggleTimestamp}\` | Toggle label timestamps |
+| \`${treeFilterCycleForward}\` / \`${treeFilterCycleBackward}\` | Cycle tree filter (default/no-tools/user-only/labeled/all) |
+| \`${treeRename}\` | Rename session |
+| \`${treeDelete}\` | Delete session |
+
+Customize: \`${keybindingsPath}\` — \`/reload\` to apply.
 `;
 
 		// Add extension-registered shortcuts

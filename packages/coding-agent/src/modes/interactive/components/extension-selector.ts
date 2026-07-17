@@ -55,7 +55,8 @@ export class ExtensionSelectorComponent extends Container {
 		const card = new SelectorCard();
 		card.addChild(new Spacer(1));
 
-		this.titleText = new Text(theme.fg("accent", theme.bold(title)), 1, 0);
+		// Muted bold title to match the shared SelectorShell heading (selector-shell.ts).
+		this.titleText = new Text(theme.bold(theme.fg("muted", title)), 1, 0);
 		card.addChild(this.titleText);
 		card.addChild(new Spacer(1));
 
@@ -63,7 +64,7 @@ export class ExtensionSelectorComponent extends Container {
 			this.countdown = new CountdownTimer(
 				opts.timeout,
 				opts.tui,
-				(s) => this.titleText.setText(theme.fg("accent", theme.bold(`${this.baseTitle} (${s}s)`))),
+				(s) => this.titleText.setText(theme.bold(theme.fg("muted", `${this.baseTitle} (${s}s)`))),
 				() => this.onCancelCallback(),
 			);
 		}
@@ -91,6 +92,11 @@ export class ExtensionSelectorComponent extends Container {
 	private updateList(): void {
 		this.listContainer.clear();
 
+		if (this.options.length === 0) {
+			this.listContainer.addChild(new Text(theme.fg("muted", "No options"), 1, 0));
+			return;
+		}
+
 		const startIndex = Math.max(
 			0,
 			Math.min(this.selectedIndex - Math.floor(MAX_VISIBLE / 2), this.options.length - MAX_VISIBLE),
@@ -115,10 +121,30 @@ export class ExtensionSelectorComponent extends Container {
 		if (kb.matches(keyData, "app.tools.expand")) {
 			this.onToggleToolsExpanded?.();
 		} else if (kb.matches(keyData, "tui.select.up") || keyData === "k") {
-			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+			// Wrap-around, matching every other selector.
+			if (this.options.length === 0) return;
+			this.selectedIndex = this.selectedIndex === 0 ? this.options.length - 1 : this.selectedIndex - 1;
 			this.updateList();
 		} else if (kb.matches(keyData, "tui.select.down") || keyData === "j") {
-			this.selectedIndex = Math.min(this.options.length - 1, this.selectedIndex + 1);
+			if (this.options.length === 0) return;
+			this.selectedIndex = this.selectedIndex === this.options.length - 1 ? 0 : this.selectedIndex + 1;
+			this.updateList();
+		} else if (kb.matches(keyData, "tui.select.pageUp")) {
+			// Jump one window toward the top, clamped (no wrap).
+			if (this.options.length === 0) return;
+			this.selectedIndex = Math.max(0, this.selectedIndex - MAX_VISIBLE);
+			this.updateList();
+		} else if (kb.matches(keyData, "tui.select.pageDown")) {
+			if (this.options.length === 0) return;
+			this.selectedIndex = Math.min(this.options.length - 1, this.selectedIndex + MAX_VISIBLE);
+			this.updateList();
+		} else if (kb.matches(keyData, "tui.select.home")) {
+			if (this.options.length === 0) return;
+			this.selectedIndex = 0;
+			this.updateList();
+		} else if (kb.matches(keyData, "tui.select.end")) {
+			if (this.options.length === 0) return;
+			this.selectedIndex = this.options.length - 1;
 			this.updateList();
 		} else if (kb.matches(keyData, "tui.select.confirm") || keyData === "\n") {
 			const selected = this.options[this.selectedIndex];

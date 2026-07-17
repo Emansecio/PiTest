@@ -30,6 +30,12 @@ export interface SelectorShellOptions {
 	 * `clamp(rows - 12, 5, 15)`. Also used to request re-renders after input.
 	 */
 	tui?: TUI;
+	/**
+	 * Render inline without the rounded {@link SelectorCard} and external spacer.
+	 * Used when the shell is nested inside another framed surface (e.g. a
+	 * {@link SettingsList} submenu) so the two card frames don't stack.
+	 */
+	embedded?: boolean;
 }
 
 export class SelectorShell extends Container implements Focusable {
@@ -61,7 +67,9 @@ export class SelectorShell extends Container implements Focusable {
 			this.selectList.setMaxVisible(clamp(this.tui.terminal.rows - 12, 5, 15));
 		}
 
-		const card = new SelectorCard();
+		// Embedded: render inline (the parent surface supplies the frame). Otherwise
+		// wrap in the rounded card with the uniform external spacer.
+		const card = options.embedded ? this : new SelectorCard();
 		card.addChild(new Spacer(1));
 
 		if (options.title) {
@@ -84,10 +92,12 @@ export class SelectorShell extends Container implements Focusable {
 		}
 
 		card.addChild(this.selectList);
-		card.addChild(new Spacer(1));
-		// Uniform breathing room above the card (matches session/tree/config).
-		this.addChild(new Spacer(1));
-		this.addChild(card);
+		if (!options.embedded) {
+			card.addChild(new Spacer(1));
+			// Uniform breathing room above the card (matches session/tree/config).
+			this.addChild(new Spacer(1));
+			this.addChild(card);
+		}
 	}
 
 	handleInput(keyData: string): void {

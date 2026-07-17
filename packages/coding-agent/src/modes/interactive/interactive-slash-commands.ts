@@ -15,6 +15,10 @@ export interface SlashCommandHost {
 	showStatus(text: string): void;
 	getTodoSummaryText(): string;
 	showSettingsSelector(): void | Promise<void>;
+	showThemeSelector(): void | Promise<void>;
+	showConfigSelector(): void | Promise<void>;
+	showTreeSelector(): void | Promise<void>;
+	showUserMessageSelector(): void | Promise<void>;
 	handleSessionCommand(): void | Promise<void>;
 	handleCacheStatusCommand(): void | Promise<void>;
 	handleDiagnosticsCommand(): void | Promise<void>;
@@ -47,6 +51,10 @@ export const DISPATCHED_SLASH_COMMAND_NAMES = [
 	"goal",
 	"todos",
 	"settings",
+	"theme",
+	"config",
+	"tree",
+	"fork",
 	"session",
 	"cache-status",
 	"diagnostics",
@@ -64,6 +72,10 @@ export const DISPATCHED_SLASH_COMMAND_NAMES = [
 
 export const exactSlashCommands = new Map<string, (host: SlashCommandHost) => void | Promise<void>>([
 	["/settings", (host) => host.showSettingsSelector()],
+	["/theme", (host) => host.showThemeSelector()],
+	["/config", (host) => host.showConfigSelector()],
+	["/tree", (host) => host.showTreeSelector()],
+	["/fork", (host) => host.showUserMessageSelector()],
 	["/session", (host) => host.handleSessionCommand()],
 	["/cache-status", (host) => host.handleCacheStatusCommand()],
 	["/diagnostics", (host) => host.handleDiagnosticsCommand()],

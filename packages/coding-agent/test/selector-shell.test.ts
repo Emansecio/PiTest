@@ -7,6 +7,11 @@
 import { SelectList } from "@pit/tui";
 import { beforeAll, describe, expect, it } from "vitest";
 import { SelectorShell } from "../src/modes/interactive/components/selector-shell.js";
+import {
+	type SettingsCallbacks,
+	type SettingsConfig,
+	SettingsSelectorComponent,
+} from "../src/modes/interactive/components/settings-selector.js";
 import { ThemeSelectorComponent } from "../src/modes/interactive/components/theme-selector.js";
 import { ThinkingSelectorComponent } from "../src/modes/interactive/components/thinking-selector.js";
 import { getAvailableThemes, getSelectListTheme, initTheme } from "../src/modes/interactive/theme/theme.js";
@@ -153,5 +158,102 @@ describe("ThinkingSelectorComponent", () => {
 		);
 		selector.handleInput("2");
 		expect(selected).toBe("low");
+	});
+});
+
+const NOOP_CALLBACKS: SettingsCallbacks = {
+	onAutoCompactChange: () => {},
+	onShowImagesChange: () => {},
+	onImageWidthCellsChange: () => {},
+	onAutoResizeImagesChange: () => {},
+	onBlockImagesChange: () => {},
+	onEnableSkillCommandsChange: () => {},
+	onSteeringModeChange: () => {},
+	onFollowUpModeChange: () => {},
+	onTransportChange: () => {},
+	onThinkingLevelChange: () => {},
+	onThemeChange: () => {},
+	onHideThinkingBlockChange: () => {},
+	onDoubleEscapeActionChange: () => {},
+	onTreeFilterModeChange: () => {},
+	onShowHardwareCursorChange: () => {},
+	onEditorPaddingXChange: () => {},
+	onAutocompleteMaxVisibleChange: () => {},
+	onQuietStartupChange: () => {},
+	onClearOnShrinkChange: () => {},
+	onShowTerminalProgressChange: () => {},
+	onWarningsChange: () => {},
+	onFusionVerifyChange: () => {},
+	onFusionBriefChange: () => {},
+	onCancel: () => {},
+};
+
+function makeSettingsConfig(overrides: Partial<SettingsConfig> = {}): SettingsConfig {
+	return {
+		autoCompact: true,
+		showImages: true,
+		imageWidthCells: 60,
+		autoResizeImages: true,
+		blockImages: false,
+		enableSkillCommands: true,
+		steeringMode: "one-at-a-time",
+		followUpMode: "one-at-a-time",
+		transport: "auto",
+		thinkingLevel: "off",
+		availableThinkingLevels: ["off", "low", "high"],
+		currentTheme: "dark",
+		availableThemes: ["dark", "light", "dracula", "nord"],
+		hideThinkingBlock: false,
+		doubleEscapeAction: "tree",
+		treeFilterMode: "default",
+		showHardwareCursor: false,
+		editorPaddingX: 1,
+		autocompleteMaxVisible: 5,
+		quietStartup: false,
+		clearOnShrink: false,
+		showTerminalProgress: false,
+		warnings: {},
+		fusionVerify: true,
+		fusionBrief: true,
+		...overrides,
+	};
+}
+
+describe("SettingsSelectorComponent", () => {
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
+	it("renders section headers for the grouped list", () => {
+		const selector = new SettingsSelectorComponent(makeSettingsConfig(), NOOP_CALLBACKS);
+		// The list is scrollable; the top of the window is the Appearance group.
+		expect(plainRender(selector.getSettingsList(), 80)).toContain("Appearance");
+	});
+
+	it("shows the new pure-UI settings with their defaults", () => {
+		const cases: Array<[string, string, string]> = [
+			["cursor", "Cursor blink", "(default: on)"],
+			["reading", "Reading width", "(default: 120)"],
+			["footer", "Footer density", "(default: calm)"],
+			["tool activity", "Tool activity", "(default: grouped)"],
+		];
+		for (const [query, label, def] of cases) {
+			const list = new SettingsSelectorComponent(makeSettingsConfig(), NOOP_CALLBACKS).getSettingsList();
+			for (const ch of query) list.handleInput(ch);
+			const joined = plainRender(list, 80);
+			expect(joined).toContain(label);
+			expect(joined).toContain(def);
+		}
+	});
+
+	it("gives the reachable theme submenu type-to-filter search", () => {
+		const list = new SettingsSelectorComponent(makeSettingsConfig(), NOOP_CALLBACKS).getSettingsList();
+		// Theme is the first item (Appearance group); Enter opens the shell submenu.
+		list.handleInput("\r");
+		// Typing filters the theme list via the shared shell grammar.
+		list.handleInput("n");
+		const joined = plainRender(list, 80);
+		expect(joined).toContain("nord");
+		expect(joined).not.toContain("light");
 	});
 });
