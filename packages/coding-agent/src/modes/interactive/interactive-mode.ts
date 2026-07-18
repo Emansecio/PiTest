@@ -603,7 +603,6 @@ export class InteractiveMode {
 	// lets every other keystroke fall through to the composer (implicit Cancel).
 	private sendNowChooserContainer!: Container;
 	private sendNowChooser: SendNowChooser | undefined = undefined;
-	private sendNowChooserText: string | undefined = undefined;
 	private sendNowChooserUnsub: (() => void) | undefined = undefined;
 
 	// Custom footer from extension (undefined = use built-in footer)
@@ -1237,7 +1236,8 @@ export class InteractiveMode {
 			rawKeyHint("/", "for commands"),
 			rawKeyHint("!", "to run bash"),
 			rawKeyHint("!!", "to run bash (no context)"),
-			hint("app.message.followUp", "to queue follow-up"),
+			rawKeyHint("enter", "during a turn: send now / queue chooser"),
+			hint("app.message.followUp", "to queue directly (skips chooser)"),
 			hint("app.message.dequeue", "to edit all queued messages"),
 			hint("app.clipboard.pasteImage", "to paste image"),
 			rawKeyHint("drop files", "to attach"),
@@ -3184,7 +3184,7 @@ export class InteractiveMode {
 				return;
 			case "clear":
 				this.session.clearGoal();
-				this.showStatus("🎯 Goal cleared.");
+				this.showStatus("Goal cleared");
 				return;
 			case "edit": {
 				const objective = parts.slice(1).join(" ").trim();
@@ -3246,13 +3246,13 @@ export class InteractiveMode {
 				source: { toolName: "goal" },
 			});
 			if (answer.cancelled || answer.picked[0] !== "Replace") {
-				this.showStatus("Kept the current goal.");
+				this.showStatus("Kept the current goal");
 				return;
 			}
 		}
 
 		this.session.startGoal(objective, { tokenBudget });
-		this.showStatus(`🎯 Goal started${budgetLabel}: ${objective}`);
+		this.showStatus(`Goal started${budgetLabel}: ${objective}`);
 		this._startGoalSpinner();
 		await this.session.prompt(objective);
 	}
@@ -3326,7 +3326,7 @@ export class InteractiveMode {
 	 */
 	private async _handleChromeCommand(rest: string): Promise<void> {
 		this.editor.setText("");
-		this.showStatus("🌐 Starting Chrome…");
+		this.showStatus("Starting Chrome…");
 		const status = await this.session.ensureChrome();
 		this.showStatus(status);
 		if (rest) {
@@ -3750,7 +3750,7 @@ export class InteractiveMode {
 			}
 
 			case "visual_review": {
-				this.showStatus(`Changed ${event.file} — verify it visually with the preview tool.`);
+				this.showStatus(`Changed ${event.file} — verify it visually with the preview tool`);
 				this.ui.requestRender();
 				break;
 			}
@@ -4761,6 +4761,21 @@ export class InteractiveMode {
 			return;
 		}
 
+		// A Fusion turn runs outside agent.run() (isStreaming stays false for 10-600s)
+		// and has no step boundary to inject a steer into, so a steer would sit undrained.
+		// Degrade to followUp — identical to the Send-now chooser's Fusion path — rather
+		// than falsely reporting "no active turn to steer". Post-fusion drainage delivers
+		// the followUp at the end of the turn.
+		if (this.session.isFusing) {
+			this.editor.addToHistory?.(`/steer ${text}`);
+			this.editor.setText("");
+			await this.session.prompt(text, { streamingBehavior: "followUp" });
+			this.updatePendingMessagesDisplay();
+			this.showStatus("Fusion turn — delivered at end of turn");
+			this.ui.requestRender();
+			return;
+		}
+
 		if (!this.session.isStreaming) {
 			this.editor.setText(text);
 			this.showWarning("There is no active turn to steer");
@@ -4795,7 +4810,6 @@ export class InteractiveMode {
 	private openSendNowChooser(text: string): void {
 		// A prior chooser should never linger; tear it down before opening a new one.
 		if (this.sendNowChooser) this.closeSendNowChooser();
-		this.sendNowChooserText = text;
 		this.sendNowChooser = new SendNowChooser(text);
 		this.editor.setText(text);
 		this.sendNowChooserContainer.clear();
@@ -4865,7 +4879,20 @@ export class InteractiveMode {
 			this.cancelSendNowChooser();
 			return;
 		}
-		const text = this.sendNowChooserText ?? "";
+		// The composer is the source of truth for what gets sent — NOT a snapshot taken
+		// when the chooser opened. A turn abort can run restoreQueuedMessagesToEditor()
+		// while the chooser is open, replacing the composer with the restored queue
+		// (e.g. "C\n\nD"). Sending a stale open-time snapshot would deliver only that
+		// snapshot AND the setText("") below would then destroy the restored text — data
+		// loss. Read the live editor instead. (SendNowChooser keeps its own copy for the
+		// preview, so no field mirror is needed here.)
+		const text = (this.editor.getExpandedText?.() ?? this.editor.getText()).trim();
+		if (!text) {
+			// The editor was emptied from under the chooser → nothing to send; treat as
+			// Cancel so nothing is queued and no empty prompt is dispatched.
+			this.cancelSendNowChooser();
+			return;
+		}
 		this.closeSendNowChooser();
 
 		const mode: "steer" | "followUp" = selection === "send" ? "steer" : "followUp";
@@ -4892,10 +4919,17 @@ export class InteractiveMode {
 			degradedFromFusion = true;
 		}
 
+		// A steer only lands as "read at the next step" when a turn is actually
+		// streaming. If the agent went idle while the chooser was open, prompt()
+		// ignores the steer and starts a fresh turn — no mid-turn feedback then.
+		const steersActiveTurn = behavior === "steer" && this.session.isStreaming;
+
 		await this.session.prompt(text, { streamingBehavior: behavior });
 		this.updatePendingMessagesDisplay();
 		if (degradedFromFusion) {
 			this.showStatus("Fusion turn — delivered at end of turn");
+		} else if (steersActiveTurn) {
+			this.showStatus("Will be read at the agent's next step");
 		}
 		this.ui.requestRender();
 	}
@@ -4911,7 +4945,6 @@ export class InteractiveMode {
 		this.sendNowChooserUnsub?.();
 		this.sendNowChooserUnsub = undefined;
 		this.sendNowChooser = undefined;
-		this.sendNowChooserText = undefined;
 		this.sendNowChooserContainer.clear();
 	}
 
@@ -6235,7 +6268,7 @@ export class InteractiveMode {
 
 	private async showRewindSelector(): Promise<void> {
 		if (!snapshotsEnabled()) {
-			this.showStatus("File snapshots are disabled (PIT_NO_FILE_SNAPSHOTS is set).");
+			this.showStatus("File snapshots are disabled (PIT_NO_FILE_SNAPSHOTS)");
 			return;
 		}
 		let turns: Awaited<ReturnType<typeof listSnapshotTurns>>;
@@ -6246,7 +6279,7 @@ export class InteractiveMode {
 			return;
 		}
 		if (turns.length === 0) {
-			this.showStatus("No file changes recorded to rewind.");
+			this.showStatus("No file changes recorded to rewind");
 			return;
 		}
 		this.showSelector((done) => {
@@ -6258,10 +6291,10 @@ export class InteractiveMode {
 						done();
 						this.renderCurrentSessionState();
 						if (result.restored === 0 && result.removed === 0) {
-							this.showStatus("Nothing to restore for that turn.");
+							this.showStatus("Nothing to restore for that turn");
 						} else if (result.removed === 0 && result.kept.length === 0) {
 							this.showStatus(
-								`Rewound ${result.restored === 1 ? "1 file" : `${result.restored} files`} to before the selected turn.`,
+								`Rewound ${result.restored === 1 ? "1 file" : `${result.restored} files`} to before the selected turn`,
 							);
 						} else {
 							const parts: string[] = [
@@ -6276,7 +6309,7 @@ export class InteractiveMode {
 							if (result.kept.length > 0) {
 								message += ` (left ${result.kept.length === 1 ? "1 file" : `${result.kept.length} files`} created in later turns)`;
 							}
-							this.showStatus(`${message}.`);
+							this.showStatus(message);
 						}
 					} catch (error) {
 						done();
@@ -6587,7 +6620,7 @@ export class InteractiveMode {
 		const providerOptions = this.getLoginProviderOptions(authType);
 		if (providerOptions.length === 0) {
 			this.showStatus(
-				authType === "oauth" ? "No subscription providers available." : "No API key providers available.",
+				authType === "oauth" ? "No subscription providers available" : "No API key providers available",
 			);
 			return;
 		}

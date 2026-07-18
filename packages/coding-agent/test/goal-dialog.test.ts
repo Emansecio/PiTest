@@ -181,7 +181,7 @@ describe("runGoalDialog — existing goal picker", () => {
 		});
 		await runGoalDialog(host);
 		expect(host.clearGoal).toHaveBeenCalledOnce();
-		expect(host.showStatus).toHaveBeenCalledWith("🎯 Goal cleared.");
+		expect(host.showStatus).toHaveBeenCalledWith("Goal cleared");
 	});
 
 	it("Esc on the picker closes with zero side effects", async () => {

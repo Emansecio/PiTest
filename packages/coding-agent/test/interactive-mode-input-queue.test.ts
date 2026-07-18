@@ -92,4 +92,54 @@ describe("interactive input queue routing", () => {
 		expect(editor.addToHistory).toHaveBeenCalledWith("/steer focus on tests");
 		expect(editor.setText).toHaveBeenCalledWith("");
 	});
+
+	// Fix 9: a Fusion turn has isStreaming=false but is genuinely busy; steering it
+	// must degrade to followUp (identical to the Send-now chooser) instead of the
+	// false "no active turn to steer" refusal.
+	test("steer during a Fusion turn degrades to followUp with a notice", async () => {
+		const editor = createEditor("fusion note");
+		const prompt = vi.fn().mockResolvedValue(undefined);
+		const showStatus = vi.fn();
+		const fakeThis = {
+			editor,
+			session: { isCompacting: false, isStreaming: false, isFusing: true, prompt },
+			updatePendingMessagesDisplay: vi.fn(),
+			showStatus,
+			ui: { requestRender: vi.fn() },
+		};
+		const handleSteer = Reflect.get(InteractiveMode.prototype, "handleSteer") as (
+			this: typeof fakeThis,
+			input?: string,
+		) => Promise<void>;
+
+		await handleSteer.call(fakeThis, "fusion note");
+
+		expect(prompt).toHaveBeenCalledWith("fusion note", { streamingBehavior: "followUp" });
+		expect(showStatus).toHaveBeenCalledWith("Fusion turn — delivered at end of turn");
+		expect(editor.addToHistory).toHaveBeenCalledWith("/steer fusion note");
+		expect(editor.setText).toHaveBeenCalledWith("");
+	});
+
+	test("steer with no active turn (idle, not fusing) still refuses", async () => {
+		const editor = createEditor("nowhere to go");
+		const prompt = vi.fn().mockResolvedValue(undefined);
+		const showWarning = vi.fn();
+		const fakeThis = {
+			editor,
+			session: { isCompacting: false, isStreaming: false, isFusing: false, prompt },
+			updatePendingMessagesDisplay: vi.fn(),
+			showWarning,
+			ui: { requestRender: vi.fn() },
+		};
+		const handleSteer = Reflect.get(InteractiveMode.prototype, "handleSteer") as (
+			this: typeof fakeThis,
+			input?: string,
+		) => Promise<void>;
+
+		await handleSteer.call(fakeThis, "nowhere to go");
+
+		expect(prompt).not.toHaveBeenCalled();
+		expect(showWarning).toHaveBeenCalledWith("There is no active turn to steer");
+		expect(editor.setText).toHaveBeenCalledWith("nowhere to go");
+	});
 });

@@ -19,10 +19,15 @@ function proto<T>(name: string): T {
 }
 
 function createEditor(text = "next message") {
+	// Stateful so setText() round-trips to getText()/getExpandedText() — the real
+	// editor is the source of truth, and confirmSendNowChooser now reads it live.
+	let current = text;
 	return {
-		getExpandedText: () => text,
-		getText: () => text,
-		setText: vi.fn(),
+		getExpandedText: () => current,
+		getText: () => current,
+		setText: vi.fn((value: string) => {
+			current = value;
+		}),
 		addToHistory: vi.fn(),
 		// Focusable flag the TUI maintains via setFocus; the chooser listener only
 		// claims keys while the composer holds focus. Default: composer focused.
@@ -39,7 +44,6 @@ function createChooserThis(overrides: Record<string, any> = {}): any {
 		editor,
 		defaultEditor: editor,
 		sendNowChooser: undefined,
-		sendNowChooserText: undefined,
 		sendNowChooserUnsub: undefined,
 		sendNowChooserContainer: { clear: vi.fn(), addChild: vi.fn() },
 		session: { isStreaming: true, isFusing: false, prompt: vi.fn().mockResolvedValue(undefined) },
@@ -147,7 +151,6 @@ describe("Send-now chooser routing", () => {
 
 		expect(editor.setText).toHaveBeenCalledWith("keep me visible");
 		expect(fakeThis.sendNowChooser).toBeInstanceOf(SendNowChooser);
-		expect(fakeThis.sendNowChooserText).toBe("keep me visible");
 		expect(fakeThis.ui.addInputListener).toHaveBeenCalledOnce();
 	});
 
@@ -162,6 +165,8 @@ describe("Send-now chooser routing", () => {
 		expect(editor.addToHistory).toHaveBeenCalledWith("read this now");
 		expect(editor.setText).toHaveBeenCalledWith("");
 		expect(fakeThis.sendNowChooser).toBeUndefined(); // torn down
+		// Steer into an active turn → positive mid-turn feedback.
+		expect(fakeThis.showStatus).toHaveBeenCalledWith("Will be read at the agent's next step");
 	});
 
 	test("confirming Queue routes to followUp", async () => {
@@ -171,6 +176,8 @@ describe("Send-now chooser routing", () => {
 		await fakeThis.confirmSendNowChooser.call(fakeThis);
 
 		expect(fakeThis.session.prompt).toHaveBeenCalledWith("later please", { streamingBehavior: "followUp" });
+		// Queue during an active turn stays quiet — the pending display already speaks.
+		expect(fakeThis.showStatus).not.toHaveBeenCalled();
 	});
 
 	test("Cancel closes the chooser, leaves the text, queues nothing", () => {
@@ -248,6 +255,37 @@ describe("Send-now chooser routing", () => {
 		// Idle → session.prompt ignores streamingBehavior and starts a normal turn.
 		expect(fakeThis.session.prompt).toHaveBeenCalledWith("delayed decision", { streamingBehavior: "steer" });
 		expect(fakeThis.showStatus).not.toHaveBeenCalled();
+	});
+
+	// Fix 14: a turn abort can run restoreQueuedMessagesToEditor() while the chooser
+	// is open, replacing the composer with the restored queue. Confirm must send the
+	// LIVE editor text, not the stale open-time snapshot (which would drop the queue
+	// and the setText("") would then destroy it).
+	test("confirm sends the live editor text after an abort restored the queue (no data loss)", async () => {
+		const { fakeThis, editor } = createChooserThis();
+		fakeThis.openSendNowChooser.call(fakeThis, "D"); // snapshot = just "D"
+		// Turn abort restored queued "C" and combined it with the in-composer draft "D".
+		editor.setText("C\n\nD");
+		editor.setText.mockClear();
+		// Send now highlighted.
+		await fakeThis.confirmSendNowChooser.call(fakeThis);
+
+		// The full restored text goes out — not the "D" snapshot — and nothing is lost.
+		expect(fakeThis.session.prompt).toHaveBeenCalledWith("C\n\nD", { streamingBehavior: "steer" });
+		expect(editor.addToHistory).toHaveBeenCalledWith("C\n\nD");
+		expect(fakeThis.sendNowChooser).toBeUndefined(); // torn down
+	});
+
+	test("confirm with an emptied composer cancels instead of sending an empty prompt", async () => {
+		const { fakeThis, editor } = createChooserThis();
+		fakeThis.openSendNowChooser.call(fakeThis, "will vanish");
+		editor.setText(""); // editor emptied from under the chooser
+		editor.setText.mockClear();
+		await fakeThis.confirmSendNowChooser.call(fakeThis);
+
+		expect(fakeThis.session.prompt).not.toHaveBeenCalled();
+		expect(editor.setText).not.toHaveBeenCalledWith(""); // no send-path reset ran
+		expect(fakeThis.sendNowChooser).toBeUndefined(); // torn down (implicit Cancel)
 	});
 
 	// Bug 7: a picker/selector that steals focus must get the keys, not the chooser.

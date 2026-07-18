@@ -94,7 +94,7 @@ async function startNewGoal(host: GoalDialogHost): Promise<void> {
 	)?.trim();
 	if (!objective) return;
 	host.startGoal(objective, {});
-	host.showStatus(`🎯 Goal started: ${objective}`);
+	host.showStatus(`Goal started: ${objective}`);
 	host.startGoalSpinner();
 	await host.prompt(objective);
 }
@@ -165,7 +165,7 @@ export async function runGoalDialog(host: GoalDialogHost): Promise<void> {
 			return;
 		case ACTION_CLEAR:
 			host.clearGoal();
-			host.showStatus("🎯 Goal cleared.");
+			host.showStatus("Goal cleared");
 			return;
 		default:
 			return; // Esc — panel closed, nothing changes
