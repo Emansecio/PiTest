@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 function createEditor(text = "next message") {
@@ -12,7 +12,15 @@ function createEditor(text = "next message") {
 }
 
 describe("interactive input queue routing", () => {
-	test("ordinary Enter queues a follow-up while the agent is working", async () => {
+	afterEach(() => {
+		delete process.env.PIT_NO_SEND_NOW;
+	});
+
+	// The Send-now chooser is on by default (see interactive-mode-send-now-chooser
+	// test); PIT_NO_SEND_NOW=1 restores the legacy "Enter → followUp direct" path
+	// that this test asserts.
+	test("ordinary Enter queues a follow-up while the agent is working (legacy path)", async () => {
+		process.env.PIT_NO_SEND_NOW = "1";
 		const editor = createEditor();
 		const prompt = vi.fn().mockResolvedValue(undefined);
 		const fakeThis = {
@@ -22,7 +30,8 @@ describe("interactive input queue routing", () => {
 			clearCtrlCHint: vi.fn(),
 			isExtensionCommand: vi.fn(() => false),
 			dismissStartupScreen: vi.fn(),
-			session: { isCompacting: false, isStreaming: true, prompt },
+			session: { isCompacting: false, isStreaming: true, isFusing: false, prompt },
+			sendNowChooserEnabled: Reflect.get(InteractiveMode.prototype, "sendNowChooserEnabled"),
 			updatePendingMessagesDisplay: vi.fn(),
 			ui: { requestRender: vi.fn() },
 		};

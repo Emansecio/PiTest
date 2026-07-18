@@ -62,8 +62,12 @@ Type `/` in the editor to open command completion. Extensions can register custo
 
 You can submit messages while the agent is still working:
 
-- **Enter** queues a steering message, delivered after the current assistant turn finishes executing its tool calls.
-- **Alt+Enter** queues a follow-up message, delivered after the agent finishes all work.
+- **Enter** opens an inline chooser `[Send now] [Queue] [Cancel]`:
+  - **Send now** (default) steers the message into the current turn — read at the next step boundary without interrupting anything. During a Fusion turn it degrades to a queued follow-up (no step boundary to inject into).
+  - **Queue** delivers it as a follow-up after the agent finishes all work.
+  - **Cancel** (or Esc, or just start typing) closes the chooser and keeps your text in the composer.
+  - Navigate with ←/→/Tab; confirm with Enter. Set `PIT_NO_SEND_NOW=1` to disable the chooser and have Enter queue a follow-up directly (legacy behavior).
+- **Alt+Enter** queues a follow-up message directly (no chooser), delivered after the agent finishes all work.
 - **Escape** aborts and restores queued messages to the editor.
 - **Alt+Up** retrieves queued messages back to the editor.
 

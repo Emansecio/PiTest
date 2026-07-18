@@ -138,7 +138,7 @@ import {
 	type UserInputBus,
 } from "../../core/user-input-bus.ts";
 import { type ClipboardImage, readClipboardImage } from "../../utils/clipboard-image.ts";
-import { isOfflineMode } from "../../utils/env-flags.ts";
+import { isOfflineMode, isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { prewarmHljs } from "../../utils/syntax-highlight.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
@@ -188,6 +188,7 @@ import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/
 import { OverthinkSteerMessageComponent } from "./components/overthink-steer-message.ts";
 import { PendingUserMessageComponent } from "./components/pending-user-message.ts";
 import { RewindSelectorComponent } from "./components/rewind-selector.ts";
+import { SendNowChooser } from "./components/send-now-chooser.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
@@ -596,6 +597,15 @@ export class InteractiveMode {
 	private widgetContainerAbove!: Container;
 	private widgetContainerBelow!: Container;
 
+	// Inline "[Send now] [Queue] [Cancel]" chooser shown when Enter is pressed with
+	// text while the agent is working. Focus stays on the editor; a global input
+	// listener (sendNowChooserUnsub) routes ←/→/Tab/Enter/Esc to the chooser and
+	// lets every other keystroke fall through to the composer (implicit Cancel).
+	private sendNowChooserContainer!: Container;
+	private sendNowChooser: SendNowChooser | undefined = undefined;
+	private sendNowChooserText: string | undefined = undefined;
+	private sendNowChooserUnsub: (() => void) | undefined = undefined;
+
 	// Custom footer from extension (undefined = use built-in footer)
 	private customFooter: (Component & { dispose?(): void }) | undefined = undefined;
 
@@ -699,6 +709,7 @@ export class InteractiveMode {
 		});
 		this.widgetContainerAbove = new Container();
 		this.widgetContainerBelow = new Container();
+		this.sendNowChooserContainer = new Container();
 		this.keybindings = KeybindingsManager.create();
 		setKeybindings(this.keybindings);
 		const editorPaddingX = this.settingsManager.getEditorPaddingX();
@@ -927,6 +938,9 @@ export class InteractiveMode {
 		this.ui.addChild(this.todoOverlay);
 		this.renderWidgets(); // Initialize with default spacer
 		this.ui.addChild(this.widgetContainerAbove);
+		// Sits directly above the composer frame so the chooser reads as part of the
+		// input surface. Empty (renders nothing) unless a chooser is open.
+		this.ui.addChild(this.sendNowChooserContainer);
 		this.ui.addChild(this.composerChrome);
 		this.ui.setFocus(this.editor);
 
@@ -3014,6 +3028,15 @@ export class InteractiveMode {
 			// treat isFusing as busy too — otherwise this Enter falls through to a normal
 			// submission that starts a second, concurrent Fusion turn.
 			if (this.session.isStreaming || this.session.isFusing) {
+				// Native on-by-default: instead of silently queuing, offer
+				// [Send now] [Queue] [Cancel]. The editor cleared its own text in
+				// submitValue() before this handler ran, so the chooser re-seats `text`
+				// in the composer and confirmation routes it. PIT_NO_SEND_NOW=1 restores
+				// the previous "Enter → followUp direct" behavior.
+				if (this.sendNowChooserEnabled()) {
+					this.openSendNowChooser(text);
+					return;
+				}
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
 				await this.session.prompt(text, { streamingBehavior: "followUp" });
@@ -4751,6 +4774,147 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	/**
+	 * Whether the inline Send-now chooser is active. Native on-by-default; the
+	 * kill-switch `PIT_NO_SEND_NOW=1` restores the previous "Enter during work →
+	 * followUp direct" behavior.
+	 */
+	private sendNowChooserEnabled(): boolean {
+		return !isTruthyEnvFlag(process.env.PIT_NO_SEND_NOW);
+	}
+
+	/**
+	 * Open the inline [Send now] [Queue] [Cancel] chooser for a message submitted
+	 * while the agent is working. The editor already cleared its own buffer in
+	 * submitValue(), so we re-seat `text` in the composer — that keeps it visible
+	 * (and intact for Cancel/implicit-cancel) without a duplicate copy of the text
+	 * to reconcile. Focus stays on the editor; a global input listener routes the
+	 * chooser's navigation/confirm/cancel keys and lets everything else fall
+	 * through to the composer.
+	 */
+	private openSendNowChooser(text: string): void {
+		// A prior chooser should never linger; tear it down before opening a new one.
+		if (this.sendNowChooser) this.closeSendNowChooser();
+		this.sendNowChooserText = text;
+		this.sendNowChooser = new SendNowChooser(text);
+		this.editor.setText(text);
+		this.sendNowChooserContainer.clear();
+		this.sendNowChooserContainer.addChild(new Spacer(1));
+		this.sendNowChooserContainer.addChild(this.sendNowChooser);
+		this.sendNowChooserUnsub = this.ui.addInputListener((data) => this.handleSendNowChooserKey(data));
+		this.ui.requestRender();
+	}
+
+	/**
+	 * Input-listener hook driving the open chooser. Runs before the focused editor,
+	 * so consuming Esc here is what stops it leaking into the turn interrupt.
+	 * Any key that is not chooser navigation is an implicit Cancel that also flows
+	 * to the composer (return undefined → the editor inserts the character).
+	 */
+	private handleSendNowChooserKey(data: string): { consume?: boolean } | undefined {
+		if (!this.sendNowChooser) return undefined;
+		// This listener runs BEFORE the focused component (tui global input listeners
+		// fire first), so it may only claim keys while the default composer actually
+		// holds focus. If a picker/selector/overlay stole focus while the chooser was
+		// still up (agent-driven `ask`, exit_plan approval, …), its keys belong to
+		// that component: close the chooser (implicit Cancel — the draft stays in the
+		// composer) and let the key fall through untouched. Without this, Enter here
+		// would confirm the chooser and steer the draft instead of answering the picker.
+		if (!this.defaultEditor.focused) {
+			this.closeSendNowChooser();
+			this.ui.requestRender();
+			return undefined;
+		}
+		if (matchesKey(data, "left")) {
+			this.sendNowChooser.prev();
+			this.ui.requestRender();
+			return { consume: true };
+		}
+		if (matchesKey(data, "right") || matchesKey(data, "tab")) {
+			this.sendNowChooser.next();
+			this.ui.requestRender();
+			return { consume: true };
+		}
+		if (matchesKey(data, "enter")) {
+			void this.confirmSendNowChooser();
+			return { consume: true };
+		}
+		if (matchesKey(data, "escape")) {
+			this.cancelSendNowChooser();
+			return { consume: true };
+		}
+		// Implicit Cancel: close the chooser but keep the text (already in the
+		// composer) and let this keystroke reach the editor.
+		this.closeSendNowChooser();
+		this.ui.requestRender();
+		return undefined;
+	}
+
+	/**
+	 * Confirm the highlighted action. Send now → steer (immediate reading at the
+	 * next step boundary); Queue → followUp. The Fusion degrade is decided HERE,
+	 * not at open time, because a Fusion turn has no step boundary to inject into —
+	 * so a steer would sit undrained. If the agent went idle while the chooser was
+	 * open, session.prompt() ignores the streamingBehavior and starts a fresh turn.
+	 */
+	private async confirmSendNowChooser(): Promise<void> {
+		const chooser = this.sendNowChooser;
+		if (!chooser) return;
+		const selection = chooser.getSelection();
+		if (selection === "cancel") {
+			this.cancelSendNowChooser();
+			return;
+		}
+		const text = this.sendNowChooserText ?? "";
+		this.closeSendNowChooser();
+
+		const mode: "steer" | "followUp" = selection === "send" ? "steer" : "followUp";
+
+		// Auto-compaction can start while the chooser is open (post-turn). Confirming
+		// then must go through the SAME queue every other input path uses (submit
+		// handler, handleFollowUp, handleSteer) — calling session.prompt() directly
+		// would race the in-flight compaction run. queueCompactionMessage handles the
+		// history/editor reset and re-emits the text with the chosen mode once
+		// compaction finishes, so the draft reaches the same destination it would have
+		// if the chooser had never existed.
+		if (this.session.isCompacting) {
+			this.queueCompactionMessage(text, mode);
+			return;
+		}
+
+		this.editor.setText("");
+		this.editor.addToHistory?.(text);
+
+		let behavior: "steer" | "followUp" = mode;
+		let degradedFromFusion = false;
+		if (behavior === "steer" && this.session.isFusing) {
+			behavior = "followUp";
+			degradedFromFusion = true;
+		}
+
+		await this.session.prompt(text, { streamingBehavior: behavior });
+		this.updatePendingMessagesDisplay();
+		if (degradedFromFusion) {
+			this.showStatus("Fusion turn — delivered at end of turn");
+		}
+		this.ui.requestRender();
+	}
+
+	/** Close the chooser, leaving the text intact in the composer. */
+	private cancelSendNowChooser(): void {
+		this.closeSendNowChooser();
+		this.ui.requestRender();
+	}
+
+	/** Tear down the chooser UI + input listener. Does not touch the editor text. */
+	private closeSendNowChooser(): void {
+		this.sendNowChooserUnsub?.();
+		this.sendNowChooserUnsub = undefined;
+		this.sendNowChooser = undefined;
+		this.sendNowChooserText = undefined;
+		this.sendNowChooserContainer.clear();
+	}
+
 	private handleDequeue(): void {
 		const restored = this.restoreQueuedMessagesToEditor();
 		if (restored === 0) {
@@ -5482,6 +5646,12 @@ export class InteractiveMode {
 	 * @param create Factory that receives a `done` callback and returns the component and focus target
 	 */
 	private showSelector(create: (done: () => void) => { component: Component; focus: Component }): void {
+		// A selector is about to take focus from the composer. Any open Send-now
+		// chooser must not linger behind it (and its listener must not intercept the
+		// selector's keys), so tear it down now — an implicit Cancel that leaves the
+		// draft in the composer. The listener's own focus guard is the fallback for
+		// focus-stealing paths that do not route through showSelector (e.g. overlays).
+		if (this.sendNowChooser) this.closeSendNowChooser();
 		// Blocks the turn on the user (selector in place of the editor) → freeze the clock.
 		const releaseWait = this.beginUserInputWait(this.userWaitMessage);
 		const done = () => {

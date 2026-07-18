@@ -120,8 +120,13 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
 | `app.tools.expand` | `ctrl+o` | Collapse or expand tool output |
-| `app.message.followUp` | `alt+enter` | Queue follow-up message |
+| `app.message.followUp` | `alt+enter` | Queue follow-up message (direct, no chooser) |
 | `app.message.dequeue` | `alt+up` | Restore queued messages to editor |
+
+While the agent is working, plain **Enter** opens an inline `[Send now] [Queue] [Cancel]`
+chooser (Send now steers into the current turn; Queue defers a follow-up). Set
+`PIT_NO_SEND_NOW=1` to have Enter queue a follow-up directly instead. See
+[usage](usage.md#message-queue).
 
 ### Tree Navigation
 

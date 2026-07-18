@@ -1,5 +1,10 @@
 # Caixa de digitação e fila previsível do Pit
 
+> **Nota (2026-07-18):** o comportamento "`Enter` durante trabalho = `followUp` direto"
+> descrito abaixo foi **superseded** pelo chooser inline `[Send now] [Queue] [Cancel]`
+> — ver [2026-07-18-send-now-chooser-design.md](2026-07-18-send-now-chooser-design.md).
+> O design original permanece válido sob o kill-switch `PIT_NO_SEND_NOW=1`.
+
 ## Objetivo
 
 Entregar a primeira fase de `GROK_PIT-AMPO.md`: substituir a linha de entrada atual por uma caixa fechada inspirada no AMP e fazer o envio comum durante uma execução entrar na fila, sem duplicar editor, fila ou metadados.
