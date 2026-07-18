@@ -69,6 +69,29 @@ export function nextFusionCycleState(
 	return { orchestration: "fusion", mode: "plan" }; // Auto → Fusion·Plan
 }
 
+/**
+ * v1 Mode invariant — the single source of truth for the two-facet coupling.
+ * Orchestration `fusion` implies permission `plan`: Fusion·Auto does not exist in
+ * v1 (the cycle in {@link nextFusionCycleState} never produces it), so `(fusion,
+ * auto)` is the only illegal pairing. Given the desired facet values and which
+ * facet the caller is authoritatively setting, this returns the legal pair — the
+ * authoritative facet is kept, the other bends. Every coupling site routes through
+ * here (exit_plan approval, `/permission-mode`, session restore) so the rule lives
+ * in one place instead of three ad-hoc resets that can drift apart.
+ */
+export function reconcileFusionModeInvariant(
+	desired: { mode: PermissionMode; orchestration: Orchestration },
+	authority: "permission" | "orchestration",
+): { mode: PermissionMode; orchestration: Orchestration } {
+	if (desired.orchestration === "fusion" && desired.mode === "auto") {
+		// Illegal Fusion·Auto: keep the facet the caller deliberately set, bend the other.
+		return authority === "permission"
+			? { mode: "auto", orchestration: "solo" } // entering auto leaves fusion
+			: { mode: "plan", orchestration: "fusion" }; // restored fusion forces plan
+	}
+	return desired;
+}
+
 export interface PermissionsExtensionOptions {
 	cwd: string;
 	checker: PermissionChecker;
@@ -150,6 +173,16 @@ export function createPermissionsExtension(options: PermissionsExtensionOptions)
 					return;
 				}
 				checker.updateMode(mode);
+				// v1 invariant: switching to auto from Fusion·Plan must drop fusion —
+				// Fusion·Auto is unreachable via the cycle and must stay unreachable
+				// here. Reconcile the two facets through the single coupling helper.
+				const reconciled = reconcileFusionModeInvariant(
+					{ mode: checker.mode, orchestration: pi.getOrchestration() },
+					"permission",
+				);
+				if (reconciled.orchestration !== pi.getOrchestration()) {
+					pi.setOrchestration(reconciled.orchestration);
+				}
 				const orch = pi.getOrchestration();
 				ctx.ui.setStatus(STATUS_KEY, `permissions: ${modeDisplayLabel(checker, orch)}`);
 				ctx.ui.notify(humanModeNotifyLabel(orch, mode), "info");
@@ -189,12 +222,18 @@ export function createPermissionsExtension(options: PermissionsExtensionOptions)
 				checker,
 				onApproved: () => {
 					// v1 invariant (fusion-mode spec, "v1 cycle"): fusion rides on
-					// plan-mode only. Approval leaves plan, so it must also leave
-					// fusion — otherwise the next turn re-routes through the read-only
-					// panel instead of executing the approved plan (fusion·auto is
-					// unreachable via the cycle and must stay unreachable here).
-					if (pi.getOrchestration() === "fusion") {
-						pi.setOrchestration("solo");
+					// plan-mode only. Approval leaves plan for auto, so it must also
+					// leave fusion — otherwise the next turn re-routes through the
+					// read-only panel instead of executing the approved plan (fusion·auto
+					// is unreachable via the cycle and must stay unreachable here). The
+					// checker is already "auto" at this point, so only orchestration may
+					// bend; reconcile through the single coupling helper.
+					const reconciled = reconcileFusionModeInvariant(
+						{ mode: checker.mode, orchestration: pi.getOrchestration() },
+						"permission",
+					);
+					if (reconciled.orchestration !== pi.getOrchestration()) {
+						pi.setOrchestration(reconciled.orchestration);
 					}
 					refreshStatus(pi.getOrchestration());
 					onModeChange?.("auto");

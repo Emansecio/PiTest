@@ -70,6 +70,7 @@ import {
 } from "./agent-session-tool-end.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage, isOAuthReauthRequired } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
+import { reconcileFusionModeInvariant } from "./built-ins/permissions-extension.ts";
 import { type CacheStats, computeCacheStats } from "./cache-stats.js";
 import type { ChromeDevtoolsManager } from "./chrome/chrome-devtools-manager.ts";
 import * as chromeDevtoolsManagerModule from "./chrome/chrome-devtools-manager.ts";
@@ -3348,7 +3349,23 @@ export class AgentSession implements CompactionHost, FusionHost {
 			}
 			if (latestTodo) this._todo.restore(latestTodo);
 			if (latestPlan) this._plan.restore(latestPlan);
-			if (latestOrchestration) this._orchestration = latestOrchestration;
+			if (latestOrchestration) {
+				this._orchestration = latestOrchestration;
+				// v1 invariant: fusion rides on plan-mode only. Orchestration is
+				// persisted but the permission mode is not — on resume it falls back to
+				// the default (usually auto), which would revive the unreachable
+				// Fusion·Auto. Reconcile through the single coupling helper: a restored
+				// fusion forces the checker to plan (orchestration is authoritative here).
+				if (this.permissionChecker) {
+					const reconciled = reconcileFusionModeInvariant(
+						{ mode: this.permissionChecker.mode, orchestration: this._orchestration },
+						"orchestration",
+					);
+					if (reconciled.mode !== this.permissionChecker.mode) {
+						this.permissionChecker.updateMode(reconciled.mode);
+					}
+				}
+			}
 		} catch {
 			// Best-effort restore; ignore malformed/legacy entries.
 		}
@@ -4695,7 +4712,10 @@ export class AgentSession implements CompactionHost, FusionHost {
 			}
 
 			// Fusion·Plan: route the turn to the panel+synthesizer unless it can't run (then fall through to solo).
-			if (this._orchestration === "fusion" && !text.startsWith("/")) {
+			// Guard against a re-entrant prompt while a Fusion turn is already in flight (isFusing):
+			// starting a second turn would overwrite host.fusionAbort and interleave transcript writes.
+			// Such a prompt is a mid-turn follow-up — it falls through to the queue branch below.
+			if (this._orchestration === "fusion" && !text.startsWith("/") && !this.isFusing) {
 				const handled = await runFusionSessionTurn(this, text, currentImages);
 				if (handled) {
 					preflightResult?.(true);
@@ -4728,8 +4748,10 @@ export class AgentSession implements CompactionHost, FusionHost {
 				expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 			}
 
-			// If streaming, queue via steer() or followUp() based on option
-			if (this.isStreaming) {
+			// If streaming OR a Fusion turn is in flight, queue via steer()/followUp() based on option.
+			// A Fusion turn runs outside agent.run() (isStreaming stays false), so it must be treated
+			// as "busy" here too or a mid-turn message would start a second, concurrent turn.
+			if (this.isStreaming || this.isFusing) {
 				if (!options?.streamingBehavior) {
 					throw new Error(
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",

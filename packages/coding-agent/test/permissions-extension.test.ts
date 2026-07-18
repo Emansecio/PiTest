@@ -15,10 +15,13 @@ const cwd = process.platform === "win32" ? "C:/proj" : "/proj";
 
 type Handler = (event: any, ctx?: any) => unknown;
 
+type CommandDef = { handler: (args: string, ctx: any) => unknown };
+
 function makeFakePi(initialOrchestration: "solo" | "fusion" = "solo") {
 	const handlers = new Map<string, Handler[]>();
 	const sent: unknown[] = [];
 	const tools: ToolDefinition[] = [];
+	const commands = new Map<string, CommandDef>();
 	let orchestration: "solo" | "fusion" = initialOrchestration;
 	const setOrchestration = vi.fn((o: "solo" | "fusion") => {
 		orchestration = o;
@@ -32,7 +35,9 @@ function makeFakePi(initialOrchestration: "solo" | "fusion" = "solo") {
 		registerTool(tool: ToolDefinition) {
 			tools.push(tool);
 		},
-		registerCommand() {},
+		registerCommand(name: string, def: CommandDef) {
+			commands.set(name, def);
+		},
 		sendMessage(message: unknown) {
 			sent.push(message);
 		},
@@ -47,7 +52,12 @@ function makeFakePi(initialOrchestration: "solo" | "fusion" = "solo") {
 		}
 		return result;
 	};
-	return { api, fire, sent, tools, setOrchestration };
+	return { api, fire, sent, tools, commands, setOrchestration };
+}
+
+/** Minimal ctx for a slash-command handler (ui.notify + ui.setStatus). */
+function makeCommandCtx() {
+	return { ui: { notify: vi.fn(), setStatus: vi.fn() } };
 }
 
 describe("permissions-extension tool_call deny", () => {
@@ -104,8 +114,8 @@ describe("exit_plan approval and orchestration", () => {
 		setCurrentUserInputBus(undefined);
 	});
 
-	/** Register the extension against a temp cwd and approve via a real bus. */
-	async function approveExitPlan(initialOrchestration: "solo" | "fusion") {
+	/** Register the extension against a temp cwd and drive exit_plan via a real bus. */
+	async function runExitPlanChoosing(initialOrchestration: "solo" | "fusion", picked = "Approve & execute") {
 		const dir = mkdtempSync(join(tmpdir(), "pi-permext-"));
 		dirs.push(dir);
 		const checker = new PermissionChecker({ cwd: dir, mode: "plan", settings: {} });
@@ -121,7 +131,7 @@ describe("exit_plan approval and orchestration", () => {
 		const bus = createUserInputBus();
 		setCurrentUserInputBus(bus);
 		bus.onRequest((req) => {
-			bus.resolve(req.requestId, { picked: ["Approve & execute"], cancelled: false });
+			bus.resolve(req.requestId, { picked: [picked], cancelled: false });
 		});
 
 		await exitPlan!.execute("t1", { title: "x" }, undefined, undefined, undefined as never);
@@ -129,16 +139,60 @@ describe("exit_plan approval and orchestration", () => {
 	}
 
 	it("approval in fusion·plan resets orchestration to solo (fusion·auto stays unreachable)", async () => {
-		const { checker, onModeChange, setOrchestration } = await approveExitPlan("fusion");
+		const { checker, onModeChange, setOrchestration } = await runExitPlanChoosing("fusion");
 		expect(checker.mode).toBe("auto");
 		expect(setOrchestration).toHaveBeenCalledWith("solo");
 		expect(onModeChange).toHaveBeenCalledWith("auto");
 	});
 
 	it("approval in solo·plan leaves orchestration untouched", async () => {
-		const { checker, onModeChange, setOrchestration } = await approveExitPlan("solo");
+		const { checker, onModeChange, setOrchestration } = await runExitPlanChoosing("solo");
 		expect(checker.mode).toBe("auto");
 		expect(setOrchestration).not.toHaveBeenCalled();
 		expect(onModeChange).toHaveBeenCalledWith("auto");
+	});
+
+	it("rejecting the plan (Keep planning) in fusion·plan does NOT reset orchestration", async () => {
+		// Only APPROVAL leaves plan mode, so only approval may drop fusion. A rejection
+		// must stay in Fusion·Plan (orchestration untouched, still read-only).
+		const { checker, onModeChange, setOrchestration } = await runExitPlanChoosing("fusion", "Keep planning");
+		expect(checker.mode).toBe("plan");
+		expect(setOrchestration).not.toHaveBeenCalled();
+		expect(onModeChange).not.toHaveBeenCalled();
+	});
+});
+
+describe("/permission-mode and the fusion invariant", () => {
+	/** Register the extension and return its `permission-mode` command handler. */
+	function setup(initialOrchestration: "solo" | "fusion", mode: "plan" | "auto") {
+		const checker = new PermissionChecker({ cwd, mode, settings: {} });
+		const onModeChange = vi.fn();
+		const fake = makeFakePi(initialOrchestration);
+		createPermissionsExtension({ cwd, checker, onModeChange })(fake.api);
+		const command = fake.commands.get("permission-mode");
+		expect(command).toBeDefined();
+		return { checker, onModeChange, setOrchestration: fake.setOrchestration, command: command! };
+	}
+
+	it("switching to auto from Fusion·Plan resets orchestration to solo", async () => {
+		const { checker, onModeChange, setOrchestration, command } = setup("fusion", "plan");
+		await command.handler("auto", makeCommandCtx());
+		expect(checker.mode).toBe("auto");
+		expect(setOrchestration).toHaveBeenCalledWith("solo");
+		expect(onModeChange).toHaveBeenCalledWith("auto");
+	});
+
+	it("switching to auto from solo leaves orchestration untouched", async () => {
+		const { checker, setOrchestration, command } = setup("solo", "plan");
+		await command.handler("auto", makeCommandCtx());
+		expect(checker.mode).toBe("auto");
+		expect(setOrchestration).not.toHaveBeenCalled();
+	});
+
+	it("switching to plan from Fusion·Plan keeps fusion (legal pairing, no reset)", async () => {
+		const { checker, setOrchestration, command } = setup("fusion", "plan");
+		await command.handler("plan", makeCommandCtx());
+		expect(checker.mode).toBe("plan");
+		expect(setOrchestration).not.toHaveBeenCalled();
 	});
 });

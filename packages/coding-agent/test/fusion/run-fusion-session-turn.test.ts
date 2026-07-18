@@ -176,6 +176,68 @@ describe("runFusionSessionTurn", () => {
 		expect(agent.state.messages.some((m) => messageText(m).includes("budget exhausted"))).toBe(true);
 	});
 
+	it("emits the user message BEFORE the synthetic answer when the goal budget is exhausted", async () => {
+		// The budget branch owns the turn (returns true, no solo fallthrough), so it
+		// must persist the user message itself — and before the synthetic assistant so
+		// the transcript keeps user→assistant ordering and the prompt is not lost.
+		const { host, agent } = createHost({
+			budget: { allowed: false, reason: "Goal token budget exhausted (1m/1m)." },
+		});
+		await runFusionSessionTurn(host, "over budget prompt");
+		expect(agent.state.messages).toHaveLength(2);
+		expect(agent.state.messages[0]?.role).toBe("user");
+		expect(messageText(agent.state.messages[0])).toContain("over budget prompt");
+		expect(agent.state.messages[1]?.role).toBe("assistant");
+		expect(messageText(agent.state.messages[1])).toContain("budget exhausted");
+	});
+
+	it("refuses to start a second turn while one is in flight and preserves the live abort controller", async () => {
+		// Double-start guard (P1): a concurrent turn would overwrite host.fusionAbort
+		// (orphaning the first turn's abort) and interleave transcript writes.
+		const turn = vi.spyOn(orchestrator, "runFusionTurn");
+		const { host, agent } = createHost();
+		const live = new AbortController();
+		host.setFusionAbort(live);
+
+		const handled = await runFusionSessionTurn(host, "second turn while busy");
+
+		// Reported handled so the caller does not fall through to a concurrent solo turn.
+		expect(handled).toBe(true);
+		// The live controller is untouched: not overwritten, and the early return skips
+		// the `finally` that would have cleared it.
+		expect(host.fusionAbort).toBe(live);
+		expect(live.signal.aborted).toBe(false);
+		// No panel work and no transcript writes from the refused turn.
+		expect(turn).not.toHaveBeenCalled();
+		expect(agent.state.messages).toHaveLength(0);
+	});
+
+	it("aborting during the writer stream finalizes cleanly without a duplicate user message", async () => {
+		const { host, agent } = createHost();
+		vi.spyOn(orchestrator, "runFusionTurn").mockImplementation(async (deps) => {
+			// The writer already emitted the user message; aborting now must not make the
+			// post-writer interrupt check append a second (duplicate) user message.
+			await deps.writer("writer prompt", [], {
+				consensus: [],
+				contradictions: [],
+				partialCoverage: [],
+				uniqueInsights: [],
+				blindSpots: [],
+				unsupportedClaims: [],
+			});
+			host.fusionAbort?.abort();
+			return { handled: true, text: "ok" };
+		});
+
+		const handled = await runFusionSessionTurn(host, "writer prompt");
+
+		expect(handled).toBe(true);
+		expect(agent.state.messages.filter((m) => m.role === "user")).toHaveLength(1);
+		expect(agent.state.messages.some((m) => m.role === "assistant")).toBe(true);
+		// The `finally` cleared the controller — the turn released its abort cleanly.
+		expect(host.fusionAbort).toBeUndefined();
+	});
+
 	it("persists user message + interrupted note when aborted before writer", async () => {
 		const { host, agent, events } = createHost();
 		vi.spyOn(orchestrator, "runFusionTurn").mockImplementation(async () => {

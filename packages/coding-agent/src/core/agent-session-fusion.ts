@@ -233,10 +233,20 @@ export async function fusionVerify(
 
 export async function runFusionSessionTurn(host: FusionHost, text: string, images?: ImageContent[]): Promise<boolean> {
 	if (isTruthyEnvFlag(process.env.PIT_NO_FUSION)) return false;
+	// Defensive backstop against a concurrent second Fusion turn: `host.fusionAbort`
+	// is the live turn's controller. Starting another turn would overwrite it (Esc
+	// then only aborts the newer one; the older panel runs to timeout) and interleave
+	// transcript writes. The interactive submit guard already routes a mid-turn Enter
+	// to the follow-up queue; this refuses any other caller WITHOUT touching the live
+	// controller, and reports the turn as handled so no concurrent solo turn starts.
+	if (host.fusionAbort !== undefined) return true;
 	const model = host.model;
 	if (!model) return false;
 	const settings = host.settingsManager.getFusionSettings();
 	if (settings.panel.length < 2) {
+		// No user message here on purpose: this branch returns false, so the caller
+		// falls through to a normal solo turn which emits the user message itself.
+		// Emitting it here too would duplicate it in the transcript.
 		emitSyntheticAssistant(
 			host,
 			"Fusion is selected but the panel isn't configured (need 2 advisor models). " +
@@ -247,6 +257,10 @@ export async function runFusionSessionTurn(host: FusionHost, text: string, image
 	await host.prepareFusionContextEconomy(text);
 	const budget = host.evaluateFusionBudget();
 	if (!budget.allowed) {
+		// This branch owns the turn (returns true, no solo fallthrough), so the user
+		// message is Fusion's responsibility — emit it before the synthetic answer so
+		// the transcript keeps user→assistant ordering (and the prompt isn't lost).
+		emitFusionUserMessage(host, text, images);
 		emitSyntheticAssistant(host, budget.reason ?? "Goal token budget exhausted — Fusion panel skipped.");
 		return true;
 	}
@@ -282,10 +296,14 @@ export async function runFusionSessionTurn(host: FusionHost, text: string, image
 		userMessageEmitted = true;
 		emitFusionNote(host, "Fusion interrupted.");
 	};
+	// Function-scoped so the `catch` can read the abort state without touching
+	// `host.fusionAbort` — the top-of-function double-start guard tests that getter,
+	// which would otherwise narrow it to `undefined` for the rest of this function.
+	let fusionSignal: AbortSignal | undefined;
 	try {
-		host.setFusionAbort(new AbortController());
-		const fusionAbort = host.fusionAbort;
-		if (!fusionAbort) return false;
+		const fusionAbort = new AbortController();
+		fusionSignal = fusionAbort.signal;
+		host.setFusionAbort(fusionAbort);
 
 		let advisorPrompt = text;
 		if (settings.brief !== false) {
@@ -515,7 +533,7 @@ export async function runFusionSessionTurn(host: FusionHost, text: string, image
 		}
 		return true;
 	} catch {
-		if (host.fusionAbort?.signal.aborted || host.userInterrupted) {
+		if (fusionSignal?.aborted || host.userInterrupted) {
 			persistInterruptedTranscript();
 			return true;
 		}

@@ -3009,8 +3009,11 @@ export class InteractiveMode {
 				return;
 			}
 
-			// Ordinary Enter during active work queues a later follow-up turn.
-			if (this.session.isStreaming) {
+			// Ordinary Enter during active work queues a later follow-up turn. A Fusion
+			// turn runs outside agent.run() (isStreaming stays false for 10–600s), so
+			// treat isFusing as busy too — otherwise this Enter falls through to a normal
+			// submission that starts a second, concurrent Fusion turn.
+			if (this.session.isStreaming || this.session.isFusing) {
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
 				await this.session.prompt(text, { streamingBehavior: "followUp" });
@@ -4707,15 +4710,16 @@ export class InteractiveMode {
 		}
 
 		// Alt+Enter queues a follow-up message (waits until agent finishes)
-		// This handles extension commands (execute immediately), prompt template expansion, and queueing
-		if (this.session.isStreaming) {
+		// This handles extension commands (execute immediately), prompt template expansion, and queueing.
+		// A Fusion turn is "busy" too (it runs outside agent.run(), so isStreaming stays false).
+		if (this.session.isStreaming || this.session.isFusing) {
 			this.editor.addToHistory?.(text);
 			this.editor.setText("");
 			await this.session.prompt(text, { streamingBehavior: "followUp" });
 			this.updatePendingMessagesDisplay();
 			this.ui.requestRender();
 		}
-		// If not streaming, Alt+Enter acts like regular Enter (trigger onSubmit)
+		// If idle, Alt+Enter acts like regular Enter (trigger onSubmit)
 		else if (this.editor.onSubmit) {
 			this.editor.setText("");
 			this.editor.onSubmit(text);
