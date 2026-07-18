@@ -35,6 +35,17 @@ export interface ConnectGuard {
 	 * user-abort forwarding stays armed for the body phase until {@link dispose}.
 	 */
 	settle<T>(promise: Promise<T>): Promise<T>;
+	/**
+	 * Re-arm the single-shot connect timer for a FOLLOW-UP connect on the same
+	 * guard (e.g. a provider retry after a 400). The first {@link settle} clears
+	 * the timer in its finally, so a second connect would otherwise run with no
+	 * ceiling and fall back to the SDK's multi-minute default — a frozen retry
+	 * connect would wedge the turn just like the first. No-op once the guard has
+	 * already aborted (user interrupt or a prior connect timeout), so a re-armed
+	 * timer can never resurrect a torn-down request. Does not change the
+	 * non-retry path: callers that never re-arm behave exactly as before.
+	 */
+	rearm(): void;
 	/** Remove all listeners + timers. Call once when the stream fully ends. */
 	dispose(): void;
 }
@@ -67,16 +78,20 @@ export function createConnectGuard(
 		userSignal?.addEventListener("abort", onUserAbort, { once: true });
 	}
 
-	let connectTimer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
-		timedOut = true;
-		controller.abort(new Error(`Provider connect timed out after ${connectTimeoutMs}ms`));
-	}, connectTimeoutMs);
+	let connectTimer: ReturnType<typeof setTimeout> | undefined;
+	const armConnectTimer = (): void => {
+		connectTimer = setTimeout(() => {
+			timedOut = true;
+			controller.abort(new Error(`Provider connect timed out after ${connectTimeoutMs}ms`));
+		}, connectTimeoutMs);
+	};
 	const clearConnectTimer = (): void => {
 		if (connectTimer !== undefined) {
 			clearTimeout(connectTimer);
 			connectTimer = undefined;
 		}
 	};
+	armConnectTimer();
 
 	return {
 		signal: controller.signal,
@@ -106,6 +121,13 @@ export function createConnectGuard(
 				clearConnectTimer();
 				if (onRaceAbort) controller.signal.removeEventListener("abort", onRaceAbort);
 			}
+		},
+		rearm(): void {
+			// A torn-down request (user ESC or a prior connect timeout already
+			// aborted the combined signal) must stay torn down.
+			if (controller.signal.aborted) return;
+			clearConnectTimer();
+			armConnectTimer();
 		},
 		dispose(): void {
 			clearConnectTimer();

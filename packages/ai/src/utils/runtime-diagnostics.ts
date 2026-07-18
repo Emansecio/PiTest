@@ -32,6 +32,9 @@ export type DiagnosticCategory =
 	| "stream.backpressure"
 	| "net.connect-timeout"
 	| "net.command-timeout"
+	// A reasoning_effort field was dropped from a tools request (provider rejects
+	// effort+tools). `mechanism` says why: compat flag / memoized value / live retry.
+	| "provider.reasoning-effort-stripped"
 	| "output.cap"
 	| "process.kill"
 	| "io.retry"

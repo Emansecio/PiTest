@@ -56,6 +56,27 @@ describe("createConnectGuard", () => {
 		guard.dispose();
 	});
 
+	it("re-arms the connect ceiling for a retry after the first settle cleared it", async () => {
+		const guard = createConnectGuard(undefined, 15);
+		// First connect succeeds and clears the single-shot timer.
+		await expect(guard.settle(Promise.resolve("headers"))).resolves.toBe("headers");
+		// Without re-arming, a second hanging connect would have no ceiling.
+		guard.rearm();
+		await expect(guard.settle(never())).rejects.toThrow(/timed out/i);
+		expect(guard.signal.aborted).toBe(true);
+		guard.dispose();
+	});
+
+	it("rearm is a no-op once the guard has already aborted (torn-down request stays down)", async () => {
+		const ctrl = new AbortController();
+		const guard = createConnectGuard(ctrl.signal, 10_000);
+		ctrl.abort();
+		guard.rearm(); // must not resurrect the request
+		expect(guard.signal.aborted).toBe(true);
+		await expect(guard.settle(never())).rejects.toThrow(/aborted/i);
+		guard.dispose();
+	});
+
 	it("a late rejection from the orphaned connect does not throw out of the guard", async () => {
 		const ctrl = new AbortController();
 		const guard = createConnectGuard(ctrl.signal, 10_000);
