@@ -19,6 +19,7 @@ import { headersToRecord } from "../utils/headers.ts";
 import { iterateWithIdleTimeout } from "../utils/idle-timeout.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { resolveStreamTimeouts } from "../utils/stream-timeouts.ts";
+import { buildToolNameGuard, NOOP_TOOL_NAME_GUARD, type ToolNameGuard } from "../utils/tool-name-guard.ts";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
@@ -91,7 +92,8 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 			const client = createClient(model, apiKey, options?.headers, cacheSessionId);
-			let params = buildParams(model, context, options);
+			const toolNameGuard = buildToolNameGuard(context.tools);
+			let params = buildParams(model, context, options, toolNameGuard);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as ResponseCreateParamsStreaming;
@@ -121,6 +123,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 				stream,
 				model,
 				{
+					toolNameGuard,
 					serviceTier: options?.serviceTier,
 					applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
 				},
@@ -229,10 +232,21 @@ function createClient(
 	return clientCache.getOrCreate(config, () => new OpenAI(config));
 }
 
-function buildParams(model: Model<"openai-responses">, context: Context, options?: OpenAIResponsesOptions) {
-	const messages = convertResponsesMessages(model, context, RESPONSES_TOOL_CALL_PROVIDERS, {
-		includeSystemPrompt: false,
-	});
+function buildParams(
+	model: Model<"openai-responses">,
+	context: Context,
+	options?: OpenAIResponsesOptions,
+	toolNameGuard: ToolNameGuard = NOOP_TOOL_NAME_GUARD,
+) {
+	const messages = convertResponsesMessages(
+		model,
+		context,
+		RESPONSES_TOOL_CALL_PROVIDERS,
+		{
+			includeSystemPrompt: false,
+		},
+		toolNameGuard,
+	);
 	// Keep the system/developer message byte-stable across turns so the
 	// automatic prefix cache covers it plus the whole replayed history; the
 	// per-turn dynamic suffix rides the newest user message instead. See
@@ -269,7 +283,7 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 	}
 
 	if (context.tools && context.tools.length > 0) {
-		params.tools = convertResponsesTools(context.tools);
+		params.tools = convertResponsesTools(context.tools, undefined, toolNameGuard);
 	}
 
 	if (model.reasoning) {

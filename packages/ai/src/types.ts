@@ -401,6 +401,8 @@ export interface OpenAICompletionsCompat {
 	supportsDeveloperRole?: boolean;
 	/** Whether the provider supports `reasoning_effort`. Default: auto-detected from URL. */
 	supportsReasoningEffort?: boolean;
+	/** Whether the provider rejects `reasoning_effort` when the request also carries tools; when true the field is omitted for tool requests. Default: false. */
+	rejectsReasoningEffortWithTools?: boolean;
 	/** Whether the provider supports `stream_options: { include_usage: true }` for token usage in streaming responses. Default: true. */
 	supportsUsageInStreaming?: boolean;
 	/** Which field to use for max tokens. Default: auto-detected from URL. */

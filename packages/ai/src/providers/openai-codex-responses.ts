@@ -45,6 +45,7 @@ import { computeRetryDelay, isRetryableStatus, parseRetryAfter } from "../utils/
 import { recordDiagnostic } from "../utils/runtime-diagnostics.ts";
 import { SseChunkBuffer } from "../utils/sse-chunk-reader.ts";
 import { resolveStreamTimeouts } from "../utils/stream-timeouts.ts";
+import { buildToolNameGuard, NOOP_TOOL_NAME_GUARD, type ToolNameGuard } from "../utils/tool-name-guard.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
 	applyDynamicPromptRelocation,
@@ -159,7 +160,8 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			}
 
 			const accountId = extractAccountId(apiKey);
-			let body = buildRequestBody(model, context, options);
+			const toolNameGuard = buildToolNameGuard(context.tools);
+			let body = buildRequestBody(model, context, options, toolNameGuard);
 			const nextBody = await options?.onPayload?.(body, model);
 			if (nextBody !== undefined) {
 				body = nextBody as RequestBody;
@@ -202,6 +204,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 							websocketStarted = true;
 						},
 						options,
+						toolNameGuard,
 					);
 
 					if (options?.signal?.aborted) {
@@ -323,7 +326,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			}
 
 			stream.push({ type: "start", partial: output });
-			await processStream(response, output, stream, model, options);
+			await processStream(response, output, stream, model, options, toolNameGuard);
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -395,10 +398,17 @@ function buildRequestBody(
 	model: Model<"openai-codex-responses">,
 	context: Context,
 	options?: OpenAICodexResponsesOptions,
+	toolNameGuard: ToolNameGuard = NOOP_TOOL_NAME_GUARD,
 ): RequestBody {
-	const messages = convertResponsesMessages(model, context, RESPONSES_TOOL_CALL_PROVIDERS, {
-		includeSystemPrompt: false,
-	});
+	const messages = convertResponsesMessages(
+		model,
+		context,
+		RESPONSES_TOOL_CALL_PROVIDERS,
+		{
+			includeSystemPrompt: false,
+		},
+		toolNameGuard,
+	);
 	// `instructions` is the first segment of the automatically cached prompt
 	// prefix, so it must stay byte-stable across turns; the per-turn dynamic
 	// suffix rides the newest user message as an <env> block instead (M1).
@@ -432,7 +442,7 @@ function buildRequestBody(
 	}
 
 	if (context.tools && context.tools.length > 0) {
-		body.tools = convertResponsesTools(context.tools, { strict: null });
+		body.tools = convertResponsesTools(context.tools, { strict: null }, toolNameGuard);
 	}
 
 	if (options?.reasoningEffort !== undefined) {
@@ -487,6 +497,7 @@ async function processStream(
 	stream: AssistantMessageEventStream,
 	model: Model<"openai-codex-responses">,
 	options?: OpenAICodexResponsesOptions,
+	toolNameGuard: ToolNameGuard = NOOP_TOOL_NAME_GUARD,
 ): Promise<void> {
 	await processResponsesStream(
 		mapCodexEvents(parseSSE(response, options?.signal, options?.idleTimeoutMs)),
@@ -494,6 +505,7 @@ async function processStream(
 		stream,
 		model,
 		{
+			toolNameGuard,
 			serviceTier: options?.serviceTier,
 			resolveServiceTier: resolveCodexServiceTier,
 			applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
@@ -1381,6 +1393,7 @@ async function processWebSocketStream(
 	model: Model<"openai-codex-responses">,
 	onStart: () => void,
 	options?: OpenAICodexResponsesOptions,
+	toolNameGuard: ToolNameGuard = NOOP_TOOL_NAME_GUARD,
 ): Promise<void> {
 	const timeouts = resolveStreamTimeouts(options);
 	const { socket, entry, reused, release } = await acquireWebSocket(
@@ -1432,6 +1445,7 @@ async function processWebSocketStream(
 			stream,
 			model,
 			{
+				toolNameGuard,
 				serviceTier: options?.serviceTier,
 				resolveServiceTier: resolveCodexServiceTier,
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
@@ -1440,9 +1454,15 @@ async function processWebSocketStream(
 		if (options?.signal?.aborted) {
 			keepConnection = false;
 		} else if (useCachedContext && entry && output.responseId) {
-			const responseItems = convertResponsesMessages(model, { messages: [output] }, RESPONSES_TOOL_CALL_PROVIDERS, {
-				includeSystemPrompt: false,
-			}).filter((item) => item.type !== "function_call_output");
+			const responseItems = convertResponsesMessages(
+				model,
+				{ messages: [output] },
+				RESPONSES_TOOL_CALL_PROVIDERS,
+				{
+					includeSystemPrompt: false,
+				},
+				toolNameGuard,
+			).filter((item) => item.type !== "function_call_output");
 			entry.continuation = {
 				lastRequestBody: fullBody,
 				lastResponseId: output.responseId,

@@ -77,5 +77,7 @@ describe("buildCrossErrorReminder", () => {
 		expect(out).toContain("2 different");
 		expect(out).toContain("ENOENT: no such file");
 		expect(out).toContain("ask the user");
+		// Steers the model to re-read the recurring error before trying another variation.
+		expect(out).toContain("re-read the actual error above");
 	});
 });

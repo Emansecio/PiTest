@@ -32,6 +32,7 @@ import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { finalizeStreamingJson, parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import { NOOP_TOOL_NAME_GUARD, type ToolNameGuard } from "../utils/tool-name-guard.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 // =============================================================================
@@ -113,10 +114,36 @@ export function imageDataUrl(block: { mimeType: string; data: string }): string 
 	return url;
 }
 
+function compactArgsDisabled(): boolean {
+	const env = typeof process !== "undefined" ? process.env?.PIT_NO_COMPACT_ARGS : undefined;
+	const flag = env?.toLowerCase();
+	return flag === "1" || flag === "true" || flag === "yes";
+}
+
+/**
+ * Serialize tool-call arguments for the wire. Object arguments (the common case)
+ * already serialize compactly via `JSON.stringify`. Pre-serialized string
+ * arguments — which can reach the wire when a tool call is replayed from a
+ * persisted transcript — are re-serialized compact (whitespace dropped) when
+ * they are valid JSON, and passed through untouched when they do not parse so a
+ * malformed argument never breaks replay. Kill switch: `PIT_NO_COMPACT_ARGS=1`
+ * restores the plain `JSON.stringify(arguments)` behavior.
+ */
+function compactToolArgs(args: unknown): string {
+	if (typeof args === "string" && !compactArgsDisabled()) {
+		try {
+			return JSON.stringify(JSON.parse(args));
+		} catch {
+			return args;
+		}
+	}
+	return JSON.stringify(args);
+}
+
 export function serializeToolArgs(toolCall: ToolCall): string {
 	let serialized = serializedToolArgsCache.get(toolCall);
 	if (serialized === undefined) {
-		serialized = JSON.stringify(toolCall.arguments);
+		serialized = compactToolArgs(toolCall.arguments);
 		serializedToolArgsCache.set(toolCall, serialized);
 	}
 	return serialized;
@@ -197,6 +224,8 @@ function parseTextSignature(
 }
 
 export interface OpenAIResponsesStreamOptions {
+	/** Per-request tool-name remap; used to restore original names on tool calls. */
+	toolNameGuard?: ToolNameGuard;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	resolveServiceTier?: (
 		responseServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
@@ -270,6 +299,7 @@ export function convertResponsesMessages<TApi extends Api>(
 	context: Context,
 	allowedToolCallProviders: ReadonlySet<string>,
 	options?: ConvertResponsesMessagesOptions,
+	toolNameGuard: ToolNameGuard = NOOP_TOOL_NAME_GUARD,
 ): ResponseInput {
 	const messages: ResponseInput = [];
 
@@ -386,7 +416,9 @@ export function convertResponsesMessages<TApi extends Api>(
 						type: "function_call",
 						id: itemId,
 						call_id: callId,
-						name: toolCall.name,
+						// Replayed history: historical path keeps a removed/disconnected tool's
+						// name wire-safe instead of passing it raw. See toWireHistorical.
+						name: toolNameGuard.toWireHistorical(toolCall.name),
 						arguments: serializeToolArgs(toolCall),
 					});
 				}
@@ -444,11 +476,15 @@ export function convertResponsesMessages<TApi extends Api>(
 // Tool conversion
 // =============================================================================
 
-export function convertResponsesTools(tools: Tool[], options?: ConvertResponsesToolsOptions): OpenAITool[] {
+export function convertResponsesTools(
+	tools: Tool[],
+	options?: ConvertResponsesToolsOptions,
+	toolNameGuard: ToolNameGuard = NOOP_TOOL_NAME_GUARD,
+): OpenAITool[] {
 	const strict = options?.strict === undefined ? false : options.strict;
 	return tools.map((tool) => ({
 		type: "function",
-		name: tool.name,
+		name: toolNameGuard.toWire(tool.name),
 		description: tool.description,
 		parameters: tool.parameters as any, // TypeBox already generates JSON Schema
 		strict,
@@ -650,6 +686,7 @@ export async function processResponsesStream<TApi extends Api>(
 						: item.arguments || "{}";
 				const finalized = finalizeStreamingJson(finalizeSource);
 				const args = finalized.value;
+				const guard = options?.toolNameGuard;
 
 				let toolCall: ToolCall;
 				if (currentBlock?.type === "toolCall") {
@@ -660,12 +697,16 @@ export async function processResponsesStream<TApi extends Api>(
 						(currentBlock as any)._streamingParseError = true;
 					}
 					delete (currentBlock as { partialJson?: string }).partialJson;
+					// Restore the caller's original tool name from the sanitized wire name.
+					if (guard?.active) {
+						currentBlock.name = guard.fromWire(currentBlock.name);
+					}
 					toolCall = currentBlock;
 				} else {
 					toolCall = {
 						type: "toolCall",
 						id: `${item.call_id}|${item.id}`,
-						name: item.name,
+						name: guard?.active ? guard.fromWire(item.name) : item.name,
 						arguments: args,
 					};
 				}

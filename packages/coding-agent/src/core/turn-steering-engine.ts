@@ -376,7 +376,7 @@ export class TurnSteeringEngine {
 			cappedSummary,
 			"```",
 			"",
-			"Varying the arguments is not working — the failure is identical regardless. Stop tweaking the arguments and change approach: a different tool, a fundamentally different strategy, or ask the user for guidance. Do not retry another small variation.",
+			"Before anything else, re-read the full error above carefully — the reason it keeps failing is usually already stated in it. Varying the arguments is not working — the failure is identical regardless. Stop tweaking the arguments and change approach: a different tool, a fundamentally different strategy, or ask the user for guidance. Do not retry another small variation.",
 			"</result-loop-reminder>",
 		].join("\n");
 		this._fireReminder("pi.result-loop-reminder", content, {

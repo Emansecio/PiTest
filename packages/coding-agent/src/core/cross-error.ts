@@ -133,6 +133,9 @@ export function buildCrossErrorReminder(input: CrossErrorReminderInput): string 
 		lines.push("```");
 	}
 	lines.push("");
+	lines.push(
+		"Before anything else, re-read the actual error above word for word — the reason it keeps failing is usually already stated in it.",
+	);
 	lines.push("Stop varying the call and fix the cause:");
 	lines.push("- **Read the actual file/state** the error refers to instead of guessing at arguments.");
 	lines.push("- If a path, permission, or precondition is wrong, correct THAT — not the surface call.");

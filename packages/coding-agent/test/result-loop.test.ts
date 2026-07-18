@@ -72,6 +72,8 @@ describe("result-only doom-loop (thrash) detector", () => {
 		expect(resultLoop.length).toBe(1);
 		expect(resultLoop[0]?.content).toContain("<result-loop-reminder>");
 		expect(resultLoop[0]?.content).toContain("the same boom every time");
+		// Steers the model to re-read the error it already received before retrying.
+		expect(resultLoop[0]?.content).toContain("re-read the full error above");
 
 		// The args-keyed doom-loop is unchanged: it never tripped (args varied) — no
 		// abort and no args-keyed steers.

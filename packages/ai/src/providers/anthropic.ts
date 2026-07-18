@@ -37,6 +37,7 @@ import { sanitizeJoinedTextMemo, sanitizeSurrogatesMemo } from "../utils/sanitiz
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { SseChunkBuffer } from "../utils/sse-chunk-reader.ts";
 import { resolveStreamTimeouts } from "../utils/stream-timeouts.ts";
+import { buildToolNameGuard, NOOP_TOOL_NAME_GUARD, type ToolNameGuard } from "../utils/tool-name-guard.ts";
 
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { createInitialAssistantMessage, sanitizeToolCallId, stripStreamingScratch } from "./openai-responses-shared.ts";
@@ -546,7 +547,8 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				client = created.client;
 				isOAuth = created.isOAuthToken;
 			}
-			let params = buildParams(model, context, isOAuth, options);
+			const toolNameGuard = buildToolNameGuard(context.tools);
+			let params = buildParams(model, context, isOAuth, options, toolNameGuard);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as MessageCreateParamsStreaming;
@@ -616,12 +618,13 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 						blockIndexMap.set(event.index, blocks.length - 1);
 						stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
 					} else if (event.content_block.type === "tool_use") {
+						const wireName = isOAuth
+							? fromClaudeCodeName(event.content_block.name, toolNameLookup)
+							: event.content_block.name;
 						const block: Block = {
 							type: "toolCall",
 							id: event.content_block.id,
-							name: isOAuth
-								? fromClaudeCodeName(event.content_block.name, toolNameLookup)
-								: event.content_block.name,
+							name: toolNameGuard.active ? toolNameGuard.fromWire(wireName) : wireName,
 							arguments: (event.content_block.input as Record<string, any>) ?? {},
 							partialJson: "",
 							index: event.index,
@@ -963,11 +966,12 @@ export function buildParams(
 	context: Context,
 	isOAuthToken: boolean,
 	options?: AnthropicOptions,
+	toolNameGuard: ToolNameGuard = buildToolNameGuard(context.tools),
 ): MessageCreateParamsStreaming {
 	const { cacheControl } = getCacheControl(model, options?.cacheRetention);
 	const params: MessageCreateParamsStreaming = {
 		model: model.id,
-		messages: convertMessages(context.messages, model, isOAuthToken, cacheControl),
+		messages: convertMessages(context.messages, model, isOAuthToken, cacheControl, toolNameGuard),
 		max_tokens: options?.maxTokens ?? model.maxTokens,
 		stream: true,
 	};
@@ -1026,6 +1030,7 @@ export function buildParams(
 			isOAuthToken,
 			compat.supportsEagerToolInputStreaming,
 			compat.supportsCacheControlOnTools ? cacheControl : undefined,
+			toolNameGuard,
 		);
 	}
 
@@ -1095,6 +1100,7 @@ function convertMessages(
 	model: Model<"anthropic-messages">,
 	isOAuthToken: boolean,
 	cacheControl?: CacheControlEphemeral,
+	toolNameGuard: ToolNameGuard = NOOP_TOOL_NAME_GUARD,
 ): MessageParam[] {
 	const params: MessageParam[] = [];
 	// Track the last user message containing a compaction-summary text block,
@@ -1184,10 +1190,14 @@ function convertMessages(
 						});
 					}
 				} else if (block.type === "toolCall") {
+					// Replayed history: use the historical path so a tool_use name whose tool
+					// was removed/disconnected (not in the current tool set) is still sanitized
+					// to the Anthropic charset instead of poisoning the request. See toWireHistorical.
+					const wireName = toolNameGuard.toWireHistorical(block.name);
 					blocks.push({
 						type: "tool_use",
 						id: block.id,
-						name: isOAuthToken ? toClaudeCodeName(block.name) : block.name,
+						name: isOAuthToken ? toClaudeCodeName(wireName) : wireName,
 						input: block.arguments ?? {},
 					});
 				}
@@ -1287,14 +1297,16 @@ function convertTools(
 	isOAuthToken: boolean,
 	supportsEagerToolInputStreaming: boolean,
 	cacheControl?: CacheControlEphemeral,
+	toolNameGuard: ToolNameGuard = NOOP_TOOL_NAME_GUARD,
 ): Anthropic.Messages.Tool[] {
 	if (!tools) return [];
 
 	return tools.map((tool, index) => {
 		const schema = tool.parameters as { properties?: unknown; required?: string[] };
+		const wireName = toolNameGuard.toWire(tool.name);
 
 		return {
-			name: isOAuthToken ? toClaudeCodeName(tool.name) : tool.name,
+			name: isOAuthToken ? toClaudeCodeName(wireName) : wireName,
 			description: tool.description,
 			...(supportsEagerToolInputStreaming ? { eager_input_streaming: true } : {}),
 			input_schema: {
