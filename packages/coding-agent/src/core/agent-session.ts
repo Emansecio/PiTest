@@ -593,19 +593,6 @@ export class AgentSession implements CompactionHost, FusionHost {
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/**
-	 * Priority recovery steers fired mid-turn (doom-loop recovery/pause, result-loop,
-	 * session-recovery narration) awaiting a flush at the current turn's `turn_end`.
-	 * They must land in the live transcript immediately so they reach the very next
-	 * model turn — routing them through the agent's one-at-a-time steering queue lets
-	 * a session-recovery burst of several priority steers starve each other (only one
-	 * drains per turn). But they cannot be pushed the instant they fire, because that
-	 * lands them BETWEEN an assistant tool call and its still-pending tool result,
-	 * producing an invalid tool_use/tool_result sequence. Buffering here and flushing
-	 * at `turn_end` (after the tool-result batch is appended) lands them promptly AND
-	 * in a valid order, in both the live transcript and the persisted session.
-	 */
-	private _pendingPrioritySteers: CustomMessage[] = [];
-	/**
 	 * Images attached out-of-band (e.g. clipboard paste in the TUI) to be merged
 	 * into the NEXT user prompt's content. Consumed and cleared the first time a
 	 * user message is built in `_promptOnce`, so a pasted image rides along with
@@ -1992,6 +1979,16 @@ export class AgentSession implements CompactionHost, FusionHost {
 	// Track last assistant message for auto-compaction check
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
 
+	/**
+	 * Whether the most recent agent run ended because its signal was aborted (Esc,
+	 * session.abort(), tool cancel that aborts the run, …). Captured at `agent_end`,
+	 * while the run's abort controller is still live. Gates the Bug-4 post-run
+	 * queue-drain so an aborted run never auto-runs the user's queued messages — the
+	 * loop itself skips its final drain on abort, and re-running them would fight the
+	 * user's intent to stop (and can hang on a provider stream that never re-aborts).
+	 */
+	private _lastRunAborted = false;
+
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
@@ -2178,9 +2175,10 @@ export class AgentSession implements CompactionHost, FusionHost {
 				}
 				break;
 			case "agent_end":
-				// Safety net: land any priority steer buffered on a turn that ended without
-				// a turn_end (e.g. an aborted turn). Normally the turn_end flush handles it.
-				this._flushPendingPrioritySteers();
+				// Capture the abort state now, while the run's controller is still live
+				// (finishRun clears it right after agent_end listeners settle). Read by the
+				// Bug-4 post-run queue-drain gate in _handlePostAgentRun.
+				this._lastRunAborted = this.agent.signal?.aborted ?? false;
 				this._toolCallArgsByCallId.clear();
 				this._rejectedToolCallIds.clear();
 				// Symmetric with the sibling maps: a turn aborted between hint-applied
@@ -2202,11 +2200,6 @@ export class AgentSession implements CompactionHost, FusionHost {
 				}
 				break;
 			case "turn_end":
-				// Land any priority recovery steers fired mid-turn now that the assistant
-				// message and its tool-result batch are both in the transcript — appending
-				// here keeps the tool_use/tool_result sequence valid while still delivering
-				// the steer before the next model turn (see _flushPendingPrioritySteers).
-				this._flushPendingPrioritySteers();
 				if (this._extensionRunner.hasHandlers("turn_end")) {
 					await this._extensionRunner.emit({
 						type: "turn_end",
@@ -2298,32 +2291,6 @@ export class AgentSession implements CompactionHost, FusionHost {
 			case "tool_error_hint_applied":
 				this._handleToolErrorHintApplied(event);
 				break;
-		}
-	}
-
-	/**
-	 * Flush buffered priority recovery steers into the live transcript. Called at
-	 * turn_end, when the assistant message and its tool-result batch are already
-	 * appended, so a direct push lands the steer AFTER the batch (valid ordering)
-	 * yet before the next model turn (no one-at-a-time starvation). Persists via
-	 * appendCustomMessageEntry and emits message_start/message_end to subscribers —
-	 * the emit targets session listeners only, so it does not re-enter this handler
-	 * and cannot double-persist.
-	 */
-	private _flushPendingPrioritySteers(): void {
-		if (this._pendingPrioritySteers.length === 0) return;
-		const steers = this._pendingPrioritySteers;
-		this._pendingPrioritySteers = [];
-		for (const appMessage of steers) {
-			this.agent.state.messages.push(appMessage);
-			this.sessionManager.appendCustomMessageEntry(
-				appMessage.customType,
-				appMessage.content,
-				appMessage.display,
-				appMessage.details,
-			);
-			this.emit({ type: "message_start", message: appMessage });
-			this.emit({ type: "message_end", message: appMessage });
 		}
 	}
 
@@ -3747,7 +3714,37 @@ export class AgentSession implements CompactionHost, FusionHost {
 
 		// End-of-turn: allow predictive background compaction (overlaps the user's
 		// read time so the next prompt rarely waits).
-		return await checkCompaction(this.compaction, msg, true, true);
+		if (await checkCompaction(this.compaction, msg, true, true)) {
+			return true;
+		}
+
+		// Bug 4 — orphaned queued message safety net: a steer/follow-up enqueued in the
+		// window between the loop's final drain (agent-loop drainSteering) and the run
+		// settling (isStreaming → false) lands in the agent queues too late for the loop
+		// to see, and would otherwise sit there until the next USER prompt. Continue the
+		// run now to drain it (agent.continue() pulls steering, then follow-up). Join any
+		// predictive background compaction just started above first, so the continuation
+		// doesn't race the compactor over state.messages. Re-entrant-safe: each
+		// continuation ends back here and returns false once the queues are empty.
+		//
+		// Only on a clean completion: the loop itself never delivers queued messages after
+		// an aborted/error turn (it returns before the drain), and an Esc (userInterrupted)
+		// or any run abort means the user wants to STOP — auto-running their queued text
+		// would fight that intent (and, on an aborted run with no fresh stream, spin a hung
+		// continuation). `_lastRunAborted` is the authoritative signal (a provider may
+		// report an aborted turn with a non-"aborted" stopReason); the stopReason checks
+		// are belt-and-suspenders for terminal error/abort turns.
+		if (
+			!this._userInterrupted &&
+			!this._lastRunAborted &&
+			msg.stopReason !== "aborted" &&
+			msg.stopReason !== "error" &&
+			this.agent.hasQueuedMessages()
+		) {
+			await awaitBackgroundCompaction(this.compaction);
+			return true;
+		}
+		return false;
 	}
 
 	/**
@@ -4719,6 +4716,10 @@ export class AgentSession implements CompactionHost, FusionHost {
 				const handled = await runFusionSessionTurn(this, text, currentImages);
 				if (handled) {
 					preflightResult?.(true);
+					// A Fusion turn runs outside the agent loop, so anything queued during it
+					// (a mid-turn submit routed to the queue) is never drained by the loop —
+					// deliver it now through the normal prompt path (Bug 1).
+					await this._drainQueuedAfterFusion();
 					return;
 				}
 			}
@@ -5081,6 +5082,71 @@ export class AgentSession implements CompactionHost, FusionHost {
 	}
 
 	/**
+	 * Deliver any steer/follow-up queued DURING a Fusion turn (Bug 1). A Fusion turn
+	 * runs outside the agent loop (runFusionSessionTurn writes straight to state.messages),
+	 * so the loop's queue pollers never fire and a mid-turn submit — routed here by
+	 * {@link _promptOnce}'s queue branch — would sit in the agent queues until the next
+	 * user prompt. Drain both queues and re-run each message through the normal prompt
+	 * path so it routes correctly (Fusion again, solo, …) and emits/persists via the
+	 * standard flow, preserving queue order (steering before follow-up, each FIFO).
+	 *
+	 * Convergence: while we re-prompt, `isFusing` and `isStreaming` are both false, so
+	 * {@link _promptOnce} processes each message inline instead of re-queueing it — a
+	 * drained message cannot re-enqueue itself. The loop only continues for genuinely new
+	 * user input that arrived during a re-prompt and stops once the queues are empty.
+	 */
+	private async _drainQueuedAfterFusion(): Promise<void> {
+		while (!this._userInterrupted && this.agent.hasQueuedMessages()) {
+			const queued = this.agent.takeQueuedMessages();
+			if (queued.length === 0) break;
+			// We took these out of the agent queues ourselves, so clear their UI-mirror
+			// entries here: the loop's message_start handler only clears the mirror for
+			// messages the loop delivers, and a Fusion re-route emits via the session bus
+			// (not agent events), so it would otherwise leave a stale "pending" entry.
+			for (const message of queued) this._removeQueueMirrorEntry(this._queuedMessageText(message));
+			this._emitQueueUpdate();
+			for (const message of queued) {
+				if (this._userInterrupted) break;
+				const text = this._queuedMessageText(message);
+				const images = this._extractImagesFromMessage(message);
+				// Already expanded when it was queued — don't expand (or re-run command
+				// handling) a second time.
+				await this._promptOnce(text, { expandPromptTemplates: false, images });
+			}
+		}
+	}
+
+	/** Extract the concatenated text of a queued user/custom AgentMessage. */
+	private _queuedMessageText(message: AgentMessage): string {
+		const content = (message as { content?: unknown }).content;
+		if (typeof content === "string") return content;
+		if (!Array.isArray(content)) return "";
+		return content
+			.filter((c): c is TextContent => (c as { type?: string }).type === "text")
+			.map((c) => c.text)
+			.join("");
+	}
+
+	/** Extract image attachments from a queued user AgentMessage, if any. */
+	private _extractImagesFromMessage(message: AgentMessage): ImageContent[] | undefined {
+		const content = (message as { content?: unknown }).content;
+		if (!Array.isArray(content)) return undefined;
+		const images = content.filter((c): c is ImageContent => (c as { type?: string }).type === "image");
+		return images.length > 0 ? images : undefined;
+	}
+
+	/** Remove the first UI-mirror entry (steering, else follow-up) matching `text`. */
+	private _removeQueueMirrorEntry(text: string): void {
+		const steeringIndex = this._steeringMessages.indexOf(text);
+		if (steeringIndex !== -1) {
+			this._steeringMessages.splice(steeringIndex, 1);
+			return;
+		}
+		const followUpIndex = this._followUpMessages.indexOf(text);
+		if (followUpIndex !== -1) this._followUpMessages.splice(followUpIndex, 1);
+	}
+
+	/**
 	 * Throw an error if the text is an extension command.
 	 */
 	private _throwIfExtensionCommand(text: string): void {
@@ -5130,12 +5196,14 @@ export class AgentSession implements CompactionHost, FusionHost {
 			if (options?.deliverAs === "followUp") {
 				this.agent.followUp(appMessage);
 			} else if (options?.steerPriority) {
-				// Buffer for a flush at this turn's turn_end. Landing it now would splice
-				// the steer between the assistant tool call and its pending tool result;
-				// routing it through the steering queue would let a burst of recovery
-				// steers starve each other under one-at-a-time draining. See the field doc
-				// on _pendingPrioritySteers.
-				this._pendingPrioritySteers.push(appMessage);
+				// Priority recovery steer (e.g. doom-loop). Deliver it via the steering
+				// queue's front (Bug 2): only the queue is drained by the in-flight run, so
+				// the model actually sees the reminder THIS run. The loop drains steering at
+				// the top of the next iteration — after the current turn's tool-result batch,
+				// before the next model turn — which is exactly the ordering we want. The
+				// injected custom message is persisted once, in the standard format, by the
+				// message_end handler (appendCustomMessageEntry).
+				this.agent.steer(appMessage, { priority: true });
 			} else {
 				this.agent.steer(appMessage);
 			}

@@ -236,10 +236,19 @@ export async function runFusionSessionTurn(host: FusionHost, text: string, image
 	// Defensive backstop against a concurrent second Fusion turn: `host.fusionAbort`
 	// is the live turn's controller. Starting another turn would overwrite it (Esc
 	// then only aborts the newer one; the older panel runs to timeout) and interleave
-	// transcript writes. The interactive submit guard already routes a mid-turn Enter
-	// to the follow-up queue; this refuses any other caller WITHOUT touching the live
-	// controller, and reports the turn as handled so no concurrent solo turn starts.
-	if (host.fusionAbort !== undefined) return true;
+	// transcript writes. With the synchronous reservation below, isFusing is already
+	// true when a re-entrant prompt arrives, so the interactive submit guard routes it
+	// to the follow-up queue and this backstop rarely fires. When it does (a direct
+	// caller during the reserving turn's awaits — Bug 3b), enqueue the prompt as a
+	// follow-up (with images) so it runs after the live turn instead of being silently
+	// dropped; the live controller is left untouched and the turn is reported handled so
+	// no concurrent solo turn starts.
+	if (host.fusionAbort !== undefined) {
+		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+		if (images && images.length > 0) content.push(...images);
+		host.agent.followUp({ role: "user", content, timestamp: Date.now() });
+		return true;
+	}
 	const model = host.model;
 	if (!model) return false;
 	const settings = host.settingsManager.getFusionSettings();
@@ -254,41 +263,19 @@ export async function runFusionSessionTurn(host: FusionHost, text: string, image
 		);
 		return false;
 	}
-	await host.prepareFusionContextEconomy(text);
-	const budget = host.evaluateFusionBudget();
-	if (!budget.allowed) {
-		// This branch owns the turn (returns true, no solo fallthrough), so the user
-		// message is Fusion's responsibility — emit it before the synthetic answer so
-		// the transcript keeps user→assistant ordering (and the prompt isn't lost).
-		emitFusionUserMessage(host, text, images);
-		emitSyntheticAssistant(host, budget.reason ?? "Goal token budget exhausted — Fusion panel skipped.");
-		return true;
-	}
-	const { apiKey, headers } = await host.getRequiredRequestAuth(model);
-	const cliTokens = new Map<string, string | undefined>();
-	for (const cli of new Set(settings.panel.map((m) => m.cli))) {
-		const provider = providerForCli(cli);
-		if (!provider) continue;
-		try {
-			cliTokens.set(cli, await host.modelRegistry.getApiKeyForProvider(provider));
-		} catch {
-			cliTokens.set(cli, undefined);
-		}
-	}
-	const memberMetrics = new Map<number, { elapsedMs: number; chars: number; ok: boolean; error?: string }>();
-	const buildSummaryMembers = (): FusionSummaryData["members"] =>
-		settings.panel.map((m, i) => {
-			const metric = memberMetrics.get(i);
-			return {
-				cli: m.cli,
-				model: m.model,
-				ok: metric?.ok ?? false,
-				elapsedMs: metric?.elapsedMs ?? 0,
-				chars: metric?.chars ?? 0,
-				error: metric?.error,
-			};
-		});
-	const synthesisItems: NonNullable<FusionSummaryData["synthesis"]> = [];
+	// Bug 3a — reserve the turn SYNCHRONOUSLY: create and register the abort controller
+	// before the first await (prepareFusionContextEconomy / getRequiredRequestAuth /
+	// getApiKeyForProvider) so `isFusing` (host.fusionAbort !== undefined) is true the
+	// instant this function suspends. Otherwise a second prompt arriving mid-await would
+	// see isFusing === false, route to Fusion again, and start a concurrent turn (or be
+	// dropped by the backstop above). The synchronous early-returns above run BEFORE this,
+	// so they never leave a stray controller; every path after it lives inside the try
+	// whose finally clears it.
+	const fusionAbort = new AbortController();
+	// Local copy so the `catch` can read the abort state without touching
+	// `host.fusionAbort` (a getter the double-start guard also tests).
+	const fusionSignal = fusionAbort.signal;
+	host.setFusionAbort(fusionAbort);
 	let userMessageEmitted = false;
 	const persistInterruptedTranscript = (): void => {
 		if (userMessageEmitted) return;
@@ -296,14 +283,42 @@ export async function runFusionSessionTurn(host: FusionHost, text: string, image
 		userMessageEmitted = true;
 		emitFusionNote(host, "Fusion interrupted.");
 	};
-	// Function-scoped so the `catch` can read the abort state without touching
-	// `host.fusionAbort` — the top-of-function double-start guard tests that getter,
-	// which would otherwise narrow it to `undefined` for the rest of this function.
-	let fusionSignal: AbortSignal | undefined;
 	try {
-		const fusionAbort = new AbortController();
-		fusionSignal = fusionAbort.signal;
-		host.setFusionAbort(fusionAbort);
+		await host.prepareFusionContextEconomy(text);
+		const budget = host.evaluateFusionBudget();
+		if (!budget.allowed) {
+			// This branch owns the turn (returns true, no solo fallthrough), so the user
+			// message is Fusion's responsibility — emit it before the synthetic answer so
+			// the transcript keeps user→assistant ordering (and the prompt isn't lost).
+			emitFusionUserMessage(host, text, images);
+			emitSyntheticAssistant(host, budget.reason ?? "Goal token budget exhausted — Fusion panel skipped.");
+			return true;
+		}
+		const { apiKey, headers } = await host.getRequiredRequestAuth(model);
+		const cliTokens = new Map<string, string | undefined>();
+		for (const cli of new Set(settings.panel.map((m) => m.cli))) {
+			const provider = providerForCli(cli);
+			if (!provider) continue;
+			try {
+				cliTokens.set(cli, await host.modelRegistry.getApiKeyForProvider(provider));
+			} catch {
+				cliTokens.set(cli, undefined);
+			}
+		}
+		const memberMetrics = new Map<number, { elapsedMs: number; chars: number; ok: boolean; error?: string }>();
+		const buildSummaryMembers = (): FusionSummaryData["members"] =>
+			settings.panel.map((m, i) => {
+				const metric = memberMetrics.get(i);
+				return {
+					cli: m.cli,
+					model: m.model,
+					ok: metric?.ok ?? false,
+					elapsedMs: metric?.elapsedMs ?? 0,
+					chars: metric?.chars ?? 0,
+					error: metric?.error,
+				};
+			});
+		const synthesisItems: NonNullable<FusionSummaryData["synthesis"]> = [];
 
 		let advisorPrompt = text;
 		if (settings.brief !== false) {
@@ -533,7 +548,7 @@ export async function runFusionSessionTurn(host: FusionHost, text: string, image
 		}
 		return true;
 	} catch {
-		if (fusionSignal?.aborted || host.userInterrupted) {
+		if (fusionSignal.aborted || host.userInterrupted) {
 			persistInterruptedTranscript();
 			return true;
 		}

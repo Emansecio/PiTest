@@ -319,6 +319,90 @@ describe("AgentSession queue characterization", () => {
 		}
 	});
 
+	it("delivers a priority steer into the in-flight run's next provider call (Bug 2)", async () => {
+		// Regression for the priority-steer buffering bug: a doom-loop recovery steer fired
+		// mid-run must reach the CURRENT run's model call. It used to be buffered and pushed
+		// straight into state.messages at turn_end — but the loop works on a clone, so the
+		// model never saw it until the following user prompt.
+		const waiting = await createWaitingHarness();
+		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = waiting;
+		harnesses.push(harness);
+		let steersSeenByModel = 0;
+
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			(context) => {
+				steersSeenByModel = context.messages.filter(
+					(message) =>
+						message.role === "user" &&
+						typeof message.content !== "string" &&
+						message.content.some((part) => part.type === "text" && part.text === "recover now"),
+				).length;
+				return fauxAssistantMessage("recovered");
+			},
+		]);
+
+		await waitForToolStart;
+		await harness.session.sendCustomMessage(
+			{ customType: "doom-recovery", content: "recover now", display: false },
+			{ deliverAs: "steer", steerPriority: true },
+		);
+		releaseToolExecution();
+		await promptPromise;
+
+		// The model saw the steer this run — exactly once (no duplication in the wire context).
+		expect(steersSeenByModel).toBe(1);
+		// And it is persisted exactly once, in the standard custom-entry format.
+		const persisted = harness.sessionManager
+			.buildSessionContext()
+			.messages.filter((message) => message.role === "custom" && message.customType === "doom-recovery");
+		expect(persisted).toHaveLength(1);
+		const inState = harness.session.messages.filter(
+			(message) => message.role === "custom" && message.customType === "doom-recovery",
+		);
+		expect(inState).toHaveLength(1);
+	});
+
+	it("drains a steer orphaned in the end-of-run window without a new user prompt (Bug 4)", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		let steered = false;
+		let steerSeenByModel = false;
+
+		// Enqueue a steer during the final agent_end — AFTER the loop's last drain but
+		// BEFORE the run settles (isStreaming → false). That is the orphan window: the loop
+		// can no longer see it, so without the post-run safety net it would sit in the queue
+		// until the next user prompt.
+		const unsubscribe = harness.session.subscribe((event) => {
+			if (event.type === "agent_end" && !steered) {
+				steered = true;
+				void harness.session.steer("orphan recovery");
+			}
+		});
+
+		harness.setResponses([
+			fauxAssistantMessage("done"),
+			(context) => {
+				steerSeenByModel = context.messages.some(
+					(message) =>
+						message.role === "user" &&
+						typeof message.content !== "string" &&
+						message.content.some((part) => part.type === "text" && part.text === "orphan recovery"),
+				);
+				return fauxAssistantMessage("handled orphan");
+			},
+		]);
+
+		await harness.session.prompt("go");
+		unsubscribe();
+
+		expect(steered).toBe(true);
+		// The orphaned steer was delivered as a continuation turn, not left pending.
+		expect(steerSeenByModel).toBe(true);
+		expect(getAssistantTexts(harness)).toContain("handled orphan");
+		expect(harness.session.pendingMessageCount).toBe(0);
+	});
+
 	it("queues custom messages with deliverAs followUp while streaming", async () => {
 		const waiting = await createWaitingHarness();
 		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = waiting;

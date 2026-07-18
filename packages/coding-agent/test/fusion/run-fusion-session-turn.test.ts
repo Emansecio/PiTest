@@ -212,6 +212,52 @@ describe("runFusionSessionTurn", () => {
 		expect(agent.state.messages).toHaveLength(0);
 	});
 
+	it("reserves the turn synchronously so a concurrent call is queued, not run twice (Bug 3 TOCTOU)", async () => {
+		// Before the fix the abort controller was only registered AFTER three long awaits
+		// (prepareFusionContextEconomy / auth / cli tokens), so a second prompt arriving in
+		// that window saw isFusing === false, routed to Fusion again, and started a
+		// concurrent turn. The reservation is now synchronous (before the first await).
+		const turn = vi.spyOn(orchestrator, "runFusionTurn").mockResolvedValue({ handled: true, text: "ok" });
+		const { host, agent } = createHost();
+
+		// Block the first turn inside its first await so the second call arrives mid-flight.
+		let releasePrepare!: () => void;
+		let prepareCalls = 0;
+		const prepareGate = new Promise<void>((resolve) => {
+			releasePrepare = resolve;
+		});
+		host.prepareFusionContextEconomy = async () => {
+			prepareCalls++;
+			await prepareGate;
+		};
+
+		const first = runFusionSessionTurn(host, "first");
+		// Synchronous reservation: isFusing is already true the instant the call suspends.
+		expect(host.fusionAbort).toBeDefined();
+
+		// A concurrent second turn arrives while the first is suspended in prepare().
+		const img: ImageContent = { type: "image", data: "zzz", mimeType: "image/png" };
+		const second = runFusionSessionTurn(host, "second", [img]);
+
+		// It did NOT start a concurrent turn: prepare ran only for the first call.
+		expect(prepareCalls).toBe(1);
+		// The message is not lost — it was queued as a follow-up, images preserved.
+		expect(agent.hasQueuedMessages()).toBe(true);
+		const queued = agent.takeQueuedMessages();
+		expect(queued).toHaveLength(1);
+		expect(queued[0]?.role).toBe("user");
+		const content = (queued[0] as { content?: unknown }).content as Array<{ type: string }>;
+		expect(content.some((c) => c.type === "text")).toBe(true);
+		expect(content.some((c) => c.type === "image")).toBe(true);
+		expect(await second).toBe(true);
+
+		// Release the first turn and let it finish; only ONE panel fan-out happened.
+		releasePrepare();
+		await first;
+		expect(turn).toHaveBeenCalledTimes(1);
+		expect(host.fusionAbort).toBeUndefined();
+	});
+
 	it("aborting during the writer stream finalizes cleanly without a duplicate user message", async () => {
 		const { host, agent } = createHost();
 		vi.spyOn(orchestrator, "runFusionTurn").mockImplementation(async (deps) => {

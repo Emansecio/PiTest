@@ -143,6 +143,12 @@ export interface AgentOptions {
 
 class PendingMessageQueue {
 	private messages: AgentMessage[] = [];
+	// Priority messages (critical recovery) are kept apart from regular messages: they
+	// drain BEFORE the regular ones AND always all-at-once, never paced one-at-a-time.
+	// A burst of recovery steers (doom-loop recovery/pause + narration in a single turn)
+	// must all reach the very next turn — pacing them one-per-turn starves the later ones
+	// when the run ends before they drain, silently dropping them.
+	private priorityMessages: AgentMessage[] = [];
 	public mode: QueueMode;
 
 	constructor(mode: QueueMode) {
@@ -153,31 +159,40 @@ class PendingMessageQueue {
 		this.messages.push(message);
 	}
 
-	/** Prepend so the message drains before older queued steers (critical recovery). */
+	/** Queue a priority message: drains ahead of regular messages and all-at-once. */
 	enqueueFront(message: AgentMessage): void {
-		this.messages.unshift(message);
+		this.priorityMessages.push(message);
 	}
 
 	hasItems(): boolean {
-		return this.messages.length > 0;
+		return this.messages.length > 0 || this.priorityMessages.length > 0;
 	}
 
 	drain(): AgentMessage[] {
+		// All priority messages first (FIFO firing order), always together.
+		const priority = this.priorityMessages;
+		this.priorityMessages = [];
 		if (this.mode === "all") {
-			const drained = this.messages;
+			const rest = this.messages;
 			this.messages = [];
-			return drained;
+			return priority.length > 0 ? priority.concat(rest) : rest;
 		}
-
 		const first = this.messages.shift();
-		if (!first) {
-			return [];
-		}
-		return [first];
+		if (first) priority.push(first);
+		return priority;
+	}
+
+	/** Drain and return every queued message, ignoring {@link mode} (always all-at-once). */
+	drainAll(): AgentMessage[] {
+		const drained = this.priorityMessages.concat(this.messages);
+		this.priorityMessages = [];
+		this.messages = [];
+		return drained;
 	}
 
 	clear(): void {
 		this.messages = [];
+		this.priorityMessages = [];
 	}
 }
 
@@ -371,6 +386,20 @@ export class Agent {
 	/** Returns true when either queue still contains pending messages. */
 	hasQueuedMessages(): boolean {
 		return this.steeringQueue.hasItems() || this.followUpQueue.hasItems();
+	}
+
+	/**
+	 * Drain and return every queued steering + follow-up message — both queues fully
+	 * emptied, steering first (higher priority) then follow-up, each in FIFO order.
+	 *
+	 * For hosts that run a turn OUTSIDE {@link runPromptMessages}/{@link continue} (e.g.
+	 * a Fusion turn that writes straight to `state.messages`): the loop's queue pollers
+	 * never fire for such a turn, so anything queued during it must be delivered by the
+	 * host afterwards through its own prompt path. Loop-driven runs drain via the config
+	 * pollers instead and must not use this.
+	 */
+	takeQueuedMessages(): AgentMessage[] {
+		return [...this.steeringQueue.drainAll(), ...this.followUpQueue.drainAll()];
 	}
 
 	/** Active abort signal for the current run, if any. */
