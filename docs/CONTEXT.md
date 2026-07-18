@@ -52,7 +52,7 @@ Continuation of a subagent cut short by ESC or a long network drop, via `task({o
 A message bus (`message` tool, default-on) that lets concurrently-running agents coordinate: `op:"list"` shows who is online; `op:"send"` with `to` (an agent id or `"all"`) asks a question and returns the reply synchronously. Each subagent receives a coordination preamble naming its own id and its spawning parent.
 
 ### Fusion Mode
-A multi-model panel (`/fusion`; `/model` split into judge→writer) that shells out to read-only model CLIs (codex / claude) and fuses their answers through a brainstorm → plan → subagent-driven execution cycle. Cycled with `alt+p`.
+The Orchestration facet value `fusion` (`packages/coding-agent/src/core/fusion/orchestrator.ts`, `agent-session-fusion.ts`). The prompt is dispatched in parallel to a **Panel** of two read-only advisors — subprocesses of the `claude` / `codex` CLIs, launched via `cli-runner.ts` under the same account credentials as Pit — staggered when two members share a CLI to dodge correlated throttling. The **Synthesizer** (the model selected via `/model`) then runs a five-stage pipeline: **brief** (optional prompt condensation) → **panel** (await the two advisors) → **judge** (structured analysis: consensus/contradictions/partial coverage/unique insights/blind spots; skipped with one surviving advisor) → **verify** (optional, read-only fact-check of unsupported claims against the code) → **writer** (streams the final answer). Invariant: `fusion` only ever composes with the `plan` Permission in v1 — there is no `Fusion · Auto` (see `nextFusionCycleState` in `built-ins/permissions-extension.ts`). Cycled with `alt+p` (3-stop loop: `Plan → Auto → Fusion · Plan → Plan`). Kill-switch: `PIT_NO_FUSION`.
 
 ## Flagged ambiguities
 

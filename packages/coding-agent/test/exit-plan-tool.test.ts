@@ -141,6 +141,42 @@ describe("exit_plan tool", () => {
 		expect(res.content[0].text).toContain("split s2 into unit + e2e");
 	});
 
+	it("cancelled picker (ESC) stays in plan mode, no approval", async () => {
+		const dir = makeDir();
+		const checker = new PermissionChecker({ cwd: dir, mode: "plan", settings: {} });
+		proposePlan();
+		setCurrentUserInputBus(makeFakeBus({ cancelled: true }));
+		const res = await runExitPlan(dir, checker, { title: "Scaffold module" });
+		expect(checker.mode).toBe("plan");
+		expect(res.details.outcome).toBe("keep_planning");
+	});
+
+	it("an unrecognized answer shape falls through defensively and stays in plan mode", async () => {
+		const dir = makeDir();
+		const checker = new PermissionChecker({ cwd: dir, mode: "plan", settings: {} });
+		proposePlan();
+		// Not cancelled, not KEEP/APPROVE, no freeform → hits the defensive fallback.
+		setCurrentUserInputBus(makeFakeBus({ picked: ["Some phantom option"] }));
+		const res = await runExitPlan(dir, checker, { title: "Scaffold module" });
+		expect(checker.mode).toBe("plan");
+		expect(res.details.outcome).toBe("keep_planning");
+	});
+
+	it("still approves (mode auto) when the onApproved host handler throws (fail-open)", async () => {
+		const dir = makeDir();
+		const checker = new PermissionChecker({ cwd: dir, mode: "plan", settings: {} });
+		proposePlan();
+		setCurrentUserInputBus(makeFakeBus({ picked: ["Approve & execute"] }));
+		const res = await runExitPlan(dir, checker, { title: "Scaffold module" }, () => {
+			throw new Error("host refresh blew up");
+		});
+		// Mode is already committed; the throwing host handler must NOT fail the tool.
+		expect(checker.mode).toBe("auto");
+		expect(res.details.outcome).toBe("approved");
+		expect(res.content[0].text).toContain("Plan approved");
+		expect(res.content[0].text).toContain("post-approval host refresh failed");
+	});
+
 	it("refuses to approve without an interactive listener (fail-closed)", async () => {
 		const dir = makeDir();
 		const checker = new PermissionChecker({ cwd: dir, mode: "plan", settings: {} });

@@ -107,6 +107,16 @@ describe("new command dispatch", () => {
 		expect(handler).toHaveBeenCalledOnce();
 		expect(clearEditor).toHaveBeenCalledOnce();
 	});
+
+	test("/plan forwards to the permission-mode extension command and clears the editor", async () => {
+		const clearEditor = vi.fn();
+		const promptExtensionCommand = vi.fn();
+		const host = spyHost({ clearEditor, promptExtensionCommand });
+
+		expect(await dispatchSlashCommand(host, "/plan")).toBe(true);
+		expect(clearEditor).toHaveBeenCalledOnce();
+		expect(promptExtensionCommand).toHaveBeenCalledWith("/permission-mode plan");
+	});
 });
 
 describe("buildGroupedSlashHelp", () => {

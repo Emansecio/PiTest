@@ -241,16 +241,23 @@ export function createExitPlanToolDefinition(
 			if (answer.picked.includes(APPROVE_LABEL)) {
 				options.checker.updateMode("auto");
 				let artifactPath: string | undefined;
-				let artifactNote = "";
+				let note = "";
 				if (current) {
 					try {
 						artifactPath = writePlanArtifact(options.cwd, title || "plan", summary, current);
 					} catch {
-						artifactNote = " (plan artifact could not be written)";
+						note = " (plan artifact could not be written)";
 					}
 				}
-				options.onApproved?.();
-				const text = `Plan approved. Permission mode is now auto. Execute the plan following the step DAG; mark steps done with \`plan step_done\`.${artifactPath ? ` Plan artifact: ${artifactPath}` : artifactNote}`;
+				// The mode is already committed, so a throwing host handler (footer
+				// refresh, role swap) must NOT fail the tool — that would desync the
+				// role/footer from the checker. Fail-open like the artifact write above.
+				try {
+					options.onApproved?.();
+				} catch {
+					note += " (post-approval host refresh failed)";
+				}
+				const text = `Plan approved. Permission mode is now auto. Execute the plan following the step DAG; mark steps done with \`plan step_done\`.${artifactPath ? ` Plan artifact: ${artifactPath}` : ""}${note}`;
 				return {
 					content: [{ type: "text" as const, text }],
 					details: { outcome: "approved", artifactPath },

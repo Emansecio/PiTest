@@ -122,6 +122,11 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	},
 	{ name: "todos", description: "Show the current todo list", group: "Session" },
 	{
+		name: "plan",
+		description: "Enter plan mode (read-only): research and build a plan, then exit_plan to execute",
+		group: "Session",
+	},
+	{
 		name: "rewind",
 		description: "Roll back files to an earlier turn (restores every file that turn touched)",
 		group: "Session",

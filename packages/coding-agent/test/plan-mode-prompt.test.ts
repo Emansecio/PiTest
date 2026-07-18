@@ -6,8 +6,9 @@
 import { describe, expect, it } from "vitest";
 import { createPermissionsExtension } from "../src/core/built-ins/permissions-extension.ts";
 import type { ExtensionAPI } from "../src/core/extensions/types.ts";
-import { PermissionChecker } from "../src/core/permissions/checker.ts";
-import { buildPlanModeSection } from "../src/core/permissions/plan-mode-prompt.ts";
+import { BUILTIN_TOOL_SIDE_EFFECTS, PermissionChecker } from "../src/core/permissions/checker.ts";
+import { buildPlanModeSection, planBlockedToolNames } from "../src/core/permissions/plan-mode-prompt.ts";
+import { isPlanBlockingSideEffect } from "../src/core/permissions/side-effect.ts";
 
 const cwd = process.platform === "win32" ? "C:/proj" : "/proj";
 
@@ -54,6 +55,37 @@ describe("buildPlanModeSection", () => {
 		expect(s).toContain("exit_plan");
 		expect(s).toContain("brief");
 		expect(s).toContain("verify");
+	});
+
+	it("derives the blocked list from the side-effect classification (no drift)", () => {
+		const s = buildPlanModeSection();
+		// Every tool the prompt derives as blocked must be named in the text.
+		const derived = planBlockedToolNames();
+		expect(derived.length).toBeGreaterThan(0);
+		for (const name of derived) {
+			expect(s, `expected the prompt to name blocked tool "${name}"`).toContain(name);
+		}
+		// The derivation itself must cover every plan-blocking built-in that is not
+		// an optional integration namespace — this is the guard that fails when a
+		// new mutating built-in is added but the prompt/derivation isn't updated.
+		const expected = Object.entries(BUILTIN_TOOL_SIDE_EFFECTS)
+			.filter(([name, effect]) => isPlanBlockingSideEffect(effect) && !/^(chrome_devtools_|security_)/.test(name))
+			.map(([name]) => name)
+			.sort();
+		expect(derived).toEqual(expected);
+	});
+
+	it("names the spawn/memory tools that the old hardcoded list omitted", () => {
+		const s = buildPlanModeSection();
+		for (const name of ["task", "parallel", "fanout", "goal_complete", "memory_append"]) {
+			expect(s, `expected the prompt to name "${name}"`).toContain(name);
+		}
+	});
+
+	it("makes the no-subagent-carve-out decision explicit", () => {
+		const s = buildPlanModeSection();
+		expect(s.toLowerCase()).toContain("subagent");
+		expect(s).toContain("carve-out");
 	});
 });
 

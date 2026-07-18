@@ -7,8 +7,12 @@ terms *mean*, not how they are implemented.
 
 **Mode**:
 The operating stance the user cycles in the interactive session (footer indicator, bound
-to a cycle key). A Mode is the cross-product of two facets: a **Permission** facet and an
-**Orchestration** facet. Current Modes: `Plan`, `Auto`, `Fusion · Plan`, `Fusion · Auto`.
+to a cycle key). A Mode is the combination of two facets: a **Permission** facet and an
+**Orchestration** facet — but not their full cross-product. Current Modes: `Plan`, `Auto`,
+`Fusion · Plan`. There is no `Fusion · Auto` in v1: the invariant is that Orchestration
+`fusion` implies Permission `plan` (enforced by `nextFusionCycleState` in
+`permissions-extension.ts`). The cycle key walks a pure 3-stop loop, not the cross-product:
+`Plan → Auto → Fusion · Plan → Plan`.
 _Avoid_: "permission mode" when you mean the whole stance — that is only one facet.
 
 **Permission** (facet of a Mode):
@@ -19,7 +23,9 @@ _Avoid_: tier (the "tier" framing was dropped; permission is a facet, not a stan
 **Orchestration** (facet of a Mode):
 How many independent reasoning paths run and how they are reconciled. `solo` = one agent;
 `fusion` = a Panel of models plus a Synthesizer.
-_Avoid_: "fusion mode" as if it were a Permission value — Fusion composes with `plan`/`auto`.
+_Avoid_: "fusion mode" as if it were a Permission value — and don't assume Fusion composes
+with both Permission values: in v1 `fusion` only ever rides on `plan` (there is no
+`Fusion · Auto`).
 
 **Fusion**:
 The Orchestration facet value where the same prompt is dispatched to a **Panel** of two
@@ -89,8 +95,10 @@ _Avoid_: "todo nag"; do not describe it as auto-advancing the list.
 ## Example dialogue
 
 > **Dev:** If I'm in Fusion · Plan and hit the cycle key, what do I get?
-> **Expert:** Fusion · Auto. The cycle walks the cross-product of the two facets; the key
-> flips Permission from `plan` to `auto` while the Orchestration facet stays `fusion`.
+> **Expert:** Plain `Plan` (solo, permission `plan`) — not Fusion · Auto. The cycle is a
+> pure 3-stop loop over the two facets, not their full cross-product:
+> `Plan → Auto → Fusion · Plan → Plan`. Fusion always rides on the `plan` Permission in v1,
+> so `fusion` + `auto` is never a reachable combination — there is no `Fusion · Auto` Mode.
 >
 > **Dev:** And the two models answering — those come from `/model`?
 > **Expert:** No. The **Panel** (two models) is configured with `/fusion`. The model from
@@ -98,4 +106,4 @@ _Avoid_: "todo nag"; do not describe it as auto-advancing the list.
 >
 > **Dev:** So Fusion is a permission level?
 > **Expert:** No — Fusion is the **Orchestration** facet. Permission (`plan`/`auto`) is a
-> separate facet. A Mode is the combination of both.
+> separate facet, and in v1 `fusion` is only ever paired with `plan`.

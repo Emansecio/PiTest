@@ -1,4 +1,18 @@
 /**
+ * NOTE (didactic example, not the real plan mode): this file is a standalone,
+ * parallel reimplementation of "plan mode" written purely to demonstrate
+ * extension-API patterns (`pi.setActiveTools`, custom command + shortcut,
+ * `before_agent_start` context injection, prose markers like
+ * `[PLAN MODE ACTIVE]`, `Ctrl+Alt+P`). It predates and does NOT reflect Pit's
+ * actual plan mode, which is built-in and permission-based: a `PermissionMode`
+ * (`plan` | `auto`) enforced by `PermissionChecker`, with an `exit_plan` tool
+ * the model calls to submit its plan for approval and a 3-stop
+ * Plan → Auto → Fusion·Plan → Plan cycle bound to `alt+p`. See
+ * `packages/coding-agent/src/core/built-ins/permissions-extension.ts` and
+ * `packages/coding-agent/docs/permissions.md` for the real mechanism.
+ */
+
+/**
  * Plan Mode Extension
  *
  * Read-only exploration mode for safe code analysis.

@@ -8,10 +8,43 @@
  * so the model researches, builds a structured DAG, and presents it for
  * approval instead of fighting the permission layer.
  *
- * Pure string, no dependencies: injected by the permissions extension from the
+ * The blocked-tools list is DERIVED from the canonical side-effect
+ * classification (`BUILTIN_TOOL_SIDE_EFFECTS` + `isPlanBlockingSideEffect`) so
+ * the prompt can never drift from what `checkPlan` actually denies — the bug
+ * this replaced was a hand-maintained string that had gone stale (it omitted the
+ * spawn/memory tools). Injected by the permissions extension from the
  * `before_agent_start` handler (pre-model band), appended AFTER the system
  * prompt's dynamic marker so it never invalidates the cacheable prefix.
  */
+
+import { BUILTIN_TOOL_SIDE_EFFECTS } from "./checker.ts";
+import { isPlanBlockingSideEffect } from "./side-effect.ts";
+
+/**
+ * Optional, conditionally-registered integration families (browser automation,
+ * security scanners). They ARE blocked in plan mode, but they are only present
+ * when their integration is loaded, and enumerating every operation would bloat
+ * an always-on prompt — the blanket "READ-ONLY" rule already covers them. The
+ * prompt names the core built-ins + coordinator/memory tools instead.
+ */
+const INTEGRATION_NAMESPACES = ["chrome_devtools_", "security_"] as const;
+
+function isIntegrationNamespaced(toolName: string): boolean {
+	return INTEGRATION_NAMESPACES.some((ns) => toolName.startsWith(ns));
+}
+
+/**
+ * The tools plan mode blocks, derived from the canonical side-effect map so the
+ * prompt and the gating (`checker.ts` / `side-effect.ts`) share one source of
+ * truth. Sorted for a stable, cache-friendly string. Optional integration
+ * namespaces are folded into the general read-only rule (see above).
+ */
+export function planBlockedToolNames(): string[] {
+	return Object.entries(BUILTIN_TOOL_SIDE_EFFECTS)
+		.filter(([name, effect]) => isPlanBlockingSideEffect(effect) && !isIntegrationNamespaced(name))
+		.map(([name]) => name)
+		.sort();
+}
 
 /**
  * The `<plan_mode>` block appended to the system prompt while plan mode active.
@@ -19,10 +52,12 @@
  * brief/produces/verify guidance, and the obligation to call `exit_plan`.
  */
 export function buildPlanModeSection(): string {
+	const blocked = planBlockedToolNames().join(", ");
 	return [
 		"<plan_mode>",
 		"Plan mode is ACTIVE: this session is READ-ONLY.",
-		"- Mutating tools (edit, edit_v2, write, bash, eval, debug, ast_edit, code, recipe, retain, forget, resolve, preview, MCP tools) are BLOCKED at the permission layer. Do not attempt them; do not promise edits.",
+		`- Mutating tools (${blocked}, and MCP tools) are BLOCKED at the permission layer. Do not attempt them; do not promise edits.`,
+		"- Subagents/spawn (`task`, `parallel`, `fanout`) are also blocked — there is no read-only carve-out; do your own research with the read-only tools directly.",
 		"Workflow you MUST follow:",
 		"1. Research with read-only tools (read, grep, find, ls, symbol, lsp navigation).",
 		"2. Read files IN FULL before planning changes to them.",

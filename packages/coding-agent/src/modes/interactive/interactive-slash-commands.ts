@@ -51,6 +51,7 @@ export const DISPATCHED_SLASH_COMMAND_NAMES = [
 	"hindsight",
 	"goal",
 	"todos",
+	"plan",
 	"settings",
 	"theme",
 	"config",
@@ -73,6 +74,11 @@ export const DISPATCHED_SLASH_COMMAND_NAMES = [
 ] as const;
 
 export const exactSlashCommands = new Map<string, (host: SlashCommandHost) => void | Promise<void>>([
+	// `/plan` is a discoverability alias for `/permission-mode plan` (parity with
+	// other CLIs). It forwards to the permissions extension's command rather than
+	// touching the checker directly, so mode-change side effects (footer status,
+	// role swap, fusion handling) run exactly as they do for `/permission-mode`.
+	["/plan", (host) => host.promptExtensionCommand("/permission-mode plan")],
 	["/settings", (host) => host.showSettingsSelector()],
 	["/theme", (host) => host.showThemeSelector()],
 	["/config", (host) => host.showConfigSelector()],

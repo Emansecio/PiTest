@@ -9,7 +9,7 @@ rules live in your settings and the checker runs before every tool execution.
 
 | Mode | Behavior |
 |------|----------|
-| `plan` | Read-only. Any tool that mutates the filesystem or runs a shell (`bash`, `edit`, `write`) is blocked. Reads still honor deny rules. Useful for exploration / planning passes. |
+| `plan` | Read-only. Any tool classified `write`/`exec` is blocked (`bash`, `edit`, `write`, `eval`, `debug`, …). Beyond that, every generic `type:"tool"` action is gated by its declared side effect (`src/core/permissions/side-effect.ts`): `agent` (coordination/subagent tools — `task`, `parallel`, `fanout`, and `goal_complete`), `workspace` (e.g. `memory_append`), and `exec` are all denied; only `none` (read-only) passes. A tool with no declared side effect defaults to `opaque` and is denied fail-closed. There is no read-only carve-out for subagents in plan mode — `task`/`parallel`/`fanout` stay fully blocked, so research/delegation is done by calling the read-only tools directly instead of spawning a subagent. Reads still honor deny rules. Useful for exploration / planning passes. |
 | `auto` | **Default.** Writes and commands run without prompts, but the built-in deny floor is enforced as **hard blocks**: sensitive paths (`.env`, `~/.ssh/**`, …) and dangerous commands (`rm -rf /`, fork bomb, …) are denied. A *guarded* default. |
 
 The built-in floor can still be dropped per-session by setting
@@ -66,7 +66,7 @@ Switch mid-session with the `/permission-mode <mode>` slash command.
 Within a single check the order is:
 
 1. `denyTools[name]` → **deny** (every mode)
-2. **plan** only: write / exec / mutating / unclassified `type:"tool"` → **deny** (read-only)
+2. **plan** only: `write` / `exec` action types, and `type:"tool"` actions whose side effect is `agent` (`task`/`parallel`/`fanout`/`goal_complete`), `workspace` (e.g. `memory_append`), `exec`, or unclassified (`opaque`, the fail-closed default) → **deny** (read-only)
 3. **plan** only: `mcp__*` → **deny** always (MCP cannot be opted in via `allowTools`; leave plan mode to use MCP)
 4. `allowTools[name]` → **allow** (skips remaining checks; in plan this can reopen sensitive reads or non-MCP custom tools already past step 2)
 5. `denyPaths` (reads in `plan`; reads + writes in `auto`) and
