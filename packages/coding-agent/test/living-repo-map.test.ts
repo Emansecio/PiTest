@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+	clearLivingRepoMapMemoForTest,
+	defaultLivingRepoMapDeps,
 	getLivingRepoMap,
 	type LivingRepoMap,
 	type LivingRepoMapDeps,
@@ -517,5 +519,79 @@ describe("cache round-trip + digest projection", () => {
 		// Filtered to a subset (compaction's touched paths).
 		const subset = livingRepoMapToDigests(map, ["a.ts"]);
 		expect(subset).toEqual({ "a.ts": "f, C" });
+	});
+});
+
+/**
+ * Fix 3: a short-TTL process memo so a burst of independent callers (the four
+ * repo-map consumers) sharing the SAME (cwd, HEAD) within ~1s don't each rerun
+ * resolveHead/loadCache/gitDiff/the re-stat loop from scratch. Must be
+ * bypassable for injectable-deps tests (all the tests above pass a fresh,
+ * non-default `deps` object per call) so it can never mask what they assert on.
+ */
+describe("getLivingRepoMap — process memo (Fix 3)", () => {
+	it("memoizes back-to-back calls with default deps: the underlying scan runs once", async () => {
+		const { mkdtempSync, rmSync } = await import("node:fs");
+		const { tmpdir } = await import("node:os");
+		const { join } = await import("node:path");
+		const dir = mkdtempSync(join(tmpdir(), "pit-repomap-memo-"));
+		clearLivingRepoMapMemoForTest();
+		const scanSpy = vi.spyOn(defaultLivingRepoMapDeps, "scan");
+		try {
+			// A fresh tmpdir is outside any git working tree, so resolveHead
+			// resolves null and both calls take the full-scan path, which calls
+			// deps.scan(cwd) — a memo hit on the second call skips that entirely.
+			const first = await getLivingRepoMap(dir);
+			const second = await getLivingRepoMap(dir);
+			expect(scanSpy).toHaveBeenCalledTimes(1);
+			// Reference-equal, not just structurally equal: proves the second call
+			// short-circuited to the memoized result instead of recomputing an
+			// equal-but-distinct one.
+			expect(second).toBe(first);
+		} finally {
+			scanSpy.mockRestore();
+			clearLivingRepoMapMemoForTest();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("never memoizes calls made with non-default (injected) deps", async () => {
+		const cache: LivingRepoMap = {
+			version: 3,
+			lastIndexedCommit: "old-sha",
+			entries: [{ path: "a.ts", symbols: ["aOld"], mtimeMs: 1 }],
+		};
+		const { deps, parseCounts } = makeDeps({
+			head: "new-sha",
+			diff: [{ status: "M", path: "a.ts" }],
+			cache,
+			files: { "a.ts": "aNew" },
+			mtimes: { "a.ts": 1 },
+		});
+		clearLivingRepoMapMemoForTest();
+		await getLivingRepoMap(CWD, deps);
+		await getLivingRepoMap(CWD, deps);
+		// If the memo wrongly applied to injected deps, the second call would have
+		// skipped the reindex and this would stay 1.
+		expect(parseCounts["a.ts"]).toBe(2);
+	});
+
+	it("clearLivingRepoMapMemoForTest forces a fresh computation even inside the TTL window", async () => {
+		const { mkdtempSync, rmSync } = await import("node:fs");
+		const { tmpdir } = await import("node:os");
+		const { join } = await import("node:path");
+		const dir = mkdtempSync(join(tmpdir(), "pit-repomap-memo-"));
+		clearLivingRepoMapMemoForTest();
+		const scanSpy = vi.spyOn(defaultLivingRepoMapDeps, "scan");
+		try {
+			await getLivingRepoMap(dir);
+			clearLivingRepoMapMemoForTest();
+			await getLivingRepoMap(dir);
+			expect(scanSpy).toHaveBeenCalledTimes(2);
+		} finally {
+			scanSpy.mockRestore();
+			clearLivingRepoMapMemoForTest();
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

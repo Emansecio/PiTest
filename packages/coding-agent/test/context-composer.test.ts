@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
 	type ComposeContextInput,
+	clearComposeContextMemoForTest,
 	composeContext,
 	LEVEL_TOKEN_CAP,
 	predictRelevantFiles,
@@ -23,6 +24,13 @@ const MAP: RepoMapEntry[] = [
 ];
 
 const BASE: ComposeContextInput = { prompt: "", entries: MAP, env: {} };
+
+// `composeContext` memoizes its last inputs (Fix 4 — see the module docblock).
+// Clear it before every test so no test can observe another test's cached
+// result — pure isolation, doesn't change any test's inputs.
+beforeEach(() => {
+	clearComposeContextMemoForTest();
+});
 
 describe("predictRelevantFiles", () => {
 	it("picks a file whose path is mentioned in the prompt", () => {
@@ -314,5 +322,90 @@ describe("composeContext — determinism", () => {
 		const b = composeContext(input);
 		expect(a.block).toBe(b.block);
 		expect(a.predicted).toEqual(b.predicted);
+	});
+});
+
+/**
+ * Fix 4: agent-session rebuilds `composeContext` several times per user turn
+ * (frequent-files refresh, map refresh, tool-surface, turn) with the SAME
+ * entries/prompt/level/frequentFiles/recentReadPath — this memo replays the
+ * prior result instead of rebuilding the outline + exemplar from scratch.
+ * `frequentFiles` in particular must be compared BY VALUE: the real caller
+ * re-derives it (`this._frequentFiles.getTop(...).map(...)`) into a FRESH
+ * array on every call even when the hot-files list hasn't changed.
+ */
+describe("composeContext — process memo (Fix 4)", () => {
+	it("a second identical-input call returns the exact same result object (a real memo hit)", () => {
+		const input: ComposeContextInput = {
+			prompt: "fix computeThing in src/core/foo.ts",
+			entries: MAP,
+			level: "padrao",
+			env: {},
+		};
+		const a = composeContext(input);
+		const b = composeContext({ ...input }); // fresh input object, same field values
+		expect(b).toBe(a); // reference-equal: the second call short-circuited to the memo
+	});
+
+	it("matches frequentFiles BY VALUE, not by array reference", () => {
+		const a = composeContext({
+			prompt: "",
+			entries: MAP,
+			level: "padrao",
+			frequentFiles: ["src/core/bar.ts"], // array literal #1
+			env: {},
+		});
+		const b = composeContext({
+			prompt: "",
+			entries: MAP,
+			level: "padrao",
+			frequentFiles: ["src/core/bar.ts"], // array literal #2 — same content, different reference
+			env: {},
+		});
+		expect(b).toBe(a);
+	});
+
+	it("a changed prompt busts the memo and recomputes", () => {
+		const a = composeContext({ ...BASE, prompt: "fix computeThing in src/core/foo.ts", level: "padrao" });
+		const b = composeContext({ ...BASE, prompt: "fix barHelper in src/core/bar.ts", level: "padrao" });
+		expect(b).not.toBe(a);
+		expect(b.block).not.toBe(a.block);
+	});
+
+	it("a changed frequentFiles value busts the memo and recomputes", () => {
+		const a = composeContext({
+			prompt: "",
+			entries: MAP,
+			level: "padrao",
+			frequentFiles: ["src/core/bar.ts"],
+			env: {},
+		});
+		const b = composeContext({
+			prompt: "",
+			entries: MAP,
+			level: "padrao",
+			frequentFiles: ["src/util/helper.ts"],
+			env: {},
+		});
+		expect(b).not.toBe(a);
+		expect(b.predicted).not.toEqual(a.predicted);
+	});
+
+	it("a changed entries array (a fresh repo-map snapshot) busts the memo even with identical content", () => {
+		const entriesCopy: RepoMapEntry[] = MAP.map((e) => ({ ...e }));
+		const a = composeContext({ prompt: "", entries: MAP, level: "padrao", env: {} });
+		const b = composeContext({ prompt: "", entries: entriesCopy, level: "padrao", env: {} });
+		expect(b).not.toBe(a);
+		expect(b.block).toBe(a.block); // still byte-identical content, just recomputed
+	});
+});
+
+describe("predictRelevantFiles — entries index cache (Fix 4)", () => {
+	it("reuses the cached index across different prompts against the same entries array without cross-contamination", () => {
+		clearComposeContextMemoForTest();
+		const first = predictRelevantFiles({ prompt: "fix computeThing in src/core/foo.ts", entries: MAP, env: {} });
+		const second = predictRelevantFiles({ prompt: "look at src/util/helper.ts", entries: MAP, env: {} });
+		expect(first).toEqual(["src/core/foo.ts"]);
+		expect(second).toEqual(["src/util/helper.ts"]);
 	});
 });

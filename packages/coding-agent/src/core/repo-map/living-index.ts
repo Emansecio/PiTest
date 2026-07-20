@@ -532,6 +532,40 @@ async function fullScan(
 }
 
 /**
+ * Short-TTL process-level memo for `getLivingRepoMap`, keyed by `(cwd,
+ * resolvedHead)`. Several independent callers (agent-session, grounding-guard,
+ * impact, intent-gate extensions) each request the map within the same burst
+ * of tool calls; without this, each one re-runs `resolveHead` + `loadCache` +
+ * `gitDiff` + the re-stat loop from scratch. The TTL is short enough that it
+ * never masks a genuine change between two calls that are seconds apart —
+ * callers that need freshness beyond that already re-check mtime drift on the
+ * entries they get back. Only used for the DEFAULT deps: tests inject their
+ * own `deps` object to drive exact scenarios (parse counts, save counts, …),
+ * and memoizing across those would silently skip the very I/O they assert on
+ * — so any non-default `deps` bypasses the memo entirely.
+ */
+const LIVING_REPO_MAP_MEMO_TTL_MS = 1000;
+
+interface LivingRepoMapMemoEntry {
+	result: LivingRepoMapResult;
+	expiresAt: number;
+}
+
+const livingRepoMapMemo = new Map<string, LivingRepoMapMemoEntry>();
+
+function livingRepoMapMemoKey(cwd: string, head: string | null): string {
+	// "::" can't appear in a git sha (plain hex), so it's a safe delimiter; the
+	// non-git case gets its own "::null" tail so it can never collide with a
+	// (never actually possible) empty-string sha.
+	return `${cwd}::${head === null ? "::null" : head}`;
+}
+
+/** Test-only: clear the memo between cases so a stale entry can't leak across tests. */
+export function clearLivingRepoMapMemoForTest(): void {
+	livingRepoMapMemo.clear();
+}
+
+/**
  * Get the living repo map for `cwd`. Incremental against the last indexed
  * commit when possible; degrades to a full scan otherwise. Persists the updated
  * cache (best effort) unless running in the PIT_NO_LIVING_REPO_MAP escape mode.
@@ -557,13 +591,31 @@ export async function getLivingRepoMap(
 
 	const head = await deps.resolveHead(cwd);
 
+	// Short-TTL memo: only for the default deps (see `livingRepoMapMemoKey` doc
+	// comment) — non-default deps bypass it entirely so injectable-deps tests
+	// keep driving exact scenarios. `memoize` below stores every result this
+	// call produces; a hit here skips loadCache/gitDiff/the re-stat loop below.
+	const memoKey = deps === defaultLivingRepoMapDeps ? livingRepoMapMemoKey(cwd, head) : null;
+	if (memoKey) {
+		const cached = livingRepoMapMemo.get(memoKey);
+		if (cached && cached.expiresAt > Date.now()) {
+			return cached.result;
+		}
+	}
+	const memoize = (result: LivingRepoMapResult): LivingRepoMapResult => {
+		if (memoKey) {
+			livingRepoMapMemo.set(memoKey, { result, expiresAt: Date.now() + LIVING_REPO_MAP_MEMO_TTL_MS });
+		}
+		return result;
+	};
+
 	// Non-git (or git unavailable): full scan, do not persist a commit anchor.
 	// We still persist the symbol map with commit="" so a later git run starts
 	// from real data instead of cold.
 	if (head === null) {
 		const result = await fullScan(cwd, "", deps, extractDepsEnabled);
 		trySave(deps, cachePath, result.map);
-		return result;
+		return memoize(result);
 	}
 
 	const cache = deps.loadCache(cachePath);
@@ -574,7 +626,7 @@ export async function getLivingRepoMap(
 	if (!cache || cache.lastIndexedCommit.length === 0) {
 		const result = await fullScan(cwd, head, deps, extractDepsEnabled);
 		trySave(deps, cachePath, result.map);
-		return result;
+		return memoize(result);
 	}
 
 	// Anchored cache present. Ask git for the committed delta since that commit.
@@ -584,7 +636,7 @@ export async function getLivingRepoMap(
 	if (diff === null) {
 		const result = await fullScan(cwd, head, deps, extractDepsEnabled);
 		trySave(deps, cachePath, result.map);
-		return result;
+		return memoize(result);
 	}
 
 	// Start from the cached entries, keyed for O(1) patch.
@@ -647,7 +699,7 @@ export async function getLivingRepoMap(
 		reindexedCount: reindexed,
 	};
 	trySave(deps, cachePath, result.map);
-	return result;
+	return memoize(result);
 }
 
 /** Persist best-effort; a cache write failure must never break the caller. */

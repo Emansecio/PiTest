@@ -10,6 +10,7 @@ import { attachPostWriteDiagnostics, capturePreWriteDiagnostics, maybeFormat } f
 import { getCurrentPreviewQueue } from "../preview-queue.ts";
 import { getUrlSchemeRegistry } from "../url-schemes/index.ts";
 import { applyKeyAliases, PATH_KEY_ALIASES } from "./argument-prep.js";
+import { captureFileContentStamp, fileContentStampMatches } from "./file-content-stamp.ts";
 import { type FileMtimeStore, refreshFileMtime } from "./file-mtime-store.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.js";
 import { attachOmissionWarning } from "./lazy-omission-attach.ts";
@@ -252,19 +253,8 @@ export function createWriteToolDefinition(
 			const queue = getCurrentPreviewQueue();
 			if (preview === true && queue) {
 				if (signal?.aborted) throw new Error("Operation aborted");
-				// Snapshot the mtime this preview is staged against (undefined for a
-				// brand-new file — nothing to drift from), so apply() (run later, from
-				// `resolve`) can detect the file changing between staging and commit
-				// and refuse to blindly clobber it instead of silently discarding that
-				// external change.
-				let stagedMtimeMs: number | undefined;
-				if (ops === defaultWriteOperations) {
-					try {
-						stagedMtimeMs = (await fsStat(absolutePath)).mtimeMs;
-					} catch {
-						// File doesn't exist yet (or unreadable) — nothing to drift from.
-					}
-				}
+				const stagedContentStamp =
+					ops === defaultWriteOperations ? await captureFileContentStamp(absolutePath) : undefined;
 				const item = queue.add({
 					kind: "write",
 					path,
@@ -272,13 +262,10 @@ export function createWriteToolDefinition(
 						await withFileMutationQueue(
 							absolutePath,
 							async () => {
-								if (ops === defaultWriteOperations && stagedMtimeMs !== undefined) {
-									const curStat = await fsStat(absolutePath).catch(() => undefined);
-									if (curStat && curStat.mtimeMs !== stagedMtimeMs) {
-										throw new Error(
-											`Cannot apply preview: ${path} changed on disk since this write was staged. Re-run write to overwrite the current file, or use edit to merge changes.`,
-										);
-									}
+								if (stagedContentStamp && !(await fileContentStampMatches(absolutePath, stagedContentStamp))) {
+									throw new Error(
+										`Cannot apply preview: ${path} changed on disk since this write was staged. Re-run write to overwrite the current file, or use edit to merge changes.`,
+									);
 								}
 								await ops.mkdir(dir);
 								// Format at commit exactly as the direct-write path does, so the bytes
@@ -349,9 +336,9 @@ export function createWriteToolDefinition(
 									// Committed (atomic rename): stop honoring abort so a late ESC
 									// can't reject a write that already landed. A pre-commit abort
 									// throws from writeFile and is caught below with disk intact.
+									signal?.removeEventListener("abort", onAbort);
 									__written = formatted.content;
 									await refreshFileMtime(mtimeStore, absolutePath);
-									signal?.removeEventListener("abort", onAbort);
 									resolve({
 										content: [
 											{

@@ -117,6 +117,66 @@ interface Scored {
 	score: number;
 }
 
+/**
+ * Lookup structures derived from `entries` ALONE (no prompt/level/etc.
+ * involved) -- pure w.r.t. entries content, so keying a cache on the `entries`
+ * array's own identity is safe: a fresh repo-map snapshot is always a fresh
+ * array (see living-index.ts), so a stale cache entry can never outlive the
+ * data it was built from. `graph` is built lazily (only the callers that hit
+ * the graph-neighbor layer need it) and cached on first use.
+ */
+interface EntriesIndex {
+	pathSet: Set<string>;
+	baseToPaths: Map<string, string[]>;
+	symbolToPaths: Map<string, string[]>;
+	allPaths: string[];
+	allBases: string[];
+	allSymbols: string[];
+	graph?: ReturnType<typeof buildRepoGraph>;
+}
+
+const entriesIndexCache = new WeakMap<readonly RepoMapEntry[], EntriesIndex>();
+
+/**
+ * Build (once per distinct `entries` array) or reuse the cached indexes that
+ * `predictRelevantFiles` needs. Was previously rebuilt from scratch on EVERY
+ * call, including the several redundant `composeContext` rebuilds that fire
+ * per user turn (frequent-files refresh, map refresh, tool-surface, turn) —
+ * all sharing the exact same `entries` array reference.
+ */
+function getEntriesIndex(entries: readonly RepoMapEntry[]): EntriesIndex {
+	const cached = entriesIndexCache.get(entries);
+	if (cached) return cached;
+	const pathSet = new Set<string>();
+	const baseToPaths = new Map<string, string[]>();
+	const symbolToPaths = new Map<string, string[]>();
+	for (const e of entries) {
+		const p = norm(e.path);
+		pathSet.add(p);
+		const b = baseOf(p);
+		(baseToPaths.get(b) ?? baseToPaths.set(b, []).get(b)!).push(p);
+		for (const s of e.symbols) {
+			(symbolToPaths.get(s) ?? symbolToPaths.set(s, []).get(s)!).push(p);
+		}
+	}
+	const index: EntriesIndex = {
+		pathSet,
+		baseToPaths,
+		symbolToPaths,
+		allPaths: [...pathSet],
+		allBases: [...baseToPaths.keys()],
+		allSymbols: [...symbolToPaths.keys()],
+	};
+	entriesIndexCache.set(entries, index);
+	return index;
+}
+
+/** Lazily build and cache the import-graph for this `entries` array (see `getEntriesIndex`). */
+function getEntriesGraph(entries: readonly RepoMapEntry[], index: EntriesIndex): ReturnType<typeof buildRepoGraph> {
+	if (!index.graph) index.graph = buildRepoGraph([...entries]);
+	return index.graph;
+}
+
 /** Normalize a path to forward slashes for stable comparison/dedupe. */
 function norm(p: string): string {
 	return p.split("\\").join("/");
@@ -203,22 +263,12 @@ export function predictRelevantFiles(input: ComposeContextInput): string[] {
 	if (entries.length === 0) return [];
 	const topK = input.topK ?? DEFAULT_TOP_K;
 
-	// Indexes over the map (built once).
-	const pathSet = new Set<string>();
-	const baseToPaths = new Map<string, string[]>();
-	const symbolToPaths = new Map<string, string[]>();
-	for (const e of entries) {
-		const p = norm(e.path);
-		pathSet.add(p);
-		const b = baseOf(p);
-		(baseToPaths.get(b) ?? baseToPaths.set(b, []).get(b)!).push(p);
-		for (const s of e.symbols) {
-			(symbolToPaths.get(s) ?? symbolToPaths.set(s, []).get(s)!).push(p);
-		}
-	}
-	const allPaths = [...pathSet];
-	const allBases = [...baseToPaths.keys()];
-	const allSymbols = [...symbolToPaths.keys()];
+	// Indexes over the map — cached per `entries` array identity (see
+	// `getEntriesIndex`) since a fresh repo-map snapshot is always a fresh
+	// array, so several composeContext rebuilds sharing the same snapshot
+	// (frequent-files refresh, map refresh, tool-surface, turn) build this once.
+	const entriesIndex = getEntriesIndex(entries);
+	const { pathSet, baseToPaths, symbolToPaths, allPaths, allBases, allSymbols } = entriesIndex;
 
 	const scores = new Map<string, number>();
 	const add = (p: string, s: number): void => {
@@ -306,11 +356,12 @@ export function predictRelevantFiles(input: ComposeContextInput): string[] {
 	// transitive) of a strong seed get SCORE_GRAPH_NEIGHBOR ADDED to whatever
 	// they already scored. This is the one layer that accumulates rather than
 	// maxes: being independently relevant AND graph-adjacent to another
-	// relevant file is a stronger signal than either alone. Built fresh each
-	// call from `entries[].deps` (no I/O, mirrors repo-map/graph.ts exactly) —
-	// entries without `deps` (PIT_NO_REPO_GRAPH) simply yield no edges here.
+	// relevant file is a stronger signal than either alone. Built from
+	// `entries[].deps` (no I/O, mirrors repo-map/graph.ts exactly) and cached
+	// per `entries` identity (see `getEntriesGraph`) — entries without `deps`
+	// (PIT_NO_REPO_GRAPH) simply yield no edges here.
 	if (strongSeeds.size > 0) {
-		const graph = buildRepoGraph([...entries]);
+		const graph = getEntriesGraph(entries, entriesIndex);
 		for (const seed of strongSeeds) {
 			const neighbors = new Set<string>([...(graph.deps.get(seed) ?? []), ...(graph.dependents.get(seed) ?? [])]);
 			for (const neighbor of neighbors) {
@@ -441,6 +492,40 @@ function exemplarBody(content: string, maxLines: number): string {
 }
 
 /**
+ * Single-entry "last inputs" memo for `composeContext` (see the module
+ * docblock: agent-session rebuilds this several times per user turn --
+ * frequent-files refresh, map refresh, tool-surface, turn -- reusing the same
+ * prompt/map/level each time). `composeContext` is pure, so replaying the
+ * prior result for identical inputs is byte-identical to recomputing it.
+ * `frequentFiles` is compared BY VALUE, not reference: the caller re-derives
+ * it (a fresh array) on every call even when its contents haven't changed.
+ */
+interface ComposeContextMemoEntry {
+	entries: readonly RepoMapEntry[];
+	prompt: string;
+	level: SupervisionLevel;
+	frequentFiles: readonly string[];
+	recentReadPath: string | undefined;
+	result: ComposeContextResult;
+}
+
+let lastComposeContextMemo: ComposeContextMemoEntry | undefined;
+
+function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
+	if (a === b) return true;
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		if (a[i] !== b[i]) return false;
+	}
+	return true;
+}
+
+/** Test-only: clear the memo so a stale entry can't leak across test cases. */
+export function clearComposeContextMemoForTest(): void {
+	lastComposeContextMemo = undefined;
+}
+
+/**
  * Compose the grounded-context block (P1) plus an optional style exemplar (P3),
  * both under the thermostat-dosed token cap. Fail-open: any degenerate input
  * yields an empty block.
@@ -452,6 +537,31 @@ export function composeContext(input: ComposeContextInput): ComposeContextResult
 	if (input.entries.length === 0) return empty;
 
 	const level = input.level ?? "padrao";
+	const frequentFiles = input.frequentFiles ?? [];
+
+	const memo = lastComposeContextMemo;
+	if (
+		memo &&
+		memo.entries === input.entries &&
+		memo.prompt === input.prompt &&
+		memo.level === level &&
+		memo.recentReadPath === input.recentReadPath &&
+		sameStringArray(memo.frequentFiles, frequentFiles)
+	) {
+		return memo.result;
+	}
+	const memoize = (result: ComposeContextResult): ComposeContextResult => {
+		lastComposeContextMemo = {
+			entries: input.entries,
+			prompt: input.prompt,
+			level,
+			frequentFiles,
+			recentReadPath: input.recentReadPath,
+			result,
+		};
+		return result;
+	};
+
 	const charBudget = LEVEL_TOKEN_CAP[level] * CHARS_PER_TOKEN;
 
 	const predicted = predictRelevantFiles(input);
@@ -508,9 +618,9 @@ export function composeContext(input: ComposeContextInput): ComposeContextResult
 	}
 
 	const blocks = [groundedBlock, exemplarBlock].filter((b) => b.length > 0);
-	if (blocks.length === 0) return { block: "", predicted, approxTokens: 0 };
+	if (blocks.length === 0) return memoize({ block: "", predicted, approxTokens: 0 });
 	const block = blocks.join("\n\n");
-	return { block, predicted, exemplarPath, approxTokens: Math.ceil(block.length / CHARS_PER_TOKEN) };
+	return memoize({ block, predicted, exemplarPath, approxTokens: Math.ceil(block.length / CHARS_PER_TOKEN) });
 }
 
 /** Opt-out helper (mirrors the other guards' env checks). */
