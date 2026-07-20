@@ -71,6 +71,81 @@ describe("predictRelevantFiles", () => {
 	});
 });
 
+describe("predictRelevantFiles — graph-neighbor (Fase 3)", () => {
+	// foo.ts imports bar.ts (bar is a DEPENDENCY of foo); baz.ts imports foo.ts
+	// (baz is a DEPENDENT of foo); qux.ts imports bar.ts (qux is 2 hops from foo
+	// via bar — must NOT score, only 1-hop neighbors of a strong seed count).
+	const GRAPH_MAP: RepoMapEntry[] = [
+		{ ...entry("src/core/foo.ts", [["function", "computeThing", 10]]), deps: ["src/core/bar.ts"] },
+		{ ...entry("src/core/bar.ts", [["const", "barHelper", 5]]), deps: [] },
+		{ ...entry("src/core/baz.ts", [["const", "bazThing", 3]]), deps: ["src/core/foo.ts"] },
+		{ ...entry("src/core/qux.ts", [["const", "quxThing", 1]]), deps: ["src/core/bar.ts"] },
+	];
+
+	it("scores direct deps AND dependents of a strong seed, but not 2-hop neighbors", () => {
+		const predicted = predictRelevantFiles({
+			prompt: "fix computeThing in src/core/foo.ts",
+			entries: GRAPH_MAP,
+			env: {},
+		});
+		expect(predicted).toContain("src/core/foo.ts");
+		expect(predicted).toContain("src/core/bar.ts"); // foo's dependency
+		expect(predicted).toContain("src/core/baz.ts"); // foo's dependent
+		expect(predicted).not.toContain("src/core/qux.ts"); // 2 hops — no score
+	});
+
+	it("accumulates on top of an existing (weaker-layer) score instead of taking the max", () => {
+		// bar.ts is independently a frequent file (SCORE_FREQUENT_FILE=1) AND a
+		// graph-neighbor of the strong seed foo.ts (SCORE_GRAPH_NEIGHBOR=2) — the
+		// final score must be the SUM (3), not max(1,2)=2, so bar outranks the
+		// dependent-only baz.ts (score 2).
+		const predicted = predictRelevantFiles({
+			prompt: "fix computeThing in src/core/foo.ts",
+			entries: GRAPH_MAP,
+			frequentFiles: ["src/core/bar.ts"],
+			env: {},
+		});
+		const fooIdx = predicted.indexOf("src/core/foo.ts");
+		const barIdx = predicted.indexOf("src/core/bar.ts");
+		const bazIdx = predicted.indexOf("src/core/baz.ts");
+		expect(fooIdx).toBeGreaterThanOrEqual(0);
+		expect(barIdx).toBeGreaterThan(fooIdx); // foo (5) still ranks above bar (3)
+		expect(bazIdx).toBeGreaterThan(barIdx); // bar (3) outranks baz (2)
+	});
+
+	it("scores neighbors of the recently-read file too, even though the file itself never surfaces", () => {
+		const predicted = predictRelevantFiles({
+			prompt: "",
+			entries: GRAPH_MAP,
+			recentReadPath: "src/core/foo.ts",
+			env: {},
+		});
+		expect(predicted).not.toContain("src/core/foo.ts"); // still excluded (just-read)
+		expect(predicted).toContain("src/core/bar.ts");
+		expect(predicted).toContain("src/core/baz.ts");
+	});
+
+	it("is deterministic across repeated calls with identical inputs", () => {
+		const input: ComposeContextInput = {
+			prompt: "fix computeThing in src/core/foo.ts",
+			entries: GRAPH_MAP,
+			frequentFiles: ["src/core/bar.ts"],
+			env: {},
+		};
+		expect(predictRelevantFiles(input)).toEqual(predictRelevantFiles(input));
+	});
+
+	it("degrades to a no-op when entries carry no deps (PIT_NO_REPO_GRAPH shape) — no graph-neighbor score", () => {
+		// Same prompt/seed as the first test, but MAP's entries carry no `deps`.
+		const predicted = predictRelevantFiles({
+			prompt: "fix computeThing in src/core/foo.ts",
+			entries: MAP,
+			env: {},
+		});
+		expect(predicted).toEqual(["src/core/foo.ts"]);
+	});
+});
+
 describe("composeContext — assembler & budget", () => {
 	it("renders a grounded_context block with real kind name:line outlines", () => {
 		const r = composeContext({ ...BASE, prompt: "fix computeThing in src/core/foo.ts", level: "padrao" });

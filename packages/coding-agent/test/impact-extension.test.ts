@@ -10,6 +10,7 @@ vi.mock("../src/core/repo-map/living-index.ts", () => ({
 import {
 	_resetImpactStateForTest,
 	createImpactExtension,
+	getCurrentPredictedImpactPaths,
 	getCurrentUnreviewedImpact,
 	wasFileInPredictedImpact,
 } from "../src/core/built-ins/impact-extension.ts";
@@ -215,6 +216,36 @@ describe("createImpactExtension", () => {
 
 		const diag = getRuntimeDiagnostics().recent.find((e) => e.source === "impact-extension");
 		expect(diag?.context?.ruleId).toBe("impact-hub");
+	});
+
+	it("getCurrentPredictedImpactPaths returns every surfaced path, sorted (Fase 3)", async () => {
+		mockMap([
+			entry("src/seed.ts"),
+			entry("src/a.ts", ["src/seed.ts"]),
+			entry("src/b.ts", ["src/seed.ts"]),
+			entry("src/c.ts", ["src/seed.ts"]),
+			entry("src/d.ts", ["src/a.ts"]), // 2 hops from seed via a.ts
+		]);
+		const { api, fire } = makeFakePi();
+		createImpactExtension({ cwd })(api as unknown as ExtensionAPI);
+
+		expect(getCurrentPredictedImpactPaths()).toEqual([]);
+		await fire("tool_result", editResult("src/seed.ts"));
+		// Every hop the advisory named (direct + 2-hop), sorted — not just the
+		// DIRECT-only `pending` set.
+		expect(getCurrentPredictedImpactPaths()).toEqual(["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts"]);
+	});
+
+	it("getCurrentPredictedImpactPaths resets on turn_start", async () => {
+		mockMap([entry("src/seed.ts"), entry("src/a.ts", ["src/seed.ts"])]);
+		const { api, fire } = makeFakePi();
+		createImpactExtension({ cwd })(api as unknown as ExtensionAPI);
+
+		await fire("tool_result", editResult("src/seed.ts"));
+		expect(getCurrentPredictedImpactPaths()).toEqual(["src/a.ts"]);
+
+		await fire("turn_start", { type: "turn_start", turnIndex: 1, timestamp: Date.now() });
+		expect(getCurrentPredictedImpactPaths()).toEqual([]);
 	});
 
 	it("is fully disabled by PIT_NO_IMPACT_GUARD", async () => {

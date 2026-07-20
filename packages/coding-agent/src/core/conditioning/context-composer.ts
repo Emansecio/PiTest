@@ -11,6 +11,18 @@
  * the head of an analogous neighbor file (same dir + suffix pattern) so idiom is
  * learned by imitation, not instruction.
  *
+ * Fase 3 (token-economy layer, see repo-map/graph.ts) adds a fifth prediction
+ * layer, graph-neighbor: a file that is a DIRECT import-graph neighbor (either
+ * side — what a strong seed imports, or what imports it) of a file already
+ * matched by a strong layer (prompt-path, prompt-symbol, or the recently-read
+ * file) gets `SCORE_GRAPH_NEIGHBOR` ADDED on top of its existing score — the
+ * one deliberate departure from the max-across-layers rule the other four
+ * layers share (see `applyGraphNeighborLayer`). The reverse index is built
+ * once per call from `entries[].deps` via the same `buildRepoGraph` Fase-1
+ * uses; entries carrying no `deps` (PIT_NO_REPO_GRAPH, or an unindexed
+ * language) simply contribute no edges — the layer degrades to a no-op with
+ * no special-casing needed here.
+ *
  * Purity + fail-open by construction:
  *  - No I/O except the injectable `readFile` used ONLY for the exemplar body.
  *  - No clock / randomness → deterministic output for identical inputs.
@@ -33,6 +45,7 @@
 
 import { suggestClosest } from "@pit/ai";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
+import { buildRepoGraph } from "../repo-map/graph.ts";
 import type { RepoMapDecl, RepoMapEntry } from "../repo-map/living-index.ts";
 import type { SupervisionLevel } from "../supervision-thermostat.ts";
 
@@ -60,6 +73,12 @@ const SCORE_PROMPT_PATH = 5;
 const SCORE_PROMPT_SYMBOL = 4;
 const SCORE_RECENT_IMPORT = 3;
 const SCORE_FREQUENT_FILE = 1;
+/**
+ * Graph-neighbor bonus (Fase 3): added — not maxed — on top of whatever score a
+ * direct import-graph neighbor of a STRONG seed (prompt-path/prompt-symbol match,
+ * or the recently-read file) already carries. See `applyGraphNeighborLayer`.
+ */
+const SCORE_GRAPH_NEIGHBOR = 2;
 
 export interface ComposeContextInput {
 	/** The user prompt text for this turn (drives the prompt-mention layer). */
@@ -176,7 +195,8 @@ function extractImportSpecifiers(content: string): string[] {
 /**
  * Predict the files this turn is likely to touch, ranked. Layered heuristic
  * (no ML): prompt-mentioned paths/symbols (fuzzy-matched against the map) >
- * imports of the most-recently-read file > session hot files.
+ * imports of the most-recently-read file > session hot files > (Fase 3) direct
+ * import-graph neighbors of the strong (path/symbol/recent-read) seeds.
  */
 export function predictRelevantFiles(input: ComposeContextInput): string[] {
 	const { entries } = input;
@@ -204,24 +224,41 @@ export function predictRelevantFiles(input: ComposeContextInput): string[] {
 	const add = (p: string, s: number): void => {
 		scores.set(p, Math.max(scores.get(p) ?? 0, s));
 	};
+	// Files matched by a STRONG layer (prompt-path / prompt-symbol), plus the
+	// recently-read file itself — the seed set for the graph-neighbor layer (e)
+	// below. Tracked separately from `scores` because (e) must run after ALL
+	// four other layers (so it sees their final scores) while only SEEDING from
+	// these two.
+	const strongSeeds = new Set<string>();
 
 	// (a) prompt-mentioned paths (exact or fuzzy against basenames/full paths).
 	for (const mention of promptPaths(input.prompt)) {
 		if (pathSet.has(mention)) {
 			add(mention, SCORE_PROMPT_PATH);
+			strongSeeds.add(mention);
 			continue;
 		}
 		const base = baseOf(mention);
 		const direct = baseToPaths.get(base);
 		if (direct) {
-			for (const p of direct) add(p, SCORE_PROMPT_PATH);
+			for (const p of direct) {
+				add(p, SCORE_PROMPT_PATH);
+				strongSeeds.add(p);
+			}
 			continue;
 		}
 		const closeBase = suggestClosest(base, allBases, { maxDistance: 3, prefixMinOverlap: 64 });
-		if (closeBase) for (const p of baseToPaths.get(closeBase) ?? []) add(p, SCORE_PROMPT_PATH);
-		else {
+		if (closeBase) {
+			for (const p of baseToPaths.get(closeBase) ?? []) {
+				add(p, SCORE_PROMPT_PATH);
+				strongSeeds.add(p);
+			}
+		} else {
 			const closePath = suggestClosest(mention, allPaths, { maxDistance: 4, prefixMinOverlap: 64 });
-			if (closePath) add(closePath, SCORE_PROMPT_PATH);
+			if (closePath) {
+				add(closePath, SCORE_PROMPT_PATH);
+				strongSeeds.add(closePath);
+			}
 		}
 	}
 
@@ -229,11 +266,19 @@ export function predictRelevantFiles(input: ComposeContextInput): string[] {
 	for (const ident of promptIdentifiers(input.prompt)) {
 		const exact = symbolToPaths.get(ident);
 		if (exact) {
-			for (const p of exact) add(p, SCORE_PROMPT_SYMBOL);
+			for (const p of exact) {
+				add(p, SCORE_PROMPT_SYMBOL);
+				strongSeeds.add(p);
+			}
 			continue;
 		}
 		const close = suggestClosest(ident, allSymbols, { maxDistance: 2, prefixMinOverlap: 64 });
-		if (close) for (const p of symbolToPaths.get(close) ?? []) add(p, SCORE_PROMPT_SYMBOL);
+		if (close) {
+			for (const p of symbolToPaths.get(close) ?? []) {
+				add(p, SCORE_PROMPT_SYMBOL);
+				strongSeeds.add(p);
+			}
+		}
 	}
 
 	// (c) imports of the most-recently-read file → its likely neighbors.
@@ -251,7 +296,33 @@ export function predictRelevantFiles(input: ComposeContextInput): string[] {
 		if (pathSet.has(p)) add(p, SCORE_FREQUENT_FILE);
 	}
 
-	// Never re-surface the file the model just read (already in context).
+	// The recently-read file is a strong signal too (the file about to be
+	// edited) even though it is never itself surfaced in the output (see the
+	// delete below) — its graph neighbors still deserve the bonus.
+	if (input.recentReadPath) strongSeeds.add(norm(input.recentReadPath));
+
+	// (e) Fase 3 — graph-neighbor: direct import-graph neighbors (both `deps`,
+	// what a seed imports, AND `dependents`, who imports it — one hop, never
+	// transitive) of a strong seed get SCORE_GRAPH_NEIGHBOR ADDED to whatever
+	// they already scored. This is the one layer that accumulates rather than
+	// maxes: being independently relevant AND graph-adjacent to another
+	// relevant file is a stronger signal than either alone. Built fresh each
+	// call from `entries[].deps` (no I/O, mirrors repo-map/graph.ts exactly) —
+	// entries without `deps` (PIT_NO_REPO_GRAPH) simply yield no edges here.
+	if (strongSeeds.size > 0) {
+		const graph = buildRepoGraph([...entries]);
+		for (const seed of strongSeeds) {
+			const neighbors = new Set<string>([...(graph.deps.get(seed) ?? []), ...(graph.dependents.get(seed) ?? [])]);
+			for (const neighbor of neighbors) {
+				const n = norm(neighbor);
+				if (!pathSet.has(n)) continue;
+				scores.set(n, (scores.get(n) ?? 0) + SCORE_GRAPH_NEIGHBOR);
+			}
+		}
+	}
+
+	// Never re-surface the file the model just read (already in context) — run
+	// LAST so a graph-neighbor bonus from another seed can't reintroduce it.
 	if (input.recentReadPath) scores.delete(norm(input.recentReadPath));
 
 	const ranked: Scored[] = [...scores.entries()].map(([path, score]) => ({ path, score }));

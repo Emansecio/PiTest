@@ -151,6 +151,25 @@ describe("runSelfReviewLoop", () => {
 		expect(diag?.category).toBe("quality.self-review");
 	});
 
+	it("threads impactedFiles through to the runner's prompt (Fase 3)", async () => {
+		let seenPrompt = "";
+		const runner: SelfReviewRunner = async (args) => {
+			seenPrompt = args.prompt;
+			return { findings: [] };
+		};
+		await runSelfReviewLoop({
+			totals: totals({}),
+			level: "leve",
+			runner,
+			maxAttempts: 3,
+			fixesAlreadyUsed: 0,
+			injectFix: async () => {},
+			impactedFiles: ["dependent.ts"],
+		});
+		expect(seenPrompt).toContain("Files that import what changed");
+		expect(seenPrompt).toContain("- dependent.ts");
+	});
+
 	it("re-injects a fix prompt for HIGH findings, then clears when the re-review is clean", async () => {
 		const finding = highFinding();
 		const { runner, calls } = scriptedRunner([{ findings: [finding] }, { findings: [] }]);
@@ -261,6 +280,35 @@ describe("self-review prompts", () => {
 		expect(p).toContain("high-severity problems");
 		expect(p).toContain("null deref");
 		expect(p).toContain("user.name");
+	});
+});
+
+describe("self-review prompt — Fase 3 impactedFiles (graph escopo expandido)", () => {
+	const base = totals({ touchedFiles: [{ path: "a.ts", changedLines: 130 }] });
+
+	it("is byte-identical to the pre-Fase-3 prompt when impactedFiles is omitted", () => {
+		expect(buildSelfReviewPrompt(base)).toBe(buildSelfReviewPrompt(base, undefined));
+	});
+
+	it("is byte-identical to the pre-Fase-3 prompt when impactedFiles is empty", () => {
+		expect(buildSelfReviewPrompt(base, [])).toBe(buildSelfReviewPrompt(base));
+	});
+
+	it("appends a read-only impacted-files section when the registry has entries", () => {
+		const prompt = buildSelfReviewPrompt(base, ["b.ts", "c.ts"]);
+		expect(prompt).toContain("Files that import what changed");
+		expect(prompt).toContain("check the change doesn't break how they use it");
+		expect(prompt).toContain("- b.ts");
+		expect(prompt).toContain("- c.ts");
+		// The section is additive: the pre-existing content is still present verbatim.
+		expect(prompt).toContain("a.ts — 130 changed lines");
+	});
+
+	it("caps the impacted-files section at 10 paths", () => {
+		const many = Array.from({ length: 15 }, (_, i) => `impacted${i}.ts`);
+		const prompt = buildSelfReviewPrompt(base, many);
+		for (const p of many.slice(0, 10)) expect(prompt).toContain(`- ${p}`);
+		for (const p of many.slice(10)) expect(prompt).not.toContain(`- ${p}`);
 	});
 });
 

@@ -15,6 +15,13 @@
  * (a spawnSubagent wrapper) and the fix-injection callback. Splitting it this way
  * lets the loop be unit-tested with a stubbed runner — no real subagent spawns.
  *
+ * Fase 3 (token-economy layer, see repo-map/graph.ts) widens what the reviewer
+ * SEES without touching WHEN it runs: `SelfReviewLoopParams.impactedFiles` — the
+ * turn's unreviewed import-graph dependents (impact-extension.ts's registry) —
+ * is threaded into `buildSelfReviewPrompt` as extra read-only context ("these
+ * files import what changed"), capped and additive; absent/empty renders the
+ * exact prompt this module always has.
+ *
  * Fail-open everywhere: any runner error/timeout degrades to "no findings" (with a
  * diagnostic), never blocking the turn. Kill-switch: `PIT_NO_SELF_REVIEW=1`.
  */
@@ -122,8 +129,24 @@ export const SELF_REVIEW_SYSTEM_PROMPT = [
 	"Do NOT report style nits, formatting, naming preferences, or subjective taste. A finding is `high` only when it is a genuine bug, a broken contract, or an unhandled edge case that must be fixed before the work can be called done.",
 ].join("\n");
 
-/** Build the review subagent's user prompt from the cycle's touched files + diffs. */
-export function buildSelfReviewPrompt(totals: TurnRiskTotals): string {
+/**
+ * Cap on `impactedFiles` paths embedded in the review prompt (Fase 3, graph
+ * escopo expandido). A review subagent gets a short read-only context list,
+ * not a second worklist — 10 keeps it a hint, not a review burden.
+ */
+const IMPACTED_FILES_PROMPT_CAP = 10;
+
+/**
+ * Build the review subagent's user prompt from the cycle's touched files +
+ * diffs, plus (Fase 3) an optional read-only list of import-graph dependents
+ * impacted by the change but NOT themselves edited this turn — "these files
+ * import what changed; check the change doesn't break how they use it".
+ * Omitted entirely when `impactedFiles` is absent/empty, so the prompt stays
+ * byte-identical to the pre-Fase-3 shape in that case (fail-open by construction:
+ * an empty impact registry — the common case — never touches this function's
+ * existing output).
+ */
+export function buildSelfReviewPrompt(totals: TurnRiskTotals, impactedFiles?: readonly string[]): string {
 	const lines: string[] = [
 		`This turn modified ${totals.touchedFiles.length} file(s), ${totals.changedLines} changed lines total (aggregate risk: ${totals.aggregateRisk}).`,
 		"",
@@ -140,6 +163,15 @@ export function buildSelfReviewPrompt(totals: TurnRiskTotals): string {
 		}
 	} else {
 		lines.push("", "No diffs were captured — read the touched files directly to review the change.");
+	}
+	if (impactedFiles && impactedFiles.length > 0) {
+		lines.push(
+			"",
+			"Files that import what changed (not edited this turn — read-only context, per the persisted import graph): these files import what changed; check the change doesn't break how they use it:",
+		);
+		for (const path of impactedFiles.slice(0, IMPACTED_FILES_PROMPT_CAP)) {
+			lines.push(`- ${path}`);
+		}
 	}
 	lines.push("", "Return your findings as the schema requires. Empty findings when the change is clean.");
 	return lines.join("\n");
@@ -203,6 +235,14 @@ export interface SelfReviewLoopParams {
 	/** Optional abort probe — stops the loop between passes. */
 	isAborted?: () => boolean;
 	env?: NodeJS.ProcessEnv;
+	/**
+	 * Fase 3: repo-relative paths of import-graph dependents impacted by this
+	 * turn's edits but not themselves touched — read-only context handed to the
+	 * reviewer (see `buildSelfReviewPrompt`), capped at
+	 * {@link IMPACTED_FILES_PROMPT_CAP}. Absent/empty is the fail-open default:
+	 * the prompt renders exactly as it did before this field existed.
+	 */
+	impactedFiles?: string[];
 }
 
 export interface SelfReviewLoopResult {
@@ -231,7 +271,7 @@ export async function runSelfReviewLoop(params: SelfReviewLoopParams): Promise<S
 	if (!shouldRunSelfReview(totals, level)) return { ran: false, fixesUsed, unresolvedHigh: [], reviews: 0 };
 
 	const args: SelfReviewRunnerArgs = {
-		prompt: buildSelfReviewPrompt(totals),
+		prompt: buildSelfReviewPrompt(totals, params.impactedFiles),
 		systemPrompt: SELF_REVIEW_SYSTEM_PROMPT,
 		totals,
 	};

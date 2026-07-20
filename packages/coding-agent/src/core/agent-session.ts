@@ -70,7 +70,7 @@ import {
 } from "./agent-session-tool-end.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage, isOAuthReauthRequired } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
-import { wasFileInPredictedImpact } from "./built-ins/impact-extension.ts";
+import { getCurrentPredictedImpactPaths, wasFileInPredictedImpact } from "./built-ins/impact-extension.ts";
 import { reconcileFusionModeInvariant } from "./built-ins/permissions-extension.ts";
 import { type CacheStats, computeCacheStats } from "./cache-stats.js";
 import type { ChromeDevtoolsManager } from "./chrome/chrome-devtools-manager.ts";
@@ -4615,6 +4615,10 @@ export class AgentSession implements CompactionHost, FusionHost {
 			fixesAlreadyUsed,
 			injectFix: (prompt) => this._promptOnce(prompt, { expandPromptTemplates: false, source: options?.source }),
 			isAborted: () => abort.signal.aborted || this._userInterrupted,
+			// Fase 3: widen the reviewer's read-only context with this turn's
+			// unreviewed import-graph dependents (impact-extension.ts's registry) —
+			// empty when nothing was impacted, so this is a no-op most cycles.
+			impactedFiles: getCurrentPredictedImpactPaths(),
 		});
 		this.emit({
 			type: "self_review",

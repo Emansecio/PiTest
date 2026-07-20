@@ -108,6 +108,7 @@ import { createFindSymbolToolDefinition, type FindSymbolToolOptions } from "./fi
 import { createForgetToolDefinition, type ForgetToolOptions } from "./forget.ts";
 import { createGoalCompleteToolDefinition, type GoalCompleteToolOptions } from "./goal-complete.ts";
 import { createGrepToolDefinition, type GrepToolOptions } from "./grep.ts";
+import { createImpactToolDefinition, type ImpactToolOptions } from "./impact.ts";
 import { createInspectImageToolDefinition, type InspectImageToolOptions } from "./inspect-image.ts";
 import { createLsToolDefinition, type LsToolOptions } from "./ls.ts";
 import { createPlanToolDefinition, type PlanToolOptions } from "./plan.ts";
@@ -292,6 +293,14 @@ const TOOL_REGISTRY = {
 		optionsKey: "find_symbol",
 		readOnly: true,
 		coding: "always",
+	},
+	impact: {
+		definitionFactory: createImpactToolDefinition,
+		optionsKey: "impact",
+		readOnly: true,
+		// Native + default-on, same tier as undo/calc/recipe: a query over the
+		// persisted import graph (repo-map's `deps`), never a scan of its own.
+		coding: "native",
 	},
 	repo_map: {
 		definitionFactory: createRepoMapToolDefinition,
@@ -731,6 +740,7 @@ export interface ToolsOptions {
 	ls?: LsToolOptions;
 	symbol?: SymbolToolOptions;
 	find_symbol?: FindSymbolToolOptions;
+	impact?: ImpactToolOptions;
 	repo_map?: RepoMapToolOptions;
 	security?: SecurityToolsOptions;
 	search_skills?: SearchSkillsToolOptions;

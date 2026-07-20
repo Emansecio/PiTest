@@ -121,6 +121,22 @@ export function wasFileInPredictedImpact(path: string): boolean {
 	return currentPredicted.has(normalizeRelKey(path));
 }
 
+/**
+ * Fase 3 (token-economy layer): every path surfaced by the impact graph THIS
+ * turn (any hop, hub-suppressed or not — the same set `wasFileInPredictedImpact`
+ * checks against), sorted. Feeds the self-review call-site (`agent-session.ts`
+ * `_runSelfReviewPhase`), which threads this into `runSelfReviewLoop`'s
+ * `impactedFiles` so the review subagent sees "these files import what
+ * changed" as extra read-only context. Reuses `currentPredicted` verbatim — its
+ * keys are already normalized (forward-slash, lowercased on win32 only) since
+ * that is the same registry `wasFileInPredictedImpact` reads. Empty when
+ * nothing was edited this turn (fail-open: the self-review call-site degrades
+ * to its pre-Fase-3 behavior).
+ */
+export function getCurrentPredictedImpactPaths(): string[] {
+	return Array.from(currentPredicted).sort();
+}
+
 /** Test-only: seed the pending registry directly, bypassing the event pipeline. */
 export function _setUnreviewedImpactForTest(entries: Array<{ path: string; seeds: string[] }>): void {
 	currentPending = new Map(
