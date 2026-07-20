@@ -70,6 +70,7 @@ import {
 } from "./agent-session-tool-end.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage, isOAuthReauthRequired } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
+import { wasFileInPredictedImpact } from "./built-ins/impact-extension.ts";
 import { reconcileFusionModeInvariant } from "./built-ins/permissions-extension.ts";
 import { type CacheStats, computeCacheStats } from "./cache-stats.js";
 import type { ChromeDevtoolsManager } from "./chrome/chrome-devtools-manager.ts";
@@ -4469,6 +4470,11 @@ export class AgentSession implements CompactionHost, FusionHost {
 					mechanism: analysis.classification,
 					count: analysis.failingCount,
 					crossFileCount: analysis.crossFileCount,
+					// Predictive telemetry (code-graph Fase 2): did the import graph
+					// already flag one of these cross-file failures as an impacted
+					// dependent before the check caught it? Pure enrichment of this
+					// existing diagnostic — no new session behavior (Invariant #1).
+					predictedByGraph: analysis.crossFiles.some((f) => wasFileInPredictedImpact(f)),
 				},
 			});
 			if (analysis.crossFileCount === 0) return undefined;

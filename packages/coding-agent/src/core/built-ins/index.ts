@@ -27,6 +27,7 @@ import { createCoordinatorExtension } from "./coordinator-extension.ts";
 import { createDestructiveCommandGuardExtension } from "./destructive-command-guard-extension.ts";
 import { bundleGroundingGuardFactories } from "./grounding-guard-registry.ts";
 import { createHooksExtension } from "./hooks-extension.ts";
+import { createImpactExtension } from "./impact-extension.ts";
 import { createIntentGateExtension } from "./intent-gate-extension.ts";
 import { createLearnedErrorGuardExtension } from "./learned-error-guard-extension.ts";
 import { createMcpExtension } from "./mcp-extension.ts";
@@ -156,6 +157,13 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 		// medium/high-risk write/edit results based on patch shape. Model-agnostic,
 		// fail-open; opt out PIT_NO_PATCH_AUDIT.
 		createPatchAuditExtension(),
+		// Impact graph (code-graph Fase 2): post-exec, appends a compact "N files
+		// depend on this" advisory to successful edit/write results using the
+		// Fase 1 import graph (repo-map/graph.ts blastRadius), and tracks
+		// unreviewed direct dependents for the goal_complete R10 gate. Degrades to
+		// a no-op automatically when the map has no deps (PIT_NO_REPO_GRAPH).
+		// Model-agnostic, fail-open; opt out PIT_NO_IMPACT_GUARD.
+		createImpactExtension({ cwd: options.cwd }),
 		createHooksExtension({ settings: options.hooks, cwd: options.cwd }),
 		createMemoryExtension({ cwd: options.cwd, agentDir: options.agentDir }),
 		createMcpExtension({ settings: options.mcp, cwd: options.cwd, agentDir: options.agentDir }),

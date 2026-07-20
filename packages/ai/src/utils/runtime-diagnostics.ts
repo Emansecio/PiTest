@@ -77,6 +77,10 @@ export type DiagnosticCategory =
 	| "quality.contract"
 	| "quality.self-review"
 	| "quality.cache-marker"
+	// Code-graph Fase 2 (import-edge blast radius): a post-edit advisory fired
+	// (or the goal_complete R10 gate blocked completion) because dependents of
+	// the changed file were surfaced by `built-ins/impact-extension.ts`.
+	| "quality.impact-guard"
 	// An under-specified mutating prompt got the ask-before-you-wander
 	// `<clarify_first>` directive appended for this turn (clarify nudge).
 	| "quality.clarify"
@@ -129,6 +133,13 @@ export interface DiagnosticContext {
 	count?: number;
 	/** How many of `count` were cross-file (failing files the turn never touched). */
 	crossFileCount?: number;
+	/**
+	 * On a `verification.cross_file_escape` diagnostic: whether the import graph
+	 * (`built-ins/impact-extension.ts`) had already flagged at least one of the
+	 * cross-file failures as an impacted dependent before the check caught it —
+	 * i.e. the escape was predictable from the graph, not a total surprise.
+	 */
+	predictedByGraph?: boolean;
 }
 
 export interface DiagnosticEvent {

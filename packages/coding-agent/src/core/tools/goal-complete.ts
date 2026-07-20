@@ -10,6 +10,7 @@ import type { AgentTool } from "@pit/agent-core";
 import { recordDiagnostic } from "@pit/ai";
 import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
+import { getCurrentUnreviewedImpact } from "../built-ins/impact-extension.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentGoalManager } from "../goal/goal-manager.ts";
 import { getCurrentSelfReviewFindings } from "../self-review.ts";
@@ -123,6 +124,32 @@ export function createGoalCompleteToolDefinition(
 						{
 							type: "text" as const,
 							text: `Not completing the goal — a self-review of your changes found unresolved high-severity problems. Fix these (or explain why each is a false positive), then call goal_complete again:\n${list}`,
+						},
+					],
+					details: { completed: false, objective: goal.objective },
+				};
+			}
+			// R10: the native import graph (Fase 2, `built-ins/impact-extension.ts`)
+			// found direct dependents of this turn's edits that were never read,
+			// edited, or lsp-checked afterward. Refuse completion with the concrete
+			// list — same shape as the R7/R8/R9 refusals above.
+			const unreviewedImpact = getCurrentUnreviewedImpact();
+			if (unreviewedImpact.length > 0) {
+				const shown = unreviewedImpact.slice(0, 10);
+				const list = shown.map((e) => `  • ${e.path}`).join("\n");
+				const more =
+					unreviewedImpact.length > shown.length ? `\n  +${unreviewedImpact.length - shown.length} more` : "";
+				recordDiagnostic({
+					category: "quality.impact-guard",
+					level: "warn",
+					source: "goal-complete",
+					context: { ruleId: "impact-blocked-done", note: `unreviewed=${unreviewedImpact.length}` },
+				});
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Not completing the goal — the import graph shows ${unreviewedImpact.length} file(s) that depend on what you changed and were never reviewed this turn. Read them (or run lsp diagnostics on them) to confirm they still work, then call goal_complete again:\n${list}${more}`,
 						},
 					],
 					details: { completed: false, objective: goal.objective },
