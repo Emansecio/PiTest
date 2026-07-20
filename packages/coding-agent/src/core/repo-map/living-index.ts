@@ -41,11 +41,13 @@ import {
 	unlinkSync,
 	writeSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, relative } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
+import { findTsconfigPathsForFile } from "../project-config-context.ts";
 import { scanSourceFiles } from "../tools/source-scan.ts";
 import { listDeclarations, listTopLevelDeclarations } from "../tools/symbol.ts";
-import { extractFileDeps } from "./edges.ts";
+import { type EdgeResolveDeps, extractFileDeps } from "./edges.ts";
+import { buildWorkspacePackageMap } from "./workspace-map.ts";
 
 /**
  * Bump when the on-disk schema changes incompatibly. v2 adds the optional
@@ -53,9 +55,14 @@ import { extractFileDeps } from "./edges.ts";
  * composer. v3 adds the optional per-file `deps` (resolved import edges)
  * projection that turns the map into a graph (see `edges.ts`/`graph.ts`);
  * bumping invalidates v2 caches so they reindex cleanly with edges instead of
- * being read back without `deps`.
+ * being read back without `deps`. v4 keeps the exact v3 SHAPE but changes what
+ * `deps` can CONTAIN: bare workspace/alias specifiers now resolve (workspace
+ * map + tsconfig `paths` via `resolveBare` — see `workspace-map.ts` and
+ * `makeBareSpecifierResolver` below), so edges cached under v3 are silently
+ * missing cross-package links on every file NOT touched since; bumping forces
+ * one clean reindex so all entries gain the new resolutions.
  */
-export const CACHE_VERSION = 3 as const;
+export const CACHE_VERSION = 4 as const;
 
 /** Wall-clock cap on the `git diff` subprocess; deep histories must not stall. */
 const GIT_TIMEOUT_MS = 5000;
@@ -171,12 +178,20 @@ export interface LivingRepoMapDeps {
 	 * the absolute path — edge resolution needs repo-relative math to produce
 	 * repo-relative output). `fileExists` is a cheap, memoized-per-reindex-pass
 	 * checker (see `makeFileExistsChecker`) so resolving N files importing the
-	 * same shared module doesn't re-stat it N times. Absent (a deps harness that
-	 * only stubs `extractSymbols`) -> entries carry no `deps`, same graceful
-	 * degradation as `extractDeclarations`. Ignored entirely when
-	 * PIT_NO_REPO_GRAPH is truthy (never called).
+	 * same shared module doesn't re-stat it N times. `resolveBare` is the
+	 * OPTIONAL bare-specifier resolver built once per reindex pass (workspace
+	 * map + tsconfig paths — see `makeBareSpecifierResolver`); a harness that
+	 * declares the older 3-arg shape still assigns cleanly and simply never sees
+	 * it. Absent (a deps harness that only stubs `extractSymbols`) -> entries
+	 * carry no `deps`, same graceful degradation as `extractDeclarations`.
+	 * Ignored entirely when PIT_NO_REPO_GRAPH is truthy (never called).
 	 */
-	extractDeps?: (content: string, path: string, fileExists: (repoRelPath: string) => boolean) => string[];
+	extractDeps?: (
+		content: string,
+		path: string,
+		fileExists: (repoRelPath: string) => boolean,
+		resolveBare?: (specifier: string, fromRepoRelPath: string) => string | null,
+	) => string[];
 	/** Load the persisted cache, or undefined on any failure. */
 	loadCache: (cachepath: string) => LivingRepoMap | undefined;
 	/** Persist the cache atomically. Throws are swallowed by the caller. */
@@ -307,9 +322,124 @@ function defaultExtractDeclarations(content: string, path: string): RepoMapDecl[
  * Default edge extractor: wires `edges.ts`'s pure extract+resolve, capped to
  * `MAX_DEPS_PER_FILE`. `extractFileDeps` already dedupes+sorts, so the cap keeps
  * the alphabetically-first edges on truncation (deterministic, not arbitrary).
+ * `resolveBare` (when the pass supplies one) is forwarded so bare workspace /
+ * alias specifiers resolve; omitted -> edges.ts's trivial fallback only.
  */
-function defaultExtractDeps(content: string, repoRelPath: string, fileExists: (p: string) => boolean): string[] {
-	return extractFileDeps(content, repoRelPath, { fileExists }).slice(0, MAX_DEPS_PER_FILE);
+function defaultExtractDeps(
+	content: string,
+	repoRelPath: string,
+	fileExists: (p: string) => boolean,
+	resolveBare?: (specifier: string, fromRepoRelPath: string) => string | null,
+): string[] {
+	const edgeDeps: EdgeResolveDeps = resolveBare ? { fileExists, resolveBare } : { fileExists };
+	return extractFileDeps(content, repoRelPath, edgeDeps).slice(0, MAX_DEPS_PER_FILE);
+}
+
+// --- Bare-specifier resolution (workspace map + tsconfig paths) --------------
+
+/**
+ * Substitute `spec` through ONE tsconfig `paths` pattern (exact, or the
+ * single-`*` wildcard form `@/*` -> `src/*`), returning the FIRST substituted
+ * target or null when the pattern doesn't match. Multiple targets per pattern
+ * exist for fallback chains we don't model — the first is the overwhelmingly
+ * common (and TS-preferred) one, and a miss just yields no edge (fail-open).
+ */
+function substituteAliasPattern(spec: string, pattern: string, targets: string[]): string | null {
+	const star = pattern.indexOf("*");
+	if (star < 0) {
+		if (spec !== pattern) return null;
+		return targets.find((t) => !t.includes("*")) ?? null;
+	}
+	const prefix = pattern.slice(0, star);
+	const suffix = pattern.slice(star + 1);
+	if (spec.length < prefix.length + suffix.length) return null;
+	if (!spec.startsWith(prefix) || !spec.endsWith(suffix)) return null;
+	const captured = spec.slice(prefix.length, spec.length - suffix.length);
+	const target = targets[0];
+	if (target === undefined) return null;
+	return target.includes("*") ? target.replace("*", captured) : target;
+}
+
+/**
+ * Resolve `specifier` through the tsconfig `paths` governing the importing file,
+ * to a REPO-RELATIVE forward-slash module path (no guaranteed extension), or
+ * null. Reuses the import-grounding lookup (`findTsconfigPathsForFile`: walk-up
+ * to the nearest config + `extends` chain, memoized per config mtime in
+ * `tsconfig-paths-cache.ts`, so the per-specifier cost is one cached hit).
+ * Longest-static-prefix pattern wins, mirroring TS resolution. A target that
+ * escapes the repo root resolves to null — edges are repo-internal by contract.
+ */
+function resolveTsconfigAliasTarget(cwd: string, specifier: string, fromRepoRelPath: string): string | null {
+	let cfg: ReturnType<typeof findTsconfigPathsForFile>;
+	try {
+		cfg = findTsconfigPathsForFile(join(cwd, fromRepoRelPath));
+	} catch {
+		return null;
+	}
+	if (cfg === undefined) return null;
+	let best: { prefixLen: number; substituted: string } | undefined;
+	for (const [pattern, targets] of Object.entries(cfg.paths)) {
+		const substituted = substituteAliasPattern(specifier, pattern, targets);
+		if (substituted === null) continue;
+		const star = pattern.indexOf("*");
+		const prefixLen = star < 0 ? pattern.length : star;
+		if (best === undefined || prefixLen > best.prefixLen) best = { prefixLen, substituted };
+	}
+	if (best === undefined) return null;
+	const rel = relative(cwd, resolve(cfg.baseUrl, best.substituted)).split("\\").join("/");
+	if (rel.length === 0 || rel.startsWith("..") || isAbsolute(rel)) return null;
+	return rel;
+}
+
+/** `@scope/pkg/sub` -> {name:"@scope/pkg", subpath:"sub"}; `pkg/sub` -> {name:"pkg", subpath:"sub"}. */
+function splitBareSpecifier(specifier: string): { name: string; subpath: string } | null {
+	if (specifier.startsWith("@")) {
+		const parts = specifier.split("/");
+		if (parts.length < 2 || parts[0]!.length === 0 || parts[1]!.length === 0) return null;
+		return { name: `${parts[0]}/${parts[1]}`, subpath: parts.slice(2).join("/") };
+	}
+	const slash = specifier.indexOf("/");
+	if (slash < 0) return { name: specifier, subpath: "" };
+	return { name: specifier.slice(0, slash), subpath: specifier.slice(slash + 1) };
+}
+
+/** Map a bare specifier through the workspace package map, or null. */
+function resolveWorkspaceTarget(specifier: string, workspaceMap: Map<string, string>): string | null {
+	if (workspaceMap.size === 0) return null;
+	const split = splitBareSpecifier(specifier);
+	if (split === null) return null;
+	const dir = workspaceMap.get(split.name);
+	if (dir === undefined) return null;
+	// Bare name -> the package's conventional source entry (`<dir>/src/index`,
+	// which edges.ts then extension/index-resolves); a subpath import maps
+	// straight under the package dir. package.json `main`/`exports` are NOT
+	// consulted (see module doc of workspace-map.ts) — a package whose entry
+	// lives elsewhere simply yields no edge, never a wrong one.
+	return split.subpath.length > 0 ? `${dir}/${split.subpath}` : `${dir}/src/index`;
+}
+
+/**
+ * Compose the per-reindex-pass bare-specifier resolver handed to `extractDeps`
+ * (and from there to `edges.ts`'s `resolveBare`): tsconfig `paths` first (an
+ * alias mapping is the more specific intent), then the npm workspace map.
+ * Construction is FREE — the workspace map is built lazily on the first bare
+ * specifier actually resolved, so passes that touch no files (cache hits) and
+ * harnesses that inject their own `extractDeps` (which simply never call this)
+ * pay zero I/O. Fail-open throughout: any failure resolves null, and edges.ts
+ * still runs its trivial `@pit/<name>` fallback after a null.
+ */
+export function makeBareSpecifierResolver(cwd: string): (specifier: string, fromRepoRelPath: string) => string | null {
+	let workspaceMap: Map<string, string> | null = null;
+	return (specifier, fromRepoRelPath) => {
+		try {
+			const viaAlias = resolveTsconfigAliasTarget(cwd, specifier, fromRepoRelPath);
+			if (viaAlias !== null) return viaAlias;
+			if (workspaceMap === null) workspaceMap = buildWorkspacePackageMap(cwd);
+			return resolveWorkspaceTarget(specifier, workspaceMap);
+		} catch {
+			return null;
+		}
+	};
 }
 
 /**
@@ -468,6 +598,7 @@ function indexFile(
 	deps: LivingRepoMapDeps,
 	fileExists: (repoRelPath: string) => boolean,
 	extractDepsEnabled: boolean,
+	resolveBare: ((specifier: string, fromRepoRelPath: string) => string | null) | undefined,
 ): RepoMapEntry | null {
 	const abs = isAbsolute(relPath) ? relPath : join(cwd, relPath);
 	// Capture mtime BEFORE reading content so a write racing between the two
@@ -495,7 +626,7 @@ function indexFile(
 	// any throw degrades to the deps-less entry (never breaks indexing).
 	if (extractDepsEnabled && deps.extractDeps) {
 		try {
-			const fileDeps = deps.extractDeps(content, repoRelPath, fileExists);
+			const fileDeps = deps.extractDeps(content, repoRelPath, fileExists, resolveBare);
 			if (fileDeps.length > 0) entry.deps = fileDeps;
 		} catch {
 			// no-deps fallback
@@ -519,9 +650,12 @@ async function fullScan(
 		deps,
 		files.map((f) => toRelKey(cwd, f)),
 	);
+	// One bare-specifier resolver per pass: its workspace map / tsconfig lookups
+	// are built lazily and shared across every file indexed below.
+	const resolveBare = extractDepsEnabled ? makeBareSpecifierResolver(cwd) : undefined;
 	const entries: RepoMapEntry[] = [];
 	for (const file of files) {
-		const entry = indexFile(cwd, file, deps, fileExists, extractDepsEnabled);
+		const entry = indexFile(cwd, file, deps, fileExists, extractDepsEnabled, resolveBare);
 		if (entry) entries.push(entry);
 	}
 	return {
@@ -648,6 +782,10 @@ export async function getLivingRepoMap(
 	// DURING this pass still holds via its statMtime fallback.
 	const fileExists = makeFileExistsChecker(cwd, deps, byPath.keys());
 
+	// One bare-specifier resolver per pass (lazy internals — a pure cache hit
+	// never touches the workspace manifest or any tsconfig).
+	const resolveBare = extractDepsEnabled ? makeBareSpecifierResolver(cwd) : undefined;
+
 	let reindexed = 0;
 	const changedKeys = new Set<string>();
 
@@ -662,7 +800,7 @@ export async function getLivingRepoMap(
 		if (entry.status === "R") byPath.delete(toRelKey(cwd, entry.path));
 		const key = toRelKey(cwd, target);
 		changedKeys.add(key);
-		const fresh = indexFile(cwd, target, deps, fileExists, extractDepsEnabled);
+		const fresh = indexFile(cwd, target, deps, fileExists, extractDepsEnabled, resolveBare);
 		if (fresh) {
 			byPath.set(key, fresh);
 		} else {
@@ -686,7 +824,7 @@ export async function getLivingRepoMap(
 			continue;
 		}
 		if (mtime !== e.mtimeMs) {
-			const fresh = indexFile(cwd, e.path, deps, fileExists, extractDepsEnabled);
+			const fresh = indexFile(cwd, e.path, deps, fileExists, extractDepsEnabled, resolveBare);
 			if (fresh) byPath.set(e.path, fresh);
 			else byPath.delete(e.path);
 			reindexed++;

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { extractFileDeps } from "../src/core/repo-map/edges.js";
 import {
 	clearLivingRepoMapMemoForTest,
 	defaultLivingRepoMapDeps,
@@ -7,8 +8,10 @@ import {
 	type LivingRepoMapDeps,
 	livingRepoMapToDigests,
 	loadRepoMapCache,
+	makeBareSpecifierResolver,
 	saveRepoMapCache,
 } from "../src/core/repo-map/living-index.js";
+import { buildWorkspacePackageMap, type WorkspaceMapDeps } from "../src/core/repo-map/workspace-map.js";
 
 const CWD = "/proj";
 
@@ -91,7 +94,7 @@ function makeDeps(opts: {
 describe("getLivingRepoMap — incremental git delta", () => {
 	it("reindexes ONLY the modified file, keeps the rest, persists new HEAD", async () => {
 		const cache: LivingRepoMap = {
-			version: 3,
+			version: 4,
 			lastIndexedCommit: "old-sha",
 			entries: [
 				{ path: "a.ts", symbols: ["aOld"], mtimeMs: 1 },
@@ -125,7 +128,7 @@ describe("getLivingRepoMap — incremental git delta", () => {
 
 	it("drops deleted files from the map", async () => {
 		const cache: LivingRepoMap = {
-			version: 3,
+			version: 4,
 			lastIndexedCommit: "old-sha",
 			entries: [
 				{ path: "a.ts", symbols: ["a"], mtimeMs: 1 },
@@ -147,7 +150,7 @@ describe("getLivingRepoMap — incremental git delta", () => {
 
 	it("handles a rename: old key dropped, destination indexed", async () => {
 		const cache: LivingRepoMap = {
-			version: 3,
+			version: 4,
 			lastIndexedCommit: "old-sha",
 			entries: [{ path: "old.ts", symbols: ["x"], mtimeMs: 1 }],
 		};
@@ -167,7 +170,7 @@ describe("getLivingRepoMap — incremental git delta", () => {
 
 	it("catches an uncommitted edit via mtime drift (not in the git diff)", async () => {
 		const cache: LivingRepoMap = {
-			version: 3,
+			version: 4,
 			lastIndexedCommit: "head-sha",
 			entries: [
 				{ path: "a.ts", symbols: ["aOld"], mtimeMs: 1 },
@@ -192,7 +195,7 @@ describe("getLivingRepoMap — incremental git delta", () => {
 
 	it("pure cache hit when nothing changed → mode cache-hit, zero reindex", async () => {
 		const cache: LivingRepoMap = {
-			version: 3,
+			version: 4,
 			lastIndexedCommit: "head-sha",
 			entries: [{ path: "a.ts", symbols: ["a"], mtimeMs: 5 }],
 		};
@@ -227,7 +230,7 @@ describe("getLivingRepoMap — degradation", () => {
 
 	it("git diff failure (rebased-away base) triggers a full rebuild at HEAD", async () => {
 		const cache: LivingRepoMap = {
-			version: 3,
+			version: 4,
 			lastIndexedCommit: "dangling-sha",
 			entries: [{ path: "a.ts", symbols: ["stale"], mtimeMs: 1 }],
 		};
@@ -246,7 +249,7 @@ describe("getLivingRepoMap — degradation", () => {
 
 	it("PIT_NO_LIVING_REPO_MAP forces a one-shot full scan with NO persistence", async () => {
 		const cache: LivingRepoMap = {
-			version: 3,
+			version: 4,
 			lastIndexedCommit: "old-sha",
 			entries: [{ path: "a.ts", symbols: ["a"], mtimeMs: 1 }],
 		};
@@ -274,7 +277,7 @@ describe("getLivingRepoMap — degradation", () => {
 		const { deps, parseCounts, saved } = makeDeps({
 			head: "new-sha",
 			diff: [{ status: "M", path: "a.ts" }],
-			cache: { version: 3, lastIndexedCommit: "", entries: [] }, // empty anchor
+			cache: { version: 4, lastIndexedCommit: "", entries: [] }, // empty anchor
 			files: { "a.ts": "a", "b.ts": "b" },
 		});
 		const result = await getLivingRepoMap(CWD, deps);
@@ -295,7 +298,7 @@ describe("getLivingRepoMap — repo graph (deps) extraction", () => {
 
 	it("extracts deps ONLY for the reindexed file, in the SAME pass as symbols", async () => {
 		const cache: LivingRepoMap = {
-			version: 3,
+			version: 4,
 			lastIndexedCommit: "old-sha",
 			entries: [
 				{ path: "a.ts", symbols: ["aOld"], mtimeMs: 1 },
@@ -327,7 +330,7 @@ describe("getLivingRepoMap — repo graph (deps) extraction", () => {
 
 	it("a renamed file's deps are re-extracted (not carried over from the old path)", async () => {
 		const cache: LivingRepoMap = {
-			version: 3,
+			version: 4,
 			lastIndexedCommit: "old-sha",
 			entries: [{ path: "old.ts", symbols: ["x"], deps: ["stale.ts"], mtimeMs: 1 }],
 		};
@@ -359,7 +362,7 @@ describe("getLivingRepoMap — repo graph (deps) extraction", () => {
 
 	it("PIT_NO_REPO_GRAPH disables deps extraction AND persistence entirely", async () => {
 		const cache: LivingRepoMap = {
-			version: 3,
+			version: 4,
 			lastIndexedCommit: "old-sha",
 			entries: [{ path: "a.ts", symbols: ["aOld"], mtimeMs: 1 }],
 		};
@@ -383,6 +386,40 @@ describe("getLivingRepoMap — repo graph (deps) extraction", () => {
 			if (prev === undefined) delete process.env.PIT_NO_REPO_GRAPH;
 			else process.env.PIT_NO_REPO_GRAPH = prev;
 		}
+	});
+
+	it("reindex gains CROSS-PACKAGE deps when the extractor composes a workspace-map resolveBare (fake monorepo)", async () => {
+		// In-memory monorepo: root manifest declares workspaces; `packages/agent`
+		// holds `@pit/agent-core` (dir != name — the exact case the trivial
+		// `@pit/<name>` guess cannot resolve).
+		const wsFiles: Record<string, string> = {
+			"package.json": JSON.stringify({ workspaces: ["packages/*"] }),
+			"packages/agent/package.json": JSON.stringify({ name: "@pit/agent-core" }),
+		};
+		const wsDeps: WorkspaceMapDeps = {
+			readFile: (absPath) => wsFiles[absPath.split("\\").join("/").replace(`${CWD}/`, "")] ?? null,
+			readDir: (absPath) =>
+				absPath.split("\\").join("/").replace(`${CWD}/`, "") === "packages" ? ["agent", "coding-agent"] : null,
+		};
+		const workspaceMap = buildWorkspacePackageMap(CWD, wsDeps);
+		const resolveBare = (spec: string) => {
+			const dir = workspaceMap.get(spec);
+			return dir === undefined ? null : `${dir}/src/index`;
+		};
+		const { deps } = makeDeps({
+			head: null, // full scan
+			files: {
+				"packages/coding-agent/src/x.ts": `import { a } from "@pit/agent-core";`,
+				"packages/agent/src/index.ts": "export const a = 1;",
+			},
+			// The REAL edge extractor, with resolveBare composed from the REAL
+			// workspace map — the same shape defaultExtractDeps wires.
+			extractDeps: (content, path, fileExists) => extractFileDeps(content, path, { fileExists, resolveBare }),
+		});
+		const result = await getLivingRepoMap(CWD, deps);
+		const byPath = Object.fromEntries(result.map.entries.map((e) => [e.path, e.deps]));
+		// Without resolveBare this edge was INVISIBLE (dir mismatch) — now it lands.
+		expect(byPath["packages/coding-agent/src/x.ts"]).toEqual(["packages/agent/src/index.ts"]);
 	});
 
 	it("without PIT_NO_REPO_GRAPH, symbols/decls extraction is unaffected either way (parity check)", async () => {
@@ -420,7 +457,7 @@ describe("cache round-trip + digest projection", () => {
 		try {
 			const cachePath = join(dir, ".pit", "repo-map.jsonl");
 			const map: LivingRepoMap = {
-				version: 3,
+				version: 4,
 				lastIndexedCommit: "sha123",
 				entries: [
 					{ path: "a.ts", symbols: ["f", "C"], mtimeMs: 10 },
@@ -449,7 +486,7 @@ describe("cache round-trip + digest projection", () => {
 			// Valid header, one good line, one garbage line.
 			writeFileSync(
 				cachePath,
-				`${JSON.stringify({ version: 3, lastIndexedCommit: "s" })}\n${JSON.stringify({ path: "ok.ts", symbols: ["x"], mtimeMs: 1 })}\n{not json\n`,
+				`${JSON.stringify({ version: 4, lastIndexedCommit: "s" })}\n${JSON.stringify({ path: "ok.ts", symbols: ["x"], mtimeMs: 1 })}\n{not json\n`,
 				"utf8",
 			);
 			const loaded = loadRepoMapCache(cachePath);
@@ -467,7 +504,7 @@ describe("cache round-trip + digest projection", () => {
 		try {
 			const cachePath = join(dir, ".pit", "repo-map.jsonl");
 			const map: LivingRepoMap = {
-				version: 3,
+				version: 4,
 				lastIndexedCommit: "sha123",
 				entries: [
 					{ path: "a.ts", symbols: ["f"], deps: ["b.ts", "c.ts"], mtimeMs: 10 },
@@ -484,7 +521,7 @@ describe("cache round-trip + digest projection", () => {
 		}
 	});
 
-	it("a v2-versioned cache (pre-repo-graph) is invalidated by the v3 bump — full reindex, not a partial read", async () => {
+	it("an older-versioned cache (v2 pre-graph, v3 pre-resolveBare) is invalidated by the v4 bump — full reindex, not a partial read", async () => {
 		const { mkdtempSync, rmSync, writeFileSync, mkdirSync } = await import("node:fs");
 		const { tmpdir } = await import("node:os");
 		const { join, dirname } = await import("node:path");
@@ -492,13 +529,21 @@ describe("cache round-trip + digest projection", () => {
 		try {
 			const cachePath = join(dir, ".pit", "repo-map.jsonl");
 			mkdirSync(dirname(cachePath), { recursive: true });
-			// A well-formed v2 cache (no `deps` field at all — pre-repo-graph shape).
+			// A well-formed v3 cache: same SHAPE as v4, but its `deps` were extracted
+			// without bare-specifier resolution — untouched files would keep stale
+			// edge sets forever if it loaded. The version check must reject it.
+			writeFileSync(
+				cachePath,
+				`${JSON.stringify({ version: 3, lastIndexedCommit: "old-sha" })}\n${JSON.stringify({ path: "a.ts", symbols: ["x"], deps: ["b.ts"], mtimeMs: 1 })}\n`,
+				"utf8",
+			);
+			expect(loadRepoMapCache(cachePath)).toBeUndefined();
+			// And the older v2 (pre-repo-graph) shape stays rejected too.
 			writeFileSync(
 				cachePath,
 				`${JSON.stringify({ version: 2, lastIndexedCommit: "old-sha" })}\n${JSON.stringify({ path: "a.ts", symbols: ["x"], mtimeMs: 1 })}\n`,
 				"utf8",
 			);
-			// CACHE_VERSION is now 3 -> the version check rejects it outright.
 			expect(loadRepoMapCache(cachePath)).toBeUndefined();
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
@@ -507,7 +552,7 @@ describe("cache round-trip + digest projection", () => {
 
 	it("livingRepoMapToDigests projects to the file-digests Record shape, filtered by path", () => {
 		const map: LivingRepoMap = {
-			version: 3,
+			version: 4,
 			lastIndexedCommit: "s",
 			entries: [
 				{ path: "a.ts", symbols: ["f", "C"], mtimeMs: 1 },
@@ -557,7 +602,7 @@ describe("getLivingRepoMap — process memo (Fix 3)", () => {
 
 	it("never memoizes calls made with non-default (injected) deps", async () => {
 		const cache: LivingRepoMap = {
-			version: 3,
+			version: 4,
 			lastIndexedCommit: "old-sha",
 			entries: [{ path: "a.ts", symbols: ["aOld"], mtimeMs: 1 }],
 		};
@@ -590,6 +635,71 @@ describe("getLivingRepoMap — process memo (Fix 3)", () => {
 			expect(scanSpy).toHaveBeenCalledTimes(2);
 		} finally {
 			scanSpy.mockRestore();
+			clearLivingRepoMapMemoForTest();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+/**
+ * Default bare-specifier composition (workspace map + tsconfig `paths`) against a
+ * REAL on-disk fake monorepo: this is the wiring `getLivingRepoMap`'s reindex
+ * pass builds once per pass and threads into `edges.ts` via `extractDeps`.
+ */
+describe("makeBareSpecifierResolver — default composition (real fs)", () => {
+	/** Write the fake monorepo used by both tests below; returns its root dir. */
+	async function writeFakeMonorepo(): Promise<string> {
+		const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+		const { tmpdir } = await import("node:os");
+		const { join } = await import("node:path");
+		const dir = mkdtempSync(join(tmpdir(), "pit-repomap-ws-"));
+		writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fake-root", workspaces: ["packages/*"] }));
+		// `@pit/agent-core` deliberately lives in `packages/agent` (dir != name).
+		mkdirSync(join(dir, "packages", "agent", "src"), { recursive: true });
+		writeFileSync(join(dir, "packages", "agent", "package.json"), JSON.stringify({ name: "@pit/agent-core" }));
+		writeFileSync(join(dir, "packages", "agent", "src", "index.ts"), "export const agentThing = 1;\n");
+		// `@pit/cli` maps `@/*` -> `src/*` via its own tsconfig.
+		mkdirSync(join(dir, "packages", "cli", "src", "utils"), { recursive: true });
+		writeFileSync(join(dir, "packages", "cli", "package.json"), JSON.stringify({ name: "@pit/cli" }));
+		writeFileSync(
+			join(dir, "packages", "cli", "tsconfig.json"),
+			JSON.stringify({ compilerOptions: { paths: { "@/*": ["src/*"] } } }),
+		);
+		writeFileSync(join(dir, "packages", "cli", "src", "utils", "helpers.ts"), "export const helper = 1;\n");
+		writeFileSync(
+			join(dir, "packages", "cli", "src", "main.ts"),
+			`import { agentThing } from "@pit/agent-core";\nimport { helper } from "@/utils/helpers";\nexport const main = agentThing + helper;\n`,
+		);
+		return dir;
+	}
+
+	it("resolves workspace names (dir != name), subpaths, and tsconfig aliases; npm names -> null", async () => {
+		const { rmSync } = await import("node:fs");
+		const dir = await writeFakeMonorepo();
+		try {
+			const resolver = makeBareSpecifierResolver(dir);
+			// Workspace name whose dir doesn't match: the map, not the guess.
+			expect(resolver("@pit/agent-core", "packages/cli/src/main.ts")).toBe("packages/agent/src/index");
+			// Subpath import maps straight under the package dir.
+			expect(resolver("@pit/agent-core/utils/retry", "packages/cli/src/main.ts")).toBe("packages/agent/utils/retry");
+			// tsconfig alias governed by the IMPORTING file's nearest config.
+			expect(resolver("@/utils/helpers", "packages/cli/src/main.ts")).toBe("packages/cli/src/utils/helpers");
+			// A plain npm package matches neither pass.
+			expect(resolver("zod", "packages/cli/src/main.ts")).toBeNull();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("END-TO-END: getLivingRepoMap with DEFAULT deps lands both cross-package and alias edges", async () => {
+		const { rmSync } = await import("node:fs");
+		const dir = await writeFakeMonorepo();
+		clearLivingRepoMapMemoForTest();
+		try {
+			const result = await getLivingRepoMap(dir); // default deps: real scan + real edges + default resolveBare
+			const entry = result.map.entries.find((e) => e.path === "packages/cli/src/main.ts");
+			expect(entry?.deps).toEqual(["packages/agent/src/index.ts", "packages/cli/src/utils/helpers.ts"]);
+		} finally {
 			clearLivingRepoMapMemoForTest();
 			rmSync(dir, { recursive: true, force: true });
 		}

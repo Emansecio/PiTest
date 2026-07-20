@@ -23,13 +23,14 @@
  *
  * v1 language coverage (extension-dispatched):
  *   - TS/JS: `import ... from "X"` (incl. `import type`), `export ... from "X"`,
- *     side-effect `import "X"`, dynamic `import("X")`, `require("X")`. Only
- *     relative specifiers ("./x", "../y") are resolved against the filesystem;
- *     bare npm packages are discarded. Bonus: trivial monorepo mapping
- *     `@pit/<name>` -> `packages/<name>/src/index.*` (skipped when the workspace
- *     package's directory doesn't match its declared name — e.g. `@pit/agent-core`
- *     lives in `packages/agent`, not `packages/agent-core` — see the module doc of
- *     `living-index.ts` for how the cap/dedup wraps this).
+ *     side-effect `import "X"`, dynamic `import("X")`, `require("X")`. Relative
+ *     specifiers ("./x", "../y") resolve against the filesystem; bare specifiers
+ *     first go through the OPTIONAL injected `resolveBare` (workspace-map +
+ *     tsconfig-paths resolver wired by `living-index.ts` — this is what resolves
+ *     `@pit/agent-core` -> `packages/agent` and aliases like `@/x`), then fall
+ *     back to the trivial monorepo mapping `@pit/<name>` ->
+ *     `packages/<name>/src/index.*` (back-compat for harnesses that don't inject
+ *     the resolver). Bare npm packages resolve through neither and are discarded.
  *   - Python: `import a.b.c` (incl. comma lists + `as` aliases) and
  *     `from a.b import d` (incl. relative `from . import x` / `from ..pkg import
  *     y`). Only the MODULE portion (`a.b`, never the imported names) is resolved,
@@ -50,6 +51,19 @@ import { posix } from "node:path";
 export interface EdgeResolveDeps {
 	/** True iff `repoRelPath` exists on disk. Cheap/memoized by the caller. */
 	fileExists: (repoRelPath: string) => boolean;
+	/**
+	 * OPTIONAL bare-specifier resolver: maps a non-relative TS/JS specifier
+	 * (workspace package `@pit/agent-core`, tsconfig alias `@/x`) to a
+	 * repo-relative forward-slash module path WITHOUT a guaranteed extension
+	 * (e.g. `packages/agent/src/index`), or null when it models nothing for the
+	 * specifier. The returned path still goes through the same extension/index
+	 * cascade (`resolveTsJsModule`) against `fileExists` — so a wrong mapping
+	 * yields no edge, never a phantom one. `fromRepoRelPath` is the IMPORTING
+	 * file (aliases are governed by the tsconfig nearest to it). Wired by
+	 * `living-index.ts` (workspace map + tsconfig paths); absent in older
+	 * harnesses -> only the trivial `@pit/<name>` fallback below applies.
+	 */
+	resolveBare?: (specifier: string, fromRepoRelPath: string) => string | null;
 }
 
 /**
@@ -139,19 +153,39 @@ const WORKSPACE_SPEC_RE = /^@pit\/([a-z0-9-]+)$/;
 
 /**
  * Resolve one TS/JS specifier to a repo-relative path, or null (bare npm package /
- * unresolved). Relative specifiers ("./", "../") resolve against `fileDir`. The
- * `@pit/<name>` bonus is trivial-only: it assumes the workspace directory matches
- * the name suffix (`packages/<name>/`), which is true for `@pit/ai`/`@pit/tui`/
- * `@pit/coding-agent` but NOT `@pit/agent-core` (dir `packages/agent`) — that case
- * simply fails to resolve and is dropped, matching "skip if not trivial".
+ * unresolved). Relative specifiers ("./", "../") resolve against `fileDir`,
+ * exactly as before. Bare specifiers try the injected `resolveBare` FIRST (the
+ * workspace-map + tsconfig-paths resolver wired by `living-index.ts` — the only
+ * way `@pit/agent-core`, whose dir `packages/agent` doesn't match its name, or an
+ * alias `@/x` can resolve). When `resolveBare` is absent, returns null, throws,
+ * or maps to a path that doesn't exist on disk, the trivial `@pit/<name>` ->
+ * `packages/<name>/src/index` guess still runs as the back-compat fallback.
+ * Either way the mapped path goes through `resolveTsJsModule` (extension + index
+ * + .js->.ts swap) so only on-disk files ever become edges.
  */
-function resolveTsJsSpecifier(fileDir: string, specifier: string, fileExists: (p: string) => boolean): string | null {
+function resolveTsJsSpecifier(
+	repoRelPath: string,
+	fileDir: string,
+	specifier: string,
+	deps: EdgeResolveDeps,
+): string | null {
 	if (specifier.startsWith("./") || specifier.startsWith("../")) {
-		return resolveTsJsModule(posix.join(fileDir, specifier), fileExists);
+		return resolveTsJsModule(posix.join(fileDir, specifier), deps.fileExists);
+	}
+	if (deps.resolveBare) {
+		try {
+			const mapped = deps.resolveBare(specifier, repoRelPath);
+			if (mapped !== null) {
+				const resolved = resolveTsJsModule(mapped, deps.fileExists);
+				if (resolved !== null) return resolved;
+			}
+		} catch {
+			// fail-open: a resolver bug degrades to the trivial fallback below
+		}
 	}
 	const workspaceMatch = WORKSPACE_SPEC_RE.exec(specifier);
 	if (workspaceMatch) {
-		return resolveTsJsModule(`packages/${workspaceMatch[1]}/src/index`, fileExists);
+		return resolveTsJsModule(`packages/${workspaceMatch[1]}/src/index`, deps.fileExists);
 	}
 	return null;
 }
@@ -164,7 +198,7 @@ export function extractTsJsDeps(content: string, repoRelPath: string, deps: Edge
 	while (m !== null) {
 		const specifier = m[1] ?? m[2] ?? m[3] ?? m[4] ?? m[5];
 		if (specifier !== undefined) {
-			const resolved = resolveTsJsSpecifier(fileDir, specifier, deps.fileExists);
+			const resolved = resolveTsJsSpecifier(repoRelPath, fileDir, specifier, deps);
 			if (resolved !== null) out.push(resolved);
 		}
 		m = TS_JS_IMPORT_RE.exec(content);

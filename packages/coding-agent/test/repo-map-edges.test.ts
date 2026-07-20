@@ -98,7 +98,7 @@ describe("extractTsJsDeps — TS/JS relative resolution", () => {
 		expect(deps).toEqual(["packages/ai/src/index.ts"]);
 	});
 
-	it("drops @pit/agent-core (dir mismatch: packages/agent, not packages/agent-core) — known v1 limitation", () => {
+	it("drops @pit/agent-core when NO resolveBare is injected (dir mismatch: packages/agent) — fallback-only behavior", () => {
 		const content = `import { something } from "@pit/agent-core";`;
 		const deps = extractTsJsDeps(content, "packages/coding-agent/src/x.ts", {
 			fileExists: fsFrom(["packages/agent/src/index.ts"]),
@@ -114,6 +114,98 @@ describe("extractTsJsDeps — TS/JS relative resolution", () => {
 
 	it("never throws on malformed content (fail-open)", () => {
 		expect(() => extractFileDeps("import from ;;; ((( {{{", "src/a.ts", { fileExists: () => true })).not.toThrow();
+	});
+});
+
+describe("extractTsJsDeps — bare specifiers via the injected resolveBare", () => {
+	it("resolves @pit/agent-core through resolveBare (the dir-mismatch case the fallback can't)", () => {
+		const content = `import { something } from "@pit/agent-core";`;
+		const deps = extractTsJsDeps(content, "packages/coding-agent/src/x.ts", {
+			fileExists: fsFrom(["packages/agent/src/index.ts"]),
+			resolveBare: (spec) => (spec === "@pit/agent-core" ? "packages/agent/src/index" : null),
+		});
+		expect(deps).toEqual(["packages/agent/src/index.ts"]);
+	});
+
+	it("resolves a subpath specifier @scope/pkg/sub via resolveBare", () => {
+		const content = `import { x } from "@pit/agent-core/utils/retry";`;
+		const deps = extractTsJsDeps(content, "packages/coding-agent/src/x.ts", {
+			fileExists: fsFrom(["packages/agent/utils/retry.ts"]),
+			resolveBare: (spec) => (spec === "@pit/agent-core/utils/retry" ? "packages/agent/utils/retry" : null),
+		});
+		expect(deps).toEqual(["packages/agent/utils/retry.ts"]);
+	});
+
+	it("resolves a tsconfig alias @/x via resolveBare (wiring itself is living-index's concern)", () => {
+		const content = `import { util } from "@/utils/helpers";`;
+		const deps = extractTsJsDeps(content, "packages/coding-agent/src/x.ts", {
+			fileExists: fsFrom(["packages/coding-agent/src/utils/helpers.ts"]),
+			resolveBare: (spec) => (spec === "@/utils/helpers" ? "packages/coding-agent/src/utils/helpers" : null),
+		});
+		expect(deps).toEqual(["packages/coding-agent/src/utils/helpers.ts"]);
+	});
+
+	it("passes the IMPORTING file's repo-relative path to resolveBare", () => {
+		const seen: string[] = [];
+		extractTsJsDeps(`import { x } from "@pit/ai";`, "packages/coding-agent/src/deep/y.ts", {
+			fileExists: () => false,
+			resolveBare: (_spec, fromRepoRelPath) => {
+				seen.push(fromRepoRelPath);
+				return null;
+			},
+		});
+		expect(seen).toEqual(["packages/coding-agent/src/deep/y.ts"]);
+	});
+
+	it("falls back to the trivial @pit/<name> mapping when resolveBare returns null", () => {
+		const content = `import { something } from "@pit/ai";`;
+		const deps = extractTsJsDeps(content, "packages/coding-agent/src/x.ts", {
+			fileExists: fsFrom(["packages/ai/src/index.ts"]),
+			resolveBare: () => null,
+		});
+		expect(deps).toEqual(["packages/ai/src/index.ts"]);
+	});
+
+	it("falls back when resolveBare's mapped path does not exist on disk", () => {
+		const content = `import { something } from "@pit/ai";`;
+		const deps = extractTsJsDeps(content, "packages/coding-agent/src/x.ts", {
+			fileExists: fsFrom(["packages/ai/src/index.ts"]),
+			resolveBare: () => "totally/wrong/mapping", // no file there -> fallback still lands the edge
+		});
+		expect(deps).toEqual(["packages/ai/src/index.ts"]);
+	});
+
+	it("a throwing resolveBare fails open to the fallback", () => {
+		const content = `import { something } from "@pit/ai";`;
+		const deps = extractTsJsDeps(content, "packages/coding-agent/src/x.ts", {
+			fileExists: fsFrom(["packages/ai/src/index.ts"]),
+			resolveBare: () => {
+				throw new Error("resolver bug");
+			},
+		});
+		expect(deps).toEqual(["packages/ai/src/index.ts"]);
+	});
+
+	it("still discards a bare npm package when resolveBare returns null for it", () => {
+		const content = `import { z } from "zod";`;
+		const deps = extractTsJsDeps(content, "src/a.ts", {
+			fileExists: () => true,
+			resolveBare: () => null,
+		});
+		expect(deps).toEqual([]);
+	});
+
+	it("relative specifiers NEVER consult resolveBare", () => {
+		let called = 0;
+		const deps = extractTsJsDeps(`import { foo } from "./sibling.ts";`, "src/a.ts", {
+			fileExists: fsFrom(["src/sibling.ts"]),
+			resolveBare: () => {
+				called++;
+				return null;
+			},
+		});
+		expect(deps).toEqual(["src/sibling.ts"]);
+		expect(called).toBe(0);
 	});
 });
 
