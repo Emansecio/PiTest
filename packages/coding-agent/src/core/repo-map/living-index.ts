@@ -20,6 +20,9 @@
  *  - Corrupt / unreadable cache  → treated as empty, full reindex.
  *  - PIT_NO_LIVING_REPO_MAP truthy  → bail to a one-shot full scan with no
  *    persistence (escape hatch; the feature is ON by default).
+ *  - PIT_NO_REPO_GRAPH truthy  → import-edge extraction (`deps`) is skipped
+ *    entirely; symbols/decls indexing is UNAFFECTED (escape hatch for the edge
+ *    layer only; see `edges.ts`/`graph.ts`).
  *
  * Pure-ish: all I/O (git, fs, scan, parse, clock) is injectable via `deps` so
  * tests drive exact scenarios without a real repo. Default deps wire the real
@@ -42,14 +45,17 @@ import { dirname, isAbsolute, join, relative } from "node:path";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { scanSourceFiles } from "../tools/source-scan.ts";
 import { listDeclarations, listTopLevelDeclarations } from "../tools/symbol.ts";
+import { extractFileDeps } from "./edges.ts";
 
 /**
  * Bump when the on-disk schema changes incompatibly. v2 adds the optional
  * per-symbol `decls` (kind+line) projection consumed by the Band P context
- * composer; bumping invalidates v1 name-only caches so they reindex cleanly
- * with the richer data instead of being read back without `decls`.
+ * composer. v3 adds the optional per-file `deps` (resolved import edges)
+ * projection that turns the map into a graph (see `edges.ts`/`graph.ts`);
+ * bumping invalidates v2 caches so they reindex cleanly with edges instead of
+ * being read back without `deps`.
  */
-export const CACHE_VERSION = 2 as const;
+export const CACHE_VERSION = 3 as const;
 
 /** Wall-clock cap on the `git diff` subprocess; deep histories must not stall. */
 const GIT_TIMEOUT_MS = 5000;
@@ -66,6 +72,9 @@ const MAX_INDEX_BYTES = 256 * 1024;
 
 /** Symbols kept per file — matches the file-digests cap so the map feeds it 1:1. */
 const MAX_SYMBOLS_PER_FILE = 12;
+
+/** Dep edges kept per file — a hub file (barrel, index) shouldn't blow up the entry. */
+const MAX_DEPS_PER_FILE = 64;
 
 /** One top-level declaration: name + kind keyword + 1-based line. */
 export interface RepoMapDecl {
@@ -90,6 +99,15 @@ export interface RepoMapEntry {
 	 * pool — `repoMapToSymbolSet` reads `symbols` only.
 	 */
 	decls?: RepoMapDecl[];
+	/**
+	 * Resolved import edges: repo-relative, forward-slash paths of files THIS file
+	 * imports (deduplicated, sorted, capped at `MAX_DEPS_PER_FILE`). Optional for
+	 * the same reason `decls` is: a v2 cache / a deps harness that omits
+	 * `extractDeps` round-trips as name+symbols-only, and PIT_NO_REPO_GRAPH leaves
+	 * it unset by design. Powers `graph.ts` (buildRepoGraph/blastRadius) — absent
+	 * on an entry simply means that file contributes no edges to the graph.
+	 */
+	deps?: string[];
 	/** Epoch ms of the file mtime when these symbols were extracted. 0 if unknown. */
 	mtimeMs: number;
 }
@@ -146,6 +164,19 @@ export interface LivingRepoMapDeps {
 	 * gracefully. The default wires `listTopLevelDeclarations` (repo_map's extractor).
 	 */
 	extractDeclarations?: (content: string, path: string) => RepoMapDecl[];
+	/**
+	 * OPTIONAL edge extractor: resolves this file's import/require/use/mod
+	 * specifiers to repo-relative dep paths (see `edges.ts`). `path` here is the
+	 * REPO-RELATIVE key (unlike `extractSymbols`/`extractDeclarations`, which get
+	 * the absolute path — edge resolution needs repo-relative math to produce
+	 * repo-relative output). `fileExists` is a cheap, memoized-per-reindex-pass
+	 * checker (see `makeFileExistsChecker`) so resolving N files importing the
+	 * same shared module doesn't re-stat it N times. Absent (a deps harness that
+	 * only stubs `extractSymbols`) -> entries carry no `deps`, same graceful
+	 * degradation as `extractDeclarations`. Ignored entirely when
+	 * PIT_NO_REPO_GRAPH is truthy (never called).
+	 */
+	extractDeps?: (content: string, path: string, fileExists: (repoRelPath: string) => boolean) => string[];
 	/** Load the persisted cache, or undefined on any failure. */
 	loadCache: (cachepath: string) => LivingRepoMap | undefined;
 	/** Persist the cache atomically. Throws are swallowed by the caller. */
@@ -273,6 +304,15 @@ function defaultExtractDeclarations(content: string, path: string): RepoMapDecl[
 }
 
 /**
+ * Default edge extractor: wires `edges.ts`'s pure extract+resolve, capped to
+ * `MAX_DEPS_PER_FILE`. `extractFileDeps` already dedupes+sorts, so the cap keeps
+ * the alphabetically-first edges on truncation (deterministic, not arbitrary).
+ */
+function defaultExtractDeps(content: string, repoRelPath: string, fileExists: (p: string) => boolean): string[] {
+	return extractFileDeps(content, repoRelPath, { fileExists }).slice(0, MAX_DEPS_PER_FILE);
+}
+
+/**
  * Best-effort cache read. JSONL: line 0 is the header
  * `{version,lastIndexedCommit}`, each subsequent non-empty line is one
  * RepoMapEntry. A malformed line is skipped (advisory data, never load-bearing).
@@ -291,6 +331,20 @@ function parseDecls(raw: unknown): RepoMapDecl[] | undefined {
 		if (typeof c.name !== "string" || typeof c.kind !== "string") continue;
 		const line = typeof c.line === "number" && Number.isFinite(c.line) ? c.line : 0;
 		out.push({ name: c.name, kind: c.kind, line });
+	}
+	return out.length > 0 ? out : undefined;
+}
+
+/**
+ * Validate + normalize a persisted `deps` array. Returns undefined when absent /
+ * malformed (v2 caches never carried this field, corrupt lines) so the entry
+ * round-trips without edges rather than throwing.
+ */
+function parseDeps(raw: unknown): string[] | undefined {
+	if (!Array.isArray(raw)) return undefined;
+	const out: string[] = [];
+	for (const d of raw) {
+		if (typeof d === "string") out.push(d);
 	}
 	return out.length > 0 ? out : undefined;
 }
@@ -323,8 +377,10 @@ export function loadRepoMapCache(cachePath: string): LivingRepoMap | undefined {
 			if (typeof obj.path !== "string" || !Array.isArray(obj.symbols)) continue;
 			const mtimeMs = typeof obj.mtimeMs === "number" && Number.isFinite(obj.mtimeMs) ? obj.mtimeMs : 0;
 			const decls = parseDecls(obj.decls);
+			const depsList = parseDeps(obj.deps);
 			const entry: RepoMapEntry = { path: obj.path, symbols: obj.symbols.map(String), mtimeMs };
 			if (decls) entry.decls = decls;
+			if (depsList) entry.deps = depsList;
 			entries.push(entry);
 		} catch {
 			// Skip the corrupt line; partial caches still accelerate the rest.
@@ -371,6 +427,7 @@ export const defaultLivingRepoMapDeps: LivingRepoMapDeps = {
 	scan: (cwd) => scanSourceFiles(cwd),
 	extractSymbols: defaultExtractSymbols,
 	extractDeclarations: defaultExtractDeclarations,
+	extractDeps: defaultExtractDeps,
 	loadCache: loadRepoMapCache,
 	saveCache: saveRepoMapCache,
 	cachePath: defaultRepoMapCachePath,
@@ -378,8 +435,40 @@ export const defaultLivingRepoMapDeps: LivingRepoMapDeps = {
 
 // --- Core flow ---------------------------------------------------------------
 
+/**
+ * Memoized existence check for edge resolution: caches lookups (via
+ * `deps.statMtime`, the same injectable I/O the mtime-drift check below already
+ * uses) for the duration of ONE reindex pass, so N files importing the same
+ * shared module don't re-stat it N times. `knownPaths` (paths already known to
+ * the map BEFORE this pass — cached entries, or this run's full scan list) are
+ * seeded as free hits; anything else falls through to a real stat, which
+ * correctly finds files created/reindexed earlier in THIS SAME pass too
+ * (statMtime reflects live disk state, not a stale snapshot).
+ */
+function makeFileExistsChecker(
+	cwd: string,
+	deps: LivingRepoMapDeps,
+	knownPaths: Iterable<string>,
+): (repoRelPath: string) => boolean {
+	const cache = new Map<string, boolean>();
+	for (const p of knownPaths) cache.set(p, true);
+	return (repoRelPath: string) => {
+		const cached = cache.get(repoRelPath);
+		if (cached !== undefined) return cached;
+		const exists = deps.statMtime(join(cwd, repoRelPath)) !== 0;
+		cache.set(repoRelPath, exists);
+		return exists;
+	};
+}
+
 /** Index one file (abs path) into an entry, or null if it has no symbols/unreadable. */
-function indexFile(cwd: string, relPath: string, deps: LivingRepoMapDeps): RepoMapEntry | null {
+function indexFile(
+	cwd: string,
+	relPath: string,
+	deps: LivingRepoMapDeps,
+	fileExists: (repoRelPath: string) => boolean,
+	extractDepsEnabled: boolean,
+): RepoMapEntry | null {
 	const abs = isAbsolute(relPath) ? relPath : join(cwd, relPath);
 	// Capture mtime BEFORE reading content so a write racing between the two
 	// makes the stored mtime strictly older than the file's real mtime, forcing
@@ -389,7 +478,8 @@ function indexFile(cwd: string, relPath: string, deps: LivingRepoMapDeps): RepoM
 	if (content === null) return null;
 	const symbols = deps.extractSymbols(content, abs);
 	if (symbols.length === 0) return null;
-	const entry: RepoMapEntry = { path: toRelKey(cwd, relPath), symbols, mtimeMs };
+	const repoRelPath = toRelKey(cwd, relPath);
+	const entry: RepoMapEntry = { path: repoRelPath, symbols, mtimeMs };
 	// Enriched projection (kind+line) when the dep is wired. Best-effort: any
 	// throw degrades to the name-only entry (never breaks indexing).
 	if (deps.extractDeclarations) {
@@ -400,15 +490,38 @@ function indexFile(cwd: string, relPath: string, deps: LivingRepoMapDeps): RepoM
 			// name-only fallback
 		}
 	}
+	// Edge extraction: skipped entirely under PIT_NO_REPO_GRAPH (extractDepsEnabled
+	// false) — the entry simply has no `deps`, same as a v2-only harness. Best-effort:
+	// any throw degrades to the deps-less entry (never breaks indexing).
+	if (extractDepsEnabled && deps.extractDeps) {
+		try {
+			const fileDeps = deps.extractDeps(content, repoRelPath, fileExists);
+			if (fileDeps.length > 0) entry.deps = fileDeps;
+		} catch {
+			// no-deps fallback
+		}
+	}
 	return entry;
 }
 
 /** Build a fresh map from a full source-file walk (non-git / cold-start path). */
-async function fullScan(cwd: string, commit: string, deps: LivingRepoMapDeps): Promise<LivingRepoMapResult> {
+async function fullScan(
+	cwd: string,
+	commit: string,
+	deps: LivingRepoMapDeps,
+	extractDepsEnabled: boolean,
+): Promise<LivingRepoMapResult> {
 	const files = await deps.scan(cwd);
+	// Every scanned file exists on disk by construction — seed the checker with
+	// them so the common case (one scanned file importing another) never stats.
+	const fileExists = makeFileExistsChecker(
+		cwd,
+		deps,
+		files.map((f) => toRelKey(cwd, f)),
+	);
 	const entries: RepoMapEntry[] = [];
 	for (const file of files) {
-		const entry = indexFile(cwd, file, deps);
+		const entry = indexFile(cwd, file, deps, fileExists, extractDepsEnabled);
 		if (entry) entries.push(entry);
 	}
 	return {
@@ -430,11 +543,16 @@ export async function getLivingRepoMap(
 	deps: LivingRepoMapDeps = defaultLivingRepoMapDeps,
 ): Promise<LivingRepoMapResult> {
 	const cachePath = deps.cachePath(cwd);
+	// Repo graph kill-switch: with the flag, deps are neither extracted nor
+	// persisted (entries fall back to symbols/decls-only, exactly like a v2-only
+	// harness) and `graph.ts` naturally sees an all-nodes-no-edges map. Read
+	// ONCE per call — every fullScan/indexFile call site below shares this value.
+	const extractDepsEnabled = !isTruthyEnvFlag(process.env.PIT_NO_REPO_GRAPH);
 
 	// Escape hatch: one-shot full scan, no persistence. Feature is ON by default;
 	// this flag (when truthy) only DISABLES the incremental cache, never the map.
 	if (isTruthyEnvFlag(process.env.PIT_NO_LIVING_REPO_MAP)) {
-		return fullScan(cwd, "", deps);
+		return fullScan(cwd, "", deps, extractDepsEnabled);
 	}
 
 	const head = await deps.resolveHead(cwd);
@@ -443,7 +561,7 @@ export async function getLivingRepoMap(
 	// We still persist the symbol map with commit="" so a later git run starts
 	// from real data instead of cold.
 	if (head === null) {
-		const result = await fullScan(cwd, "", deps);
+		const result = await fullScan(cwd, "", deps, extractDepsEnabled);
 		trySave(deps, cachePath, result.map);
 		return result;
 	}
@@ -454,7 +572,7 @@ export async function getLivingRepoMap(
 	// if we have a cached commit, try the cheap incremental delta; otherwise
 	// (no commit anchor at all) do a full scan once to seed the cache.
 	if (!cache || cache.lastIndexedCommit.length === 0) {
-		const result = await fullScan(cwd, head, deps);
+		const result = await fullScan(cwd, head, deps, extractDepsEnabled);
 		trySave(deps, cachePath, result.map);
 		return result;
 	}
@@ -464,7 +582,7 @@ export async function getLivingRepoMap(
 
 	// git diff failed (e.g. the cached commit was rebased away): rebuild fully.
 	if (diff === null) {
-		const result = await fullScan(cwd, head, deps);
+		const result = await fullScan(cwd, head, deps, extractDepsEnabled);
 		trySave(deps, cachePath, result.map);
 		return result;
 	}
@@ -472,6 +590,11 @@ export async function getLivingRepoMap(
 	// Start from the cached entries, keyed for O(1) patch.
 	const byPath = new Map<string, RepoMapEntry>();
 	for (const e of cache.entries) byPath.set(e.path, e);
+
+	// Seeded from the PRE-mutation cache keys — a cheap perf hint for edge
+	// resolution (see makeFileExistsChecker); correctness for files added/renamed
+	// DURING this pass still holds via its statMtime fallback.
+	const fileExists = makeFileExistsChecker(cwd, deps, byPath.keys());
 
 	let reindexed = 0;
 	const changedKeys = new Set<string>();
@@ -487,7 +610,7 @@ export async function getLivingRepoMap(
 		if (entry.status === "R") byPath.delete(toRelKey(cwd, entry.path));
 		const key = toRelKey(cwd, target);
 		changedKeys.add(key);
-		const fresh = indexFile(cwd, target, deps);
+		const fresh = indexFile(cwd, target, deps, fileExists, extractDepsEnabled);
 		if (fresh) {
 			byPath.set(key, fresh);
 		} else {
@@ -511,7 +634,7 @@ export async function getLivingRepoMap(
 			continue;
 		}
 		if (mtime !== e.mtimeMs) {
-			const fresh = indexFile(cwd, e.path, deps);
+			const fresh = indexFile(cwd, e.path, deps, fileExists, extractDepsEnabled);
 			if (fresh) byPath.set(e.path, fresh);
 			else byPath.delete(e.path);
 			reindexed++;
