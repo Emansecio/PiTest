@@ -561,6 +561,31 @@ function inspectOpaqueDestructive(segment: string): string | undefined {
 }
 
 /**
+ * Matches a `powershell`/`pwsh` invocation using `-EncodedCommand` or one of its
+ * unambiguous abbreviations (`-e`, `-enc`) followed by a base64 blob. Requiring
+ * whitespace right after the flag name (rather than a `\b` boundary) is what
+ * keeps `-e` from matching inside an unrelated longer flag like `-experimental`.
+ */
+const ENCODED_COMMAND_RE = /(?:^|[\s"'`])(?:pwsh|powershell(?:\.exe)?)\b[^;&|]*\s-(?:e|enc|encodedcommand)\s+\S+/i;
+
+/**
+ * `-EncodedCommand` (and its abbreviations) hides the real command inside a
+ * base64 blob (PowerShell decodes it as UTF-16LE) — no literal-text detector in
+ * this file can see the verb at all. We deliberately do NOT decode it here: this
+ * whole guard fails OPEN on any throw (see the outer `try` in
+ * `groundDestructiveCommand`), so a malformed/adversarial blob that throws
+ * mid-decode would silently ALLOW exactly the command this plan hardens against.
+ * Instead this is always treated as an opaque target — one speed-bump per
+ * invocation — UNCONDITIONALLY, independent of `isDestructiveShaped`: shape
+ * cannot be assessed when the verb itself is hidden, so there is no "obviously
+ * benign" case to spare from the bump the way plain command substitution has.
+ */
+function inspectEncodedCommandSegment(segment: string): string | undefined {
+	if (!ENCODED_COMMAND_RE.test(segment)) return undefined;
+	return "target is a PowerShell -EncodedCommand base64 blob — the real command is hidden from this guard and cannot be inspected";
+}
+
+/**
  * Unwrap a `powershell -Command "…"` / `pwsh -c '…'` prefix to its inner command
  * so the PowerShell (and any other) detectors can see the real verb. Returns the
  * segment unchanged when there is no wrapper.
@@ -606,6 +631,15 @@ export function groundDestructiveCommand(input: DestructiveCommandInput): Destru
 			const opaque = inspectOpaqueDestructive(segment);
 			if (opaque) {
 				impacts.push(opaque);
+				continue;
+			}
+
+			// `-EncodedCommand` hides the verb behind base64; bump unconditionally
+			// (see inspectEncodedCommandSegment) before any text-based detector runs,
+			// since none of them can see through the blob anyway.
+			const encoded = inspectEncodedCommandSegment(segment);
+			if (encoded) {
+				impacts.push(encoded);
 				continue;
 			}
 

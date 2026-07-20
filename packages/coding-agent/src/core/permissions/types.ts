@@ -89,8 +89,46 @@ export const BUILTIN_SENSITIVE_PATHS: readonly PathRule[] = [
 
 export const BUILTIN_DANGEROUS_COMMANDS: readonly CommandRule[] = [
 	// Bounded quantifiers only — validateSafeRegex rejects consecutive `*`/`+`.
-	{ pattern: "\\brm\\s+-[a-zA-Z]{0,8}r[a-zA-Z]{0,8}\\s+/(?:\\s|$)", reason: "Recursive rm of /" },
-	{ pattern: "\\brm\\s+-[a-zA-Z]{0,8}r[a-zA-Z]{0,8}\\s+~(?:/|\\s|$)", reason: "Recursive rm of $HOME" },
+	// Target suffix covers bare `/`, `/*`, and `/.` (all resolve to root itself);
+	// an optional `-- ` separator is allowed between the flag token and the target.
+	// A deeper path like `/tmp/build` does NOT match: nothing follows the optional
+	// `[*.]` before the required whitespace/end.
+	{
+		pattern: "\\brm\\s+-[a-zA-Z]{0,8}r[a-zA-Z]{0,8}\\s+(?:--\\s{1,3})?/[*.]?(?:\\s|$)",
+		reason: "Recursive rm of /",
+	},
+	// Target suffix requires `~` or `~/` to be the WHOLE target (whitespace/end right
+	// after), so `~/project/node_modules` stays allowed. (Note: the prior suffix
+	// `~(?:/|\s|$)` accepted a bare `/` after `~` with nothing requiring it be the
+	// last character, so it over-matched any `~/...` path — fixed here.)
+	{
+		pattern: "\\brm\\s+-[a-zA-Z]{0,8}r[a-zA-Z]{0,8}\\s+(?:--\\s{1,3})?~(?:/(?:\\s|$)|\\s|$)",
+		reason: "Recursive rm of $HOME",
+	},
+	// Separated flag clusters: `rm -r -f /` / `rm -f -r /` (the single-token pattern
+	// above only matches one joined flag argument like `-rf`). One of the two
+	// tokens must contain `r`; the other is unconstrained (covers `-f`, `-v`, etc).
+	{
+		pattern: "\\brm\\s+-[a-zA-Z]{0,6}r[a-zA-Z]{0,6}\\s+-[a-zA-Z]{1,8}\\s+/[*.]?(?:\\s|$)",
+		reason: "Recursive rm of / (separated flags)",
+	},
+	{
+		pattern: "\\brm\\s+-[a-zA-Z]{1,8}\\s+-[a-zA-Z]{0,6}r[a-zA-Z]{0,6}\\s+/[*.]?(?:\\s|$)",
+		reason: "Recursive rm of / (separated flags)",
+	},
+	{
+		pattern: "\\brm\\s+-[a-zA-Z]{0,6}r[a-zA-Z]{0,6}\\s+-[a-zA-Z]{1,8}\\s+~(?:/(?:\\s|$)|\\s|$)",
+		reason: "Recursive rm of $HOME (separated flags)",
+	},
+	{
+		pattern: "\\brm\\s+-[a-zA-Z]{1,8}\\s+-[a-zA-Z]{0,6}r[a-zA-Z]{0,6}\\s+~(?:/(?:\\s|$)|\\s|$)",
+		reason: "Recursive rm of $HOME (separated flags)",
+	},
+	// `$HOME` / `${HOME}` literal, mirroring the `~` variant above.
+	{
+		pattern: "\\brm\\s+-[a-zA-Z]{0,8}r[a-zA-Z]{0,8}\\s+(?:--\\s{1,3})?\\$\\{?HOME\\}?(?:/(?:\\s|$)|\\s|$)",
+		reason: "Recursive rm of $HOME",
+	},
 	{ pattern: ":\\(\\)\\s*\\{\\s*:\\s*\\|\\s*:&\\s*\\};:", reason: "Fork bomb" },
 	{ pattern: "\\b(?:mkfs|dd\\s+if=.*of=/dev/)", reason: "Disk-destroying command" },
 	{ pattern: "\\bchmod\\s+-R\\s+777\\s+/", reason: "Recursive world-writable on root" },

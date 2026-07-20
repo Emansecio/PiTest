@@ -3,6 +3,9 @@
  * and command regex matching.
  */
 
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	findMatchingCommandRule,
@@ -11,6 +14,7 @@ import {
 	matchGlob,
 	normalizeTargetPath,
 } from "../src/core/permissions/matcher.js";
+import { BUILTIN_SENSITIVE_PATHS } from "../src/core/permissions/types.js";
 
 describe("permissions/matcher: globToRegExp", () => {
 	it("matches simple literal segments", () => {
@@ -75,6 +79,68 @@ describe("permissions/matcher: findMatchingGlob", () => {
 		const rules = [{ glob: "**/dist/**", tools: ["write"], reason: "dist" }];
 		expect(findMatchingGlob(rules, "/proj/dist/a.js", "read")).toBeUndefined();
 		expect(findMatchingGlob(rules, "/proj/dist/a.js", "write")?.reason).toBe("dist");
+	});
+});
+
+describe("permissions/matcher: deny-floor sensitive-glob canonical-path hardening (plan 022)", () => {
+	const cwd = process.platform === "win32" ? "C:/proj" : "/proj";
+
+	it("a plain non-sensitive path does not match the built-in sensitive globs", () => {
+		expect(findMatchingGlob(BUILTIN_SENSITIVE_PATHS, `${cwd}/src/index.ts`)).toBeUndefined();
+	});
+
+	it("still matches an ordinary, unmangled .env path (no regression)", () => {
+		expect(findMatchingGlob(BUILTIN_SENSITIVE_PATHS, `${cwd}/.env`)?.reason).toBe("Secrets file");
+	});
+
+	// ADS and trailing-space/dot are Windows (NTFS) filesystem quirks — only meaningful
+	// as a bypass attempt on win32, so these mirror the win32-only guard already used
+	// above (`it.runIf(process.platform === "win32" || ...)`) to keep the suite green
+	// cross-platform.
+	it.runIf(process.platform === "win32")(
+		"matches .env through a trailing space (Windows silently drops it on file access)",
+		() => {
+			expect(findMatchingGlob(BUILTIN_SENSITIVE_PATHS, `${cwd}/.env `)?.reason).toBe("Secrets file");
+		},
+	);
+
+	it.runIf(process.platform === "win32")(
+		"matches .env through an NTFS alternate-data-stream suffix (::$DATA is the same file's default stream)",
+		() => {
+			expect(findMatchingGlob(BUILTIN_SENSITIVE_PATHS, `${cwd}/.env::$DATA`)?.reason).toBe("Secrets file");
+		},
+	);
+
+	it("matches a read THROUGH an in-repo symlink whose real target lives under .ssh (canonical key)", () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-matcher-sensitive-"));
+		try {
+			const realSshDir = join(tempDir, ".ssh");
+			mkdirSync(realSshDir);
+			writeFileSync(join(realSshDir, "id_rsa"), "fake-key", "utf-8");
+			const link = join(tempDir, "creds-link");
+			// Symlink creation can fail without privilege on Windows — skip if so
+			// (mirrors the try/catch-skip pattern in read-guard-extension.test.ts).
+			try {
+				symlinkSync(realSshDir, link, "dir");
+			} catch {
+				return;
+			}
+			const target = normalizeTargetPath(join(link, "id_rsa"), tempDir);
+			// The raw resolved path (through the symlink) does not literally contain
+			// "/.ssh/", so only the canonical (realpath-resolved) key matches.
+			expect(findMatchingGlob(BUILTIN_SENSITIVE_PATHS, target)?.reason).toBe("SSH keys");
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not apply the canonical-path hardening to a user-authored rule with the same glob text (identity-scoped)", () => {
+		// A rule object that is NOT one of BUILTIN_SENSITIVE_PATHS' own instances, even
+		// though it reuses the same glob string — must NOT get the trailing-space
+		// tolerance (or any other sensitive-only hardening). Regular denyPaths/allowPaths
+		// matching behavior must stay exactly as before this plan.
+		const userRule = { glob: "**/.env", reason: "user secrets rule" };
+		expect(findMatchingGlob([userRule], `${cwd}/.env `)).toBeUndefined();
 	});
 });
 

@@ -165,6 +165,33 @@ describe("destructive-command-guard: command-substitution opacity", () => {
 	});
 });
 
+describe("destructive-command-guard: PowerShell -EncodedCommand opacity (plan 022)", () => {
+	// Harmless synthetic payload: base64 of the UTF-16LE bytes of `Write-Host hello`
+	// (PowerShell's actual -EncodedCommand encoding). Content is irrelevant — the
+	// guard never decodes it, it treats the flag itself as opaque.
+	const PAYLOAD = "VwByAGkAdABlAC0ASABvAHMAdAAgAGgAZQBsAGwAbwA=";
+
+	it("blocks -EncodedCommand and its abbreviations instead of passing silently", () => {
+		expect(blocks(`powershell -EncodedCommand ${PAYLOAD}`)).toBe(true);
+		expect(blocks(`powershell.exe -EncodedCommand ${PAYLOAD}`)).toBe(true);
+		expect(blocks(`pwsh -EncodedCommand ${PAYLOAD}`)).toBe(true);
+		expect(blocks(`powershell -enc ${PAYLOAD}`)).toBe(true);
+		expect(blocks(`powershell -e ${PAYLOAD}`)).toBe(true);
+		expect(blocks(`powershell -NoProfile -EncodedCommand ${PAYLOAD}`)).toBe(true);
+	});
+
+	it("names the encoded command in the block message", () => {
+		expect(messageFor(`powershell -EncodedCommand ${PAYLOAD}`)).toMatch(/EncodedCommand/i);
+		expect(messageFor(`powershell -EncodedCommand ${PAYLOAD}`)).toMatch(/re-issue the identical call/i);
+	});
+
+	it("does not flag a plain -Command invocation or an unrelated -e-prefixed flag", () => {
+		expect(blocks('powershell -Command "Get-Date"')).toBe(false);
+		expect(blocks("powershell -ExecutionPolicy Bypass -File .\\build.ps1")).toBe(false);
+		expect(blocks("npm run build --experimental")).toBe(false);
+	});
+});
+
 describe("destructive-command-guard: PowerShell / cmd vocabulary", () => {
 	it("blocks Remove-Item with -Recurse and/or -Force on a non-trivial path", () => {
 		expect(blocks("Remove-Item -Recurse -Force .\\src")).toBe(true);

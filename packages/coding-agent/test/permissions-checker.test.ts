@@ -76,6 +76,32 @@ describe("PermissionChecker — auto mode (guarded default)", () => {
 		expect(c.check({ type: "exec", toolName: "bash", command: "rm -rf /" }).decision).toBe("deny");
 	});
 
+	it("blocks equivalent-form Unix destructive rm commands (plan 022)", () => {
+		const c = new PermissionChecker({ cwd, mode: "auto", settings: {} });
+		const deny = (command: string) =>
+			expect(c.check({ type: "exec", toolName: "bash", command }).decision, command).toBe("deny");
+		// Root variants: trailing glob/dot, separated flags, `--` separator.
+		deny("rm -rf /*");
+		deny("rm -r -f /");
+		deny("rm -rf -- /");
+		// $HOME variants: literal `$HOME` / `${HOME}`.
+		deny("rm -rf $HOME");
+		// biome-ignore lint/suspicious/noTemplateCurlyInString: literal shell `${HOME}` IS the case under test — not a JS template placeholder.
+		deny("rm -rf ${HOME}");
+		// Regression: the original single-token forms still block.
+		deny("rm -rf /");
+		deny("rm -rf ~");
+	});
+
+	it("allows deep Unix paths that merely start with / or ~ (no false positive from plan 022)", () => {
+		const c = new PermissionChecker({ cwd, mode: "auto", settings: {} });
+		const allow = (command: string) =>
+			expect(c.check({ type: "exec", toolName: "bash", command }).decision, command).toBe("allow");
+		allow("rm -rf /tmp/build");
+		allow("rm -rf ~/proj/node_modules");
+		allow("rm -rf $HOME/proj/node_modules");
+	});
+
 	it("blocks the PowerShell/cmd catastrophic tier (drive roots, /, ~)", () => {
 		const c = new PermissionChecker({ cwd, mode: "auto", settings: {} });
 		const deny = (command: string) =>
