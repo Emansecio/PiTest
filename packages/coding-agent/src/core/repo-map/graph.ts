@@ -48,6 +48,11 @@ export interface BlastRadiusOptions {
 const DEFAULT_MAX_DEPTH = 2;
 const DEFAULT_MAX_NODES = 200;
 
+/** Path segments that mark a directory as test-only by convention (case-insensitive). */
+const TEST_DIR_SEGMENTS = new Set(["test", "tests", "__tests__"]);
+/** Basename substrings that mark a file as test-only by convention (case-insensitive). */
+const TEST_BASENAME_MARKERS = [".test.", ".spec."];
+
 /**
  * Build the forward (`deps`) and reverse (`dependents`) adjacency maps from a
  * `RepoMapEntry[]` snapshot. Entries without `deps` (PIT_NO_REPO_GRAPH, or a
@@ -80,6 +85,39 @@ export function dependenciesOf(graph: RepoGraph, path: string): string[] {
 /** Files that import `path` (the reverse index, or [] if nothing does). */
 export function dependentsOf(graph: RepoGraph, path: string): string[] {
 	return graph.dependents.get(path) ?? [];
+}
+
+/**
+ * Convention-based heuristic: is `path` a test file? True when its basename
+ * contains `.test.` or `.spec.`, OR the path has a whole `test`, `tests`, or
+ * `__tests__` segment. Case-insensitive. Matched on segment/basename
+ * boundaries, not raw substrings, so `contest.ts` and `src/attest/foo.ts`
+ * (which merely CONTAIN "test") are correctly NOT test paths — only an exact
+ * directory segment or a `.test./.spec.` marker counts. This is a naming
+ * convention heuristic (same spirit as `isTestPath`-style checks elsewhere in
+ * the repo), not a build-config or test-runner lookup — a project that
+ * deviates from these conventions gets no coverage signal, not a wrong one.
+ */
+export function isTestPath(path: string): boolean {
+	const segments = path
+		.split("\\")
+		.join("/")
+		.split("/")
+		.filter(Boolean)
+		.map((s) => s.toLowerCase());
+	if (segments.some((s) => TEST_DIR_SEGMENTS.has(s))) return true;
+	const basename = segments[segments.length - 1] ?? "";
+	return TEST_BASENAME_MARKERS.some((marker) => basename.includes(marker));
+}
+
+/**
+ * Test files (by `isTestPath` convention) that depend on `path` — i.e. would
+ * exercise it if run. This is a PROJECTION over the existing reverse index,
+ * not a new edge: a test importing `foo.ts` is already `foo.ts`'s dependent,
+ * so this just filters `dependentsOf` down to test-shaped paths. Sorted.
+ */
+export function testsCovering(graph: RepoGraph, path: string): string[] {
+	return dependentsOf(graph, path).filter(isTestPath).sort();
 }
 
 /**

@@ -41,7 +41,7 @@ import { relative } from "node:path";
 import { recordDiagnostic } from "@pit/ai";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import type { ExtensionAPI } from "../extensions/index.js";
-import { type BlastRadiusEntry, blastRadius, buildRepoGraph, type RepoGraph } from "../repo-map/graph.ts";
+import { type BlastRadiusEntry, blastRadius, buildRepoGraph, isTestPath, type RepoGraph } from "../repo-map/graph.ts";
 import { getLivingRepoMap } from "../repo-map/living-index.ts";
 import { extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
 
@@ -102,6 +102,15 @@ interface PendingImpactEntry {
 
 let currentPending = new Map<string, PendingImpactEntry>();
 let currentPredicted = new Set<string>();
+/**
+ * Fase 4B: direct dependents that are themselves test files (`isTestPath`),
+ * keyed by normalized path -> original-casing display path. These are pulled
+ * OUT of `currentPending` — the right action for a test dependent is to RUN
+ * it, not read it, so forcing a read would just be friction — but they still
+ * count toward `currentPredicted` (unchanged: every surfaced path, test or
+ * not, is "predicted" for telemetry).
+ */
+let currentCoveringTests = new Map<string, string>();
 
 /** Unreviewed DIRECT dependents impacted this turn, sorted by path for stable output. */
 export function getCurrentUnreviewedImpact(): Array<{ path: string; seeds: string[] }> {
@@ -137,6 +146,17 @@ export function getCurrentPredictedImpactPaths(): string[] {
 	return Array.from(currentPredicted).sort();
 }
 
+/**
+ * Fase 4B: direct dependents (this turn) that are test files by convention,
+ * pulled out of `getCurrentUnreviewedImpact` — see `currentCoveringTests`.
+ * Sorted, original casing preserved. Consulted by `goal_complete` (R10) to
+ * suggest running these instead of demanding a read, and by the advisory note
+ * as a "Tests covering this" suffix.
+ */
+export function getCurrentCoveringTests(): string[] {
+	return Array.from(currentCoveringTests.values()).sort();
+}
+
 /** Test-only: seed the pending registry directly, bypassing the event pipeline. */
 export function _setUnreviewedImpactForTest(entries: Array<{ path: string; seeds: string[] }>): void {
 	currentPending = new Map(
@@ -144,15 +164,37 @@ export function _setUnreviewedImpactForTest(entries: Array<{ path: string; seeds
 	);
 }
 
-/** Test-only: reset all module-level impact state (pending + predicted). */
+/** Test-only: seed the covering-tests registry directly, bypassing the event pipeline. */
+export function _setCoveringTestsForTest(paths: string[]): void {
+	currentCoveringTests = new Map(paths.map((p) => [normalizeRelKey(p), p]));
+}
+
+/** Test-only: reset all module-level impact state (pending + predicted + covering tests). */
 export function _resetImpactStateForTest(): void {
 	currentPending = new Map();
 	currentPredicted = new Set();
+	currentCoveringTests = new Map();
 }
 
 // ---------------------------------------------------------------------------
 // Advisory note rendering.
 // ---------------------------------------------------------------------------
+
+/** Max test paths shown in the advisory's "Tests covering this" suffix before folding into "+N more". */
+const ADVISORY_TESTS_CAP = 3;
+
+/**
+ * Render the bounded "Tests covering this" suffix for the advisory note, or ""
+ * when `testPaths` is empty (no suffix at all — the common case for files
+ * with no test coverage). `testPaths` is assumed pre-sorted.
+ */
+function buildCoveringTestsSuffix(testPaths: readonly string[]): string {
+	if (testPaths.length === 0) return "";
+	const shown = testPaths.slice(0, ADVISORY_TESTS_CAP);
+	const remaining = testPaths.length - shown.length;
+	const more = remaining > 0 ? `, +${remaining} more` : "";
+	return ` Tests covering this: ${shown.join(", ")}${more}.`;
+}
 
 /**
  * Render the bounded advisory note: up to DISPLAY_CAP paths grouped by hop
@@ -160,8 +202,11 @@ export function _resetImpactStateForTest(): void {
  * is assumed pre-sorted by (distance, path) — exactly what `blastRadius`
  * guarantees. A hub-suppressed edit gets a different tail pointing at R7
  * instead of "review them" (nothing was fed into `pending` to review).
+ * `directTestPaths` (Fase 4B) — the direct dependents that are test files —
+ * append a "Tests covering this" suffix regardless of hub status; empty
+ * yields no suffix.
  */
-function buildImpactNote(files: readonly BlastRadiusEntry[], hub: boolean): string {
+function buildImpactNote(files: readonly BlastRadiusEntry[], hub: boolean, directTestPaths: readonly string[]): string {
 	const total = files.length;
 	const shown = files.slice(0, DISPLAY_CAP);
 	const remaining = total - shown.length;
@@ -177,7 +222,8 @@ function buildImpactNote(files: readonly BlastRadiusEntry[], hub: boolean): stri
 		.join("; ");
 	const moreSuffix = remaining > 0 ? `; +${remaining} more` : "";
 	const head = `Impact graph: ${total} file(s) depend on this one — ${groupText}${moreSuffix}`;
-	return hub ? `${head} (hub file — rely on the project check).` : `${head}. Review them before declaring done.`;
+	const body = hub ? `${head} (hub file — rely on the project check).` : `${head}. Review them before declaring done.`;
+	return `${body}${buildCoveringTestsSuffix(directTestPaths)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +252,7 @@ export function createImpactExtension(options: ImpactExtensionOptions) {
 		pi.on("turn_start", () => {
 			currentPending = new Map();
 			currentPredicted = new Set();
+			currentCoveringTests = new Map();
 		});
 
 		pi.on("tool_result", async (event) => {
@@ -250,18 +297,29 @@ export function createImpactExtension(options: ImpactExtensionOptions) {
 				// text told the model about it either way.
 				for (const f of blast.files) currentPredicted.add(normalizeRelKey(f.path));
 
-				if (!hub) {
-					for (const f of blast.files) {
-						if (f.distance !== 1) continue;
-						const key = normalizeRelKey(f.path);
-						const existing = currentPending.get(key);
-						if (existing) {
-							if (!existing.seeds.includes(editedRepoRel)) existing.seeds.push(editedRepoRel);
-						} else {
-							currentPending.set(key, { path: f.path, distance: 1, seeds: [editedRepoRel] });
-						}
+				// Direct dependents split two ways: test-shaped paths (Fase 4B) go to
+				// `currentCoveringTests` — the model should RUN them, not read them —
+				// regardless of hub status (a hub file's test dependents are still
+				// worth naming). Non-test direct dependents follow the existing
+				// pending-review flow, still gated by the hub cap.
+				const directTestPaths: string[] = [];
+				for (const f of blast.files) {
+					if (f.distance !== 1) continue;
+					if (isTestPath(f.path)) {
+						currentCoveringTests.set(normalizeRelKey(f.path), f.path);
+						directTestPaths.push(f.path);
+						continue;
+					}
+					if (hub) continue;
+					const key = normalizeRelKey(f.path);
+					const existing = currentPending.get(key);
+					if (existing) {
+						if (!existing.seeds.includes(editedRepoRel)) existing.seeds.push(editedRepoRel);
+					} else {
+						currentPending.set(key, { path: f.path, distance: 1, seeds: [editedRepoRel] });
 					}
 				}
+				directTestPaths.sort();
 
 				recordDiagnostic({
 					category: "quality.impact-guard",
@@ -274,7 +332,7 @@ export function createImpactExtension(options: ImpactExtensionOptions) {
 					},
 				});
 
-				const note = buildImpactNote(blast.files, hub);
+				const note = buildImpactNote(blast.files, hub, directTestPaths);
 				return { content: [...event.content, { type: "text" as const, text: `\n${note}` }] };
 			} catch {
 				return undefined;

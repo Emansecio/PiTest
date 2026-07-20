@@ -10,7 +10,7 @@ import type { AgentTool } from "@pit/agent-core";
 import { recordDiagnostic } from "@pit/ai";
 import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
-import { getCurrentUnreviewedImpact } from "../built-ins/impact-extension.ts";
+import { getCurrentCoveringTests, getCurrentUnreviewedImpact } from "../built-ins/impact-extension.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentGoalManager } from "../goal/goal-manager.ts";
 import { getCurrentSelfReviewFindings } from "../self-review.ts";
@@ -40,6 +40,27 @@ export interface GoalCompleteToolDetails {
 }
 
 export interface GoalCompleteToolOptions {}
+
+/** Cap on seeds shown per R10 bullet line before folding the rest into "+N". */
+const R10_SEEDS_CAP = 2;
+/** Cap on covering-test paths shown in the R10 "run them" line before folding into "+N more". */
+const R10_TESTS_CAP = 5;
+
+/** Render `(impacted by: seed1, seed2, +N)` — the edit(s) that made a file show up in R10's list. */
+function formatImpactedBySeeds(seeds: readonly string[]): string {
+	const shown = seeds.slice(0, R10_SEEDS_CAP);
+	const remaining = seeds.length - shown.length;
+	return remaining > 0 ? `${shown.join(", ")}, +${remaining}` : shown.join(", ");
+}
+
+/** Render the "Tests covering the changed files (run them): ..." line, or "" when there are none. */
+function formatCoveringTestsLine(coveringTests: readonly string[]): string {
+	if (coveringTests.length === 0) return "";
+	const shown = coveringTests.slice(0, R10_TESTS_CAP);
+	const remaining = coveringTests.length - shown.length;
+	const more = remaining > 0 ? `, +${remaining} more` : "";
+	return `\nTests covering the changed files (run them): ${shown.join(", ")}${more}`;
+}
 
 export function createGoalCompleteToolDefinition(
 	_cwd: string,
@@ -136,9 +157,15 @@ export function createGoalCompleteToolDefinition(
 			const unreviewedImpact = getCurrentUnreviewedImpact();
 			if (unreviewedImpact.length > 0) {
 				const shown = unreviewedImpact.slice(0, 10);
-				const list = shown.map((e) => `  • ${e.path}`).join("\n");
+				const list = shown
+					.map(
+						(e) =>
+							`  • ${e.path}${e.seeds.length > 0 ? ` (impacted by: ${formatImpactedBySeeds(e.seeds)})` : ""}`,
+					)
+					.join("\n");
 				const more =
 					unreviewedImpact.length > shown.length ? `\n  +${unreviewedImpact.length - shown.length} more` : "";
+				const testsLine = formatCoveringTestsLine(getCurrentCoveringTests());
 				recordDiagnostic({
 					category: "quality.impact-guard",
 					level: "warn",
@@ -149,7 +176,7 @@ export function createGoalCompleteToolDefinition(
 					content: [
 						{
 							type: "text" as const,
-							text: `Not completing the goal — the import graph shows ${unreviewedImpact.length} file(s) that depend on what you changed and were never reviewed this turn. Read them (or run lsp diagnostics on them) to confirm they still work, then call goal_complete again:\n${list}${more}`,
+							text: `Not completing the goal — the import graph shows ${unreviewedImpact.length} file(s) that depend on what you changed and were never reviewed this turn. Read them (or run lsp diagnostics on them) to confirm they still work, then call goal_complete again:\n${list}${more}${testsLine}`,
 						},
 					],
 					details: { completed: false, objective: goal.objective },

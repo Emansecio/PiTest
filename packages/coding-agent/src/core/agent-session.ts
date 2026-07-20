@@ -4475,6 +4475,10 @@ export class AgentSession implements CompactionHost, FusionHost {
 					// dependent before the check caught it? Pure enrichment of this
 					// existing diagnostic — no new session behavior (Invariant #1).
 					predictedByGraph: analysis.crossFiles.some((f) => wasFileInPredictedImpact(f)),
+					// Fase 4B: the COUNT of predicted cross-file failures — recall
+					// numerator (crossFileCount above is the denominator). The boolean
+					// stays for compat with existing aggregations.
+					predictedCrossFileCount: analysis.crossFiles.filter((f) => wasFileInPredictedImpact(f)).length,
 				},
 			});
 			if (analysis.crossFileCount === 0) return undefined;

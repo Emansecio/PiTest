@@ -5,7 +5,11 @@
  */
 import { getRuntimeDiagnostics, resetRuntimeDiagnostics } from "@pit/ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { _resetImpactStateForTest, _setUnreviewedImpactForTest } from "../src/core/built-ins/impact-extension.ts";
+import {
+	_resetImpactStateForTest,
+	_setCoveringTestsForTest,
+	_setUnreviewedImpactForTest,
+} from "../src/core/built-ins/impact-extension.ts";
 import { GoalManager, setCurrentGoalManager } from "../src/core/goal/goal-manager.js";
 import { createGoalCompleteToolDefinition } from "../src/core/tools/goal-complete.js";
 
@@ -39,8 +43,11 @@ describe("goal_complete R10 (unreviewed impact-graph dependents)", () => {
 		expect(blocked.details?.completed).toBe(false);
 		expect(textOf(blocked)).toContain("Not completing the goal");
 		expect(textOf(blocked)).toContain("import graph shows 1 file(s)");
-		expect(textOf(blocked)).toContain("src/b.ts");
+		// Fase 4B: each bullet names the edit(s) that made the file impacted.
+		expect(textOf(blocked)).toContain("  • src/b.ts (impacted by: src/a.ts)");
 		expect(textOf(blocked)).toContain("never reviewed this turn");
+		// No covering tests registered -> no tests line (regression guard).
+		expect(textOf(blocked)).not.toContain("Tests covering the changed files");
 		expect(mgr.get()?.status).toBe("active");
 
 		const diag = getRuntimeDiagnostics().recent.find((e) => e.context?.ruleId === "impact-blocked-done");
@@ -76,5 +83,53 @@ describe("goal_complete R10 (unreviewed impact-graph dependents)", () => {
 		expect(text).toContain("+3 more");
 		// Exactly 10 bullet lines shown.
 		expect(text.match(/ {2}• /g)).toHaveLength(10);
+	});
+
+	it("caps seeds per bullet at 2 and folds the rest into +N (Fase 4B)", async () => {
+		const mgr = new GoalManager();
+		mgr.start("ship it", {});
+		setCurrentGoalManager(mgr);
+
+		_setUnreviewedImpactForTest([{ path: "src/b.ts", seeds: ["src/s1.ts", "src/s2.ts", "src/s3.ts", "src/s4.ts"] }]);
+		const r = await complete("c1", "done");
+		expect(r.details?.completed).toBe(false);
+		expect(textOf(r)).toContain("  • src/b.ts (impacted by: src/s1.ts, src/s2.ts, +2)");
+	});
+
+	it("appends the covering-tests line when the registry has tests (Fase 4B)", async () => {
+		const mgr = new GoalManager();
+		mgr.start("ship it", {});
+		setCurrentGoalManager(mgr);
+
+		_setUnreviewedImpactForTest([{ path: "src/b.ts", seeds: ["src/a.ts"] }]);
+		_setCoveringTestsForTest(["test/a.test.ts", "test/b.test.ts"]);
+		const r = await complete("c1", "done");
+		expect(r.details?.completed).toBe(false);
+		expect(textOf(r)).toContain("Tests covering the changed files (run them): test/a.test.ts, test/b.test.ts");
+	});
+
+	it("caps the covering-tests line at 5 and folds the rest into +N more (Fase 4B)", async () => {
+		const mgr = new GoalManager();
+		mgr.start("ship it", {});
+		setCurrentGoalManager(mgr);
+
+		_setUnreviewedImpactForTest([{ path: "src/b.ts", seeds: ["src/a.ts"] }]);
+		_setCoveringTestsForTest(Array.from({ length: 7 }, (_, i) => `test/dep${i}.test.ts`));
+		const r = await complete("c1", "done");
+		const text = textOf(r);
+		expect(text).toContain("Tests covering the changed files (run them): ");
+		expect(text).toContain("test/dep4.test.ts, +2 more");
+		expect(text).not.toContain("test/dep5.test.ts");
+	});
+
+	it("covering tests alone (no pending files) do NOT block completion (Fase 4B)", async () => {
+		const mgr = new GoalManager();
+		mgr.start("ship it", {});
+		setCurrentGoalManager(mgr);
+
+		_setCoveringTestsForTest(["test/a.test.ts"]);
+		const r = await complete("c1", "done");
+		expect(r.details?.completed).toBe(true);
+		expect(mgr.get()?.status).toBe("complete");
 	});
 });

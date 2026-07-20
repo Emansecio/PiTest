@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { blastRadius, buildRepoGraph, dependenciesOf, dependentsOf } from "../src/core/repo-map/graph.js";
+import {
+	blastRadius,
+	buildRepoGraph,
+	dependenciesOf,
+	dependentsOf,
+	isTestPath,
+	testsCovering,
+} from "../src/core/repo-map/graph.js";
 import type { RepoMapEntry } from "../src/core/repo-map/living-index.js";
 
 function entry(path: string, deps: string[] = []): RepoMapEntry {
@@ -129,5 +136,59 @@ describe("blastRadius", () => {
 		const graph = buildRepoGraph([entry("a.ts", [])]);
 		const result = blastRadius(graph, ["ghost.ts"]);
 		expect(result).toEqual({ files: [], capped: false });
+	});
+});
+
+describe("isTestPath", () => {
+	it("matches .test. / .spec. basenames", () => {
+		expect(isTestPath("src/foo.test.ts")).toBe(true);
+		expect(isTestPath("src/foo.spec.tsx")).toBe(true);
+		expect(isTestPath("foo.test.js")).toBe(true);
+	});
+
+	it("matches test/, tests/ and __tests__/ directory segments", () => {
+		expect(isTestPath("test/foo.ts")).toBe(true);
+		expect(isTestPath("packages/x/tests/foo.ts")).toBe(true);
+		expect(isTestPath("src/__tests__/foo.ts")).toBe(true);
+	});
+
+	it("is case-insensitive", () => {
+		expect(isTestPath("src/Foo.TEST.ts")).toBe(true);
+		expect(isTestPath("TESTS/foo.ts")).toBe(true);
+		expect(isTestPath("src/Foo.Spec.ts")).toBe(true);
+	});
+
+	it("normalizes backslash separators before segment matching", () => {
+		expect(isTestPath("test\\foo.ts")).toBe(true);
+		expect(isTestPath("src\\attest\\foo.ts")).toBe(false);
+	});
+
+	it("does NOT match mere substrings — segment/basename boundaries only", () => {
+		expect(isTestPath("src/contest.ts")).toBe(false); // "test" inside a word
+		expect(isTestPath("src/attest/foo.ts")).toBe(false); // "test" inside a segment
+		expect(isTestPath("src/protest/foo.ts")).toBe(false);
+		expect(isTestPath("src/latest.ts")).toBe(false);
+		expect(isTestPath("src/testfoo.ts")).toBe(false); // no ".test." marker, not a "test" segment
+		expect(isTestPath("src/test-utils/foo.ts")).toBe(false); // "test-utils" is not the "test" segment
+		expect(isTestPath("src/foo.ts")).toBe(false);
+	});
+});
+
+describe("testsCovering", () => {
+	it("filters dependents down to test-shaped paths, sorted", () => {
+		const entries = [
+			entry("src/foo.ts", []),
+			entry("src/consumer.ts", ["src/foo.ts"]),
+			entry("test/z-foo.test.ts", ["src/foo.ts"]),
+			entry("src/foo.spec.ts", ["src/foo.ts"]),
+		];
+		const graph = buildRepoGraph(entries);
+		expect(testsCovering(graph, "src/foo.ts")).toEqual(["src/foo.spec.ts", "test/z-foo.test.ts"]);
+	});
+
+	it("returns [] when no dependents are tests, or the path is untracked", () => {
+		const graph = buildRepoGraph([entry("src/foo.ts", []), entry("src/bar.ts", ["src/foo.ts"])]);
+		expect(testsCovering(graph, "src/foo.ts")).toEqual([]);
+		expect(testsCovering(graph, "ghost.ts")).toEqual([]);
 	});
 });

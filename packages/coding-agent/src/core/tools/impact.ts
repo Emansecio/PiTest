@@ -24,7 +24,13 @@ import { relative } from "node:path";
 import type { AgentTool } from "@pit/agent-core";
 import { Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.js";
-import { type BlastRadiusEntry, blastRadius, buildRepoGraph, dependenciesOf } from "../repo-map/graph.ts";
+import {
+	type BlastRadiusEntry,
+	blastRadius,
+	buildRepoGraph,
+	dependenciesOf,
+	testsCovering,
+} from "../repo-map/graph.ts";
 import { getLivingRepoMap, type RepoMapEntry } from "../repo-map/living-index.ts";
 import { resolveToolPath } from "./argument-prep.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
@@ -62,6 +68,8 @@ const MAX_NODES = 500;
 const DISPLAY_CAP = 40;
 /** Symbol-declaration matches shown before folding into "+N more". */
 const MAX_SYMBOL_MATCHES = 5;
+/** Test paths shown in the "Tests covering" section before folding into "+N more". */
+const TESTS_DISPLAY_CAP = 10;
 
 export interface ImpactToolOptions {}
 
@@ -150,7 +158,7 @@ export function createImpactToolDefinition(cwd: string): ToolDefinition<typeof i
 						content: [
 							{
 								type: "text" as const,
-								text: `No declaration of "${symbol}" found in the indexed repo map. Try find_symbol or grep for usages.`,
+								text: `No declaration of "${symbol}" found in the indexed repo map. Try find_symbol or grep for usages. (the symbol index keeps at most 12 top-level symbols per file — for deep files use find_symbol or lsp)`,
 							},
 						],
 						details: undefined,
@@ -190,6 +198,20 @@ export function createImpactToolDefinition(cwd: string): ToolDefinition<typeof i
 						: `Dependencies of ${subject}: none found.`,
 				);
 			}
+			// Fase 4B: test files that directly import the seed(s) — a projection of
+			// the dependents index through the `isTestPath` naming convention, so the
+			// model knows which tests to RUN after changing this file. Rendered for
+			// every direction (it is cheap and it is the actionable slice).
+			const testsSet = new Set<string>();
+			for (const seed of seeds) {
+				for (const t of testsCovering(graph, seed)) testsSet.add(t);
+			}
+			const tests = [...testsSet].sort();
+			lines.push(
+				tests.length > 0
+					? `Tests covering ${subject}: ${formatFlatList(tests, TESTS_DISPLAY_CAP)}`
+					: `Tests covering ${subject}: none found (by naming convention).`,
+			);
 			lines.push("(from the persisted import graph — heuristic; use lsp references for authority)");
 
 			return { content: [{ type: "text" as const, text: lines.join("\n") }], details: undefined };

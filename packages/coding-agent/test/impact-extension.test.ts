@@ -10,6 +10,7 @@ vi.mock("../src/core/repo-map/living-index.ts", () => ({
 import {
 	_resetImpactStateForTest,
 	createImpactExtension,
+	getCurrentCoveringTests,
 	getCurrentPredictedImpactPaths,
 	getCurrentUnreviewedImpact,
 	wasFileInPredictedImpact,
@@ -47,7 +48,7 @@ function entry(path: string, deps?: string[]): Record<string, unknown> {
 
 function mockMap(entries: Array<Record<string, unknown>>): void {
 	getLivingRepoMap.mockResolvedValue({
-		map: { version: 3, lastIndexedCommit: "abc", entries },
+		map: { version: 4, lastIndexedCommit: "abc", entries },
 		mode: "cache-hit",
 		reindexedCount: 0,
 	});
@@ -246,6 +247,61 @@ describe("createImpactExtension", () => {
 
 		await fire("turn_start", { type: "turn_start", turnIndex: 1, timestamp: Date.now() });
 		expect(getCurrentPredictedImpactPaths()).toEqual([]);
+	});
+
+	it("routes test-path direct dependents to coveringTests, NOT pending, still counting as predicted (Fase 4B)", async () => {
+		mockMap([entry("src/seed.ts"), entry("src/a.ts", ["src/seed.ts"]), entry("test/seed.test.ts", ["src/seed.ts"])]);
+		const { api, fire } = makeFakePi();
+		createImpactExtension({ cwd })(api as unknown as ExtensionAPI);
+
+		const result = await fire("tool_result", editResult("src/seed.ts"));
+		const text = textOf(result);
+		// Advisory still lists both dependents, plus the covering-tests suffix.
+		expect(text).toContain("Impact graph: 2 file(s) depend on this one —");
+		expect(text).toContain("Tests covering this: test/seed.test.ts.");
+
+		// The test file is NOT pending (the right action is to RUN it, not read it)…
+		expect(getCurrentUnreviewedImpact().map((p) => p.path)).toEqual(["src/a.ts"]);
+		// …it lives in the covering-tests registry instead…
+		expect(getCurrentCoveringTests()).toEqual(["test/seed.test.ts"]);
+		// …and it still counts as "predicted" for the cross-file-escape telemetry.
+		expect(wasFileInPredictedImpact("test/seed.test.ts")).toBe(true);
+	});
+
+	it("caps the advisory covering-tests suffix at 3 and folds the rest into +N more", async () => {
+		const tests = Array.from({ length: 5 }, (_, i) => `test/dep${i}.test.ts`);
+		mockMap([entry("src/seed.ts"), ...tests.map((p) => entry(p, ["src/seed.ts"]))]);
+		const { api, fire } = makeFakePi();
+		createImpactExtension({ cwd })(api as unknown as ExtensionAPI);
+
+		const result = await fire("tool_result", editResult("src/seed.ts"));
+		const text = textOf(result);
+		expect(text).toContain("Tests covering this: test/dep0.test.ts, test/dep1.test.ts, test/dep2.test.ts, +2 more.");
+		// All 5 dependents are tests: nothing pends, all are covering tests.
+		expect(getCurrentUnreviewedImpact()).toEqual([]);
+		expect(getCurrentCoveringTests()).toHaveLength(5);
+	});
+
+	it("emits no covering-tests suffix when no direct dependent is a test", async () => {
+		mockMap([entry("src/seed.ts"), entry("src/a.ts", ["src/seed.ts"])]);
+		const { api, fire } = makeFakePi();
+		createImpactExtension({ cwd })(api as unknown as ExtensionAPI);
+
+		const result = await fire("tool_result", editResult("src/seed.ts"));
+		expect(textOf(result)).not.toContain("Tests covering this:");
+		expect(getCurrentCoveringTests()).toEqual([]);
+	});
+
+	it("resets coveringTests on turn_start", async () => {
+		mockMap([entry("src/seed.ts"), entry("test/seed.test.ts", ["src/seed.ts"])]);
+		const { api, fire } = makeFakePi();
+		createImpactExtension({ cwd })(api as unknown as ExtensionAPI);
+
+		await fire("tool_result", editResult("src/seed.ts"));
+		expect(getCurrentCoveringTests()).toEqual(["test/seed.test.ts"]);
+
+		await fire("turn_start", { type: "turn_start", turnIndex: 1, timestamp: Date.now() });
+		expect(getCurrentCoveringTests()).toEqual([]);
 	});
 
 	it("is fully disabled by PIT_NO_IMPACT_GUARD", async () => {

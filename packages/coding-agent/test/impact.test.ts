@@ -18,7 +18,7 @@ function entry(path: string, symbols: string[] = ["x"], deps?: string[]): Record
 
 function mockMap(entries: Array<Record<string, unknown>>): void {
 	getLivingRepoMap.mockResolvedValue({
-		map: { version: 3, lastIndexedCommit: "abc", entries },
+		map: { version: 4, lastIndexedCommit: "abc", entries },
 		mode: "cache-hit",
 		reindexedCount: 0,
 	});
@@ -188,6 +188,67 @@ describe("impact tool", () => {
 			const text = textOf(res).toLowerCase();
 			expect(text).toContain("no declaration");
 			expect(text).toContain("find_symbol");
+		});
+
+		it("zero-match adds the symbol-index cap note; a successful match does not (Fase 4B)", async () => {
+			mockMap([entry("src/foo.ts", ["Foo"])]);
+			const tool = createImpactTool(cwd);
+
+			const miss = await tool.execute("t", { symbol: "DoesNotExist" }, undefined, undefined, undefined as never);
+			expect(textOf(miss)).toContain(
+				"(the symbol index keeps at most 12 top-level symbols per file — for deep files use find_symbol or lsp)",
+			);
+
+			const hit = await tool.execute("t", { symbol: "Foo" }, undefined, undefined, undefined as never);
+			expect(textOf(hit)).not.toContain("symbol index keeps at most");
+		});
+	});
+
+	describe("tests covering (Fase 4B)", () => {
+		it("lists test-shaped direct dependents of the seed", async () => {
+			mockMap([
+				entry("src/seed.ts"),
+				entry("src/a.ts", ["x"], ["src/seed.ts"]),
+				entry("test/seed.test.ts", ["x"], ["src/seed.ts"]),
+				entry("src/seed.spec.ts", ["x"], ["src/seed.ts"]),
+			]);
+			const tool = createImpactTool(cwd);
+			const res = await tool.execute("t", { path: "src/seed.ts" }, undefined, undefined, undefined as never);
+			expect(textOf(res)).toContain("Tests covering src/seed.ts: src/seed.spec.ts, test/seed.test.ts");
+		});
+
+		it("reports none found (by naming convention) when no dependent is a test", async () => {
+			mockMap([entry("src/seed.ts"), entry("src/a.ts", ["x"], ["src/seed.ts"])]);
+			const tool = createImpactTool(cwd);
+			const res = await tool.execute("t", { path: "src/seed.ts" }, undefined, undefined, undefined as never);
+			expect(textOf(res)).toContain("Tests covering src/seed.ts: none found (by naming convention).");
+		});
+
+		it("caps the tests list at 10 and folds the rest into +N more", async () => {
+			const tests = Array.from({ length: 12 }, (_, i) => `test/dep${String(i).padStart(2, "0")}.test.ts`);
+			mockMap([entry("src/seed.ts"), ...tests.map((p) => entry(p, ["x"], ["src/seed.ts"]))]);
+			const tool = createImpactTool(cwd);
+			const res = await tool.execute("t", { path: "src/seed.ts" }, undefined, undefined, undefined as never);
+			// Assert on the tests line alone — the Dependents section above it lists
+			// the same files under its own (larger) display cap.
+			const testsLine = textOf(res)
+				.split("\n")
+				.find((l) => l.startsWith("Tests covering"));
+			expect(testsLine).toContain("(+2 more)");
+			expect(testsLine).toContain("test/dep09.test.ts");
+			expect(testsLine).not.toContain("test/dep10.test.ts");
+		});
+
+		it("unions covering tests across every declaring file of a symbol", async () => {
+			mockMap([
+				entry("src/a.ts", ["Dup"]),
+				entry("src/b.ts", ["Dup"]),
+				entry("test/a.test.ts", ["x"], ["src/a.ts"]),
+				entry("test/b.test.ts", ["x"], ["src/b.ts"]),
+			]);
+			const tool = createImpactTool(cwd);
+			const res = await tool.execute("t", { symbol: "Dup" }, undefined, undefined, undefined as never);
+			expect(textOf(res)).toContain("test/a.test.ts, test/b.test.ts");
 		});
 	});
 

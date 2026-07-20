@@ -140,6 +140,11 @@ export interface DiagnosticContext {
 	 * i.e. the escape was predictable from the graph, not a total surprise.
 	 */
 	predictedByGraph?: boolean;
+	/**
+	 * How many of the cross-file failures the import graph had predicted — the
+	 * numerator of the graph's recall (`crossFileCount` is the denominator).
+	 */
+	predictedCrossFileCount?: number;
 }
 
 export interface DiagnosticEvent {
