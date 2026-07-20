@@ -45,6 +45,9 @@ const PATTERNS: readonly SecretPattern[] = [
 	},
 	// Anthropic API key.
 	{ type: "anthropic-key", re: /\bsk-ant-[A-Za-z0-9_-]{20,}/g },
+	// OpenAI project/service/admin keys — the dash after the prefix breaks the
+	// generic sk- pattern below, so match these explicitly first.
+	{ type: "openai-key", re: /\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}/g },
 	// OpenAI-style key (sk- followed by 20+ alphanumerics). Runs AFTER the
 	// Anthropic pattern so sk-ant-… is labeled anthropic, not openai.
 	{ type: "openai-key", re: /\bsk-[A-Za-z0-9]{20,}\b/g },
@@ -52,6 +55,8 @@ const PATTERNS: readonly SecretPattern[] = [
 	{ type: "google-api-key", re: /\bAIza[0-9A-Za-z_-]{35}\b/g },
 	// GitHub tokens (personal / oauth / refresh / server / user-to-server).
 	{ type: "github-token", re: /\bgh[oprsu]_[A-Za-z0-9]{36,}\b/g },
+	// GitHub fine-grained personal access token.
+	{ type: "github-token", re: /\bgithub_pat_[A-Za-z0-9_]{22,}/g },
 	// Slack token (bot/user/app/refresh/legacy).
 	{ type: "slack-token", re: /\bxox[baprs]-[A-Za-z0-9-]{10,}/g },
 	// JWT (three base64url segments). The header segment starts `eyJ`, which is
@@ -90,6 +95,19 @@ const PATTERNS: readonly SecretPattern[] = [
 		type: "credential",
 		re: /\b(?:password|passwd|pwd|api[_-]?key|secret|access[_-]?token|auth[_-]?token|client[_-]?secret)\b(?:\s*[=:]\s*\\?(['"])([^'"\\]{4,})\\?\1|[=:]([^\s'"&]{6,}))/gi,
 	},
+	// Bare access/refresh token fields of the OAuthCredentials shape
+	// (`{ access: string; refresh: string }` — no `_token` suffix). Runs AFTER
+	// `credential` (which already owns the `access_token`/`auth_token` assignment
+	// shape) so it only picks up the truly bare key form. Like `aws-secret-key`
+	// above, the capture group is NOT special-cased in the replacer below, so the
+	// whole match (key name included) is replaced by the redaction marker. The
+	// `['"]?` right after the key allows for the JSON-object-key form
+	// (`"access":"value"`, no space around either the closing key-quote or the
+	// colon) as well as the bare `access = value` / `access: value` shapes.
+	{
+		type: "oauth-token",
+		re: /\b(?:access|refresh)(?:_token)?\b['"]?\s*[=:]\s*['"]?([A-Za-z0-9._-]{20,})['"]?/gi,
+	},
 ];
 
 // Cheap substring/shape probe to skip the regex passes on the overwhelmingly
@@ -100,11 +118,11 @@ const PATTERNS: readonly SecretPattern[] = [
 //     AKIA / sk- / AIza / ghp_ / eyJ / PRIVATE KEY …), so a plain `includes`
 //     mirrors the regex exactly and is the cheapest possible probe.
 //   - CASE_INSENSITIVE_INDICATOR_RE backs the /i regexes (credential,
-//     aws-secret-key, bearer-token). The anchor can appear in ANY case
-//     (`API_KEY=`, `AWS_SECRET_ACCESS_KEY=`, `Password=`, `Bearer` — uppercase
-//     is the dominant dotenv/env convention), so the probe must be /i too;
-//     otherwise the gate rejects exactly the secrets these regexes exist to
-//     catch and they leak verbatim to disk.
+//     aws-secret-key, bearer-token, oauth-token). The anchor can appear in ANY
+//     case (`API_KEY=`, `AWS_SECRET_ACCESS_KEY=`, `Password=`, `Bearer` —
+//     uppercase is the dominant dotenv/env convention), so the probe must be /i
+//     too; otherwise the gate rejects exactly the secrets these regexes exist
+//     to catch and they leak verbatim to disk.
 const CASE_SENSITIVE_INDICATORS: readonly string[] = [
 	"AKIA",
 	"sk-",
@@ -114,6 +132,7 @@ const CASE_SENSITIVE_INDICATORS: readonly string[] = [
 	"ghr_",
 	"ghs_",
 	"ghu_",
+	"github_pat_",
 	"xox",
 	"eyJ",
 	"PRIVATE KEY",
@@ -121,7 +140,12 @@ const CASE_SENSITIVE_INDICATORS: readonly string[] = [
 
 // One compiled /i regex (alternation over the /i anchors) instead of a
 // lowercased copy of the text per append — no per-call allocation.
-const CASE_INSENSITIVE_INDICATOR_RE = /Bearer|password|passwd|pwd|api[_-]?key|secret|token|aws_secret/i;
+// `access`/`refresh` back the oauth-token pattern: the OAuthCredentials shape
+// (`packages/ai/src/utils/oauth/types.ts`) serializes those as BARE keys with
+// no `_token` suffix, so neither is a substring of any other anchor here —
+// without them the gate would reject the exact JSON shape oauth-token exists
+// to catch, and the pattern would be unreachable dead code.
+const CASE_INSENSITIVE_INDICATOR_RE = /Bearer|password|passwd|pwd|api[_-]?key|secret|token|aws_secret|access|refresh/i;
 
 function hasIndicator(text: string): boolean {
 	for (const ind of CASE_SENSITIVE_INDICATORS) {

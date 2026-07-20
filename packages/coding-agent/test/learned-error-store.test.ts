@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -143,6 +143,30 @@ describe("persistSessionLearnedErrors + aggregateLearnedErrors", () => {
 		]);
 		const aggregated = await aggregateLearnedErrors(dir);
 		expect(aggregated[0].sampleErrorText).toBe("NEW SAMPLE");
+	});
+
+	it("redacts sampleErrorText on disk but leaves sampleArgs byte-identical (guard match preserved)", async () => {
+		// Synthetic OpenAI-shaped token — not a real credential — just to exercise
+		// the redaction path. sampleArgs must NOT be redacted: it is the preventive
+		// guard's byte-for-byte matching key.
+		const synthetic = "sk-proj-abcDEF1234567890ghijKLMNsynthetic";
+		const rawArgs = '{"command":"grep -n access packages/x.ts"}';
+		await persistSessionLearnedErrors(dir, { sessionId: "s1", timestamp: "t", cwd: "/x" }, [
+			sampleEntry({
+				fingerprint: "fp",
+				sampleErrorText: `boom, token was ${synthetic} here`,
+				sampleArgs: rawArgs,
+			}),
+		]);
+		const raw = readFileSync(join(dir, "s1.jsonl"), "utf-8");
+		// The secret must be gone from the persisted sampleErrorText.
+		expect(raw).not.toContain(synthetic);
+		expect(raw).toContain("[REDACTED:openai-key]");
+		// sampleArgs survives byte-for-byte so the guard still matches.
+		const entryLine = raw.split("\n").find((l) => l.includes('"type":"entry"'))!;
+		const parsed = JSON.parse(entryLine) as { sampleArgs: string; sampleErrorText: string };
+		expect(parsed.sampleArgs).toBe(rawArgs);
+		expect(parsed.sampleErrorText).not.toContain(synthetic);
 	});
 
 	it("skips entries when there are none (no file is written)", async () => {

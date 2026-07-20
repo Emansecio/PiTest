@@ -12,6 +12,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { bm25Score, buildCorpus, computeDocStats, type DocStats, foldForSearch, tokenize } from "../search/bm25.ts";
+import { redactForDisk } from "../secret-redactor.ts";
 import type { HindsightEntry, HindsightKind, HindsightSearchOptions, HindsightSearchResult } from "./types.ts";
 
 export interface HindsightBank {
@@ -122,7 +123,7 @@ function loadEntries(filePath: string): HindsightEntry[] {
 
 function atomicRewrite(filePath: string, entries: HindsightEntry[]): void {
 	const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
-	const payload = entries.map((entry) => JSON.stringify(entry)).join("\n");
+	const payload = entries.map((entry) => redactForDisk(JSON.stringify(entry))).join("\n");
 	writeFileSync(tmp, payload ? `${payload}\n` : "", "utf-8");
 	renameSync(tmp, filePath);
 }
@@ -169,7 +170,7 @@ export function openBank(filePath: string, opts?: OpenBankOptions): HindsightBan
 			entries.push(entry);
 			byId.set(entry.id, entry);
 			invalidateSearchStats();
-			const line = `${JSON.stringify(entry)}\n`;
+			const line = `${redactForDisk(JSON.stringify(entry))}\n`;
 			appendFileSync(filePath, line, "utf-8");
 			// Keep bank bounded during long sessions (limits previously only ran at open).
 			if (perScopeMax !== undefined) bank.enforcePerScopeLimit(perScopeMax);

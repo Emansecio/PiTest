@@ -162,6 +162,34 @@ describe("HindsightBank", () => {
 		// pruneOlderThan is not yet present on the bank API; another agent will add it.
 	});
 
+	test("add redacts a secret in the body before it hits disk (synthetic token)", () => {
+		const { bank, path } = freshBank();
+		// Synthetic OpenAI-shaped token — not a real credential — just to exercise
+		// the redaction path the bank now routes writes through.
+		const synthetic = "sk-proj-abcDEF1234567890ghijKLMNsynthetic";
+		bank.add({
+			kind: "fact",
+			body: `remember this key: ${synthetic}`,
+			subject: "leaked secret repro",
+		});
+		const text = readFileSync(path, "utf-8");
+		expect(text).not.toContain(synthetic);
+		expect(text).toContain("[REDACTED:openai-key]");
+		// In-memory copy is untouched — only the disk write is scrubbed.
+		expect(bank.all()[0]!.body).toContain(synthetic);
+	});
+
+	test("delete rewrite also redacts remaining entries' secrets (synthetic token)", () => {
+		const { bank, path } = freshBank();
+		const synthetic = "sk-proj-abcDEF1234567890ghijKLMNsynthetic";
+		const toDelete = bank.add({ kind: "fact", body: "throwaway entry" });
+		bank.add({ kind: "fact", body: `secret to keep: ${synthetic}` });
+		bank.delete(toDelete.id);
+		const text = readFileSync(path, "utf-8");
+		expect(text).not.toContain(synthetic);
+		expect(text).toContain("[REDACTED:openai-key]");
+	});
+
 	test("enforceLimit on add keeps at most N entries (evicts oldest)", async () => {
 		const path = freshBankPath();
 		const bank = openBank(path, { maxEntries: 2 });

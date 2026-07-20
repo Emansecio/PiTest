@@ -33,6 +33,26 @@ describe("redactSecrets — each secret type is caught and replaced", () => {
 			sample: "ghr_1234567890abcdefghijklmnopqrstuvwxyzAB",
 			type: "github-token",
 		},
+		{
+			name: "GitHub fine-grained PAT",
+			sample: "github_pat_11ABCDEFG0123456789abcdefghijklmnopqrstuvwxyz01234",
+			type: "github-token",
+		},
+		{
+			name: "OpenAI project key",
+			sample: "sk-proj-abcDEF1234567890ghijKLMNsynthetic",
+			type: "openai-key",
+		},
+		{
+			name: "OpenAI service-account key",
+			sample: "sk-svcacct-abcDEF1234567890ghijKLMNsynthetic",
+			type: "openai-key",
+		},
+		{
+			name: "OpenAI admin key",
+			sample: "sk-admin-abcDEF1234567890ghijKLMNsynthetic",
+			type: "openai-key",
+		},
 		// Prefix split with an interpolation so no literal Slack-token string sits in
 		// the source (GitHub push protection flags the test file otherwise); the
 		// assembled value still exercises the slack-token regex.
@@ -135,6 +155,49 @@ describe("redactSecrets — quoted credential value may contain '&'", () => {
 		const { redacted } = redactSecrets("password=hunter2secret&next=value");
 		expect(redacted).toContain("password=[REDACTED:credential]");
 		expect(redacted).toContain("&next=value");
+	});
+});
+
+describe("redactSecrets — OAuth bare access/refresh keys (OAuthCredentials shape)", () => {
+	// Synthetic tokens only — these are not real credentials. Mirrors the bare
+	// `{ access: string; refresh: string }` shape from
+	// packages/ai/src/utils/oauth/types.ts, which has no `_token` suffix and so
+	// is NOT covered by the pre-existing `credential` pattern.
+	it("redacts a JSON line with a bare access field", () => {
+		const line = JSON.stringify({ access: "synthetic0AccessToken1234567890abcXYZ", expires: 123 });
+		const { redacted, count } = redactSecrets(line);
+		expect(count).toBeGreaterThanOrEqual(1);
+		expect(redacted).toContain("[REDACTED:oauth-token]");
+		expect(redacted).not.toContain("synthetic0AccessToken1234567890abcXYZ");
+	});
+
+	it("redacts a JSON line with a bare refresh field", () => {
+		const line = JSON.stringify({ refresh: "synthetic0RefreshToken0987654321abcXYZ", access: "short" });
+		const { redacted, count } = redactSecrets(line);
+		expect(count).toBeGreaterThanOrEqual(1);
+		expect(redacted).toContain("[REDACTED:oauth-token]");
+		expect(redacted).not.toContain("synthetic0RefreshToken0987654321abcXYZ");
+	});
+
+	it("does not eat plain prose that merely contains the words access/refresh", () => {
+		const { redacted, count } = redactSecrets("You do not have access to this file; refresh your token later.");
+		expect(count).toBe(0);
+		expect(redacted).toBe("You do not have access to this file; refresh your token later.");
+	});
+});
+
+describe("redactSecrets — pattern ordering guard", () => {
+	it("sk-ant-… stays labeled anthropic, never openai (Anthropic pattern runs first)", () => {
+		const { redacted, count } = redactSecrets("key sk-ant-api03-abcDEF123456_-ghiJKLmnop end");
+		expect(count).toBe(1);
+		expect(redacted).toContain("[REDACTED:anthropic-key]");
+		expect(redacted).not.toContain("[REDACTED:openai-key]");
+	});
+
+	it("sk-proj-… is labeled openai-key, not the generic sk- pattern eating a prefix", () => {
+		const { redacted, count } = redactSecrets("key sk-proj-abcDEF1234567890ghijKLMNsynthetic end");
+		expect(count).toBe(1);
+		expect(redacted).toContain("[REDACTED:openai-key]");
 	});
 });
 

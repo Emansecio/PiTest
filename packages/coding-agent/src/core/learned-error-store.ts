@@ -30,6 +30,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir } from "../config.ts";
 import { sliceSafe } from "../utils/surrogate.ts";
+import { redactForDisk } from "./secret-redactor.ts";
 
 /** One entry per (tool, errorFingerprint) pair within a single session. */
 export interface LearnedErrorEntry {
@@ -99,9 +100,17 @@ export async function persistSessionLearnedErrors(
 ): Promise<void> {
 	if (entries.length === 0) return;
 	await mkdir(dir, { recursive: true });
-	const lines: string[] = [JSON.stringify({ type: "manifest", ...meta })];
+	// Redact ONLY `sampleErrorText` (display/report field). `sampleArgs` is left
+	// raw on purpose: it is the preventive guard's matching key, compared
+	// byte-for-byte against a fingerprint computed from the live call
+	// (`learned-error-guard-extension.ts:139,161-173`), so redacting it would
+	// silently break the guard. It is a length-capped (~160-char) fingerprint and
+	// this store lives OUTSIDE the repo (`~/.pit`), so the push-to-remote egress
+	// risk that motivates redaction elsewhere does not apply to it.
+	const lines: string[] = [redactForDisk(JSON.stringify({ type: "manifest", ...meta }))];
 	for (const entry of entries) {
-		lines.push(JSON.stringify({ type: "entry", ...entry }));
+		const safe = { ...entry, sampleErrorText: redactForDisk(entry.sampleErrorText) };
+		lines.push(JSON.stringify({ type: "entry", ...safe }));
 	}
 	await writeFile(join(dir, `${meta.sessionId}.jsonl`), `${lines.join("\n")}\n`);
 }
