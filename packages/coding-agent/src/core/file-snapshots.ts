@@ -197,14 +197,15 @@ export async function captureSnapshot(absolutePath: string, tool: string): Promi
 		const st = await stat(absolutePath);
 		if (!st.isFile()) return;
 		mtimeMs = st.mtimeMs;
-		// Skip a byte-identical duplicate: if the newest snapshot already captured
-		// this exact (mtime, size), re-reading and re-writing the same bytes buys
-		// nothing (undo/rewind restore to identical content either way).
+		bytes = await readFile(absolutePath);
+		// Metadata equality is only a fast candidate: timestamp-preserving writers
+		// can replace same-size bytes. Confirm against the saved pre-image before
+		// suppressing a capture so undo always retains the true current content.
 		const latest = await getLatestSnapshot(absolutePath);
 		if (latest && latest.meta.mtimeMs === mtimeMs && latest.meta.size === st.size) {
-			return;
+			const previous = await readFile(latest.snapPath).catch(() => undefined);
+			if (previous?.equals(bytes)) return;
 		}
-		bytes = await readFile(absolutePath);
 	} catch (err) {
 		// ENOENT = the file does not exist yet → the turn is CREATING it. Record a
 		// creation marker (sidecar-only, no `.snap`) so a later `/rewind` can remove

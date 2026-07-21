@@ -47,17 +47,16 @@ function editExec(): ToolExecutionComponent {
 	});
 }
 
-describe("full-turn Amp-layout snapshot", () => {
+describe("full-turn work-phase layout snapshot", () => {
 	it("produces the correct component sequence and rendered output", () => {
 		const chat: any[] = [];
 		const ui = fakeTui();
 		const stacker = new ActivityStacker(ui, (c) => chat.push(c));
 
-		// nav(read) + nav(grep) → same NavGroup
+		// nav(read) + nav(grep) + action(edit) → ONE work phase (the edit is promoted
+		// to its own line INSIDE the phase, it no longer fragments the burst).
 		stacker.placeCall(navExec("read"));
 		stacker.placeCall(navExec("grep"));
-
-		// action(edit) → own ActivityLine, closes the group
 		stacker.placeCall(editExec());
 
 		// assistant message 1
@@ -69,7 +68,7 @@ describe("full-turn Amp-layout snapshot", () => {
 		stacker.divide();
 		chat.push(msg1);
 
-		// new nav group after divide
+		// new work phase after divide
 		stacker.placeCall(navExec("read"));
 
 		// assistant message 2 (deliverable)
@@ -84,13 +83,14 @@ describe("full-turn Amp-layout snapshot", () => {
 
 		// --- assert component sequence ---
 		const names = chat.map((c) => c.constructor.name);
-		// Activity blocks stack tight (no Spacer between them); the breathing room
-		// comes from the AssistantMessage boundary, which brings its own leading blank.
+		// Activity blocks stack tight. The agent-text boundary is symmetric: the
+		// AssistantMessage brings its leading blank and the stacker adds one before
+		// the next real activity block.
 		expect(names).toEqual([
-			"NavGroupComponent",
-			"ActivityLineComponent",
+			"WorkGroupComponent",
 			"AssistantMessageComponent",
-			"NavGroupComponent",
+			"Spacer",
+			"WorkGroupComponent",
 			"AssistantMessageComponent",
 		]);
 
@@ -100,29 +100,33 @@ describe("full-turn Amp-layout snapshot", () => {
 			.map(stripAnsi)
 			.join("\n");
 
-		// nav group folded verb
-		expect(joined).toContain("Explored");
+		// The first phase was sealed by divide() → it collapses to one dense summary
+		// line that reabsorbs the promoted edit into the counter (`1 file·1 search·1
+		// edit`). No airy separator, no leftover "Explored" verb.
+		expect(joined).toContain("1 file");
+		expect(joined).toContain("1 search");
+		expect(joined).toContain("1 edit");
+		expect(joined).not.toContain(" · ");
+		expect(joined).not.toContain("Explored");
 
-		// action line verb
-		expect(joined).toContain("Edited");
+		// Expanding that sealed phase (ctrl+o) reveals the edit as its own verb-led line.
+		const phase1 = chat[0];
+		phase1.setExpanded(true);
+		expect(phase1.render(120).map(stripAnsi).join("\n")).toContain("Edited");
 
 		// first assistant narration
 		expect(joined).toContain("I'll update");
 
-		// deliverable text
+		// deliverable text + marker glyph
 		expect(joined).toContain("Pronto");
-
-		// deliverable marker glyph
 		expect(joined).toMatch(/[●◉]/);
 
 		// no generic "Did" verb
 		expect(joined).not.toContain("Did");
-		expect(joined).not.toContain("Did 1 question");
 
 		// activity components carry no gutter bar
 		for (const c of chat) {
-			const name = c.constructor.name;
-			if (name === "NavGroupComponent" || name === "ActivityLineComponent") {
+			if (c.constructor.name === "WorkGroupComponent") {
 				for (const l of c.render(120)) {
 					expect(stripAnsi(l)).not.toContain("│");
 				}
@@ -130,7 +134,7 @@ describe("full-turn Amp-layout snapshot", () => {
 		}
 	});
 
-	it("two NavGroups are separate instances in chat order", () => {
+	it("two work phases are separate instances in chat order", () => {
 		const chat: any[] = [];
 		const ui = fakeTui();
 		const stacker = new ActivityStacker(ui, (c) => chat.push(c));
@@ -151,8 +155,8 @@ describe("full-turn Amp-layout snapshot", () => {
 		stacker.divide();
 		chat.push(msg2);
 
-		const navGroups = chat.filter((c) => c.constructor.name === "NavGroupComponent");
-		expect(navGroups.length).toBe(2);
-		expect(navGroups[0]).not.toBe(navGroups[1]);
+		const phases = chat.filter((c) => c.constructor.name === "WorkGroupComponent");
+		expect(phases.length).toBe(2);
+		expect(phases[0]).not.toBe(phases[1]);
 	});
 });

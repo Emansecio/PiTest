@@ -146,6 +146,27 @@ describe("McpHttpClient", () => {
 		expect(Date.now() - startedAt).toBeLessThan(5_000);
 	});
 
+	it("dispose cancels config commands before they can start a transport", async () => {
+		const fetchMock = installFetch({
+			[TEST_URL]: () => ({ protocolVersion: "2025-06-18", capabilities: {} }),
+		});
+		const nodePath = process.execPath.replaceAll("\\", "/");
+		const slowHeader = `!"${nodePath}" -e "setTimeout(()=>process.stdout.write('token'), 1000)"`;
+		const client = new McpHttpClient("disposing", {
+			url: TEST_URL,
+			headers: { Authorization: slowHeader },
+		});
+
+		const startedAt = Date.now();
+		const initialization = client.initialize();
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		client.dispose();
+
+		await expect(initialization).rejects.toThrow();
+		expect(Date.now() - startedAt).toBeLessThan(800);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
 	it("aborts a body that stalls after the headers (external signal must reach the body read)", async () => {
 		// Server sends headers immediately but never delivers the JSON body.
 		// Regression: cleanup used to run in the fetch `finally`, detaching the

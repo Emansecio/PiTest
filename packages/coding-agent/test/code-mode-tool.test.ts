@@ -91,15 +91,14 @@ describe("code tool (code-mode)", () => {
 		expect(textOf(result)).toContain("not wired");
 	}, 20_000);
 
-	it("lists the available tools.* in the prompt guidelines", () => {
+	it("references the system prompt tool list without repeating every tool name", () => {
 		const def = createCodeModeToolDefinition(process.cwd(), {
 			dispatcher: async () => ({ content: [{ type: "text", text: "" }], isError: false }),
 			getActiveToolNames: () => ["read", "grep", "code"],
 		});
 		const joined = (def.promptGuidelines ?? []).join("\n");
-		expect(joined).toContain("tools.read");
-		expect(joined).toContain("tools.grep");
-		// `code` is filtered out of the exposed list.
-		expect(joined).not.toContain("tools.code");
+		expect(joined).toContain("active tools listed above");
+		expect(joined).not.toContain("tools.read");
+		expect(joined).not.toContain("tools.grep");
 	});
 });

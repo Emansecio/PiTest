@@ -78,6 +78,20 @@ describe("InteractiveMode.showStatus", () => {
 		expect(chatContainer.children).toHaveLength(0);
 		expect(fakeThis.statusContainer.children).toHaveLength(1);
 	});
+
+	test("keeps warnings and errors compact and outside the transcript", () => {
+		const fakeThis = makeEphemeralStatusFakeThis();
+
+		(InteractiveMode as any).prototype.showWarning.call(fakeThis, "Warning first\nsecond");
+		expect(fakeThis.chatContainer.children).toHaveLength(0);
+		expect(fakeThis.statusContainer.children).toHaveLength(1);
+		expect(renderLastLine(fakeThis.statusContainer)).toContain("Warning first second");
+
+		(InteractiveMode as any).prototype.showError.call(fakeThis, "Error first\nsecond");
+		expect(fakeThis.chatContainer.children).toHaveLength(0);
+		expect(fakeThis.statusContainer.children).toHaveLength(1);
+		expect(renderLastLine(fakeThis.statusContainer)).toContain("Error first second");
+	});
 });
 
 describe("InteractiveMode.setToolsExpanded", () => {

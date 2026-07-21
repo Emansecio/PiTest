@@ -119,7 +119,7 @@ describe("lsp module — pure helpers", () => {
 
 	it("parseContentLengthFrame rejects an absurd Content-Length instead of awaiting it", () => {
 		// A multi-GB declared length must be rejected up front, not buffered until full.
-		const huge = 256 * 1024 * 1024; // > MAX_FRAME_BYTES (128MB)
+		const huge = 32 * 1024 * 1024; // > MAX_FRAME_BYTES (16MB)
 		const buf = Buffer.from(`Content-Length: ${huge}\r\n\r\n{}`, "utf-8");
 		const parsed = parseContentLengthFrame(buf);
 		if (!parsed || !("error" in parsed)) throw new Error("expected the oversized frame to be rejected");

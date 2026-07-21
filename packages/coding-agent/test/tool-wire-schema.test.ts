@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	compactToolSchemaForWire,
+	compactToolsForProviderContext,
 	compactWireToolSurface,
 	LAZY_TOOL_DESCRIPTION_MAX_CHARS,
 	sortToolsForWireCache,
@@ -42,6 +43,23 @@ describe("compactToolSchemaForWire (E1)", () => {
 		expect(compact.properties.title).toEqual({ type: "string" });
 		expect(compact.properties.title.description).toBeUndefined();
 		expect(compact.required).toEqual(["title"]);
+	});
+});
+
+describe("compactToolsForProviderContext", () => {
+	it("reuses the compacted surface while the tools array is unchanged", () => {
+		const tools = [
+			{
+				name: "read",
+				description: "Read a file\nLong provider-only prose",
+				parameters: { type: "object", properties: { path: { type: "string", description: "Path" } } },
+			},
+		];
+		const first = compactToolsForProviderContext({ messages: [], tools });
+		const second = compactToolsForProviderContext({ messages: [], tools });
+
+		expect(second.tools).toBe(first.tools);
+		expect(second.tools).not.toBe(tools);
 	});
 });
 

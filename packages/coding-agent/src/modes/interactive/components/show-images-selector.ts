@@ -48,6 +48,7 @@ export class ShowImagesSelectorComponent extends Container implements Focusable 
 			title: "Show images",
 			search: false,
 			onCancel,
+			embedded: true,
 		});
 		this.addChild(this.shell);
 	}

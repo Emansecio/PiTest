@@ -38,7 +38,8 @@ function findBashOnPath(): string | null {
 		try {
 			const result = spawnSync("where", ["bash.exe"], {
 				encoding: "utf-8",
-				timeout: 5000,
+				// Bound event-loop stall on first shell resolve (result is cached).
+				timeout: 2000,
 				windowsHide: true,
 			});
 			if (result.status === 0 && result.stdout) {
@@ -55,7 +56,7 @@ function findBashOnPath(): string | null {
 
 	// Unix: Use 'which' and trust its output (handles Termux and special filesystems)
 	try {
-		const result = spawnSync("which", ["bash"], { encoding: "utf-8", timeout: 5000 });
+		const result = spawnSync("which", ["bash"], { encoding: "utf-8", timeout: 2000 });
 		if (result.status === 0 && result.stdout) {
 			const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
 			if (firstMatch) {
@@ -241,20 +242,35 @@ export function killProcessTree(pid: number): void {
 					stillAlive = false;
 				}
 				if (!stillAlive) return; // taskkill worked, or the process already exited on its own
+				// Second taskkill /T attempt — process.kill(pid) alone only kills the
+				// root PID and orphans grandchildren (CPU, cwd locks). Prefer tree kill.
 				try {
-					process.kill(pid);
-				} catch (err) {
-					// Double failure: taskkill AND the direct fallback both failed to remove
-					// the pid (permissions, a zombie the OS hasn't reaped, or a stale/reused
-					// pid handle). Callers that need a hard guarantee (bash.ts) arm their own
-					// grace-timeout backstop for exactly this case — surface it here too
-					// instead of swallowing so it is visible in diagnostics.
-					recordDiagnostic({
-						category: "process.kill",
-						level: "error",
-						source: "shell.killProcessTree.fallback",
-						context: { pid, note: err instanceof Error ? err.message : String(err) },
+					const retry = spawn("taskkill", ["/F", "/T", "/PID", String(pid)], {
+						stdio: "ignore",
+						detached: true,
+						windowsHide: true,
 					});
+					retry.on("error", () => {});
+				} catch (err) {
+					// taskkill missing entirely — last-resort single-PID kill.
+					try {
+						process.kill(pid);
+					} catch (killErr) {
+						recordDiagnostic({
+							category: "process.kill",
+							level: "error",
+							source: "shell.killProcessTree.fallback",
+							context: {
+								pid,
+								note:
+									killErr instanceof Error
+										? killErr.message
+										: err instanceof Error
+											? err.message
+											: String(killErr),
+							},
+						});
+					}
 				}
 			}, KILL_VERIFY_DELAY_MS);
 			verifyTimer.unref?.();

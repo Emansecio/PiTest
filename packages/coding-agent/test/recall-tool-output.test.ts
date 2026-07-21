@@ -42,6 +42,9 @@ describe("recall_tool_output tool", () => {
 		const text = result.content.find((b: any) => b.type === "text")?.text;
 		expect(text).toContain("d999");
 		expect(result.details?.found).toBe(false);
+		// A miss keeps isError (model + retry budget) but flags itself recoverable so the
+		// activity stream renders it quiet instead of red + auto-expanded.
+		expect(result.details?.recoverable).toBe(true);
 		store.dispose();
 	});
 
@@ -53,12 +56,16 @@ describe("recall_tool_output tool", () => {
 		expect(result.isError).toBe(true);
 		const text = result.content.find((b: any) => b.type === "text")?.text;
 		expect(text).toMatch(/unavailable/i);
+		// A store-unavailable is a genuine system failure, NOT a recoverable miss — it
+		// stays red so the degraded state is visible.
+		expect(result.details?.recoverable).toBeFalsy();
 	});
 
 	it("tool name and label are recall_tool_output", () => {
 		const def = createRecallToolOutputDefinition(CWD);
 		expect(def.name).toBe("recall_tool_output");
 		expect(def.label).toBe("recall_tool_output");
+		expect(def.activity).toBe("navigation");
 	});
 
 	it("tool description quotes the EXACT placeholder format the prune emits (M18)", () => {

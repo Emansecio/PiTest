@@ -720,6 +720,17 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				} else if (event.type === "message_delta") {
 					if (event.delta.stop_reason) {
 						output.stopReason = mapStopReason(event.delta.stop_reason);
+						// Surface the API's refusal explanation instead of a generic error.
+						// `stop_details` (refusal category + explanation) is not yet in the SDK types.
+						if (output.stopReason === "error") {
+							const details = (event.delta as { stop_details?: { category?: string; explanation?: string } })
+								.stop_details;
+							if (details?.explanation) {
+								output.errorMessage = details.category
+									? `${event.delta.stop_reason} (${details.category}): ${details.explanation}`
+									: `${event.delta.stop_reason}: ${details.explanation}`;
+							}
+						}
 					}
 					// Only update usage fields if present (not null).
 					// Preserves input_tokens from message_start when proxies omit it in message_delta.
@@ -747,7 +758,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			}
 
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
-				throw new Error("An unknown error occurred");
+				throw new Error(output.errorMessage || "An unknown error occurred");
 			}
 
 			stream.push({ type: "done", reason: output.stopReason, message: output });
@@ -770,8 +781,8 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 
 /**
  * Heuristic default for {@link AnthropicMessagesCompat.supportsAdaptiveThinking}:
- * Opus and Sonnet at version 4.6 or newer use the adaptive "effort" thinking API;
- * earlier models use `budget_tokens`. Parses the `<family>-<major>.<minor>`
+ * Opus, Sonnet and Fable at version 4.6 or newer use the adaptive "effort" thinking
+ * API; earlier models use `budget_tokens`. Parses the `<family>-<major>.<minor>`
  * version from the id so a future bump (4.7/4.9/5.x) works without a code edit.
  *
  * The minor is bounded to 1-2 digits so a date suffix (e.g. `opus-4-20250514`,
@@ -782,7 +793,7 @@ export function defaultSupportsAdaptiveThinking(modelId: string): boolean {
 	// Minor is optional: Claude 5 family ids carry a bare major ("claude-sonnet-5").
 	// Major is also bounded to 1-2 digits so "claude-3-5-sonnet-20241022" (date
 	// right after the family name) can never be read as a version.
-	const match = /(opus|sonnet)-(\d{1,2})(?!\d)(?:[._-](\d{1,2})(?!\d))?/.exec(modelId);
+	const match = /(opus|sonnet|fable)-(\d{1,2})(?!\d)(?:[._-](\d{1,2})(?!\d))?/.exec(modelId);
 	if (!match) return false;
 	const version = Number(match[2]) + Number(match[3] ?? 0) / 10;
 	return version >= 4.6;

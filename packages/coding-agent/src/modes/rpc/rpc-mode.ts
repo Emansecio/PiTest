@@ -759,6 +759,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		for (const cleanup of signalCleanupHandlers) {
 			cleanup();
 		}
+		// Reap detached bash trees before dispose (mirrors interactive graceful quit).
+		killTrackedDetachedChildren();
 		// Settle every in-flight extension dialog to its default so a pending
 		// request (a dialog with no timeout/signal, or a hung client) cannot keep
 		// teardown awaiting.

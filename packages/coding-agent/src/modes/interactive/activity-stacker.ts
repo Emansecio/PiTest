@@ -1,110 +1,92 @@
-import type { Component, TUI } from "@pit/tui";
-import { ActivityLineComponent } from "./components/activity-line.ts";
-import { BashGroupComponent } from "./components/bash-group.ts";
-import { NavGroupComponent } from "./components/nav-group.ts";
-import { actionCoalesceKey } from "./components/tool-activity.ts";
+import { type Component, Spacer, type TUI } from "@pit/tui";
 import type { ToolExecutionComponent } from "./components/tool-execution.ts";
+import { WorkGroupComponent } from "./components/work-group.ts";
 
 /** Tools that are a turn exchange with the user, not background activity:
  * rendered as their own turn block elsewhere, never in the activity stream. */
 const TURN_EXCHANGE_TOOLS = new Set(["ask", "resolve"]);
 
 /**
- * Owns the routing rule that maps a tool call into the activity stream.
- * Navigation folds into a NavGroup; consecutive `bash` actions fold into a
- * BashGroup; other actions close open groups and get their own ActivityLine;
- * consecutive identical actions fold into one line with a `×N` counter;
- * ask/resolve are skipped (returns false so the caller can render them as turn
- * blocks).
+ * Routes tool calls into the activity stream as a sequence of WORK PHASES. Every
+ * call between two agent-text divides folds into one {@link WorkGroupComponent}:
+ * navigation + bash + misc actions collapse into a dense cross-family counter
+ * (`5 searches·8 commands`), while high-signal calls — edits, writes, task
+ * delegations, and todo/plan bookkeeping — are promoted to their own line beneath
+ * it. An action in the middle no longer fragments the phase into three blocks.
  *
- * Activity blocks stack tight — there is no blank between consecutive tool
- * blocks. The breathing room comes from the agent-text boundary (each
- * MessageShell / AssistantMessage brings its own leading blank), so a long
- * burst of tool calls reads as a compact list instead of a double-spaced one.
+ * `divide()` (visible agent text) seals the open phase, and a sealed phase collapses
+ * to a single summary line; the next call opens a fresh phase. Activity phases stack
+ * tight — a blank divides bursts only where agent narration intervenes, so narration
+ * gets breathing room without double-spacing a long tool run.
+ *
+ * ask/resolve are turn exchanges, not activity: placeCall returns false so the
+ * caller renders them as their own turn block.
  */
 export class ActivityStacker {
 	private ui: TUI;
 	private addToChat: (component: Component) => void;
-	private current: NavGroupComponent | null = null;
-	private currentBash: BashGroupComponent | null = null;
+	private current: WorkGroupComponent | null = null;
 	// Per-turn sequence for unnamed `task` agents (reset on reset()).
 	private taskOrdinal = 0;
-	// The last action line placed + its coalesce fingerprint. A new action with
-	// the SAME fingerprint folds into it (×N) instead of stacking an identical
-	// row. Any navigation call, turn exchange, or divide/reset breaks the run.
-	private lastAction: ActivityLineComponent | null = null;
-	private lastActionKey: string | null = null;
+	private gapBeforeNextActivity = false;
+	/** When true, activity spinners hold still so the working loader owns motion. */
+	private spinnersFrozen = false;
+	private readonly isFrozen = (): boolean => this.spinnersFrozen;
 
 	constructor(ui: TUI, addToChat: (component: Component) => void) {
 		this.ui = ui;
 		this.addToChat = addToChat;
 	}
 
-	/** Place a tool call. Navigation folds into the open group; an action closes
-	 * the group and gets its own ActivityLine (or folds into the previous one when
-	 * identical). Returns false when the tool is a turn exchange (ask/resolve) the
-	 * caller should render itself. */
+	/** Freeze/unfreeze WorkGroup + ActivityLine spinners (one animated zone). */
+	setSpinnersFrozen(frozen: boolean): void {
+		this.spinnersFrozen = frozen;
+	}
+
+	private appendActivity(component: Component): void {
+		if (this.gapBeforeNextActivity) {
+			this.addToChat(new Spacer(1));
+			this.gapBeforeNextActivity = false;
+		}
+		this.addToChat(component);
+	}
+
+	/** Place a tool call into the current work phase, opening one if needed. Returns
+	 * false when the tool is a turn exchange (ask/resolve) the caller renders itself. */
 	placeCall(exec: ToolExecutionComponent): boolean {
 		if (TURN_EXCHANGE_TOOLS.has(exec.getToolName())) {
-			this.breakRun();
+			this.seal();
+			this.gapBeforeNextActivity = false;
 			return false;
 		}
-		if (exec.getActivityFamily() === "action") {
-			this.current = null;
-			if (exec.getToolName() === "bash") {
-				this.lastAction = null;
-				this.lastActionKey = null;
-				if (!this.currentBash) {
-					this.currentBash = new BashGroupComponent(this.ui);
-					this.addToChat(this.currentBash);
-				}
-				this.currentBash.addCall(exec);
-				return true;
-			}
-			this.currentBash = null;
-			const key = actionCoalesceKey(exec.getToolName(), exec.getArgs());
-			if (key !== null && this.lastAction && this.lastActionKey === key) {
-				this.lastAction.coalesce(exec);
-				return true;
-			}
-			const line = new ActivityLineComponent(this.ui);
-			this.addToChat(line);
-			// Number unnamed task agents per turn so they get a stable "Agente N".
-			const ordinal = exec.getToolName() === "task" ? ++this.taskOrdinal : 0;
-			line.setExec(exec, ordinal);
-			this.lastAction = line;
-			this.lastActionKey = key;
-			return true;
-		}
-		// Navigation breaks any in-progress action/bash run, then folds into the group.
-		this.lastAction = null;
-		this.lastActionKey = null;
-		this.currentBash = null;
 		if (!this.current) {
-			this.current = new NavGroupComponent(this.ui);
-			this.addToChat(this.current);
+			this.current = new WorkGroupComponent(this.ui, this.isFrozen);
+			this.appendActivity(this.current);
 		}
-		this.current.addCall(exec);
+		// Number unnamed task agents per turn so they get a stable "Agent N".
+		const ordinal = exec.getToolName() === "task" ? ++this.taskOrdinal : 0;
+		this.current.addCall(exec, ordinal);
 		return true;
 	}
 
-	/** Agent text or abort splits the burst without promoting state. */
+	/** Agent text or abort splits the burst: seal the open phase and leave a gap so
+	 * the next real activity block has one leading blank. */
 	divide(): void {
-		this.breakRun();
+		this.seal();
+		this.gapBeforeNextActivity = true;
 	}
 
-	/** New turn / history rebuild: forget the open group and restart agent numbering. */
+	/** New turn / history rebuild: seal the open phase and restart agent numbering. */
 	reset(): void {
-		this.breakRun();
+		this.seal();
+		this.gapBeforeNextActivity = false;
 		this.taskOrdinal = 0;
 	}
 
-	/** Close the open NavGroup and the action-coalescing run so the next call
-	 * starts fresh. Shared by divide/reset and the turn-exchange path. */
-	private breakRun(): void {
+	/** Seal the open phase (so it collapses to its summary) and detach it, so the
+	 * next call opens a fresh phase. Shared by divide/reset and the turn-exchange path. */
+	private seal(): void {
+		this.current?.seal();
 		this.current = null;
-		this.currentBash = null;
-		this.lastAction = null;
-		this.lastActionKey = null;
 	}
 }

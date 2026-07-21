@@ -199,6 +199,8 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		for (const cleanup of signalCleanupHandlers) {
 			cleanup();
 		}
+		// Reap detached bash trees on normal completion (signal path already does).
+		killTrackedDetachedChildren();
 		await disposeRuntime();
 		await flushRawStdout();
 	}

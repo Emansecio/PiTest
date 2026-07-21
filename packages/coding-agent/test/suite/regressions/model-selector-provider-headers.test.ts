@@ -52,15 +52,15 @@ describe("model selector provider group headers", () => {
 						apiKey: "k-alpha",
 						api: "openai-completions",
 						models: [
-							{ id: "a1", name: "Alpha One" },
-							{ id: "a2", name: "Alpha Two" },
+							{ id: "x", name: "Alpha One" },
+							{ id: "zzx", name: "Alpha Two" },
 						],
 					},
 					beta: {
 						baseUrl: "https://beta.example.com/v1",
 						apiKey: "k-beta",
 						api: "openai-completions",
-						models: [{ id: "b1", name: "Beta One" }],
+						models: [{ id: "zx", name: "Beta One" }],
 					},
 				},
 			}),
@@ -71,7 +71,7 @@ describe("model selector provider group headers", () => {
 		registry.refresh();
 
 		const available = registry.getAvailable();
-		const a1 = available.find((m) => m.provider === "alpha" && m.id === "a1")!;
+		const a1 = available.find((m) => m.provider === "alpha" && m.id === "x")!;
 		expect(a1).toBeDefined();
 
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
@@ -110,5 +110,17 @@ describe("model selector provider group headers", () => {
 		const b1Idx = lines.findIndex((line) => line.includes("Beta One"));
 		expect(a1Idx).toBeLessThan(a2Idx);
 		expect(a2Idx).toBeLessThan(b1Idx);
+
+		// Fuzzy rank interleaves alpha/x, beta/zx, alpha/zzx. Search results are
+		// therefore a flat ranked list with provider names inline, not three noisy
+		// group headers (alpha, beta, alpha).
+		selector.handleInput("x");
+		const searchLines = stripAnsi(selector.render(120).join("\n"))
+			.split("\n")
+			.map((line) => line.trim());
+		expect(searchLines.filter((line) => stripCardFrame(line) === "alpha")).toHaveLength(0);
+		expect(searchLines.filter((line) => stripCardFrame(line) === "beta")).toHaveLength(0);
+		expect(searchLines.some((line) => line.includes("alpha · Alpha One"))).toBe(true);
+		expect(searchLines.some((line) => line.includes("beta · Beta One"))).toBe(true);
 	});
 });

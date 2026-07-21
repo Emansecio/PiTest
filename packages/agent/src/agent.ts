@@ -718,16 +718,50 @@ export class Agent {
 		}
 		// Listeners run in parallel via Promise.all. Subscription order is no longer
 		// observable between listeners, but all settle before the next event.
+		// Each listener is also raced against a wall-clock budget so a hung
+		// extension on agent_end / tool_execution_end cannot leave isStreaming true forever.
+		const listenerTimeoutMs = resolveAgentListenerTimeoutMs();
+		type Listener = (event: AgentEvent, signal: AbortSignal) => Promise<void> | void;
+		const runListener = async (listener: Listener) => {
+			const pending = Promise.resolve(listener(event, signal));
+			if (listenerTimeoutMs <= 0) {
+				await pending;
+				return;
+			}
+			pending.catch(() => {});
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				await Promise.race([
+					pending,
+					new Promise<void>((resolve) => {
+						timer = setTimeout(resolve, listenerTimeoutMs);
+						(timer as { unref?: () => void }).unref?.();
+					}),
+				]);
+			} finally {
+				if (timer !== undefined) clearTimeout(timer);
+			}
+		};
 		if (this.listeners.size === 1) {
 			for (const listener of this.listeners) {
-				await listener(event, signal);
+				await runListener(listener);
 			}
 		} else if (this.listeners.size > 1) {
-			const pending: Array<Promise<void> | void> = [];
+			const pending: Array<Promise<void>> = [];
 			for (const listener of this.listeners) {
-				pending.push(listener(event, signal));
+				pending.push(runListener(listener));
 			}
 			await Promise.all(pending);
 		}
 	}
+}
+
+const DEFAULT_AGENT_LISTENER_TIMEOUT_MS = 30_000;
+
+function resolveAgentListenerTimeoutMs(): number {
+	const raw = typeof process !== "undefined" ? process.env.PIT_AGENT_LISTENER_TIMEOUT_MS : undefined;
+	if (raw === undefined || raw === "") return DEFAULT_AGENT_LISTENER_TIMEOUT_MS;
+	const n = Number(raw);
+	if (!Number.isFinite(n) || n < 0) return DEFAULT_AGENT_LISTENER_TIMEOUT_MS;
+	return n;
 }

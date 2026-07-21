@@ -34,7 +34,25 @@ function installFetch() {
 					result = { resources: [{ uri: "file://a.txt", name: "A", description: "the A file" }] };
 					break;
 				case "resources/read":
-					result = { contents: [{ uri: body.params.uri, text: "hello-resource" }] };
+					result = {
+						contents:
+							body.params.uri === "file://many"
+								? [
+										{
+											uri: "file://a.txt",
+											text: Array.from({ length: 10_000 }, (_, i) =>
+												(i % 2 === 0 ? "x" : "y").repeat(64),
+											).join("\n"),
+										},
+										{
+											uri: "file://b.txt",
+											text: Array.from({ length: 10_000 }, (_, i) =>
+												(i % 2 === 0 ? "m" : "n").repeat(64),
+											).join("\n"),
+										},
+									]
+								: [{ uri: body.params.uri, text: "hello-resource" }],
+					};
 					break;
 				case "prompts/list":
 					result = {
@@ -146,6 +164,28 @@ describe("MCP resources + prompts wiring", () => {
 		const listTool = harness.registeredTools.get("list_mcp_resources")!;
 		const listed = await listTool.execute("id2", {}, undefined, undefined as never, undefined as never);
 		expect((listed.content[0] as { text: string }).text).toContain("file://a.txt");
+	});
+
+	it("caps multi-block resource reads under one aggregate budget", async () => {
+		installFetch();
+		const harness = createFakePi();
+		createMcpExtension({ settings: { servers: { full: { url: URL } } } })(harness.pi);
+		await harness.fireSessionStart();
+		await waitForMcpEffect(() => harness.registeredTools.has("read_mcp_resource"));
+
+		const readTool = harness.registeredTools.get("read_mcp_resource")!;
+		const res = await readTool.execute(
+			"id-many",
+			{ server: "full", uri: "file://many" },
+			undefined,
+			undefined as never,
+			undefined as never,
+		);
+		expect(res.content).toHaveLength(1);
+		const text = (res.content[0] as { text: string }).text;
+		expect(text).toContain("[MCP output truncated:");
+		expect(text).not.toContain("file://b.txt");
+		expect(Buffer.byteLength(text, "utf8")).toBeLessThan(70 * 1024);
 	});
 
 	it("registers each prompt as a slash command that injects the rendered text", async () => {

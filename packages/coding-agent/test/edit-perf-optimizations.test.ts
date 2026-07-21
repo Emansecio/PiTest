@@ -54,30 +54,30 @@ describe("canonicalPathKey realpath cache", () => {
 });
 
 describe("edit execute() base-content cache", () => {
-	it("reuses the mtime-keyed base populated by the streaming preview (cache hit)", async () => {
+	it("always applies against current disk bytes even when preview cache mtime matches", async () => {
 		const file = join(dir, "hit.txt");
-		await writeFile(file, "hello\nworld\n");
+		await writeFile(file, "alpha ONE\n");
 		// Pin a fixed past mtime so the cache key is reproducible after a rewrite.
 		const past = new Date(Date.now() - 60_000);
 		await utimes(file, past, past);
 
 		// Streaming-preview read warms the base cache with the CURRENT bytes.
-		await computeEditsDiffWithBaseCache(file, [{ oldText: "world", newText: "WORLD" }], dir);
+		await computeEditsDiffWithBaseCache(file, [{ oldText: "ONE", newText: "TWO" }], dir);
 
-		// Bytes change on disk but the mtime is restored to the cached one — the
-		// exact race window the cache trades on. execute() must edit the CACHED
-		// bytes ("world"), not the on-disk bytes ("planet").
-		await writeFile(file, "hello\nplanet\n");
+		// Bytes change on disk but the mtime is restored to the cached one. Execute
+		// must ignore the timestamp-only cache as a write base and preserve the
+		// external bytes around the requested replacement.
+		await writeFile(file, "bravo ONE\n");
 		await utimes(file, past, past);
 
 		const editTool = createEditTool(dir);
 		const res = (await editTool.execute("c1", {
 			path: file,
-			edits: [{ oldText: "world", newText: "WORLD" }],
+			edits: [{ oldText: "ONE", newText: "TWO" }],
 		})) as TextResult;
 
 		expect(resultText(res)).toContain("Successfully replaced");
-		expect(await readFile(file, "utf8")).toBe("hello\nWORLD\n");
+		expect(await readFile(file, "utf8")).toBe("bravo TWO\n");
 	});
 
 	it("re-reads from disk on an mtime mismatch (cache miss)", async () => {

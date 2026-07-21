@@ -184,6 +184,12 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (model.id.includes("opus-4-8") || model.id.includes("opus-4.8")) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh" });
 	}
+	// Fable 5 supports adaptive effort through xhigh (same wire value as Opus 4.7+).
+	// Upstream catalogs omit the opt-in map; without it the selector stops at high.
+	// off/minimal stay nulled — Fable's usable range is low → xhigh.
+	if (model.id.includes("fable-5") || model.id.includes("fable-5.")) {
+		mergeThinkingLevelMap(model, { off: null, minimal: null, xhigh: "xhigh" });
+	}
 	if (model.api === "openai-completions" && model.id.includes("deepseek-v4")) {
 		mergeThinkingLevelMap(model, DEEPSEEK_V4_THINKING_LEVEL_MAP);
 	}
@@ -929,6 +935,12 @@ async function generateModels() {
 			candidate.cost.output = 2.06;
 			candidate.cost.cacheRead = 0.07;
 			candidate.maxTokens = 4096;
+		}
+		// Upstream models.dev entry for Fable 5 omits its thinking range; pin it
+		// so xhigh stays selectable (low → xhigh, no off/minimal), matching the
+		// fallback block below.
+		if (candidate.provider === "anthropic" && candidate.id === "claude-fable-5") {
+			candidate.thinkingLevelMap = { off: null, minimal: null, xhigh: "xhigh" };
 		}
 		if (candidate.provider === "openrouter" && candidate.id === "z-ai/glm-5") {
 			candidate.cost.input = 0.6;

@@ -3,7 +3,7 @@ import { type Component, Container, getKeybindings, Spacer, Text, truncateToWidt
 import type { TurnGroup } from "../../../core/file-snapshots.ts";
 import { theme } from "../theme/theme.ts";
 import { selectionCursor, themedScrollPositionHint } from "./keybinding-hints.ts";
-import { SelectorCard } from "./selector-card.ts";
+import { beginSelectorSurface } from "./selector-surface.ts";
 
 /**
  * Parse a snapshot stamp (`2026-07-17T12-30-45-123Z-<counter>-<rand>`) back into
@@ -144,14 +144,14 @@ export class RewindSelectorComponent extends Container {
 		);
 		this.addChild(new Spacer(1));
 
-		const card = new SelectorCard();
+		const { surface: card, mount } = beginSelectorSurface(this, true);
 		card.addChild(new Spacer(1));
 		this.list = new RewindList(turns);
 		this.list.onConfirm = onConfirm;
 		this.list.onCancel = onCancel;
 		card.addChild(this.list);
 		card.addChild(new Spacer(1));
-		this.addChild(card);
+		mount();
 
 		if (turns.length === 0) setTimeout(() => onCancel(), 100);
 	}

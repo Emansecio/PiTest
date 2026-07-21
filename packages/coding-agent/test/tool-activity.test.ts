@@ -2,7 +2,6 @@ import { beforeAll, describe, expect, it, test } from "vitest";
 import {
 	capDiffPreview,
 	diffStat,
-	glyphFor,
 	hasEditDiff,
 	isEditFamilyTool,
 	nounFor,
@@ -10,15 +9,8 @@ import {
 	verbFor,
 } from "../src/modes/interactive/components/tool-activity.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
-import { stripAnsi } from "../src/utils/ansi.js";
 
 beforeAll(() => initTheme("dark"));
-
-describe("glyphFor", () => {
-	it("uses ◈ as the fallback glyph for unmapped tools", () => {
-		expect(stripAnsi(glyphFor("some_mcp_tool"))).toBe("◈");
-	});
-});
 
 describe("nounFor", () => {
 	test("maps known tools (navigation and action), falls back to step", () => {

@@ -11,7 +11,7 @@ import { Type } from "typebox";
 import { mapWithConcurrency } from "../../utils/map-with-concurrency.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { McpManager } from "./manager.ts";
-import { capMcpText } from "./tools.ts";
+import { capMcpText, resolveMcpCapBytes } from "./tools.ts";
 
 const LIST_RESOURCES_CONCURRENCY = 4;
 
@@ -99,19 +99,33 @@ export function createReadResourceTool(manager: McpManager): ToolDefinition {
 			}
 			try {
 				const result = await client.readResource(uri, signal);
-				const blocks: Array<{ type: "text"; text: string }> = [];
+				const parts: string[] = [];
+				let remaining = resolveMcpCapBytes(server);
+				let elided = 0;
 				for (const c of result.contents ?? []) {
+					let raw: string | undefined;
 					if (typeof c.text === "string") {
-						blocks.push({ type: "text", text: capMcpText(`[${c.uri}]\n${c.text}`, server) });
+						raw = `[${c.uri}]\n${c.text}`;
 					} else if (typeof c.blob === "string") {
-						blocks.push({
-							type: "text",
-							text: `[${c.uri}] binary resource (${c.blob.length} base64 bytes, ${c.mimeType ?? "unknown"})`,
-						});
+						raw = `[${c.uri}] binary resource (${c.blob.length} base64 bytes, ${c.mimeType ?? "unknown"})`;
+					}
+					if (raw === undefined) continue;
+					if (remaining <= 0) {
+						elided += 1;
+						continue;
+					}
+					const text = capMcpText(raw, server);
+					const size = Buffer.byteLength(text, "utf8") + (parts.length > 0 ? 2 : 0);
+					if (parts.length === 0 || size <= remaining) {
+						parts.push(text);
+						remaining -= size;
+					} else {
+						elided += 1;
 					}
 				}
-				if (blocks.length === 0) blocks.push({ type: "text", text: "(empty resource)" });
-				return { content: blocks, isError: false, details: undefined };
+				if (elided > 0) parts.push(`[+${elided} MCP resource blocks elided — refine the query]`);
+				const text = parts.length === 0 ? "(empty resource)" : parts.join("\n\n");
+				return { content: [{ type: "text", text }], isError: false, details: undefined };
 			} catch (err) {
 				return {
 					content: [

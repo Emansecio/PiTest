@@ -41,9 +41,16 @@ const MAX_PASTE_BYTES = 10 * 1024 * 1024;
 // it can fire and let this.buffer grow without bound (OOM). Mirroring the
 // MAX_PASTE_BYTES guard, once the remainder exceeds this cap we force-flush the
 // buffered content as data and reset, so growth is bounded even when no chunk
-// gap ever reaches timeoutMs. Generous so legitimate long sequences still buffer
-// normally before completion.
-const MAX_BUFFER_BYTES = 10 * 1024 * 1024;
+// gap ever reaches timeoutMs.
+//
+// Kept modest (64 KiB) because extractCompleteSequences re-scans incomplete
+// prefixes; multi-megabyte incomplete CSI would burn the event loop in O(n²)
+// string slices and freeze the TUI. Real CSI/Kitty sequences are tiny.
+const MAX_BUFFER_BYTES = 64 * 1024;
+
+// Hard cap on a single incomplete escape attempt before force-flush. Prevents
+// the O(n²) scan of `\x1b[` + many digits even when under MAX_BUFFER_BYTES.
+const MAX_INCOMPLETE_ESC_BYTES = 4 * 1024;
 
 /**
  * Check if a string is a complete escape sequence or needs more data
@@ -220,9 +227,11 @@ function extractCompleteSequences(buffer: string): { sequences: string[]; remain
 
 		// Try to extract a sequence starting at this position
 		if (remaining.startsWith(ESC)) {
-			// Find the end of this escape sequence
+			// Find the end of this escape sequence. Cap the scan so a pathological
+			// incomplete CSI cannot burn O(n²) on multi-KB digit runs.
+			const scanLimit = Math.min(remaining.length, MAX_INCOMPLETE_ESC_BYTES);
 			let seqEnd = 1;
-			while (seqEnd <= remaining.length) {
+			while (seqEnd <= scanLimit) {
 				const candidate = remaining.slice(0, seqEnd);
 				const status = isCompleteSequence(candidate);
 
@@ -263,6 +272,16 @@ function extractCompleteSequences(buffer: string): { sequences: string[]; remain
 				}
 			}
 
+			if (seqEnd > scanLimit) {
+				// Incomplete past the scan cap: force-flush as data so the event loop
+				// is not wedged re-scanning the same growing prefix every chunk.
+				if (remaining.length > MAX_INCOMPLETE_ESC_BYTES) {
+					sequences.push(remaining.slice(0, MAX_INCOMPLETE_ESC_BYTES));
+					pos += MAX_INCOMPLETE_ESC_BYTES;
+					continue;
+				}
+				return { sequences, remainder: remaining };
+			}
 			if (seqEnd > remaining.length) {
 				return { sequences, remainder: remaining };
 			}

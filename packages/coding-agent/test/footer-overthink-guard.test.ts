@@ -22,6 +22,7 @@ function makeSession(): AgentSession {
 			getCwd: () => "/tmp/project",
 		},
 		getContextUsage: () => ({ contextWindow: 200_000, percent: 0, tokens: 0 }),
+		goalIsDriving: () => false,
 		goalStatusLine: () => "",
 		modelRegistry: { isUsingOAuth: () => false },
 		orchestration: "solo",

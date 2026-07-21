@@ -14,7 +14,7 @@ import { formatDisplayPath } from "../display-utils.ts";
 import { theme } from "../theme/theme.ts";
 import { HINT_SEPARATOR, keyHint, keyText, scrollPositionHint, selectionCursor } from "./keybinding-hints.ts";
 import { paintSelectedRow } from "./selectable-row.ts";
-import { SelectorCard } from "./selector-card.ts";
+import { beginSelectorSurface } from "./selector-surface.ts";
 
 /** Gutter info: position (displayIndent where connector was) and whether to show │ */
 interface GutterInfo {
@@ -1267,7 +1267,7 @@ export class TreeSelectorComponent extends Container implements Focusable {
 		this.labelInputContainer = new Container();
 
 		this.addChild(new Spacer(1));
-		const card = new SelectorCard();
+		const { surface: card, mount } = beginSelectorSurface(this, true);
 		card.addChild(new Text(theme.bold("  Session Tree"), 1, 0));
 		const filterKeys = [
 			keyText("app.tree.filter.default"),
@@ -1293,7 +1293,7 @@ export class TreeSelectorComponent extends Container implements Focusable {
 		card.addChild(this.treeContainer);
 		card.addChild(this.labelInputContainer);
 		card.addChild(new Spacer(1));
-		this.addChild(card);
+		mount();
 
 		if (tree.length === 0) {
 			setTimeout(() => onCancel(), 100);

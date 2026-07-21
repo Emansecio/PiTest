@@ -65,6 +65,7 @@ export class McpClient {
 	/** Set by the manager: invoked after a runtime tools/list_changed re-list so tools get re-registered. */
 	onToolsChanged?: () => void;
 	private relistInFlight = false;
+	private initializeController?: AbortController;
 	/**
 	 * Single-flight guard for forceTokenRefresh. Concurrent 401s (e.g. two tool calls
 	 * in flight when the bearer expires server-side) must NOT each issue a parallel
@@ -148,8 +149,8 @@ export class McpClient {
 	 * freezing it, then merges the OAuth bearer with the same precedence as the
 	 * sync version.
 	 */
-	private async transportConfigAsync(): Promise<McpServerConfig> {
-		return this.mergeAuthHeader(await resolveServerConfigAsync(this.config));
+	private async transportConfigAsync(signal?: AbortSignal): Promise<McpServerConfig> {
+		return this.mergeAuthHeader(await resolveServerConfigAsync(this.config, signal));
 	}
 
 	/** Refresh an expired OAuth token before a (re)connect so the handshake is authenticated. */
@@ -228,49 +229,80 @@ export class McpClient {
 	}
 
 	async initialize(signal?: AbortSignal): Promise<void> {
-		// Refresh an expired OAuth token and re-inject the bearer before connecting,
-		// so a reconnect after token expiry re-handshakes with a valid token.
-		await this.ensureFreshAuth();
-		this.transport.updateConfig?.(await this.transportConfigAsync());
-		// start() resets/(re)opens the transport so a reconnect re-handshakes with
-		// fresh state (no stale HTTP session id, no dead subprocess, no dead channel).
-		await this.transport.start(signal);
-		const initParams = {
-			protocolVersion: PROTOCOL_VERSION,
-			capabilities: { tools: {}, resources: {}, prompts: {} },
-			clientInfo: CLIENT_INFO,
-		};
-		type InitResult = {
-			protocolVersion?: string;
-			capabilities?: Record<string, unknown>;
-		};
-		let result: InitResult;
-		try {
-			result = await this.rpc<InitResult>("initialize", initParams, signal, 15_000);
-		} catch (err) {
-			// Stored token rejected at handshake (revoked/rotated, or no expiry to
-			// pre-refresh): force a refresh and re-handshake once.
-			if (isUnauthorizedError(err) && (await this.forceTokenRefresh())) {
-				result = await this.rpc<InitResult>("initialize", initParams, signal, 15_000);
-			} else {
-				throw err;
+		this.initializeController?.abort(new Error(`MCP ${this.name}: initialization superseded`));
+		const controller = new AbortController();
+		this.initializeController = controller;
+		const forwardAbort = () =>
+			controller.abort(signal?.reason instanceof Error ? signal.reason : new Error("aborted"));
+		if (signal?.aborted) forwardAbort();
+		else signal?.addEventListener("abort", forwardAbort, { once: true });
+		const activeSignal = controller.signal;
+		const throwIfAborted = () => {
+			if (activeSignal.aborted) {
+				throw activeSignal.reason instanceof Error ? activeSignal.reason : new Error("aborted");
 			}
-		}
-		const caps = result.capabilities ?? {};
-		this.capabilities = {
-			tools: caps.tools !== undefined,
-			resources: caps.resources !== undefined,
-			prompts: caps.prompts !== undefined,
 		};
+		this.initialized = false;
+		try {
+			// Refresh an expired OAuth token and re-inject the bearer before connecting,
+			// so a reconnect after token expiry re-handshakes with a valid token.
+			await this.ensureFreshAuth();
+			throwIfAborted();
+			this.transport.updateConfig?.(await this.transportConfigAsync(activeSignal));
+			throwIfAborted();
+			// start() resets/(re)opens the transport so a reconnect re-handshakes with
+			// fresh state (no stale HTTP session id, no dead subprocess, no dead channel).
+			await this.transport.start(activeSignal);
+			throwIfAborted();
+			const initParams = {
+				protocolVersion: PROTOCOL_VERSION,
+				capabilities: { tools: {}, resources: {}, prompts: {} },
+				clientInfo: CLIENT_INFO,
+			};
+			type InitResult = {
+				protocolVersion?: string;
+				capabilities?: Record<string, unknown>;
+			};
+			let result: InitResult;
+			try {
+				result = await this.rpc<InitResult>("initialize", initParams, activeSignal, 15_000);
+			} catch (err) {
+				// Stored token rejected at handshake (revoked/rotated, or no expiry to
+				// pre-refresh): force a refresh and re-handshake once.
+				if (isUnauthorizedError(err) && (await this.forceTokenRefresh())) {
+					throwIfAborted();
+					result = await this.rpc<InitResult>("initialize", initParams, activeSignal, 15_000);
+				} else {
+					throw err;
+				}
+			}
+			const caps = result.capabilities ?? {};
+			this.capabilities = {
+				tools: caps.tools !== undefined,
+				resources: caps.resources !== undefined,
+				prompts: caps.prompts !== undefined,
+			};
 
-		// Send the initialized notification (no response expected).
-		await this.transport.notify({ jsonrpc: "2.0", method: "notifications/initialized" }, signal);
+			// Send the initialized notification (no response expected).
+			await this.transport.notify({ jsonrpc: "2.0", method: "notifications/initialized" }, activeSignal);
+			throwIfAborted();
 
-		// Always refresh tools (servers commonly advertise tools without an explicit
-		// capability flag; tools/list is harmless if empty). Resources/prompts are
-		// only listed lazily, gated by their capability.
-		await this.refreshTools(signal);
-		this.initialized = true;
+			// Always refresh tools (servers commonly advertise tools without an explicit
+			// capability flag; tools/list is harmless if empty). Resources/prompts are
+			// only listed lazily, gated by their capability.
+			await this.refreshTools(activeSignal);
+			throwIfAborted();
+			this.initialized = true;
+		} catch (error) {
+			if (this.initializeController === controller) {
+				this.initialized = false;
+				this.transport.dispose();
+			}
+			throw error;
+		} finally {
+			signal?.removeEventListener("abort", forwardAbort);
+			if (this.initializeController === controller) this.initializeController = undefined;
+		}
 	}
 
 	/**
@@ -363,6 +395,8 @@ export class McpClient {
 	}
 
 	dispose(): void {
+		this.initializeController?.abort(new Error(`MCP ${this.name}: client disposed`));
+		this.initializeController = undefined;
 		this.initialized = false;
 		this.tools = [];
 		this.capabilities = {};

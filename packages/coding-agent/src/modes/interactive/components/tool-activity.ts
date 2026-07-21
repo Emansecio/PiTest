@@ -1,7 +1,7 @@
 import { basename } from "node:path";
 import { truncateToWidth } from "@pit/tui";
 import { truncateWithEllipsis } from "../../../utils/surrogate.ts";
-import { type ThemeColor, theme } from "../theme/theme.ts";
+import { theme } from "../theme/theme.ts";
 import { keyText } from "./keybinding-hints.ts";
 
 export type ToolActivity = "navigation" | "action";
@@ -92,6 +92,8 @@ const TOOL_NOUNS: Record<string, string> = {
 	ls: "list",
 	symbol: "symbol",
 	recall: "recall",
+	recall_history: "recall",
+	recall_tool_output: "recall",
 	reflect: "reflection",
 	recipe: "recipe",
 	calc: "calc",
@@ -123,11 +125,18 @@ const TOOL_NOUNS: Record<string, string> = {
 	ask: "question",
 	resolve: "answer",
 	preview: "preview",
+	plan: "plan",
+	task: "agent",
 };
 
 export function nounFor(toolName: string): string {
 	return TOOL_NOUNS[toolName] ?? "step";
 }
+
+/** Dense separator for activity counters — no lateral padding, so a burst reads
+ * `5 searches·8 commands·2 edits` instead of the airier `… · … · …`. Kept as one
+ * constant so every counter (nav group, work group, basename list) stays uniform. */
+export const COUNTER_SEP = "·";
 
 const CONSONANTS_BEFORE_Y = /[bcdfghjklmnpqrstvwxz]y$/i;
 
@@ -157,6 +166,7 @@ const ACTION_VERBS: Record<string, { done: string; pending: string }> = {
 	render_mermaid: { done: "Rendered", pending: "Rendering" },
 	preview: { done: "Previewed", pending: "Previewing" },
 	todo: { done: "Updated todos", pending: "Updating todos" },
+	plan: { done: "Updated plan", pending: "Updating plan" },
 };
 
 export function verbFor(toolName: string, pending: boolean): string {
@@ -186,63 +196,6 @@ export function parseMcpToolName(toolName: string): { server: string; tool: stri
 		}
 	}
 	return null;
-}
-
-/** Per-tool-type glyph rendered between the state icon and the label so the
- * action family (edit / run / search / read / …) is legible at a glance. Every
- * glyph here is verified width-1 (one terminal cell) so it never shifts the
- * label column — emoji / variation-selectors that measure 2 are banned. */
-const TOOL_GLYPH: Record<string, string> = {
-	edit: "✎",
-	edit_v2: "✎",
-	ast_edit: "✎",
-	write: "✎",
-	bash: "$",
-	grep: "⌕",
-	find: "⌕",
-	ast_grep: "⌕",
-	search_tool_bm25: "⌕",
-	web_search: "⌕",
-	read: "▸",
-	todo: "≡",
-	task: "◆",
-	subagent: "◆",
-	preview: "◑",
-};
-
-/** Family tint for a type glyph, mapped onto existing theme tokens (no new
- * tokens): edits read as `success`, shell as `warning`, searches/reads as
- * `accent`, agents as `toolTitle`. Unmapped → muted neutral. */
-const TOOL_GLYPH_COLOR: Record<string, ThemeColor> = {
-	edit: "success",
-	edit_v2: "success",
-	ast_edit: "success",
-	write: "success",
-	bash: "warning",
-	grep: "accent",
-	find: "accent",
-	ast_grep: "accent",
-	search_tool_bm25: "accent",
-	web_search: "accent",
-	read: "accent",
-	task: "toolTitle",
-	subagent: "toolTitle",
-	preview: "toolTitle",
-};
-
-/** Neutral fallback glyph for tools without a mapped type glyph (MCP/unknown). */
-const FALLBACK_GLYPH = "◈";
-
-/**
- * Colorized, width-1 type glyph for a tool, tinted by family. Falls back to a
- * muted MCP diamond for unmapped tools so every activity line keeps a stable
- * `<state> <glyph> <label>` shape. The returned string is exactly one visible
- * cell wide (ANSI is width-free), preserving the TUI width invariant.
- */
-export function glyphFor(toolName: string): string {
-	const glyph = TOOL_GLYPH[toolName];
-	if (glyph === undefined) return theme.fg("muted", FALLBACK_GLYPH);
-	return theme.fg(TOOL_GLYPH_COLOR[toolName] ?? "muted", glyph);
 }
 
 /** Colored `server shortName` target for MCP activity headers when no path target exists. */

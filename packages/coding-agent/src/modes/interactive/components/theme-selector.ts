@@ -72,6 +72,8 @@ export class ThemeSelectorComponent extends Container implements Focusable {
 			search: true,
 			onCancel,
 			tui,
+			// Mounted inside ComposerChrome via showSelector — one frame only.
+			embedded: true,
 		});
 		this.addChild(this.shell);
 	}

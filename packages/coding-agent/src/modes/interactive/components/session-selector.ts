@@ -21,7 +21,7 @@ import { formatDisplayPath } from "../display-utils.ts";
 import { theme } from "../theme/theme.ts";
 import { keyHint, keyText, selectionCursor, themedScrollPositionHint } from "./keybinding-hints.ts";
 import { paintSelectedRow } from "./selectable-row.ts";
-import { SelectorCard } from "./selector-card.ts";
+import { beginSelectorSurface } from "./selector-surface.ts";
 import { filterAndSortSessions, hasSessionName, type NameFilter, type SortMode } from "./session-selector-search.ts";
 
 type SessionScope = "current" | "all";
@@ -872,7 +872,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		// Default cardBorder like every other selector — accent borders are
 		// reserved for genuinely special surfaces (announcements), and /resume
 		// is routine chrome.
-		const card = new SelectorCard(1, 0);
+		const { surface: card, mount } = beginSelectorSurface(this, true);
 		card.addChild(new Spacer(1));
 		if (options?.showHeader ?? true) {
 			card.addChild(this.header);
@@ -880,8 +880,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		}
 		card.addChild(content);
 		card.addChild(new Spacer(1));
-		this.addChild(new Spacer(1));
-		this.addChild(card);
+		mount();
 	}
 
 	constructor(

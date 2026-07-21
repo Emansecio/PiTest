@@ -27,6 +27,10 @@ export type RecallToolOutputInput = Static<typeof recallToolOutputSchema>;
 
 export interface RecallToolOutputDetails {
 	found: boolean;
+	/** A miss (id not found) is an expected, recoverable negative result — the
+	 * activity stream reads this to avoid painting the row red / auto-expanding,
+	 * while the payload still carries isError for the model and the retry budget. */
+	recoverable?: boolean;
 }
 
 export function createRecallToolOutputDefinition(
@@ -38,6 +42,7 @@ export function createRecallToolOutputDefinition(
 		description:
 			'Retrieve the full text of a tool output that was deferred out of context during pruning/compaction. Use the id from a `[Full output (~N tokens) deferred — recall_tool_output({ id: "dN" }) returns it in full.]` placeholder.',
 		promptSnippet: "Retrieve a tool output deferred during compaction by its id",
+		activity: "navigation",
 		parameters: recallToolOutputSchema,
 		async execute(_toolCallId, input: RecallToolOutputInput) {
 			const store = getCurrentDeferredOutputStore();
@@ -50,9 +55,12 @@ export function createRecallToolOutputDefinition(
 			}
 			const content = store.get(input.id);
 			if (!content) {
+				// A miss (superseded / expired id) is recoverable, not a genuine failure:
+				// keep isError so the model and retry budget still register it, but flag it
+				// recoverable so the activity stream renders it as a quiet negative result.
 				return {
 					content: [{ type: "text" as const, text: `No deferred output with id "${input.id}".` }],
-					details: { found: false },
+					details: { found: false, recoverable: true },
 					isError: true,
 				};
 			}

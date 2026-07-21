@@ -1,8 +1,8 @@
 import { resetCapabilitiesCache, setCapabilities, type TUI } from "@pit/tui";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { ActivityLineComponent } from "../src/modes/interactive/components/activity-line.ts";
-import { NavGroupComponent } from "../src/modes/interactive/components/nav-group.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
+import { WorkGroupComponent } from "../src/modes/interactive/components/work-group.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 // Pin capabilities so the gutter/icon ColorEases never arm against the tracking
@@ -100,13 +100,13 @@ describe("ActivityLineComponent.dispose stops its ticker", () => {
 	});
 });
 
-describe("NavGroupComponent.dispose stops its ticker and children", () => {
-	test("a pending nav group arms a ticker that dispose() removes", () => {
+describe("WorkGroupComponent.dispose stops its ticker and children", () => {
+	test("a pending work phase arms a ticker that dispose() removes", () => {
 		const t = trackingTui();
 		const exec = new ToolExecutionComponent("read", "r1", { file_path: "a.ts" }, {}, undefined, t.ui, process.cwd());
 		exec.markExecutionStarted();
-		const group = new NavGroupComponent(t.ui);
-		group.addCall(exec); // pending → ensureTicker arms a spinner callback
+		const group = new WorkGroupComponent(t.ui);
+		group.addCall(exec); // pending counted call → ensureTicker arms a spinner callback
 		expect(t.active()).toBeGreaterThan(0);
 		group.dispose();
 		expect(t.active()).toBe(0);
@@ -118,7 +118,7 @@ describe("NavGroupComponent.dispose stops its ticker and children", () => {
 		const b = new ToolExecutionComponent("read", "r2", { file_path: "b.ts" }, {}, undefined, t.ui, process.cwd());
 		a.markExecutionStarted();
 		b.markExecutionStarted();
-		const group = new NavGroupComponent(t.ui);
+		const group = new WorkGroupComponent(t.ui);
 		group.addCall(a);
 		group.addCall(b);
 		group.render(120);
@@ -153,11 +153,11 @@ describe("orphan resume settle stops the ticker", () => {
 		expect(exec.getActivityState()).toBe("error");
 	});
 
-	test("settling a NavGroup's pending exec as incomplete self-stops the group ticker", () => {
+	test("settling a WorkGroup's pending exec as incomplete self-stops the group ticker", () => {
 		const t = trackingTui();
 		const exec = new ToolExecutionComponent("read", "r1", { file_path: "a.ts" }, {}, undefined, t.ui, process.cwd());
 		exec.markExecutionStarted();
-		const group = new NavGroupComponent(t.ui);
+		const group = new WorkGroupComponent(t.ui);
 		group.addCall(exec);
 		expect(t.active()).toBeGreaterThan(0);
 		t.tickAll(0); // spin once while pending

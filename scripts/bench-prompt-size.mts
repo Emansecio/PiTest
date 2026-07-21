@@ -4,11 +4,8 @@
  *
  * Output METRIC lines for autoresearch.
  */
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { openBank } from "../packages/coding-agent/src/core/hindsight/bank.ts";
 import {
@@ -24,7 +21,11 @@ import {
 import { loadProjectContextFiles } from "../packages/coding-agent/src/core/resource-loader.ts";
 import { buildSystemPrompt } from "../packages/coding-agent/src/core/system-prompt.ts";
 import { compactWireToolSurface } from "../packages/coding-agent/src/core/tool-wire-schema.ts";
-import { createAllTools } from "../packages/coding-agent/src/core/tools/index.ts";
+import {
+	createAllToolDefinitions,
+	createAllTools,
+	type ToolsOptions,
+} from "../packages/coding-agent/src/core/tools/index.ts";
 import { resolveBenchRoot } from "./lib/bench-root.mts";
 
 // DX-02: measure from the script-derived, worktree-normalized repo root — not
@@ -75,15 +76,22 @@ function loadSkills(): Skill[] {
 
 const toolsMap = createAllTools(benchRoot);
 const tools = Object.values(toolsMap);
+const activeToolNames = tools.map((tool) => tool.name);
+const toolOptions: ToolsOptions = {
+	chromeDevtools: { enabled: true },
+	debug: { enabled: true },
+	lsp: { enabled: true },
+	code: { getActiveToolNames: () => activeToolNames },
+};
+const toolDefinitions = createAllToolDefinitions(benchRoot, toolOptions);
 const toolSnippets: Record<string, string> = {};
-for (const t of tools) {
-	toolSnippets[t.name] = (t as any).promptSnippet ?? t.description.split("\n")[0];
+for (const definition of Object.values(toolDefinitions)) {
+	if (definition.promptSnippet) toolSnippets[definition.name] = definition.promptSnippet;
 }
 
 const guidelinesFromTools: string[] = [];
-for (const t of tools) {
-	const pg = (t as any).promptGuidelines;
-	if (Array.isArray(pg)) guidelinesFromTools.push(...pg);
+for (const definition of Object.values(toolDefinitions)) {
+	if (definition.promptGuidelines) guidelinesFromTools.push(...definition.promptGuidelines);
 }
 
 const contextFiles = loadContextFiles(benchRoot);

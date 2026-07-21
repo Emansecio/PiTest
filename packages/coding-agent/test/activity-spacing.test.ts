@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { ActivityLineComponent } from "../src/modes/interactive/components/activity-line.ts";
-import { NavGroupComponent } from "../src/modes/interactive/components/nav-group.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
+import { WorkGroupComponent } from "../src/modes/interactive/components/work-group.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -36,8 +36,8 @@ function editExecStub(): ToolExecutionComponent {
 }
 
 describe("activity spacing invariant", () => {
-	it("NavGroup emits no leading or trailing blank line", () => {
-		const g = new NavGroupComponent(fakeTui());
+	it("WorkGroup emits no leading or trailing blank line", () => {
+		const g = new WorkGroupComponent(fakeTui());
 		g.addCall(navExec("read"));
 		const lines = g.render(120).map(stripAnsi);
 		expect(lines.length).toBeGreaterThan(0);

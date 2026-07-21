@@ -14,8 +14,8 @@ import {
 import type { WarningSettings } from "../../../core/settings-manager.ts";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.ts";
 import { HINT_SEPARATOR, keyDisplayText, keyHint } from "./keybinding-hints.ts";
-import { SelectorCard } from "./selector-card.ts";
 import { SelectorShell } from "./selector-shell.ts";
+import { beginSelectorSurface } from "./selector-surface.ts";
 
 const SETTINGS_SUBMENU_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
@@ -585,7 +585,7 @@ export class SettingsSelectorComponent extends Container {
 			values: ["true", "false"],
 		});
 
-		const card = new SelectorCard();
+		const { surface, mount } = beginSelectorSurface(this, true);
 
 		this.settingsList = new SettingsList(
 			items,
@@ -684,8 +684,8 @@ export class SettingsSelectorComponent extends Container {
 			{ enableSearch: true },
 		);
 
-		card.addChild(this.settingsList);
-		this.addChild(card);
+		surface.addChild(this.settingsList);
+		mount();
 	}
 
 	getSettingsList(): SettingsList {

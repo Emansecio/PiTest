@@ -1286,6 +1286,61 @@ function createSupersedeScanState(): SupersedeScanState {
 /** NUL separator of resource keys, derived from the prefix to avoid re-typing the escape. */
 const KEY_SEP = READ_KEY_PREFIX.slice("read".length);
 
+/** Deep-copy a scan state: map/array containers are copied, value objects are
+ * shared (they are replaced, never mutated, by the scan — see
+ * `recordSuccessfulMutation` / `extendSupersedeScanState` step 3/3b). */
+function cloneSupersedeScanState(state: SupersedeScanState): SupersedeScanState {
+	return {
+		scannedLength: state.scannedLength,
+		keyByCallId: new Map(state.keyByCallId),
+		keyByIndex: new Map(state.keyByIndex),
+		lastIndexByKey: new Map(state.lastIndexByKey),
+		lastErrorIndexByKey: new Map(state.lastErrorIndexByKey),
+		unkeyedResults: state.unkeyedResults.slice(),
+		mutationCallById: new Map(state.mutationCallById),
+		lastMutationByPathKey: new Map(state.lastMutationByPathKey),
+		pendingMutationResults: state.pendingMutationResults.slice(),
+		grepPathKeyByCallId: new Map(state.grepPathKeyByCallId),
+		grepPathKeyByIndex: new Map(state.grepPathKeyByIndex),
+		lastFullReadIndexByPathKey: new Map(state.lastFullReadIndexByPathKey),
+	};
+}
+
+/** Cheap structural identity check for the adopt guard: clones produced by the
+ * prune/slice paths are `{ ...msg }` copies, so role + numeric timestamp
+ * survive; a false negative merely skips the adopt (full rescan fallback). */
+function sameMessageIdentity(a: AgentMessage | undefined, b: AgentMessage | undefined): boolean {
+	if (a === undefined || b === undefined) return false;
+	if (a === b) return true;
+	if (a.role !== b.role) return false;
+	const ta = (a as { timestamp?: unknown }).timestamp;
+	const tb = (b as { timestamp?: unknown }).timestamp;
+	return typeof ta === "number" && ta === tb;
+}
+
+/**
+ * Re-key the incremental supersede-scan cache from `source` onto `derived`.
+ *
+ * The send path (agent-loop) and the prune/clone paths produce FRESH arrays
+ * every turn, so the WeakMap keyed on array identity never hit there and every
+ * turn paid a full O(session) rescan. When `derived` is a slice/clone of
+ * `source` (same messages, possibly with appended suffix), the scan state is
+ * position-and-content derived — indexes, toolCall ids, and resource keys are
+ * identical — so it can be copied instead of rebuilt.
+ *
+ * Guarded: adopts only when the scanned prefix provably corresponds (length +
+ * endpoint identity checks). On any mismatch it silently does nothing and the
+ * next scan falls back to today's full rebuild — never incorrect, only slower.
+ */
+export function adoptSupersedeScanState(source: AgentMessage[], derived: AgentMessage[]): void {
+	if (source === derived || supersedeScanCache.has(derived)) return;
+	const state = supersedeScanCache.get(source);
+	if (!state || state.scannedLength === 0 || state.scannedLength > derived.length) return;
+	const last = state.scannedLength - 1;
+	if (!sameMessageIdentity(source[0], derived[0]) || !sameMessageIdentity(source[last], derived[last])) return;
+	supersedeScanCache.set(derived, cloneSupersedeScanState(state));
+}
+
 /** True for a read key with neither offset nor limit — the FULL current file content (N4). */
 function isFullReadKey(key: string): boolean {
 	if (!key.startsWith(READ_KEY_PREFIX)) return false;
@@ -2112,6 +2167,29 @@ export function cloneToolResultMessagesForPrune(messages: AgentMessage[]): Agent
 		}
 		return msg;
 	});
+}
+
+/**
+ * Cheap clone for the arg-elision-only live-prune path: `elideMutatingToolCallArguments`
+ * only reassigns `arguments` on the toolCall blocks matching `toolCallIds`, so
+ * slicing the array and shallow-cloning just those assistant messages (and blocks)
+ * gives the same abort-safety as `cloneToolResultMessagesForPrune` at O(ids) object
+ * churn instead of O(N) — this runs on EVERY successful mutating tool call / turn end.
+ */
+export function cloneForArgElision(messages: AgentMessage[], toolCallIds: readonly string[]): AgentMessage[] {
+	const copy = messages.slice();
+	if (toolCallIds.length === 0) return copy;
+	const ids = new Set(toolCallIds);
+	for (let i = 0; i < copy.length; i++) {
+		const msg = copy[i];
+		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+		if (!msg.content.some((block) => block.type === "toolCall" && ids.has(block.id))) continue;
+		copy[i] = {
+			...msg,
+			content: msg.content.map((block) => (block.type === "toolCall" && ids.has(block.id) ? { ...block } : block)),
+		};
+	}
+	return copy;
 }
 
 // ============================================================================

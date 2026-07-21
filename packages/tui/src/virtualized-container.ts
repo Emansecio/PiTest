@@ -10,7 +10,15 @@ type ChildRenderCache = {
 };
 
 function renderChild(child: Component, width: number): string[] {
-	return child.render(width);
+	// Isolate throws so one bad transcript bubble cannot blank the whole
+	// VirtualizedContainer (parent Container already isolates per-child; this
+	// path used to let a single render() error replace the entire chat).
+	try {
+		return child.render(width);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return [`\x1b[2m[render error: ${message}]\x1b[22m`];
+	}
 }
 
 /**

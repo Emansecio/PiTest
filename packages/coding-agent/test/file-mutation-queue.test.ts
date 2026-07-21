@@ -1,4 +1,4 @@
-import { access, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -260,10 +260,39 @@ describe("built-in edit and write tools", () => {
 /**
  * Regression for finding 6.1 in REVISAO-TOOLS-PIT.md: preview-apply closures
  * computed `finalContent` at staging time but blindly overwrote whatever was
- * on disk at commit time. Both `edit` and `write` now snapshot the mtime at
+ * on disk at commit time. Both `edit` and `write` now stamp the exact bytes at
  * staging and refuse to apply if the file drifted before commit.
  */
 describe("preview apply() staleness re-check", () => {
+	it("write detects same-size changes even when mtime is preserved", async () => {
+		const dir = await createTempDir();
+		const filePath = join(dir, "same-metadata-write.txt");
+		const fixed = new Date(Date.now() - 60_000);
+		await writeFile(filePath, "AAAAA", "utf8");
+		await utimes(filePath, fixed, fixed);
+
+		const writeTool = createWriteTool(dir);
+		const queue = createPreviewQueue();
+		setCurrentPreviewQueue(queue);
+		try {
+			const staged = (await writeTool.execute("w0", {
+				path: filePath,
+				content: "CCCCC",
+				preview: true,
+			})) as TextResult;
+			const id = extractPreviewId(staged);
+
+			await writeFile(filePath, "BBBBB", "utf8");
+			await utimes(filePath, fixed, fixed);
+
+			const outcome = await queue.accept(id);
+			expect(outcome.ok).toBe(false);
+			expect(await readFile(filePath, "utf8")).toBe("BBBBB");
+		} finally {
+			setCurrentPreviewQueue(undefined);
+		}
+	});
+
 	it("write's apply throws instead of blindly overwriting when the file changed after staging", async () => {
 		const dir = await createTempDir();
 		const filePath = join(dir, "drift-write.txt");
@@ -293,6 +322,35 @@ describe("preview apply() staleness re-check", () => {
 				expect(outcome.error).toMatch(/changed on disk since this write was staged/);
 			}
 			expect(await readFile(filePath, "utf8")).toBe("externally-changed\n");
+		} finally {
+			setCurrentPreviewQueue(undefined);
+		}
+	});
+
+	it("edit detects same-size changes even when mtime is preserved", async () => {
+		const dir = await createTempDir();
+		const filePath = join(dir, "same-metadata-edit.txt");
+		const fixed = new Date(Date.now() - 60_000);
+		await writeFile(filePath, "alpha ONE\n", "utf8");
+		await utimes(filePath, fixed, fixed);
+
+		const editTool = createEditTool(dir);
+		const queue = createPreviewQueue();
+		setCurrentPreviewQueue(queue);
+		try {
+			const staged = (await editTool.execute("e0", {
+				path: filePath,
+				edits: [{ oldText: "ONE", newText: "TWO" }],
+				preview: true,
+			})) as TextResult;
+			const id = extractPreviewId(staged);
+
+			await writeFile(filePath, "bravo ONE\n", "utf8");
+			await utimes(filePath, fixed, fixed);
+
+			const outcome = await queue.accept(id);
+			expect(outcome.ok).toBe(false);
+			expect(await readFile(filePath, "utf8")).toBe("bravo ONE\n");
 		} finally {
 			setCurrentPreviewQueue(undefined);
 		}

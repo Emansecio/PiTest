@@ -121,7 +121,7 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("After a non-trivial code change, verify before reporting done");
+			expect(prompt).toContain("After a non-trivial code change, run the affected test/build/lint");
 		});
 
 		test("omitted when there is no way to run a check (no bash)", () => {
@@ -302,8 +302,8 @@ describe("buildSystemPrompt", () => {
 		test("default guideline suppresses narration between tool calls", () => {
 			delete process.env.PIT_NARRATION;
 			const prompt = buildSystemPrompt(base);
-			expect(prompt).toContain("Respond only when the task is done or a question is asked");
-			expect(prompt).not.toContain("Be concise in your responses");
+			expect(prompt).toContain("Respond only when done or asked a question");
+			expect(prompt).not.toContain("Keep terminal responses concise");
 		});
 
 		test.each(["1", "true", "yes", "TRUE", "Yes"] as const)(
@@ -311,8 +311,8 @@ describe("buildSystemPrompt", () => {
 			(value) => {
 				process.env.PIT_NARRATION = value;
 				const prompt = buildSystemPrompt(base);
-				expect(prompt).toContain("Be concise in your responses");
-				expect(prompt).not.toContain("Respond only when the task is done or a question is asked");
+				expect(prompt).toContain("Keep terminal responses concise");
+				expect(prompt).not.toContain("Respond only when done or asked a question");
 			},
 		);
 	});

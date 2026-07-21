@@ -13,6 +13,8 @@ import type { WireToolSurface } from "./compaction/compaction.ts";
 /** Max chars for tool descriptions on the provider wire (T01 — was 120). */
 export const LAZY_TOOL_DESCRIPTION_MAX_CHARS = 40;
 
+const compactProviderToolsCache = new WeakMap<NonNullable<Context["tools"]>, NonNullable<Context["tools"]>>();
+
 function firstLine(text: string): string {
 	const line = text.split("\n")[0]?.trim() ?? "";
 	return line;
@@ -75,13 +77,18 @@ export function compactAgentToolsForWire(tools: AgentTool[]): AgentTool[] {
 
 export function compactToolsForProviderContext(context: Context): Context {
 	if (!context.tools || context.tools.length === 0) return context;
-	return {
-		...context,
-		tools: context.tools.map((tool) => ({
+	let tools = compactProviderToolsCache.get(context.tools);
+	if (!tools) {
+		tools = context.tools.map((tool) => ({
 			...tool,
 			description: compactToolDescription(tool.description),
 			parameters: compactToolSchemaForWire(tool.parameters) as Tool["parameters"],
-		})),
+		}));
+		compactProviderToolsCache.set(context.tools, tools);
+	}
+	return {
+		...context,
+		tools,
 	};
 }
 

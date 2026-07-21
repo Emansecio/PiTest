@@ -204,6 +204,7 @@ import { TurnDoneMessageComponent } from "./components/turn-done-message.ts";
 import { TurnRule } from "./components/turn-rule.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
+import { WorkGroupComponent } from "./components/work-group.ts";
 import { workingPulsePalette } from "./components/working-palette.ts";
 import { formatRuntimeDiagnostics } from "./diagnostics-summary.ts";
 import {
@@ -251,7 +252,7 @@ import {
 	Theme,
 	theme,
 } from "./theme/theme.ts";
-import { buildTurnDoneSnapshot } from "./turn-done-format.ts";
+import { buildTurnDoneSnapshot, shouldRenderTurnDone } from "./turn-done-format.ts";
 
 /**
  * A structural rule for the chat transcript (e.g. hotkeys framing).
@@ -483,7 +484,7 @@ export class InteractiveMode {
 	private anthropicSubscriptionWarningShown = false;
 
 	// Ephemeral status above the editor (statusContainer). Not part of the transcript.
-	private ephemeralStatusText: Text | undefined = undefined;
+	private ephemeralStatusText: TruncatedText | undefined = undefined;
 	/** Color used by the next/current info toast (preserves showStatus color overrides). */
 	private ephemeralPaintColor: (text: string) => string = (text) => theme.fg("dim", text);
 	private ephemeralStatus!: EphemeralStatusController;
@@ -1826,6 +1827,11 @@ export class InteractiveMode {
 		this.loadingAnimation?.setMessage(label);
 	}
 
+	/** When the working loader is up, freeze activity spinners so only one zone animates. */
+	private syncActivitySpinnersFrozen(): void {
+		this.activityStacker?.setSpinnersFrozen(!!this.loadingAnimation);
+	}
+
 	private resetStreamRateCounters(): void {
 		this.streamTextCharCount = 0;
 	}
@@ -1951,6 +1957,7 @@ export class InteractiveMode {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
 		}
+		this.syncActivitySpinnersFrozen();
 		// Turn settled (or was interrupted): the next loader starts a new clock.
 		this.workingClockOriginMs = undefined;
 		this.resetStreamRateCounters();
@@ -1977,11 +1984,11 @@ export class InteractiveMode {
 		this.streamingAttached = false;
 	}
 
-	/** Ephemeral turn-complete marker in the chat transcript (not persisted). */
+	/** Persist only abnormal turn outcomes in the chat transcript. */
 	private appendTurnDoneLine(snapshot: ReturnType<typeof buildTurnDoneSnapshot>): void {
+		if (!shouldRenderTurnDone(snapshot)) return;
 		const component = new TurnDoneMessageComponent(snapshot);
 		component.setNoLeadingGap(true);
-		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(component);
 	}
 
@@ -2054,6 +2061,7 @@ export class InteractiveMode {
 			this.clearStatusContainer();
 			this.loadingAnimation = this.createWorkingLoader();
 			this.statusContainer.addChild(this.loadingAnimation);
+			this.syncActivitySpinnersFrozen();
 		}
 		this.ui.requestRender();
 	}
@@ -3058,6 +3066,7 @@ export class InteractiveMode {
 				this.clearStatusContainer();
 				this.loadingAnimation = this.createWorkingLoader();
 				this.statusContainer.addChild(this.loadingAnimation);
+				this.syncActivitySpinnersFrozen();
 				this.setWorkingPhase("Thinking…");
 				this.ui.requestRender();
 			}
@@ -3385,6 +3394,7 @@ export class InteractiveMode {
 					this.clearStatusContainer();
 					this.loadingAnimation = this.createWorkingLoader();
 					this.statusContainer.addChild(this.loadingAnimation);
+					this.syncActivitySpinnersFrozen();
 				}
 				this.setWorkingPhase("Thinking…");
 				this.ui.requestRender();
@@ -3527,6 +3537,16 @@ export class InteractiveMode {
 						}
 					}
 					this.streamTextCharCount = this.countAssistantTextChars(this.streamingMessage);
+					// Visible text is flowing: flip "Thinking…" to "Writing…" so the user can
+					// tell reasoning from response streaming. Only replaces the neutral phase
+					// — tool/check labels set elsewhere are never clobbered.
+					if (
+						this.streamTextCharCount > 0 &&
+						this.pendingTools.size === 0 &&
+						this.workingMessage === "Thinking…"
+					) {
+						this.setWorkingPhase("Writing…");
+					}
 					this.refreshLoaderTrailingSuffix();
 					this.ui.requestRender();
 				}
@@ -3591,7 +3611,13 @@ export class InteractiveMode {
 			case "tool_execution_start": {
 				const component = this._ensureToolComponent(event.toolName, event.toolCallId, event.args);
 				component.markExecutionStarted();
-				this.setWorkingPhase(workingPhaseLabel(event.toolName, event.args as Record<string, unknown>, true));
+				// Grouped transcript already shows verb+target on activity lines —
+				// keep the loader neutral so the same action isn't mirrored twice.
+				if (this.settingsManager.getToolActivity() === "grouped") {
+					this.setWorkingPhase("Working…");
+				} else {
+					this.setWorkingPhase(workingPhaseLabel(event.toolName, event.args as Record<string, unknown>, true));
+				}
 				// Esc changes meaning while tools are cancellable — swap the loader
 				// hint at the boundary, not on the next stream tick.
 				this.refreshLoaderTrailingSuffix();
@@ -3766,6 +3792,7 @@ export class InteractiveMode {
 						this.clearStatusContainer();
 						this.loadingAnimation = this.createWorkingLoader();
 						this.statusContainer.addChild(this.loadingAnimation);
+						this.syncActivitySpinnersFrozen();
 					}
 					this.setWorkingPhase(label);
 				} else if (event.phase === "passed") {
@@ -3792,6 +3819,7 @@ export class InteractiveMode {
 						this.clearStatusContainer();
 						this.loadingAnimation = this.createWorkingLoader();
 						this.statusContainer.addChild(this.loadingAnimation);
+						this.syncActivitySpinnersFrozen();
 					}
 					this.loadingAnimation?.resetElapsed();
 					this.setWorkingPhase("Reviewing final changes…");
@@ -3818,6 +3846,7 @@ export class InteractiveMode {
 						this.clearStatusContainer();
 						this.loadingAnimation = this.createWorkingLoader();
 						this.statusContainer.addChild(this.loadingAnimation);
+						this.syncActivitySpinnersFrozen();
 					}
 					this.setWorkingPhase(label);
 				} else if (event.phase === "passed") {
@@ -3850,6 +3879,7 @@ export class InteractiveMode {
 						this.clearStatusContainer();
 						this.loadingAnimation = this.createWorkingLoader();
 						this.statusContainer.addChild(this.loadingAnimation);
+						this.syncActivitySpinnersFrozen();
 					}
 				} else if (event.phase === "passed") {
 					this.showStatus(`✓ ${event.command} passed`, (text) => theme.fg("success", text));
@@ -4073,7 +4103,7 @@ export class InteractiveMode {
 			this.ui.requestRender();
 			return;
 		}
-		const line = new Text(color(text), 1, 0);
+		const line = new TruncatedText(color(text), 1, 0);
 		this.ephemeralStatusText = line;
 		this.statusContainer.addChild(line);
 		this.ui.requestRender();
@@ -4099,6 +4129,7 @@ export class InteractiveMode {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
 		}
+		this.syncActivitySpinnersFrozen();
 		this.ephemeralStatus.dispose();
 		this.statusContainer.clear();
 		this.ephemeralStatusText = undefined;
@@ -4356,6 +4387,7 @@ export class InteractiveMode {
 				}
 			} else {
 				// All other messages use standard rendering
+				if (grouped && message.role === "user") this.activityStacker.reset();
 				this.addMessageToChat(message, options);
 			}
 		}
@@ -4535,6 +4567,11 @@ export class InteractiveMode {
 		if (this.isShuttingDown) return;
 		this.isShuttingDown = true;
 		this.unregisterSignalHandlers();
+
+		// Reap detached bash / background jobs before dispose. Signal handlers
+		// already call killTrackedDetachedChildren(); graceful /quit and Ctrl+D
+		// must do the same or Unix detached process groups outlive the agent.
+		killTrackedDetachedChildren();
 
 		// Drain any in-flight Kitty key release events before stopping.
 		// This prevents escape sequences from leaking to the parent shell over slow SSH.
@@ -5111,21 +5148,35 @@ export class InteractiveMode {
 			this.setStartupHeaderExpanded(!this.startupHeaderExpanded);
 			return;
 		}
-		// Scoped-first expansion cycle: the everyday need is "show me the output
-		// of the thing that just ran", and expanding the entire scrollback for
-		// that loses the reading position in a wall of text. So the key cycles
-		// collapsed → last block only → everything → collapsed.
+		// Scoped-first expansion cycle:
+		// collapsed → last tool in last phase → full phase → everything → collapsed.
 		if (!this.toolOutputExpanded && this.scopedExpandTarget === null) {
 			const target = this.findLastExpandableChatChild();
 			if (target) {
 				this.scopedExpandTarget = target;
-				target.setExpanded(true);
+				if (target instanceof WorkGroupComponent) {
+					target.expandLastChild();
+					this.showStatus("Expanded last tool · ctrl+o again for phase");
+				} else {
+					target.setExpanded(true);
+					this.showStatus("Expanded last tool output · ctrl+o again for all");
+				}
 				this.chatContainer.markChildStale(target);
-				this.showStatus("Expanded last tool output · ctrl+o again for all");
 				this.ui.requestRender();
 				return;
 			}
 			this.setToolsExpanded(true);
+			return;
+		}
+		if (
+			!this.toolOutputExpanded &&
+			this.scopedExpandTarget instanceof WorkGroupComponent &&
+			this.scopedExpandTarget.isLastChildExpanded()
+		) {
+			this.scopedExpandTarget.setExpanded(true);
+			this.chatContainer.markChildStale(this.scopedExpandTarget);
+			this.showStatus("Expanded phase · ctrl+o again for all");
+			this.ui.requestRender();
 			return;
 		}
 		if (!this.toolOutputExpanded) {
@@ -5248,12 +5299,17 @@ export class InteractiveMode {
 		const currentText = this.editor.getExpandedText?.() ?? this.editor.getText();
 		const tmpFile = path.join(os.tmpdir(), `pi-editor-${Date.now()}.pit.md`);
 
+		// Only restart the TUI if we actually stopped it. A failure before
+		// ui.stop() (e.g. writeFileSync) must not double-attach stdin/resize
+		// listeners via a second start() (duplicate keys / paste storms).
+		let stopped = false;
 		try {
 			// Write current content to temp file
 			fs.writeFileSync(tmpFile, currentText, "utf-8");
 
 			// Stop TUI to release terminal
 			this.ui.stop();
+			stopped = true;
 
 			// Split by space to support editor arguments (e.g., "code --wait")
 			const [editor, ...editorArgs] = editorCmd.split(" ");
@@ -5288,10 +5344,12 @@ export class InteractiveMode {
 				// Ignore cleanup errors
 			}
 
-			// Restart TUI
-			this.ui.start();
-			// Force full re-render since external editor uses alternate screen
-			this.ui.requestRender(true);
+			if (stopped) {
+				// Restart TUI
+				this.ui.start();
+				// Force full re-render since external editor uses alternate screen
+				this.ui.requestRender(true);
+			}
 		}
 	}
 
@@ -5305,17 +5363,11 @@ export class InteractiveMode {
 	}
 
 	showError(errorMessage: string): void {
-		// Leading blank only — mirror showWarning. A trailing Spacer here stacked a
-		// second blank against the next block's own leading gap (double gap after errors).
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Text(theme.fg("error", `Error: ${errorMessage}`), 1, 0));
-		this.ui.requestRender();
+		this.ephemeralStatus.show(`Error: ${errorMessage}`, "error");
 	}
 
 	showWarning(warningMessage: string): void {
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Text(theme.fg("warning", `Warning: ${warningMessage}`), 1, 0));
-		this.ui.requestRender();
+		this.ephemeralStatus.show(`Warning: ${warningMessage}`, "warning");
 	}
 
 	/** Surface a paste-truncation event from the editor as a visible warning. The

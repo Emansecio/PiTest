@@ -1,21 +1,13 @@
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import * as fsPromises from "fs/promises";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
+import { createPreviewQueue, setCurrentPreviewQueue } from "../src/core/preview-queue.ts";
+import { defaultEditOperations } from "../src/core/tools/edit.ts";
 import { createEditHashlineToolDefinition } from "../src/core/tools/edit-hashline.ts";
 import { computeAnchorIndex } from "../src/core/tools/edit-hashline-diff.ts";
 import { FileMtimeStore } from "../src/core/tools/file-mtime-store.ts";
-
-// edit-hashline.ts imports its post-write `stat` from "fs/promises" (no
-// "node:" prefix) — mock that exact specifier so the integrity-check test
-// below intercepts the same binding. Everything else delegates to the real
-// implementation; only the one test that needs it overrides `stat` per-call.
-vi.mock("fs/promises", async () => {
-	const actual = await vi.importActual<typeof import("fs/promises")>("fs/promises");
-	return { ...actual, stat: vi.fn(actual.stat) };
-});
 
 let dir: string;
 
@@ -24,6 +16,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	setCurrentPreviewQueue(undefined);
 	rmSync(dir, { recursive: true, force: true });
 });
 
@@ -69,6 +62,44 @@ describe("edit_v2 refreshes the shared FileMtimeStore after writing", () => {
 });
 
 type TextResult = { content: Array<{ type: string; text?: string }> };
+
+function previewId(result: TextResult): string {
+	const match = result.content[0]?.text?.match(/id=([0-9a-f]+)\./);
+	if (!match) throw new Error("missing preview id");
+	return match[1];
+}
+
+describe("edit_v2 preview staleness", () => {
+	it("detects same-size changes even when mtime is preserved", async () => {
+		const file = join(dir, "preview.ts");
+		const content = Array.from({ length: 10 }, (_, i) => `line_${i}`).join("\n");
+		const fixed = new Date(Date.now() - 60_000);
+		writeFileSync(file, `${content}\n`, "utf8");
+		utimesSync(file, fixed, fixed);
+
+		const queue = createPreviewQueue();
+		setCurrentPreviewQueue(queue);
+		const def = createEditHashlineToolDefinition(dir);
+		const staged = (await def.execute(
+			"c",
+			{
+				path: file,
+				edits: [{ before_hash: hashAtLine(content, 0), after_hash: hashAtLine(content, 5), new_text: "INSERTED" }],
+				preview: true,
+			},
+			undefined,
+			undefined,
+			{} as ExtensionContext,
+		)) as TextResult;
+
+		writeFileSync(file, `${content.replace("line_9", "LINE_9")}\n`, "utf8");
+		utimesSync(file, fixed, fixed);
+
+		const outcome = await queue.accept(previewId(staged));
+		expect(outcome.ok).toBe(false);
+		expect(readFileSync(file, "utf8")).toContain("LINE_9");
+	});
+});
 
 /**
  * Regression for finding 4.3 in REVISAO-TOOLS-PIT.md: edit_v2 mirrored edit's
@@ -131,8 +162,8 @@ describe("edit_v2 stale-read note", () => {
  */
 describe("edit_v2 post-write integrity check", () => {
 	it("warns when the on-disk byte count doesn't match what was written", async () => {
-		// Snapshot capture stats the file BEFORE the write; this test's
-		// mockImplementationOnce must land on the post-write integrity stat, so
+		// Snapshot capture stats the file BEFORE the write. The injected stat
+		// operation must reach the post-write integrity check, so
 		// disable snapshots — they are not the subject here (file-snapshots has
 		// its own suite).
 		process.env.PIT_NO_FILE_SNAPSHOTS = "1";
@@ -145,16 +176,12 @@ describe("edit_v2 post-write integrity check", () => {
 		const def = createEditHashlineToolDefinition(dir, {});
 		const ctx = {} as ExtensionContext;
 
-		const actualStat = (await vi.importActual<typeof import("fs/promises")>("fs/promises")).stat;
-		const statMock = vi.mocked(fsPromises.stat);
-		statMock.mockImplementationOnce(async (...args: Parameters<typeof actualStat>) => {
-			const st = await actualStat(...args);
-			return Object.assign(Object.create(Object.getPrototypeOf(st) as object), st, {
-				// `st.size` is typed `number | bigint` (the actualStat overload set
-				// includes the bigint-stats variant); coerce before arithmetic.
-				size: Number(st.size) + 999,
-			}) as typeof st;
-		});
+		const actualStat = defaultEditOperations.stat;
+		if (!actualStat) throw new Error("default edit stat operation is missing");
+		defaultEditOperations.stat = async (path: string) => {
+			const st = await actualStat(path);
+			return { ...st, size: Number(st.size) + 999 };
+		};
 		try {
 			const result = (await def.execute(
 				"c",
@@ -166,7 +193,7 @@ describe("edit_v2 post-write integrity check", () => {
 
 			expect(result.content[0]?.text).toMatch(/WARNING: post-write size mismatch/);
 		} finally {
-			statMock.mockRestore();
+			defaultEditOperations.stat = actualStat;
 			delete process.env.PIT_NO_FILE_SNAPSHOTS;
 		}
 	});

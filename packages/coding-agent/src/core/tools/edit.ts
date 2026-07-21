@@ -18,7 +18,6 @@ import {
 	type EditDiffError,
 	type EditDiffResult,
 	generateDiffString,
-	getCachedBaseForEdit,
 	normalizeToLF,
 	putCachedBaseForEdit,
 	restoreLineEndings,
@@ -31,6 +30,7 @@ import {
 	getOrCreateEditCallComponent,
 	setEditPreview,
 } from "./edit-preview-shared.ts";
+import { fileContentStampMatches, stampFileBytes } from "./file-content-stamp.ts";
 import { type FileMtimeStore, refreshFileMtime } from "./file-mtime-store.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { applyOmissionWarning, startOmissionWarning } from "./lazy-omission-attach.ts";
@@ -105,6 +105,8 @@ export interface EditOperations {
 	writeFile: (absolutePath: string, content: string, signal?: AbortSignal) => Promise<void>;
 	/** Check if file is readable and writable (throw if not) */
 	access: (absolutePath: string) => Promise<void>;
+	/** Local file metadata used by stale-read and post-write integrity checks. */
+	stat?: (absolutePath: string) => Promise<{ size: number | bigint; mtimeMs: number }>;
 }
 
 export const defaultEditOperations: EditOperations = {
@@ -113,6 +115,7 @@ export const defaultEditOperations: EditOperations = {
 	// half-written file, and an abort before the rename leaves the original intact.
 	writeFile: (path, content, signal) => writeFileAtomic(path, content, signal),
 	access: (path) => fsAccess(path, constants.R_OK | constants.W_OK),
+	stat: (path) => fsStat(path),
 };
 
 export interface EditToolOptions {
@@ -367,62 +370,33 @@ export function createEditToolDefinition(
 									return;
 								}
 
-								// One mtime snapshot serves two consumers on the default FS: the
-								// preview staleness re-check (staging only — see the preview
-								// branch below, which lets apply() detect the file changing
-								// between staging and commit and refuse to blindly overwrite it)
-								// and the (absolutePath, mtimeMs) base-content cache key. Skip the
-								// stat when neither needs it (custom ops, or non-preview with the
-								// base cache disabled) so those paths keep their exact old cost.
+								// The mtime is only a cache hint; preview staleness is checked from
+								// the exact bytes read below.
 								const baseCacheEnabled =
 									ops === defaultEditOperations && !isTruthyEnvFlag(process.env.PIT_NO_EDIT_BASE_CACHE);
 								let currentMtimeMs: number | undefined;
-								if (ops === defaultEditOperations && (input.preview === true || baseCacheEnabled)) {
+								if (ops === defaultEditOperations && baseCacheEnabled) {
 									try {
-										currentMtimeMs = (await fsStat(absolutePath)).mtimeMs;
+										currentMtimeMs = (await ops.stat!(absolutePath)).mtimeMs;
 									} catch {
-										// stat failed — staleness re-check + cache reuse skipped, not fatal.
+										// Cache reuse skipped; editing remains valid.
 									}
 								}
-								const stagedMtimeMs: number | undefined = input.preview === true ? currentMtimeMs : undefined;
 
-								// Reuse the base content the streaming preview already read for this
-								// exact (path, mtime) instead of re-reading the whole file. Gated on
-								// exact mtime equality: a hit means the bytes are unchanged since the
-								// preview read. On miss/disabled, read from disk and warm the cache.
-								let bom: string;
-								let originalEnding: "\r\n" | "\n" | "\r";
-								let normalizedContent: string;
-								const cachedBase =
-									baseCacheEnabled && currentMtimeMs !== undefined
-										? getCachedBaseForEdit(absolutePath, currentMtimeMs)
-										: undefined;
-								if (cachedBase) {
-									bom = cachedBase.bom;
-									originalEnding = cachedBase.lineEnding;
-									normalizedContent = cachedBase.normalizedContent;
-								} else {
-									// Read the file.
-									const buffer = await ops.readFile(absolutePath);
-									const rawContent = buffer.toString("utf-8");
-									// Check if aborted after reading.
-									if (aborted) {
-										return;
-									}
-									// Strip BOM before matching. The model will not include an invisible BOM in oldText.
-									const stripped = stripBom(rawContent);
-									bom = stripped.bom;
-									originalEnding = detectLineEnding(stripped.text);
-									normalizedContent = normalizeToLF(stripped.text);
-									if (baseCacheEnabled && currentMtimeMs !== undefined) {
-										putCachedBaseForEdit(
-											absolutePath,
-											currentMtimeMs,
-											normalizedContent,
-											bom,
-											originalEnding,
-										);
-									}
+								// A timestamp is not a content identity: external tools can preserve mtime
+								// while replacing bytes. Execute always reads the current pre-image so a
+								// streaming-preview cache entry can never become the write base.
+								const buffer = await ops.readFile(absolutePath);
+								const stagedContentStamp =
+									input.preview === true && ops === defaultEditOperations ? stampFileBytes(buffer) : undefined;
+								const rawContent = buffer.toString("utf-8");
+								if (aborted) return;
+								const stripped = stripBom(rawContent);
+								const bom = stripped.bom;
+								const originalEnding = detectLineEnding(stripped.text);
+								const normalizedContent = normalizeToLF(stripped.text);
+								if (baseCacheEnabled && currentMtimeMs !== undefined) {
+									putCachedBaseForEdit(absolutePath, currentMtimeMs, normalizedContent, bom, originalEnding);
 								}
 
 								// Check if aborted after obtaining the base content.
@@ -449,13 +423,13 @@ export function createEditToolDefinition(
 											await withFileMutationQueue(
 												absolutePath,
 												async () => {
-													if (ops === defaultEditOperations && stagedMtimeMs !== undefined) {
-														const curStat = await fsStat(absolutePath).catch(() => undefined);
-														if (curStat && curStat.mtimeMs !== stagedMtimeMs) {
-															throw new Error(
-																`Cannot apply preview: ${path} changed on disk since this edit was staged. Re-run edit to recompute the diff against the current file.`,
-															);
-														}
+													if (
+														stagedContentStamp &&
+														!(await fileContentStampMatches(absolutePath, stagedContentStamp))
+													) {
+														throw new Error(
+															`Cannot apply preview: ${path} changed on disk since this edit was staged. Re-run edit to recompute the diff against the current file.`,
+														);
 													}
 													await ops.writeFile(absolutePath, finalContent);
 													if (ops === defaultEditOperations)
@@ -501,7 +475,7 @@ export function createEditToolDefinition(
 									const seenMtime = mtimeStore.get(absolutePath);
 									if (seenMtime !== undefined) {
 										try {
-											const curStat = await fsStat(absolutePath);
+											const curStat = await ops.stat!(absolutePath);
 											if (curStat.mtimeMs !== seenMtime) {
 												staleNote = ` NOTE: ${path} changed on disk since you last read it this session — the edit applied to the current file, but content you weren't shown may have moved; re-read if the result looks unexpected.`;
 											}
@@ -530,7 +504,7 @@ export function createEditToolDefinition(
 								let integrityNote = "";
 								if (ops === defaultEditOperations) {
 									try {
-										const st = await fsStat(absolutePath);
+										const st = await ops.stat!(absolutePath);
 										const expected = Buffer.byteLength(finalContent, "utf-8");
 										if (st.size !== expected) {
 											integrityNote = ` WARNING: post-write size mismatch (expected ${expected} bytes, found ${st.size}). The write may be incomplete — re-read the file to confirm before relying on it.`;

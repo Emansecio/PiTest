@@ -1,4 +1,5 @@
 import assert from "node:assert";
+import { performance } from "node:perf_hooks";
 import { describe, it } from "node:test";
 import { getCellDimensions, resetCapabilitiesCache, setCellDimensions } from "../src/terminal-image.js";
 import { type Component, TUI } from "../src/tui.js";
@@ -13,6 +14,22 @@ class InputRecorder implements Component {
 
 	handleInput(data: string): void {
 		this.inputs.push(data);
+	}
+
+	invalidate(): void {}
+}
+
+class RenderCountingInput implements Component {
+	renders = 0;
+	text = "";
+
+	render(): string[] {
+		this.renders++;
+		return [this.text];
+	}
+
+	handleInput(data: string): void {
+		this.text += data;
 	}
 
 	invalidate(): void {}
@@ -77,5 +94,27 @@ describe("TUI cell size responses", () => {
 			assert.deepStrictEqual(recorder.inputs, ["q"]);
 			tui.stop();
 		});
+	});
+});
+
+describe("TUI input rendering", () => {
+	it("paints synchronous input on the next tick instead of waiting for the animation throttle", async () => {
+		const terminal = new VirtualTerminal(80, 24);
+		const tui = new TUI(terminal);
+		const input = new RenderCountingInput();
+		tui.addChild(input);
+		tui.setFocus(input);
+		tui.start();
+		await terminal.waitForRender();
+
+		const rendersBeforeInput = input.renders;
+		(tui as unknown as { lastRenderAt: number }).lastRenderAt = performance.now();
+		terminal.sendInput("a");
+		terminal.sendInput("b");
+		await new Promise<void>((resolve) => process.nextTick(resolve));
+
+		assert.equal(input.text, "ab");
+		assert.equal(input.renders, rendersBeforeInput + 1, "same-tick input should coalesce into one immediate paint");
+		tui.stop();
 	});
 });

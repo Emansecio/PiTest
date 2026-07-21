@@ -291,6 +291,7 @@ describe("recall_history tool", () => {
 	it("tool name and label are recall_history", () => {
 		expect(def().name).toBe("recall_history");
 		expect(def().label).toBe("recall_history");
+		expect(def().activity).toBe("navigation");
 	});
 });
 

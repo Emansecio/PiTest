@@ -117,6 +117,7 @@ function makeFooter({
 		},
 		messages,
 		getContextUsage: () => contextUsage,
+		goalIsDriving: () => false,
 		goalStatusLine: () => null,
 		modelRegistry: { isUsingOAuth: () => usingOAuth },
 	} as unknown as AgentSession;
@@ -243,7 +244,7 @@ it("stacks identity and metrics on narrow terminals", () => {
 	expect(lines.some((l) => l.includes("CTX"))).toBe(true);
 });
 
-it("stacks CTX and usage on medium-width terminals", () => {
+it("stacks CTX and operational state on medium-width terminals without cumulative I/O", () => {
 	const footer = makeFooter({
 		permissions: "plan",
 		usingOAuth: true,
@@ -252,13 +253,17 @@ it("stacks CTX and usage on medium-width terminals", () => {
 		contextUsage: { tokens: 47000, percent: 23, contextWindow: 200000 },
 	});
 	const lines = footer.render(60).map(stripAnsi);
-	const ctxLine = lines.find((line) => line.includes("CTX"));
-	expect(ctxLine).toBeDefined();
-	expect(ctxLine).not.toMatch(/↑/);
-	expect(lines.some((line) => line.includes("↑") || line.includes("plan"))).toBe(true);
+	const plain = lines.join("\n");
+	expect(plain).toContain("CTX");
+	expect(plain).toContain("▰");
+	expect(plain).toContain("▱");
+	expect(plain).toContain("23% · 47k/200k");
+	expect(plain).toContain("plan");
+	expect(plain).not.toContain("↑");
+	expect(plain).not.toContain("↓");
 });
 
-it("composes CTX and usage on one metrics line when wide enough", () => {
+it("composes CTX and operational state when wide enough without cumulative I/O", () => {
 	const footer = makeFooter({
 		permissions: "plan",
 		autoCompact: true,
@@ -266,7 +271,14 @@ it("composes CTX and usage on one metrics line when wide enough", () => {
 		contextUsage: { tokens: 1000, percent: 5, contextWindow: 200000 },
 	});
 	const lines = footer.render(80).map(stripAnsi);
-	expect(lines.some((line) => line.includes("CTX") && line.includes("plan"))).toBe(true);
+	const plain = lines.join("\n");
+	expect(plain).toContain("CTX");
+	expect(plain).toContain("▰");
+	expect(plain).toContain("▱");
+	expect(plain).toContain("5% · 1k/200k");
+	expect(plain).toContain("plan");
+	expect(plain).not.toContain("↑");
+	expect(plain).not.toContain("↓");
 });
 
 it("collapses to one line on a pristine idle session with permission mode", () => {
@@ -489,6 +501,7 @@ it("fillEaseTick coalesces frames when the quantized bar fingerprint is unchange
 		},
 		messages: [{ role: "user", content: "hi", timestamp: 0 }],
 		getContextUsage: () => ({ tokens: 10_000, percent, contextWindow: 200_000 }),
+		goalIsDriving: () => false,
 		goalStatusLine: () => null,
 		modelRegistry: { isUsingOAuth: () => false },
 	} as unknown as AgentSession;

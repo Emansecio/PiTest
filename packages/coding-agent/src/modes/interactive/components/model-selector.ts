@@ -125,6 +125,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private onSelectCallback: (model: Model<any>) => void;
 	private onCancelCallback: () => void;
 	private errorMessage?: string;
+	private searchActive = false;
 	private tui: TUI;
 	private scopedModels: ReadonlyArray<ScopedModelItem>;
 	private headerHintText?: Text;
@@ -138,6 +139,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		onSelect: (model: Model<any>) => void,
 		onCancel: () => void,
 		initialSearchInput?: string,
+		/** When true (default), skip SelectorCard — ComposerChrome already frames the picker. */
+		embedded = true,
 	) {
 		super();
 
@@ -149,7 +152,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.onSelectCallback = onSelect;
 		this.onCancelCallback = onCancel;
 
-		const card = new SelectorCard();
+		const card = embedded ? this : new SelectorCard();
 		card.addChild(new Spacer(1));
 
 		this.headerHintText = new Text(this.getHeaderHintText(), 0, 0);
@@ -178,10 +181,12 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.listContainer = new Container();
 		card.addChild(this.listContainer);
 
-		card.addChild(new Spacer(1));
-		// Uniform breathing room above the card (matches session/tree/config).
-		this.addChild(new Spacer(1));
-		this.addChild(card);
+		if (!embedded) {
+			card.addChild(new Spacer(1));
+			// Uniform breathing room above the card (matches session/tree/config).
+			this.addChild(new Spacer(1));
+			this.addChild(card);
+		}
 
 		// Load models and do initial render
 		this.loadModels().then(() => {
@@ -200,13 +205,9 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			const count = this.cycleModelItems.length;
 			const noun = count === 1 ? "model" : "models";
 			const cycleHint = keyHint("app.model.cycleForward", "cycles the set");
-			return (
-				`${theme.fg("accent", "●")} ${theme.bold("Cycle set")} ${theme.fg("dim", "—")} ` +
-				`${theme.fg("muted", `${count} ${noun}`)} ${theme.fg("dim", "·")} ${cycleHint}` +
-				`\n${theme.fg("muted", "Search below picks any configured model.")}`
-			);
+			return `${theme.fg("muted", `${count} ${noun} in cycle`)} ${theme.fg("dim", "·")} ${cycleHint}`;
 		}
-		return theme.fg("muted", "Only showing models from configured providers. Use /login to add providers.");
+		return theme.fg("muted", "Configured providers only · /login adds providers");
 	}
 
 	private async loadModels(): Promise<void> {
@@ -298,6 +299,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	}
 
 	private filterModels(query: string): void {
+		this.searchActive = query.trim().length > 0;
 		this.filteredModels = query
 			? fuzzyFilter(this.activeModels, query, (item) => modelSearchText(item))
 			: this.activeModels;
@@ -332,33 +334,42 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			const item = this.filteredModels[i];
 			if (!item) continue;
 
+			const isFirstVisible = i === startIndex;
 			const prev = i > 0 ? this.filteredModels[i - 1] : undefined;
 			const inCycle = this.isCycleModel(item);
 			const prevInCycle = prev ? this.isCycleModel(prev) : false;
 
-			// Section headers: cycle set vs the rest of the catalog.
-			if (this.cycleModelItems.length > 0 && inCycle && !prevInCycle) {
+			// Search is one ranked result list, so grouping headers would fragment and
+			// repeat as fuzzy scores interleave providers and cycle/catalog entries.
+			if (!this.searchActive && this.cycleModelItems.length > 0 && inCycle && (isFirstVisible || !prevInCycle)) {
 				this.listContainer.addChild(new Text(theme.fg("accent", "  ● Cycle set"), 0, 0));
 			}
-			if (this.cycleModelItems.length > 0 && !inCycle && prevInCycle) {
+			if (!this.searchActive && this.cycleModelItems.length > 0 && !inCycle && (isFirstVisible || prevInCycle)) {
 				this.listContainer.addChild(new Text(theme.fg("dim", "  All models"), 0, 0));
 			}
 
-			// Provider group header: new provider or a section boundary (cycle ↔ all).
+			const providerLabel = this.modelRegistry.getProviderDisplayName(item.provider);
+			// The catalog is grouped by provider. Cycle entries preserve --models order,
+			// and search entries preserve fuzzy rank, so those rows carry their provider
+			// inline instead of producing repeated or misleading group headers.
 			// Use the human display name ("OpenCode Zen", "OpenCode Go") rather than the
 			// raw id — otherwise two endpoints that share models read as cryptic
 			// `opencode` / `opencode-go` headers over identical rows.
-			if (!prev || prev.provider !== item.provider || inCycle !== prevInCycle) {
-				const providerLabel = this.modelRegistry.getProviderDisplayName(item.provider);
+			if (
+				!this.searchActive &&
+				!inCycle &&
+				(isFirstVisible || !prev || prev.provider !== item.provider || prevInCycle)
+			) {
 				this.listContainer.addChild(new Text(theme.fg("dim", `  ${providerLabel}`), 0, 0));
 			}
 
 			const isSelected = i === this.selectedIndex;
 			const isCurrent = modelsAreEqual(this.currentModel, item.model);
 			const label = modelRowLabel(item.model);
+			const rowLabel = this.searchActive || inCycle ? `${providerLabel} · ${label}` : label;
 			const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
 			const cursor = selectionCursor(isSelected);
-			const name = isSelected ? theme.fg("accent", label) : theme.fg("text", label);
+			const name = isSelected ? theme.fg("accent", rowLabel) : theme.fg("text", rowLabel);
 			this.listContainer.addChild(new SelectableRow(`${cursor}${name}${checkmark}`, isSelected));
 		}
 

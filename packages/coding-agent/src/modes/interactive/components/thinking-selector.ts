@@ -76,6 +76,7 @@ export class ThinkingSelectorComponent extends Container implements Focusable {
 			title: "Thinking level",
 			search: false,
 			onCancel,
+			embedded: true,
 		});
 		this.addChild(this.shell);
 	}

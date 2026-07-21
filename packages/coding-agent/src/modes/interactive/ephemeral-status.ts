@@ -20,6 +20,10 @@ export interface EphemeralStatusHooks {
 	clearTimeout?: (id: ReturnType<typeof setTimeout>) => void;
 }
 
+export function compactStatusText(message: string): string {
+	return message.replace(/\s+/g, " ").trim();
+}
+
 function ttlFor(kind: EphemeralStatusKind): number | null {
 	switch (kind) {
 		case "info":
@@ -35,6 +39,8 @@ export class EphemeralStatusController {
 	private hooks: EphemeralStatusHooks;
 	private timer: ReturnType<typeof setTimeout> | undefined;
 	private active = false;
+	private message: string | undefined;
+	private kind: EphemeralStatusKind | undefined;
 
 	constructor(hooks: EphemeralStatusHooks) {
 		this.hooks = hooks;
@@ -42,9 +48,13 @@ export class EphemeralStatusController {
 
 	/** Show (or replace) the ephemeral line. Cancels any prior dismiss timer. */
 	show(message: string, kind: EphemeralStatusKind = "info"): void {
+		const compactMessage = compactStatusText(message);
+		const unchanged = this.active && this.message === compactMessage && this.kind === kind;
 		this.cancelTimer();
 		this.active = true;
-		this.hooks.paint(message, kind);
+		this.message = compactMessage;
+		this.kind = kind;
+		if (!unchanged) this.hooks.paint(compactMessage, kind);
 		const ttl = ttlFor(kind);
 		if (ttl === null) return;
 		const schedule = this.hooks.setTimeout ?? setTimeout;
@@ -52,6 +62,8 @@ export class EphemeralStatusController {
 			this.timer = undefined;
 			if (!this.active) return;
 			this.active = false;
+			this.message = undefined;
+			this.kind = undefined;
 			this.hooks.clear();
 		}, ttl);
 	}
@@ -61,6 +73,8 @@ export class EphemeralStatusController {
 		this.cancelTimer();
 		if (!this.active) return;
 		this.active = false;
+		this.message = undefined;
+		this.kind = undefined;
 		this.hooks.clear();
 	}
 
@@ -68,6 +82,8 @@ export class EphemeralStatusController {
 	dispose(): void {
 		this.cancelTimer();
 		this.active = false;
+		this.message = undefined;
+		this.kind = undefined;
 	}
 
 	isActive(): boolean {

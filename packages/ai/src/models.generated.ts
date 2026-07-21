@@ -12,6 +12,7 @@ export const MODELS = {
 			provider: "anthropic",
 			baseUrl: "https://api.anthropic.com",
 			reasoning: true,
+			thinkingLevelMap: {"off":null,"minimal":null,"xhigh":"xhigh"},
 			input: ["text", "image"],
 			cost: {
 				input: 10,

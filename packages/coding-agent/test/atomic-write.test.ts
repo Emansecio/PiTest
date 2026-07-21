@@ -2,7 +2,12 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { writeFileAtomic } from "../src/utils/atomic-write.ts";
+import {
+	type AsyncAtomicWriteOperations,
+	type SyncAtomicWriteOperations,
+	writeFileAtomic,
+	writeFileAtomicSync,
+} from "../src/utils/atomic-write.ts";
 
 const dirs: string[] = [];
 function tmp(): string {
@@ -64,5 +69,47 @@ describe("writeFileAtomic", () => {
 		const content = readFileSync(file, "utf-8");
 		expect([..."abc"].some((ch) => content === ch.repeat(1000))).toBe(true);
 		expect(readdirSync(dir)).toEqual(["out.txt"]);
+	});
+
+	it("propagates a temp-write failure without touching the destination", async () => {
+		const dir = tmp();
+		const file = join(dir, "out.txt");
+		writeFileSync(file, "original");
+		const writes: string[] = [];
+		const operations: AsyncAtomicWriteOperations = {
+			write: async (path) => {
+				writes.push(path);
+				throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+			},
+			rename: async () => {},
+			remove: async () => {},
+		};
+
+		await expect(writeFileAtomic(file, "new", undefined, operations)).rejects.toMatchObject({ code: "ENOSPC" });
+		expect(readFileSync(file, "utf-8")).toBe("original");
+		expect(writes).toHaveLength(1);
+		expect(writes[0]).toContain(".tmp-");
+	});
+
+	it("propagates a sync temp-write failure without touching the destination", () => {
+		const dir = tmp();
+		const file = join(dir, "out.txt");
+		writeFileSync(file, "original");
+		const writes: string[] = [];
+		const operations: SyncAtomicWriteOperations = {
+			write: (path) => {
+				writes.push(path);
+				throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+			},
+			rename: () => {},
+			remove: () => {},
+		};
+
+		expect(() => writeFileAtomicSync(file, "new", operations)).toThrowError(
+			expect.objectContaining({ code: "ENOSPC" }),
+		);
+		expect(readFileSync(file, "utf-8")).toBe("original");
+		expect(writes).toHaveLength(1);
+		expect(writes[0]).toContain(".tmp-");
 	});
 });

@@ -227,12 +227,13 @@ export function resolveServerConfig(config: McpServerConfig): McpServerConfig {
  */
 async function resolveStringMapAsync(
 	map: Record<string, string> | undefined,
+	signal?: AbortSignal,
 ): Promise<Record<string, string> | undefined> {
 	if (!map) return undefined;
 	const out: Record<string, string> = {};
 	for (const [k, v] of Object.entries(map)) {
 		if (v.startsWith("!")) {
-			out[k] = (await resolveConfigValueUncachedAsync(v)) ?? "";
+			out[k] = (await resolveConfigValueUncachedAsync(v, signal)) ?? "";
 		} else {
 			out[k] = interpolateEnvVars(v);
 		}
@@ -245,13 +246,16 @@ async function resolveStringMapAsync(
  * sync `${VAR}` interpolation (no spawn); headers/env use the async string-map
  * resolver so `!cmd` values don't block the event loop during MCP connect/reconnect.
  */
-export async function resolveServerConfigAsync(config: McpServerConfig): Promise<McpServerConfig> {
+export async function resolveServerConfigAsync(
+	config: McpServerConfig,
+	signal?: AbortSignal,
+): Promise<McpServerConfig> {
 	const resolved: McpServerConfig = { ...config };
 	if (config.url !== undefined) resolved.url = interpolateEnvVars(config.url);
 	if (config.command !== undefined) resolved.command = interpolateEnvVars(config.command);
 	if (config.cwd !== undefined) resolved.cwd = interpolateEnvVars(config.cwd);
 	if (config.args !== undefined) resolved.args = config.args.map((a) => interpolateEnvVars(a));
-	if (config.headers !== undefined) resolved.headers = await resolveStringMapAsync(config.headers);
-	if (config.env !== undefined) resolved.env = await resolveStringMapAsync(config.env);
+	if (config.headers !== undefined) resolved.headers = await resolveStringMapAsync(config.headers, signal);
+	if (config.env !== undefined) resolved.env = await resolveStringMapAsync(config.env, signal);
 	return resolved;
 }

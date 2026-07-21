@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { createWriteStream, readFileSync, type WriteStream, writeFileSync } from "node:fs";
+import { createWriteStream, type WriteStream } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { redactForDisk } from "../secret-redactor.ts";
@@ -15,6 +16,7 @@ import {
 export interface OutputAccumulatorOptions {
 	maxLines?: number;
 	maxBytes?: number;
+	maxArtifactBytes?: number;
 	tempFilePrefix?: string;
 	/**
 	 * When both are > 0, retain the first `headLines`/`headBytes` of output so a
@@ -24,6 +26,8 @@ export interface OutputAccumulatorOptions {
 	headLines?: number;
 	headBytes?: number;
 }
+
+export const DEFAULT_MAX_ARTIFACT_BYTES = 16 * 1024 * 1024;
 
 export interface OutputSnapshot {
 	content: string;
@@ -60,6 +64,7 @@ export class OutputAccumulator {
 	private readonly maxLines: number;
 	private readonly maxBytes: number;
 	private readonly maxRollingBytes: number;
+	private readonly maxArtifactBytes: number;
 	private readonly tempFilePrefix: string;
 	private readonly headLineLimit: number;
 	private readonly headByteLimit: number;
@@ -79,11 +84,14 @@ export class OutputAccumulator {
 
 	private tempFilePath: string | undefined;
 	private tempFileStream: WriteStream | undefined;
+	private artifactBytesWritten = 0;
+	private artifactCapped = false;
 
 	constructor(options: OutputAccumulatorOptions = {}) {
 		this.maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
 		this.maxBytes = options.maxBytes ?? effectiveDefaultMaxBytes();
 		this.maxRollingBytes = Math.max(this.maxBytes * 2, 1);
+		this.maxArtifactBytes = Math.max(0, options.maxArtifactBytes ?? DEFAULT_MAX_ARTIFACT_BYTES);
 		this.tempFilePrefix = options.tempFilePrefix ?? "pi-output";
 		this.headLineLimit = Math.max(0, options.headLines ?? 0);
 		this.headByteLimit = Math.max(0, options.headBytes ?? 0);
@@ -92,8 +100,12 @@ export class OutputAccumulator {
 	}
 
 	append(data: Buffer): void {
+		// No-op after finish: late stdout from a kill that did not reap the tree
+		// (Windows taskkill failure, zombie) used to throw from a ChildProcess
+		// "data" handler → uncaughtException → process death. Dropping is safe —
+		// the tool result was already finalized from the buffer at finish time.
 		if (this.finished) {
-			throw new Error("Cannot append to a finished output accumulator");
+			return;
 		}
 
 		this.totalRawBytes += data.length;
@@ -101,7 +113,7 @@ export class OutputAccumulator {
 
 		if (this.tempFileStream || this.shouldUseTempFile()) {
 			this.ensureTempFile();
-			this.tempFileStream?.write(data);
+			this.writeArtifactChunk(data);
 		} else if (data.length > 0) {
 			this.rawChunks.push(data);
 		}
@@ -224,8 +236,11 @@ export class OutputAccumulator {
 		// stream is closed so matches spanning write chunks are handled as one value.
 		// The path is never exposed to callers before closeTempFile resolves.
 		if (this.tempFilePath) {
-			const raw = readFileSync(this.tempFilePath, "utf8");
-			writeFileSync(this.tempFilePath, redactForDisk(raw), "utf8");
+			const raw = await readFile(this.tempFilePath, "utf8");
+			const capNotice = this.artifactCapped
+				? `\n[... output artifact capped at ${formatSize(this.maxArtifactBytes)}; remaining output omitted ...]\n`
+				: "";
+			await writeFile(this.tempFilePath, redactForDisk(raw) + capNotice, "utf8");
 		}
 	}
 
@@ -317,8 +332,21 @@ export class OutputAccumulator {
 			this.tempFilePath = undefined;
 		});
 		for (const chunk of this.rawChunks) {
-			this.tempFileStream.write(chunk);
+			this.writeArtifactChunk(chunk);
 		}
 		this.rawChunks = [];
+	}
+
+	private writeArtifactChunk(data: Buffer): void {
+		if (!this.tempFileStream || data.length === 0) return;
+		const remaining = this.maxArtifactBytes - this.artifactBytesWritten;
+		if (remaining <= 0) {
+			this.artifactCapped = true;
+			return;
+		}
+		const written = Math.min(remaining, data.length);
+		this.tempFileStream.write(data.subarray(0, written));
+		this.artifactBytesWritten += written;
+		if (written < data.length) this.artifactCapped = true;
 	}
 }

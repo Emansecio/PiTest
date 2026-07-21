@@ -56,6 +56,7 @@ function createSession(options: {
 		modelRegistry: {
 			isUsingOAuth: () => false,
 		},
+		goalIsDriving: () => false,
 		goalStatusLine: () => "",
 	};
 

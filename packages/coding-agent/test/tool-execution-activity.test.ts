@@ -56,6 +56,26 @@ describe("ToolExecutionComponent activity API", () => {
 		expect(e.getActivityState()).toBe("error");
 	});
 
+	test("a recoverable isError result reads as success in the activity stream", () => {
+		// e.g. a recall_tool_output miss: isError stays in the payload (model + retry
+		// budget), but the row must not paint red / auto-expand.
+		const c = new ToolExecutionComponent(
+			"recall_tool_output",
+			"t4b",
+			{ id: "d9" },
+			{},
+			undefined,
+			fakeTui(),
+			process.cwd(),
+		);
+		c.updateResult({
+			content: [{ type: "text", text: 'No deferred output with id "d9".' }],
+			isError: true,
+			details: { found: false, recoverable: true },
+		});
+		expect(c.getActivityState()).toBe("success");
+	});
+
 	test("getToolName / getArgs / getResultDetails expose inputs", () => {
 		const c = new ToolExecutionComponent("edit", "t5", { path: "x.ts" }, {}, undefined, fakeTui(), process.cwd());
 		c.updateResult({ content: [], isError: false, details: { diff: "+  1 a" } });

@@ -116,7 +116,7 @@ describe("clampBashCommandRow", () => {
 		expect(plain).not.toContain("…");
 	});
 
-	it("omits the `$ ` sigil when prefix:false (activity row already shows a $ glyph)", () => {
+	it("omits the `$ ` sigil when prefix:false for compact activity rows", () => {
 		const row = stripAnsi(
 			clampBashCommandRow({ command: "npm run check", width: 80, colorKey: "toolTitle", prefix: false }),
 		);

@@ -39,6 +39,9 @@ export function createSpinnerTicker(
 	ui: TUI,
 	shouldSpin: () => boolean,
 	onFrame: (glyph: string | null) => void,
+	/** When true, hold the current glyph and skip dirty frames (e.g. working
+	 * loader already owns the animated zone). Elapsed clocks still tick once/s. */
+	isFrozen?: () => boolean,
 ): SpinnerTicker {
 	let frame = -1;
 	let cleared = true;
@@ -49,6 +52,24 @@ export function createSpinnerTicker(
 	const unsub = ui.addAnimationCallback((now: number) => {
 		if (shouldSpin()) {
 			cleared = false;
+			// Working-loader owns the animated zone: hold the current activity
+			// glyph (or frame 0) and only dirty once/s for elapsed suffixes.
+			if (isFrozen?.()) {
+				const sec = Math.floor(now / 1000);
+				const glyph = SPINNER_FRAMES[frame >= 0 ? frame : 0] ?? SPINNER_FRAMES[0]!;
+				if (frame < 0) {
+					frame = 0;
+					lastElapsedSec = sec;
+					onFrame(glyph);
+					return true;
+				}
+				if (sec !== lastElapsedSec) {
+					lastElapsedSec = sec;
+					onFrame(glyph);
+					return true;
+				}
+				return false;
+			}
 			if (isReducedMotion()) {
 				const sec = Math.floor(now / 1000);
 				const glyph = SPINNER_FRAMES[0]!;

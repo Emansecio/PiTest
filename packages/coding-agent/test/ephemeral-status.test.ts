@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+	compactStatusText,
 	EPHEMERAL_INFO_TTL_MS,
 	EPHEMERAL_WARNING_TTL_MS,
 	EphemeralStatusController,
@@ -79,6 +80,31 @@ describe("EphemeralStatusController", () => {
 		c.show("second", "info");
 		expect(paints).toEqual(["first", "second"]);
 		vi.advanceTimersByTime(EPHEMERAL_INFO_TTL_MS - 1);
+		expect(clears).toBe(0);
+		vi.advanceTimersByTime(1);
+		expect(clears).toBe(1);
+	});
+
+	it("compacts multiline status text into one line", () => {
+		expect(compactStatusText(" Error:\n  detail\tmore ")).toBe("Error: detail more");
+	});
+
+	it("renews an identical status without repainting it", () => {
+		vi.useFakeTimers();
+		const paints: string[] = [];
+		let clears = 0;
+		const c = new EphemeralStatusController({
+			paint: (message) => paints.push(message),
+			clear: () => {
+				clears++;
+			},
+		});
+
+		c.show("same", "warning");
+		vi.advanceTimersByTime(1000);
+		c.show("same", "warning");
+		expect(paints).toEqual(["same"]);
+		vi.advanceTimersByTime(EPHEMERAL_WARNING_TTL_MS - 1);
 		expect(clears).toBe(0);
 		vi.advanceTimersByTime(1);
 		expect(clears).toBe(1);

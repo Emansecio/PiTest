@@ -1,7 +1,7 @@
 import { type Component, Container, getKeybindings, Spacer, Text, truncateToWidth } from "@pit/tui";
 import { theme } from "../theme/theme.ts";
 import { selectionCursor, themedScrollPositionHint } from "./keybinding-hints.ts";
-import { SelectorCard } from "./selector-card.ts";
+import { beginSelectorSurface } from "./selector-surface.ts";
 
 interface UserMessageItem {
 	id: string; // Entry ID in the session
@@ -131,7 +131,7 @@ export class UserMessageSelectorComponent extends Container {
 		);
 		this.addChild(new Spacer(1));
 
-		const card = new SelectorCard();
+		const { surface: card, mount } = beginSelectorSurface(this, true);
 		card.addChild(new Spacer(1));
 
 		// Create message list
@@ -141,7 +141,7 @@ export class UserMessageSelectorComponent extends Container {
 
 		card.addChild(this.messageList);
 		card.addChild(new Spacer(1));
-		this.addChild(card);
+		mount();
 
 		// Auto-cancel if no messages
 		if (messages.length === 0) {

@@ -331,4 +331,20 @@ describe("capture dedup (plan 015)", () => {
 		await captureSnapshot(f, "edit");
 		expect((await listSnapshotsForFile(f)).length).toBe(2);
 	});
+
+	it("captures same-size changed bytes even when mtime is preserved", async () => {
+		const f = join(tmp, "same-metadata.txt");
+		const fixed = new Date(Date.now() - 60_000);
+		await writeFile(f, "AAAAA");
+		await utimes(f, fixed, fixed);
+		await captureSnapshot(f, "edit");
+
+		await writeFile(f, "BBBBB");
+		await utimes(f, fixed, fixed);
+		await captureSnapshot(f, "edit");
+
+		const snapshots = await listSnapshotsForFile(f);
+		expect(snapshots).toHaveLength(2);
+		expect((await readSnapshotBytes(snapshots[1]!)).toString("utf8")).toBe("BBBBB");
+	});
 });

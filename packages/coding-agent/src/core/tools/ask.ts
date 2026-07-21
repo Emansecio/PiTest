@@ -143,7 +143,7 @@ export function createAskToolDefinition(
 		// auto-resolved with the recommended/first option (never shown to the
 		// user). Sequential execution asks the questions one by one instead.
 		executionMode: "sequential",
-		async execute(toolCallId: string, input: AskToolInput) {
+		async execute(toolCallId: string, input: AskToolInput, signal?: AbortSignal) {
 			const question = input.question.trim();
 			const context = input.context?.trim() || undefined;
 			const header = input.header ? trimToMax(input.header.trim(), HEADER_MAX) : undefined;
@@ -223,19 +223,64 @@ export function createAskToolDefinition(
 				}
 			}
 
-			const answer = await bus.askOptions({
-				question,
-				context,
-				header,
-				options: normalizedOptions,
-				allowMultiple,
-				allowFreeform,
-				allowComment,
-				displayMode,
-				overlayToggleKey,
-				commentToggleKey,
-				timeout,
-				source: { toolCallId, toolName: "ask" },
+			// Honour run abort (Esc / interrupt). Without this the tool parks on
+			// bus.askOptions forever while agent.abort() has already fired — the
+			// turn never settles and the interrupt watchdog only notifies.
+			if (signal?.aborted) {
+				return {
+					content: [{ type: "text" as const, text: "User cancelled the prompt." }],
+					details: { response: null, recommended: recommendedLabel, cancelled: true },
+				};
+			}
+
+			const answer = await new Promise<Awaited<ReturnType<typeof bus.askOptions>>>((resolve, reject) => {
+				let settled = false;
+				const onAbort = () => {
+					if (settled) return;
+					settled = true;
+					// cancelAll resolves pending entries with cancelled:true; we also
+					// short-circuit here so we don't wait if cancel races.
+					bus.cancelAll("interrupt");
+					resolve({
+						requestId: "",
+						picked: [],
+						cancelled: true,
+					});
+				};
+				if (signal) {
+					if (signal.aborted) {
+						onAbort();
+						return;
+					}
+					signal.addEventListener("abort", onAbort, { once: true });
+				}
+				void bus
+					.askOptions({
+						question,
+						context,
+						header,
+						options: normalizedOptions,
+						allowMultiple,
+						allowFreeform,
+						allowComment,
+						displayMode,
+						overlayToggleKey,
+						commentToggleKey,
+						timeout,
+						source: { toolCallId, toolName: "ask" },
+					})
+					.then((result) => {
+						if (settled) return;
+						settled = true;
+						signal?.removeEventListener("abort", onAbort);
+						resolve(result);
+					})
+					.catch((err) => {
+						if (settled) return;
+						settled = true;
+						signal?.removeEventListener("abort", onAbort);
+						reject(err);
+					});
 			});
 
 			if (answer.cancelled) {

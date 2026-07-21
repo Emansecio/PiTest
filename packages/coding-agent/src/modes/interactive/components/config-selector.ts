@@ -21,7 +21,7 @@ import type { PackageSource, SettingsManager } from "../../../core/settings-mana
 import { theme } from "../theme/theme.ts";
 import { checkboxGlyph, rawKeyHint, selectionCursor, themedScrollPositionHint } from "./keybinding-hints.ts";
 import { paintSelectedRow } from "./selectable-row.ts";
-import { SelectorCard } from "./selector-card.ts";
+import { beginSelectorSurface } from "./selector-surface.ts";
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(value, max));
 
@@ -644,7 +644,7 @@ export class ConfigSelectorComponent extends Container implements Focusable {
 
 		// Add header
 		this.addChild(new Spacer(1));
-		const card = new SelectorCard();
+		const { surface: card, mount } = beginSelectorSurface(this, true);
 		card.addChild(new Spacer(1));
 		card.addChild(new ConfigSelectorHeader());
 		card.addChild(new Spacer(1));
@@ -657,7 +657,7 @@ export class ConfigSelectorComponent extends Container implements Focusable {
 		card.addChild(this.resourceList);
 
 		card.addChild(new Spacer(1));
-		this.addChild(card);
+		mount();
 	}
 
 	getResourceList(): ResourceList {

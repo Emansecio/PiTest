@@ -10,6 +10,7 @@ describe("defaultSupportsAdaptiveThinking", () => {
 			"claude-opus-4.8",
 			"claude-opus-4-8-20260101",
 			"claude-sonnet-5",
+			"claude-fable-5",
 			"claude-sonnet-4-6-20250514",
 		]) {
 			expect(defaultSupportsAdaptiveThinking(id)).toBe(true);

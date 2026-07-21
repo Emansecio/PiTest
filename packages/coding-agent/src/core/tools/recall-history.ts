@@ -56,6 +56,7 @@ export function createRecallHistoryDefinition(
 		description:
 			"Search the conversation history that was removed during context compaction. Use it to recover a specific fact (file path, error message, prior decision) you remember mentioning earlier instead of restating it from memory.",
 		promptSnippet: "Recover a fact from the compacted-away conversation by keyword search",
+		activity: "navigation",
 		parameters: recallHistorySchema,
 		async execute(_toolCallId, input: RecallHistoryInput) {
 			const source = getCurrentHistoryRecallSource();

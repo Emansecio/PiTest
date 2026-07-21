@@ -251,14 +251,28 @@ export async function isFffAvailable(): Promise<boolean> {
  * directory). Used to gate the fff backend: outside git, fff drops dotfiles and
  * its watcher goes stale — callers must fall back to rg/fd.
  */
+const gitWorkTreeCache = new Map<string, boolean>();
+
 export function isGitWorkTree(dir: string): boolean {
-	let current = path.resolve(dir);
+	const start = path.resolve(dir);
+	const cached = gitWorkTreeCache.get(start);
+	if (cached !== undefined) return cached;
+	let current = start;
+	let result = false;
 	while (true) {
-		if (existsSync(path.join(current, ".git"))) return true;
+		if (existsSync(path.join(current, ".git"))) {
+			result = true;
+			break;
+		}
 		const parent = path.dirname(current);
-		if (parent === current) return false;
+		if (parent === current) break;
 		current = parent;
 	}
+	// Session-lifetime memo: this runs on every interactive startup and per
+	// search-tool call; a cwd flipping in/out of git mid-session is not a case
+	// worth re-statting parents for.
+	gitWorkTreeCache.set(start, result);
+	return result;
 }
 
 /** Start indexing `basePath` in the background; never throws. */

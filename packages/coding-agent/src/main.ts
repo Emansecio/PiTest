@@ -990,7 +990,11 @@ export async function main(args: string[], options?: MainOptions) {
 			time("interactiveMode.init");
 			printTimings();
 			interactiveMode.stop();
-			await stopThemeWatcherLazy();
+			try {
+				await runtime.dispose();
+			} finally {
+				await stopThemeWatcherLazy();
+			}
 			if (process.stdout.writableLength > 0) {
 				await new Promise<void>((resolve) => process.stdout.once("drain", resolve));
 			}

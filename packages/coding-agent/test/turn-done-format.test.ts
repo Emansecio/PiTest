@@ -1,6 +1,10 @@
 import type { AgentMessage } from "@pit/agent-core";
 import { describe, expect, it } from "vitest";
-import { buildTurnDoneSnapshot, formatTurnDoneDisplayLine } from "../src/modes/interactive/turn-done-format.js";
+import {
+	buildTurnDoneSnapshot,
+	formatTurnDoneDisplayLine,
+	shouldRenderTurnDone,
+} from "../src/modes/interactive/turn-done-format.js";
 
 describe("turn-done-format", () => {
 	it("formatTurnDoneDisplayLine shows success stats", () => {
@@ -73,5 +77,20 @@ describe("turn-done-format", () => {
 		expect(snapshot.outputTokens).toBe(130);
 		expect(snapshot.cost).toBeCloseTo(0.003);
 		expect(snapshot.stopReason).toBe("stop");
+	});
+
+	it("keeps routine turn metrics out of the transcript", () => {
+		expect(shouldRenderTurnDone({ elapsedMs: 1000, inputTokens: 1, outputTokens: 1, stopReason: "stop" })).toBe(
+			false,
+		);
+		expect(shouldRenderTurnDone({ elapsedMs: 1000, inputTokens: 1, outputTokens: 1, stopReason: "toolUse" })).toBe(
+			false,
+		);
+		expect(shouldRenderTurnDone({ elapsedMs: 1000, inputTokens: 0, outputTokens: 0, stopReason: "aborted" })).toBe(
+			true,
+		);
+		expect(shouldRenderTurnDone({ elapsedMs: 1000, inputTokens: 0, outputTokens: 0, stopReason: "error" })).toBe(
+			true,
+		);
 	});
 });

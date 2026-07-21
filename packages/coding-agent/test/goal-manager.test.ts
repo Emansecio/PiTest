@@ -1,4 +1,3 @@
-import { SPINNER_FRAMES } from "@pit/tui";
 import { describe, expect, it } from "vitest";
 import { GoalManager, parseTokenBudget } from "../src/core/goal/goal-manager.js";
 
@@ -149,39 +148,21 @@ describe("GoalManager lifecycle", () => {
 		mgr.start("y", { tokenBudget: 100_000 });
 		mgr.recordTurn(18_000);
 		expect(mgr.statusLine()).toBe("🎯 active 18k/100k");
-		// Spinner marker only when actively driving the goal.
-		expect(mgr.statusLine(true)).toMatch(/^🎯 active 18k\/100k [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]$/);
+		// Spinner is appended by the footer outside its cache — statusLine stays static.
+		expect(mgr.statusLine(true)).toBe("🎯 active 18k/100k");
 		mgr.pause();
 		expect(mgr.statusLine()).toBe("🎯 paused");
 		expect(mgr.statusLine(true)).toBe("🎯 paused");
 	});
 
-	it("animates the spinner over time when continuing", () => {
+	it("keeps statusLine static while continuing (spinner lives in the footer)", () => {
 		const { mgr, advance } = makeManager();
 		mgr.start("x", {});
 		const first = mgr.statusLine(true);
 		advance(80);
 		const second = mgr.statusLine(true);
-		expect(first).not.toBe(second);
-		expect(SPINNER_FRAMES.some((f) => first.endsWith(f))).toBe(true);
-		expect(SPINNER_FRAMES.some((f) => second.endsWith(f))).toBe(true);
-	});
-
-	it("freezes the footer spinner under reduced motion", () => {
-		const prev = process.env.PIT_NO_MOTION;
-		process.env.PIT_NO_MOTION = "1";
-		try {
-			const { mgr, advance } = makeManager();
-			mgr.start("x", {});
-			const first = mgr.statusLine(true);
-			advance(160);
-			const second = mgr.statusLine(true);
-			expect(first).toBe(second);
-			expect(first.endsWith(SPINNER_FRAMES[0])).toBe(true);
-		} finally {
-			if (prev === undefined) delete process.env.PIT_NO_MOTION;
-			else process.env.PIT_NO_MOTION = prev;
-		}
+		expect(first).toBe(second);
+		expect(first).toBe("🎯 active 0s");
 	});
 
 	it("includes the objective in the system prompt section and continuation", () => {

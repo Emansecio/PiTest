@@ -236,4 +236,25 @@ describe("VirtualizedContainer", () => {
 
 		assert.deepEqual(container.render(20), ["a ", "c "]);
 	});
+
+	it("isolates a throwing child so siblings still render (M3)", () => {
+		const container = new VirtualizedContainer();
+		const ok = new StableText("ok");
+		const bad: Component = {
+			render() {
+				throw new Error("bubble boom");
+			},
+			invalidate() {},
+		};
+		const tail = new StableText("tail");
+		container.addChild(ok);
+		container.addChild(bad);
+		container.addChild(tail);
+		const lines = container.render(40);
+		assert.equal(lines.length, 3);
+		assert.ok(lines[0]?.includes("ok"));
+		assert.ok(lines[1]?.includes("render error"));
+		assert.ok(lines[1]?.includes("bubble boom"));
+		assert.ok(lines[2]?.includes("tail"));
+	});
 });

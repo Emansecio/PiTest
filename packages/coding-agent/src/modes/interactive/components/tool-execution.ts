@@ -27,14 +27,14 @@ const SINGLE_LINE_PREVIEW_TOOLS = new Set<string>(["task"]);
 /** Duration of the gutter color fade when a tool settles pending → success/error (P5). */
 const GUTTER_EASE_MS = 180;
 
-/** Failure glyph for the framed header label (U+2717, width-1). Mirrors the
- * activity line's error icon so a standalone tool card and a grouped activity row
+/** Failure glyph for the compact gutter label (U+2717, width-1). Mirrors the
+ * activity line's error icon so a standalone tool and a grouped activity row
  * read the same failure mark. */
 const ICON_ERROR = "✗";
 
 /** Result text marking an aborted/interrupted tool (vs a real failure). Such
  * results must not auto-expand their captured output — the user chose to stop. */
-const ABORT_RESULT_RE = /\b(?:command|operation|request was|stream) aborted\b|\binterrupted\b/i;
+const ABORT_RESULT_RE = /\b(?:command|operation|request was|stream) aborted\b|\baborted after\b|\binterrupted\b/i;
 
 type GutterState = "pending" | "success" | "error";
 
@@ -109,10 +109,8 @@ export class ToolExecutionComponent extends MessageShell {
 		cwd: string,
 	) {
 		super({
-			frame: true,
-			framePaddingX: options.framePaddingX,
+			frame: false,
 			gutterColor: (text: string) => theme.fg("gutterToolPending", text),
-			frameColor: (text: string) => theme.fg("borderMuted", text),
 		});
 		this.toolName = toolName;
 		this.toolCallId = toolCallId;
@@ -348,7 +346,14 @@ export class ToolExecutionComponent extends MessageShell {
 
 	getActivityState(): "pending" | "success" | "error" {
 		if (this.isPartial) return "pending";
-		return this.result?.isError ? "error" : "success";
+		if (!this.result?.isError) return "success";
+		// A result may flag itself `recoverable` — an expected negative result (e.g. a
+		// recall_tool_output miss on a superseded id), not a genuine failure. The payload
+		// keeps isError (model + retry budget see it unchanged); the activity stream just
+		// must not paint it red or auto-expand. Aborts stay "error" here and are filtered
+		// downstream via isAborted(), unchanged.
+		if (this.result.details?.recoverable === true) return "success";
+		return "error";
 	}
 
 	/** True when the errored result is actually an abort/interruption rather than
@@ -615,7 +620,11 @@ export class ToolExecutionComponent extends MessageShell {
 	 */
 	private refreshErrorLabel(): void {
 		const failed =
-			this.gutterAnimationsEnabled && !this.isPartial && this.result?.isError === true && !this.isAborted();
+			this.gutterAnimationsEnabled &&
+			!this.isPartial &&
+			this.result?.isError === true &&
+			!this.isAborted() &&
+			this.result?.details?.recoverable !== true;
 		this.setLabel(failed ? `${ICON_ERROR} error` : undefined);
 	}
 

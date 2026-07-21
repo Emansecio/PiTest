@@ -65,31 +65,22 @@ export interface CodeModeToolOptions {
 	 * so the registry can build the definition without the runtime dependency.
 	 */
 	dispatcher?: CodeModeDispatcher;
-	/** Returns the currently active tool names. Injected by the agent-session. */
+	/** Retained for API compatibility; active names are already listed by the system prompt. */
 	getActiveToolNames?: () => string[];
 	/** Override the per-tool-result byte cap re-injected into the vm. */
 	maxToolResultBytes?: number;
 }
 
 /**
- * Build the guideline bullets, listing the active `tools.*` available. The list
- * is resolved live at read time from `getActiveToolNames` (see the
- * `promptGuidelines` getter on the definition), so a tool activated after boot
- * shows up the next time the system prompt is rebuilt.
+ * Build compact code-mode guidance. The system prompt already lists every
+ * active tool, so repeating all names here wastes prefix tokens.
  */
-function buildGuidelines(toolNames: string[]): string[] {
-	const head =
-		"code-mode: write ONE program that calls tools as `await tools.<name>(args)`; use it for multi-tool workflows (read/filter/compose over many results) instead of N separate tool calls — it collapses them into a single turn (less latency + tokens).";
-	const lines = [
-		head,
-		"Each tools.<name>() returns the tool's text result as a string; print final answers with console.log. Wrap calls in try/catch — a failed tool call rejects that call only.",
-		"State does NOT persist across `code` calls; do everything for one workflow in a single program.",
-		"Shares its persistent JavaScript kernel process with `eval` (lang=javascript): an abort or timeout on either tool kills that kernel and silently wipes the other's persisted state too.",
+function buildGuidelines(): string[] {
+	return [
+		"For multi-tool workflows, use one code-mode program with `await tools.<name>(args)`; active tools listed above are available except `code` itself.",
+		"Tool results are strings: print the final result and catch failures. State does not persist between `code` calls.",
+		"The JavaScript process is shared with `eval`; aborting or timing out either resets both tools' JS state.",
 	];
-	if (toolNames.length > 0) {
-		lines.push(`Available in code-mode: ${toolNames.map((n) => `tools.${n}`).join(", ")}.`);
-	}
-	return lines;
 }
 
 export function createCodeModeToolDefinition(
@@ -106,12 +97,8 @@ export function createCodeModeToolDefinition(
 			"Run ONE JavaScript program that calls the agent's tools as `await tools.<name>(args)`. Use for multi-tool workflows (read/filter/compose over many results) to collapse N tool calls into a single turn — less latency and fewer tokens. Tool calls go through the same permission/safety pipeline as normal calls. Runs in the same persistent JavaScript kernel process as `eval` (lang=javascript) — aborting or timing out either tool tears down that shared kernel and wipes both tools' persisted JS state.",
 		promptSnippet:
 			"Write one JS program calling tools via `await tools.<name>(args)`; collapses N tool calls into one turn.",
-		// Live catalog: re-derive from the CURRENT active tool names at read time
-		// (a getter), not eagerly at definition-build time. The agent-session reads
-		// this in `_refreshToolRegistry` whenever the active surface changes, so a
-		// tool activated post-boot now appears in "Available in code-mode:".
 		get promptGuidelines(): string[] {
-			return buildGuidelines(getActiveToolNames().filter((n) => n !== "code"));
+			return buildGuidelines();
 		},
 		parameters: codeModeSchema,
 		// Has observable effects (it runs tools); keep it on its own activity line.

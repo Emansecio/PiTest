@@ -44,6 +44,7 @@ describe("ActivityLineComponent", () => {
 		const c = new ActivityLineComponent(fakeTui());
 		c.setExec(execStub({}));
 		const out = c.render(120).map(stripAnsi);
+		expect(out[0]).toMatch(/^✓ Edited/);
 		expect(out[0]).toContain("Edited");
 		expect(out[0]).toContain("foo.ts");
 		expect(out[0]).toContain("+1");
@@ -84,6 +85,20 @@ describe("ActivityLineComponent", () => {
 		expect(out.some((l) => l.includes("error line 25"))).toBe(true);
 		expect(out.some((l) => l.includes("more lines"))).toBe(false);
 	});
+	it("marks an aborted tool with a muted ◦ instead of ✓ or ✗", () => {
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(
+			execStub({
+				getActivityState: () => "error",
+				isAborted: () => true,
+				render: () => ["Operation aborted"],
+			}),
+		);
+		const header = stripAnsi(c.render(120)[0]!);
+		expect(header.startsWith("◦")).toBe(true);
+		expect(header).not.toContain("✓");
+		expect(header).not.toContain("✗");
+	});
 	it("folds identical repeated actions into a ×N counter", () => {
 		const todoStub = () =>
 			execStub({
@@ -98,11 +113,12 @@ describe("ActivityLineComponent", () => {
 		c.coalesce(todoStub());
 		c.coalesce(todoStub());
 		const out = c.render(120).map(stripAnsi);
+		expect(out[0]).toMatch(/^✓ Updated todos/);
 		expect(out[0]).toContain("Updated todos");
 		expect(out[0]).toContain("×3");
 	});
 
-	it("renders bash as `$ Ran <command>` without a redundant `$ ` sigil", () => {
+	it("renders bash as `Ran <command>` without a type sigil", () => {
 		const c = new ActivityLineComponent(fakeTui());
 		c.setExec(
 			execStub({
@@ -112,9 +128,9 @@ describe("ActivityLineComponent", () => {
 			}),
 		);
 		const out = c.render(120).map(stripAnsi);
-		// `$` family glyph + "Ran" verb, then the bare command (no second `$ `).
+		expect(out[0]).toMatch(/^✓ Ran npm test/);
 		expect(out[0]).toContain("Ran npm test");
-		expect(out[0]).not.toContain("Ran $ npm test");
+		expect(out[0]).not.toContain("$");
 	});
 
 	it("elides a leading `cd <path> &&` in the bash row", () => {

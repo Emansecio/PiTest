@@ -110,6 +110,44 @@ async function withTransformContextTimeout(
 }
 
 /**
+ * Shared wall-clock race for load-bearing async boundaries that must not hang
+ * the turn forever (convertToLlm, getApiKey). Same semantics as transformContext:
+ * timeout fails the turn; late rejections are swallowed.
+ */
+async function withBoundaryTimeout<T>(pending: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+	if (timeoutMs <= 0) return pending;
+	pending.catch(() => {});
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			pending,
+			new Promise<never>((_resolve, reject) => {
+				timer = setTimeout(() => {
+					reject(
+						new Error(
+							`${label} timed out after ${timeoutMs}ms (set PIT_AGENT_BOUNDARY_TIMEOUT_MS to adjust, 0 to disable).`,
+						),
+					);
+				}, timeoutMs);
+				(timer as { unref?: () => void }).unref?.();
+			}),
+		]);
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+	}
+}
+
+const DEFAULT_AGENT_BOUNDARY_TIMEOUT_MS = 60_000;
+
+function resolveAgentBoundaryTimeoutMs(): number {
+	const raw = typeof process !== "undefined" ? process.env.PIT_AGENT_BOUNDARY_TIMEOUT_MS : undefined;
+	if (raw === undefined || raw === "") return DEFAULT_AGENT_BOUNDARY_TIMEOUT_MS;
+	const parsed = Number(raw);
+	if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_AGENT_BOUNDARY_TIMEOUT_MS;
+	return parsed;
+}
+
+/**
  * Default hard backstop on model turns per `runAgentLoop` invocation when a
  * caller does not set `config.maxTurns`. High enough to never bite a legitimate
  * task, finite enough to bound cost on a runaway loop the doom-loop detector
@@ -686,8 +724,11 @@ async function streamAssistantResponse(
 		messages = timeoutMs === 0 ? await pending : await withTransformContextTimeout(pending, timeoutMs);
 	}
 
-	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
-	const llmMessages = await config.convertToLlm(messages);
+	// Convert to LLM-compatible messages (AgentMessage[] → Message[]).
+	// Bound async custom converters so a never-settling promise cannot wedge the turn.
+	const boundaryTimeoutMs = resolveAgentBoundaryTimeoutMs();
+	const convertPending = Promise.resolve(config.convertToLlm(messages));
+	const llmMessages = await withBoundaryTimeout(convertPending, boundaryTimeoutMs, "convertToLlm");
 
 	// Build LLM context
 	const llmContext: Context = {
@@ -698,9 +739,23 @@ async function streamAssistantResponse(
 
 	const streamFunction = streamFn || streamSimple;
 
-	// Resolve API key (important for expiring tokens)
-	const resolvedApiKey =
-		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
+	// Resolve API key (important for expiring tokens). Race abort + wall-clock so
+	// a hung OAuth refresh cannot leave Esc looking dead for more than the cap.
+	let resolvedApiKey = config.apiKey;
+	if (config.getApiKey) {
+		const keyPending = Promise.resolve(config.getApiKey(config.model.provider));
+		const racedKey = await withBoundaryTimeout(
+			signal
+				? raceToolExecute(keyPending, signal).catch((err) => {
+						// Re-throw abort; only use boundary timeout for true hangs.
+						throw err;
+					})
+				: keyPending,
+			boundaryTimeoutMs,
+			"getApiKey",
+		);
+		resolvedApiKey = racedKey || config.apiKey;
+	}
 
 	// Child abort controller so TTSR can cancel just this stream without
 	// poisoning the outer agent signal. We forward outer abort into it but
@@ -1724,7 +1779,11 @@ async function executePreparedToolCall(
 	}
 
 	try {
-		const result = await prepared.tool.execute(
+		// Race execute against the run abort signal so a tool that ignores
+		// `signal` cannot wedge the whole turn forever after Esc/interrupt.
+		// The tool keeps running detached on abort (we cannot force-cancel
+		// arbitrary extension code); we only unblock the loop.
+		const executePromise = prepared.tool.execute(
 			prepared.toolCall.id,
 			prepared.args as never,
 			signal,
@@ -1742,6 +1801,7 @@ async function executePreparedToolCall(
 			},
 			executeCtx,
 		);
+		const result = await raceToolExecute(executePromise, signal);
 		await Promise.allSettled(pendingUpdates);
 		// A tool can fail by RETURNING `isError: true` instead of throwing (todo,
 		// plan, chrome_devtools, web_search, ...). Fold that into the loop-level
@@ -1761,6 +1821,29 @@ async function executePreparedToolCall(
 			isError: true,
 		};
 	}
+}
+
+/**
+ * Unblock tool.execute when the run AbortSignal fires even if the tool never
+ * observes it. Late rejections from the abandoned execute are swallowed.
+ */
+function raceToolExecute<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+	if (!signal) return promise;
+	if (signal.aborted) {
+		promise.then(undefined, () => {});
+		return Promise.reject(new Error("Request was aborted"));
+	}
+	let onAbort: (() => void) | undefined;
+	const abortPromise = new Promise<never>((_resolve, reject) => {
+		onAbort = () => {
+			promise.then(undefined, () => {});
+			reject(new Error("Request was aborted"));
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+	return Promise.race([promise, abortPromise]).finally(() => {
+		if (onAbort) signal.removeEventListener("abort", onAbort);
+	});
 }
 
 // Tier 4: post-hoc error hint enrichment, shared by the prepared-call

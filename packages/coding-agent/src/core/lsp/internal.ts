@@ -159,8 +159,10 @@ function findHeaderEnd(buffer: Buffer): number {
 // grow forever. Mirrors the stderr cap (MAX_STDERR_BYTES) on the framed path.
 /** Max bytes to scan for a header terminator before declaring the stream unframed. */
 const MAX_HEADER_SCAN_BYTES = 64 * 1024;
-/** Max declared Content-Length to honour; larger is treated as garbage, not awaited. */
-const MAX_FRAME_BYTES = 128 * 1024 * 1024;
+/** Max declared Content-Length to honour; larger is treated as garbage, not awaited.
+ * 16 MiB bounds hostile/buggy servers without blocking legitimate large payloads
+ * (diagnostics, hover). Was 128 MiB — enough to OOM under Content-Length spam. */
+const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 
 /**
  * Parse a single `Content-Length`-framed JSON message from the head of `buffer`.

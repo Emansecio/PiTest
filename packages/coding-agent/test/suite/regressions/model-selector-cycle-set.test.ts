@@ -91,6 +91,8 @@ describe("model selector cycle set", () => {
 			.map((line) => line.trim());
 
 		expect(lines.some((line) => line.includes("Cycle set"))).toBe(true);
+		expect(lines.filter((line) => line.includes("Cycle set"))).toHaveLength(1);
+		expect(lines.some((line) => line.includes("1 model in cycle"))).toBe(true);
 		expect(lines).not.toContain("Scope:");
 		expect(lines).not.toContain("all | enabled");
 

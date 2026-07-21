@@ -1,6 +1,4 @@
-import { Spacer } from "@pit/tui";
 import { describe, expect, test, vi } from "vitest";
-import { TurnDoneMessageComponent } from "../src/modes/interactive/components/turn-done-message.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 
 describe("InteractiveMode turn done rendering", () => {
@@ -14,7 +12,7 @@ describe("InteractiveMode turn done rendering", () => {
 		"shouldRetireWorkingLoaderOnAgentEnd",
 	) as (willRetry: boolean) => boolean;
 
-	test("agent_end appends TurnDoneMessageComponent when the loader retires", async () => {
+	test("agent_end omits the normal turn-done marker when the loader retires", async () => {
 		const added: unknown[] = [];
 		const fakeThis = {
 			isInitialized: true,
@@ -60,8 +58,7 @@ describe("InteractiveMode turn done rendering", () => {
 			],
 		});
 
-		expect(added.some((child) => child instanceof Spacer)).toBe(true);
-		expect(added.some((child) => child instanceof TurnDoneMessageComponent)).toBe(true);
+		expect(added).toHaveLength(0);
 	});
 
 	test("agent_end defers turn-done when post-turn gates will run", async () => {

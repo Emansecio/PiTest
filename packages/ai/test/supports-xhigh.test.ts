@@ -15,7 +15,16 @@ describe("getSupportedThinkingLevels", () => {
 		expect(getSupportedThinkingLevels(model!)).toContain("xhigh");
 	});
 
-	it("does not include xhigh for non-Opus Anthropic models", () => {
+	it("includes xhigh for Anthropic Fable 5 on anthropic-messages API", () => {
+		const model = getModel("anthropic", "claude-fable-5");
+		expect(model).toBeDefined();
+		const levels = getSupportedThinkingLevels(model!);
+		expect(levels).toContain("xhigh");
+		expect(levels).toEqual(["low", "medium", "high", "xhigh"]);
+		expect(model!.thinkingLevelMap?.xhigh).toBe("xhigh");
+	});
+
+	it("does not include xhigh for non-Opus/non-Fable Anthropic models", () => {
 		const model = getModel("anthropic", "claude-sonnet-5");
 		expect(model).toBeDefined();
 		expect(getSupportedThinkingLevels(model!)).not.toContain("xhigh");

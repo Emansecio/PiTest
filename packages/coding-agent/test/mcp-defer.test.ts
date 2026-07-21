@@ -150,6 +150,7 @@ function createFakePi() {
 		},
 		registerTool(tool: ToolDefinition) {
 			registeredTools.set(tool.name, tool);
+			if (!activeTools.includes(tool.name)) activeTools = [...activeTools, tool.name];
 		},
 		registerCommand(name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) {
 			commands.set(name, options.handler);
@@ -284,6 +285,59 @@ describe("createMcpExtension registration wiring", () => {
 		// A second /mcp with no disconnected servers must not re-register or churn.
 		await harness.runCommand("mcp");
 		expect([...harness.registeredTools.keys()]).toEqual(["mcp__small__ping"]);
+	});
+
+	it("removes an eager tool from the active surface after tools/list_changed", async () => {
+		const getUrl = "http://localhost:0/list-change-sse";
+		const postUrl = "http://localhost:0/list-change-messages";
+		const encoder = new TextEncoder();
+		let channel: ReadableStreamDefaultController<Uint8Array> | undefined;
+		let toolNames = ["ping"];
+		const pushFrame = (value: unknown) =>
+			channel?.enqueue(encoder.encode(`event: message\ndata: ${JSON.stringify(value)}\n\n`));
+
+		(globalThis as unknown as { fetch: typeof fetch }).fetch = vi.fn(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				const method = (init?.method ?? "GET").toUpperCase();
+				if (method === "GET" && url === getUrl) {
+					return new Response(
+						new ReadableStream<Uint8Array>({
+							start(controller) {
+								channel = controller;
+								controller.enqueue(encoder.encode("event: endpoint\ndata: /list-change-messages\n\n"));
+							},
+						}),
+						{ status: 200, headers: { "content-type": "text/event-stream" } },
+					);
+				}
+				if (method === "POST" && url === postUrl) {
+					const rpc = init?.body ? JSON.parse(init.body.toString()) : {};
+					if (rpc.method === "notifications/initialized") return new Response("", { status: 202 });
+					const result =
+						rpc.method === "initialize"
+							? { protocolVersion: "1", capabilities: { tools: {} } }
+							: {
+									tools: toolNames.map((name) => ({ name, description: "", inputSchema: { type: "object" } })),
+								};
+					queueMicrotask(() => pushFrame({ jsonrpc: "2.0", id: rpc.id, result }));
+					return new Response("", { status: 202 });
+				}
+				throw new Error(`unexpected ${method} ${url}`);
+			},
+		) as unknown as typeof fetch;
+
+		const harness = createFakePi();
+		createMcpExtension({
+			settings: { defer: "never", servers: { live: { transport: "sse", url: getUrl } } },
+		})(harness.pi);
+		await harness.fireSessionStart();
+		await waitForMcpEffect(() => harness.getActiveTools().includes("mcp__live__ping"));
+
+		toolNames = [];
+		pushFrame({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
+		await waitForMcpEffect(() => !harness.getActiveTools().includes("mcp__live__ping"));
+		await harness.fireSessionShutdown();
 	});
 
 	it("opens the interactive MCP manager above the editor", async () => {

@@ -70,3 +70,7 @@ export function formatTurnDoneDisplayLine(snapshot: TurnDoneSnapshot): string {
 	}
 	return parts.join(" · ");
 }
+
+export function shouldRenderTurnDone(snapshot: TurnDoneSnapshot): boolean {
+	return snapshot.stopReason === "aborted" || snapshot.stopReason === "error";
+}

@@ -8,7 +8,6 @@
  * the interactive mode owns continuation. Clocks/ids are injected for testing.
  */
 
-import { spinnerGlyphAt } from "../../modes/interactive/components/spinner-ticker.ts";
 import { sliceSafe } from "../../utils/surrogate.ts";
 
 export type GoalStatus = "active" | "paused" | "budget_limited" | "complete";
@@ -236,11 +235,12 @@ export class GoalManager {
 	}
 
 	/**
-	 * Compact statusline string, e.g. "🎯 active 18k/100k ⠹" or "🎯 paused".
-	 * `continuing` appends an animated spinner when the agent is actively driving
-	 * the goal (streaming or auto-continuing) vs. an active goal that is idle.
+	 * Compact statusline string, e.g. "🎯 active 18k/100k" or "🎯 paused".
+	 * Static on purpose: the footer appends the driving spinner outside its
+	 * render cache so the whole metrics strip is not rebuilt ~12fps.
+	 * `continuing` is retained for call-site compatibility and ignored.
 	 */
-	statusLine(continuing = false): string {
+	statusLine(_continuing = false): string {
 		const g = this.state;
 		if (!g) return "";
 		const budgetPart =
@@ -248,7 +248,7 @@ export class GoalManager {
 		switch (g.status) {
 			case "active": {
 				const body = budgetPart ?? formatElapsed(this.now() - g.startedAt);
-				return `🎯 active ${body}${continuing ? ` ${spinnerGlyphAt(this.now())}` : ""}`;
+				return `🎯 active ${body}`;
 			}
 			case "paused":
 				return "🎯 paused";

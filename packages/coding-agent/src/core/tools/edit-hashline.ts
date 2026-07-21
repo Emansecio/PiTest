@@ -1,6 +1,5 @@
 import type { AgentTool } from "@pit/agent-core";
 import { type Box, Container, Spacer, Text } from "@pit/tui";
-import { stat as fsStat } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
 import type { ToolDefinition } from "../extensions/types.js";
@@ -22,6 +21,7 @@ import {
 	getOrCreateEditCallComponent,
 	setEditPreview,
 } from "./edit-preview-shared.ts";
+import { fileContentStampMatches, stampFileBytes } from "./file-content-stamp.ts";
 import { type FileMtimeStore, refreshFileMtime } from "./file-mtime-store.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
@@ -185,21 +185,9 @@ export function createEditHashlineToolDefinition(
 								}
 								if (aborted) return;
 
-								// Snapshot the mtime this preview will be staged against (only
-								// needed when staging — see the preview branch below), so the
-								// eventual apply() (run later, from `resolve`) can detect the file
-								// changing between staging and commit and refuse to blindly
-								// overwrite it instead of silently discarding that change.
-								let stagedMtimeMs: number | undefined;
-								if (ops === defaultEditOperations && input.preview === true) {
-									try {
-										stagedMtimeMs = (await fsStat(absolutePath)).mtimeMs;
-									} catch {
-										// stat failed — staleness re-check at apply time is skipped, not fatal.
-									}
-								}
-
 								const buffer = await ops.readFile(absolutePath);
+								const stagedContentStamp =
+									input.preview === true && ops === defaultEditOperations ? stampFileBytes(buffer) : undefined;
 								const rawContent = buffer.toString("utf-8");
 								if (aborted) return;
 
@@ -247,13 +235,13 @@ export function createEditHashlineToolDefinition(
 											await withFileMutationQueue(
 												absolutePath,
 												async () => {
-													if (ops === defaultEditOperations && stagedMtimeMs !== undefined) {
-														const curStat = await fsStat(absolutePath).catch(() => undefined);
-														if (curStat && curStat.mtimeMs !== stagedMtimeMs) {
-															throw new Error(
-																`Cannot apply preview: ${path} changed on disk since this edit was staged. Re-run edit_v2 to recompute the diff against the current file.`,
-															);
-														}
+													if (
+														stagedContentStamp &&
+														!(await fileContentStampMatches(absolutePath, stagedContentStamp))
+													) {
+														throw new Error(
+															`Cannot apply preview: ${path} changed on disk since this edit was staged. Re-run edit_v2 to recompute the diff against the current file.`,
+														);
 													}
 													await ops.writeFile(absolutePath, finalContent);
 													if (ops === defaultEditOperations)
@@ -292,7 +280,7 @@ export function createEditHashlineToolDefinition(
 									const seenMtime = mtimeStore.get(absolutePath);
 									if (seenMtime !== undefined) {
 										try {
-											const curStat = await fsStat(absolutePath);
+											const curStat = await ops.stat!(absolutePath);
 											if (curStat.mtimeMs !== seenMtime) {
 												staleNote = ` NOTE: ${path} changed on disk since you last read it this session — the edit applied to the current file, but content you weren't shown may have moved; re-read if the result looks unexpected.`;
 											}
@@ -319,7 +307,7 @@ export function createEditHashlineToolDefinition(
 								let integrityNote = "";
 								if (ops === defaultEditOperations) {
 									try {
-										const st = await fsStat(absolutePath);
+										const st = await ops.stat!(absolutePath);
 										const expected = Buffer.byteLength(finalContent, "utf-8");
 										if (st.size !== expected) {
 											integrityNote = ` WARNING: post-write size mismatch (expected ${expected} bytes, found ${st.size}). The write may be incomplete — re-read the file to confirm before relying on it.`;

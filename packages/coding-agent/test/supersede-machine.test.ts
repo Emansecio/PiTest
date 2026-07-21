@@ -9,8 +9,11 @@ import type { AgentMessage } from "@pit/agent-core";
 import { afterEach, describe, expect, it } from "vitest";
 import { applyLiveContextEconomyAfterToolSuccess } from "../src/core/agent-session-live-prune.js";
 import {
+	adoptSupersedeScanState,
 	applySupersedeOnly,
+	cloneForArgElision,
 	cloneToolResultMessagesForPrune,
+	elideMutatingToolCallArguments,
 	estimateTokens,
 	imageBlockTokens,
 	planContextPrune,
@@ -794,5 +797,63 @@ describe("imageBlockTokens — size-scaled image cost", () => {
 		} as unknown as AgentMessage;
 
 		expect(estimateTokens(message)).toBe(3000);
+	});
+});
+
+// ============================================================================
+// Scan-state adoption + cheap arg-elision clone (send-path cache re-key)
+// ============================================================================
+
+describe("adoptSupersedeScanState — re-key incremental scan across derived arrays", () => {
+	it("adopted state plans identically and ingests a suffix appended only to the derived array", () => {
+		const blob = bigBlob();
+		const base = [toolCall("read", "c1", { path: "adopt-a.ts" }), toolResult("read", "c1", blob), user("a")];
+		// Warm the scan cache on `base`.
+		planContextPrune(base, 1);
+		const derived = base.slice();
+		adoptSupersedeScanState(base, derived);
+		// Duplicate read appended ONLY to `derived` — the adopted state must scan
+		// the new suffix rather than treat it as already ingested.
+		derived.push(
+			toolCall("read", "c2", { path: "adopt-a.ts" }),
+			toolResult("read", "c2", "fresh"),
+			user("b"),
+			user("c"),
+		);
+		expect(sorted(planContextPrune(derived, 2).supersededIndices)).toEqual([1]);
+		// The source array's own state is unaffected by the derived array's scan.
+		expect(sorted(planContextPrune(base, 1).supersededIndices)).toEqual([]);
+	});
+
+	it("refuses adoption when the derived array does not correspond to the source prefix", () => {
+		const base = [toolCall("read", "c1", { path: "adopt-b.ts" }), toolResult("read", "c1", bigBlob()), user("a")];
+		planContextPrune(base, 1);
+		const unrelated = [user("x"), user("y"), user("z")];
+		adoptSupersedeScanState(base, unrelated);
+		// No stale indices leak into the unrelated array's plan.
+		expect(sorted(planContextPrune(unrelated, 1).supersededIndices)).toEqual([]);
+	});
+});
+
+describe("cloneForArgElision — clones only the targeted assistant messages", () => {
+	it("shares all non-target messages by reference and isolates elision from the original", () => {
+		const big = "x".repeat(4000);
+		const messages = [
+			toolCall("write", "w1", { path: "f1.ts", content: big }),
+			toolResult("write", "w1", "ok"),
+			toolCall("write", "w2", { path: "f2.ts", content: big }),
+			toolResult("write", "w2", "ok"),
+			user("a"),
+		];
+		const copy = cloneForArgElision(messages, ["w1", "w2"]);
+		expect(copy).not.toBe(messages);
+		expect(copy[0]).not.toBe(messages[0]);
+		expect(copy[2]).not.toBe(messages[2]);
+		expect(copy[1]).toBe(messages[1]);
+		expect(copy[4]).toBe(messages[4]);
+		expect(elideMutatingToolCallArguments(copy, "w1")).toBeGreaterThan(0);
+		const originalArgs = (messages[0] as unknown as { content: { arguments: { content: string } }[] }).content[0]
+			.arguments;
+		expect(originalArgs.content.length).toBe(4000);
 	});
 });

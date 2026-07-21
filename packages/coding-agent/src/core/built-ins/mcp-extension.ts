@@ -140,6 +140,7 @@ export function createMcpExtension(options: McpExtensionOptions) {
 		// Guards the late-registration path against re-registering tools that the
 		// boot pass already handled when a server merely re-emits "connected".
 		const registeredNames = new Set<string>();
+		const registeredToolsByServer = new Map<string, Set<string>>();
 
 		// Eager (on-surface) tool names registered per server, so /mcp's disable can
 		// pull exactly that server's tools off the active surface and enable can put
@@ -200,12 +201,42 @@ export function createMcpExtension(options: McpExtensionOptions) {
 						eager.add(definition.name);
 					}
 					registeredNames.add(prefixedName);
+					let registeredForServer = registeredToolsByServer.get(serverName);
+					if (!registeredForServer) {
+						registeredForServer = new Set<string>();
+						registeredToolsByServer.set(serverName, registeredForServer);
+					}
+					registeredForServer.add(prefixedName);
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
 					console.error(`[mcp] failed to register ${prefixedName}: ${message}`);
 				}
 			}
 			return deferredCount;
+		};
+
+		const removeUnadvertisedTools = (serverName: string): void => {
+			const registeredForServer = registeredToolsByServer.get(serverName);
+			if (!registeredForServer || registeredForServer.size === 0) return;
+			const advertised = new Set(
+				manager
+					.listTools()
+					.filter((tool) => tool.serverName === serverName)
+					.map((tool) => tool.prefixedName),
+			);
+			const removed = [...registeredForServer].filter((name) => !advertised.has(name));
+			if (removed.length === 0) return;
+			const removedSet = new Set(removed);
+			pi.setActiveTools(pi.getActiveTools().filter((name) => !removedSet.has(name)));
+			const index = getCurrentToolDiscoveryIndex();
+			const eager = eagerToolsByServer.get(serverName);
+			for (const name of removed) {
+				index?.unregister(name);
+				eager?.delete(name);
+				registeredNames.delete(name);
+				registeredForServer.delete(name);
+			}
+			if (registeredForServer.size === 0) registeredToolsByServer.delete(serverName);
 		};
 
 		// With tools deferred, the discovery tool must be on the active surface so
@@ -324,11 +355,10 @@ export function createMcpExtension(options: McpExtensionOptions) {
 				ensureDiscoveryActive(deferredCount);
 				void discoverResourcesAndPrompts();
 			},
-			// A server re-listed its tools at runtime (notifications/tools/list_changed):
-			// register whatever is newly advertised so new tools become callable without
-			// a reconnect. registerNewTools skips already-registered names (idempotent);
-			// tools removed by the server stay registered but simply fail if called.
-			onToolsChanged: () => {
+			// Reconcile removals before registering additions so the active surface and
+			// discovery index always match the server's latest catalog.
+			onToolsChanged: (serverName) => {
+				removeUnadvertisedTools(serverName);
 				const deferredCount = registerNewTools();
 				ensureDiscoveryActive(deferredCount);
 			},
@@ -358,6 +388,8 @@ export function createMcpExtension(options: McpExtensionOptions) {
 			bootConnectTimer = setTimeout(() => {
 				controller.abort(new Error(`MCP startup connect timed out after ${connectBudgetMs}ms`));
 			}, connectBudgetMs);
+			// Boot budget must not keep Node alive after natural session end.
+			bootConnectTimer.unref?.();
 			return controller.signal;
 		};
 
@@ -533,10 +565,8 @@ export function createMcpExtension(options: McpExtensionOptions) {
 			// servers still in promptedServers). Without this, disable→enable of the
 			// same server silently never re-creates its prompt slash-commands.
 			promptedServers.delete(name);
-			const prefix = manager.prefixFor(name) ?? `mcp__${name}__`;
-			for (const prefixedName of [...registeredNames]) {
-				if (prefixedName.startsWith(prefix)) registeredNames.delete(prefixedName);
-			}
+			for (const prefixedName of registeredToolsByServer.get(name) ?? []) registeredNames.delete(prefixedName);
+			registeredToolsByServer.delete(name);
 		};
 
 		const toggleServer = async (name: string): Promise<void> => {

@@ -21,6 +21,11 @@ const execAsync = promisify(exec);
 const ttlCommandCache = new Map<string, { value: string; expiresAt: number }>();
 const DEFAULT_CONFIG_COMMAND_TTL_MS = 30_000;
 
+function throwIfAborted(signal?: AbortSignal): void {
+	if (!signal?.aborted) return;
+	throw signal.reason instanceof Error ? signal.reason : new Error("aborted");
+}
+
 // Window for ttlCommandCache, overridable via PIT_CONFIG_COMMAND_TTL_MS
 // (milliseconds; 0 disables the memo and restores fresh-every-call behaviour).
 function configCommandTtlMs(): number {
@@ -140,18 +145,22 @@ export function resolveConfigValueUncached(config: string): string | undefined {
  */
 async function executeWithConfiguredShellAsync(
 	command: string,
+	signal?: AbortSignal,
 ): Promise<{ executed: boolean; value: string | undefined }> {
 	try {
+		throwIfAborted(signal);
 		const { shell, args } = getShellConfig();
 		const { stdout } = await execFileAsync(shell, [...args, command], {
 			encoding: "utf-8",
 			timeout: 10000,
 			windowsHide: true,
 			shell: false,
+			signal,
 		});
 		const value = (stdout ?? "").trim();
 		return { executed: true, value: value || undefined };
 	} catch (err) {
+		throwIfAborted(signal);
 		const error = err as NodeJS.ErrnoException;
 		// ENOENT = shell binary not found -> not executed (caller falls back to default shell).
 		if (error?.code === "ENOENT") {
@@ -163,14 +172,17 @@ async function executeWithConfiguredShellAsync(
 }
 
 /** Async, non-blocking mirror of executeWithDefaultShell (execSync -> promisified exec). */
-async function executeWithDefaultShellAsync(command: string): Promise<string | undefined> {
+async function executeWithDefaultShellAsync(command: string, signal?: AbortSignal): Promise<string | undefined> {
 	try {
+		throwIfAborted(signal);
 		const { stdout } = await execAsync(command, {
 			encoding: "utf-8",
 			timeout: 10000,
+			signal,
 		});
 		return stdout.trim() || undefined;
 	} catch {
+		throwIfAborted(signal);
 		return undefined;
 	}
 }
@@ -184,7 +196,8 @@ async function executeWithDefaultShellAsync(command: string): Promise<string | u
  * Written with if/else, not a nested ternary IIFE, to satisfy tsgo
  * erasableSyntaxOnly lint.
  */
-async function executeCommandUncachedAsync(commandConfig: string): Promise<string | undefined> {
+async function executeCommandUncachedAsync(commandConfig: string, signal?: AbortSignal): Promise<string | undefined> {
+	throwIfAborted(signal);
 	const cached = ttlCacheGet(commandConfig);
 	if (cached !== undefined) {
 		return cached;
@@ -192,11 +205,12 @@ async function executeCommandUncachedAsync(commandConfig: string): Promise<strin
 	const command = commandConfig.slice(1);
 	let value: string | undefined;
 	if (process.platform === "win32") {
-		const configuredResult = await executeWithConfiguredShellAsync(command);
-		value = configuredResult.executed ? configuredResult.value : await executeWithDefaultShellAsync(command);
+		const configuredResult = await executeWithConfiguredShellAsync(command, signal);
+		value = configuredResult.executed ? configuredResult.value : await executeWithDefaultShellAsync(command, signal);
 	} else {
-		value = await executeWithDefaultShellAsync(command);
+		value = await executeWithDefaultShellAsync(command, signal);
 	}
+	throwIfAborted(signal);
 	ttlCacheSet(commandConfig, value);
 	return value;
 }
@@ -206,9 +220,13 @@ async function executeCommandUncachedAsync(commandConfig: string): Promise<strin
  * command without blocking the event loop; `${VAR}`/env/literal resolution is
  * identical to the sync version.
  */
-export async function resolveConfigValueUncachedAsync(config: string): Promise<string | undefined> {
+export async function resolveConfigValueUncachedAsync(
+	config: string,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	throwIfAborted(signal);
 	if (config.startsWith("!")) {
-		return executeCommandUncachedAsync(config);
+		return executeCommandUncachedAsync(config, signal);
 	}
 	const envValue = process.env[config];
 	return envValue || config;
@@ -227,8 +245,12 @@ export function resolveConfigValueOrThrow(config: string, description: string): 
 	throw new Error(`Failed to resolve ${description}`);
 }
 
-export async function resolveConfigValueOrThrowAsync(config: string, description: string): Promise<string> {
-	const resolvedValue = await resolveConfigValueUncachedAsync(config);
+export async function resolveConfigValueOrThrowAsync(
+	config: string,
+	description: string,
+	signal?: AbortSignal,
+): Promise<string> {
+	const resolvedValue = await resolveConfigValueUncachedAsync(config, signal);
 	if (resolvedValue !== undefined) {
 		return resolvedValue;
 	}

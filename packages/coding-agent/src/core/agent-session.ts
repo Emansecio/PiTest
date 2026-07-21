@@ -43,6 +43,7 @@ import { theme } from "../modes/interactive/theme/theme.ts";
 import { settleOrAbort } from "../utils/abort-race.ts";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
+import { killTrackedDetachedChildren } from "../utils/shell.ts";
 import { sleep } from "../utils/sleep.ts";
 import { sliceSafe } from "../utils/surrogate.ts";
 import {
@@ -78,6 +79,7 @@ import * as chromeDevtoolsManagerModule from "./chrome/chrome-devtools-manager.t
 import { buildHarnessDispatcher, type CodeModeDispatcher } from "./code-mode/bridge.ts";
 import {
 	adaptivePruneThreshold,
+	adoptSupersedeScanState,
 	applyOldThinkingCap,
 	applySupersedeOnly,
 	cloneToolResultMessagesForPrune,
@@ -260,6 +262,7 @@ import {
 	type BashBackgroundJob,
 	type BashOperations,
 	createLocalBashOperations,
+	disposeBashBackgroundJobs,
 	disposeBashSparePool,
 	listBashBackgroundJobs,
 } from "./tools/bash.js";
@@ -274,6 +277,7 @@ import { TurnRiskAccumulator } from "./turn-risk.ts";
 import { TurnSteeringEngine } from "./turn-steering-engine.ts";
 import { resolveNextTurnThinkingLevel } from "./turn-thinking-policy.ts";
 import { registerBuiltinSchemes } from "./url-schemes/index.ts";
+import { getCurrentUserInputBus } from "./user-input-bus.ts";
 import { summarizeCheckFailure } from "./verification/failure-summary.ts";
 import { functionalWebFixPrompt, runFunctionalWebCheck } from "./verification/functional-web.ts";
 import { pendingVerificationJobs } from "./verification/pending-checks.ts";
@@ -1818,6 +1822,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 				return cached.value;
 			}
 			const transformed = existingTransform ? await existingTransform(messages, signal) : messages;
+			adoptSupersedeScanState(messages, transformed);
 			const pruned = this._pruneContextForProvider(transformed);
 			this._ctxPruneCache = { key, value: pruned };
 			return pruned;
@@ -2833,6 +2838,12 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// Cancel any in-flight verification check so its child process does not keep
 		// holding the session cwd (Windows rmSync EBUSY in tests).
 		this._verificationAbort?.abort();
+		// Kill promoted/auto-background bash jobs and any other tracked detached
+		// children before spare-pool dispose so session replace (/new, /fork) and
+		// graceful process exit do not leave orphan process groups (Unix) or
+		// directory-locking grandchildren (Windows).
+		disposeBashBackgroundJobs();
+		killTrackedDetachedChildren();
 		// Same reasoning for the bash spare-shell pool (see bash.ts): an unconsumed
 		// spare is a live process pinned to a cwd that may be a temp dir the caller
 		// is about to delete. Kill it here rather than waiting for process shutdown.
@@ -3002,7 +3013,13 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// Tear down any active debug session so adapters don't outlive the session.
 		if (this.settingsManager.getDebugSettings().enabled) {
 			const { dapSessionManager } = await import("./dap/index.ts");
-			void dapSessionManager.disposeAll().catch(() => {});
+			// Bound wait so a stuck debug adapter cannot hang session dispose.
+			const DAP_DISPOSE_WAIT_MS = 2_500;
+			try {
+				await Promise.race([dapSessionManager.disposeAll(), sleep(DAP_DISPOSE_WAIT_MS)]);
+			} catch {
+				// best-effort — never block dispose
+			}
 		}
 	}
 
@@ -4014,6 +4031,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 	}
 
 	private _pruneContextForProvider(messages: AgentMessage[]): AgentMessage[] {
+		// Warm this turn's fresh send-path array from the live transcript's scan
+		// state (and vice-versa below) so the supersede scan stays incremental.
+		adoptSupersedeScanState(this.agent.state.messages, messages);
 		const contextWindow = this.model?.contextWindow ?? 0;
 		const contextTokens = estimateContextTokens(messages).tokens;
 		const protectTurns = pressurePruneProtectTurns(contextTokens, contextWindow);
@@ -4054,6 +4074,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 			}
 		}
 
+		adoptSupersedeScanState(messages, this.agent.state.messages);
 		if (!runThinkingCap && !runToolPrune && !runSupersedeOnly && !runArgElision) return messages;
 
 		const copy = cloneToolResultMessagesForPrune(messages);
@@ -5312,11 +5333,15 @@ export class AgentSession implements CompactionHost, FusionHost {
 
 	/**
 	 * Abort current operation and wait for agent to become idle.
+	 * Bounded so a non-cooperative tool cannot hang RPC/dispose forever after abort.
 	 */
 	async abort(): Promise<void> {
 		this.abortRetry();
+		getCurrentUserInputBus()?.cancelAll("interrupt");
 		this.agent.abort();
-		await this.agent.waitForIdle();
+		// Hard ceiling: non-cooperative tools used to leave waitForIdle pending forever.
+		const ABORT_IDLE_WAIT_MS = 15_000;
+		await Promise.race([this.agent.waitForIdle(), sleep(ABORT_IDLE_WAIT_MS)]);
 	}
 
 	/**
@@ -5384,6 +5409,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// ESC cancels detached op:"spawn" subagents too (session_shutdown already does;
 		// turn-end must NOT — they are meant to outlive a normal turn).
 		this._abortDetachedSubagents?.();
+		// Unblock the `ask` tool (and any other UserInputBus waiter). agent.abort()
+		// alone does not cancel bus.askOptions, so Esc would leave the turn parked.
+		getCurrentUserInputBus()?.cancelAll("interrupt");
 		this.agent.abort();
 	}
 

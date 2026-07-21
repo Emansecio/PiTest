@@ -211,19 +211,56 @@ export type ReloadHandler = () => Promise<void>;
 
 export type ShutdownHandler = () => void;
 
+/** Default wall-clock budget for session_shutdown handlers (quit must not hang forever). */
+const DEFAULT_SESSION_SHUTDOWN_TIMEOUT_MS = 5_000;
+
+function resolveSessionShutdownTimeoutMs(): number {
+	const raw = typeof process !== "undefined" ? process.env.PIT_SESSION_SHUTDOWN_TIMEOUT_MS : undefined;
+	if (raw === undefined || raw === "") return DEFAULT_SESSION_SHUTDOWN_TIMEOUT_MS;
+	const n = Number(raw);
+	if (!Number.isFinite(n) || n < 0) return DEFAULT_SESSION_SHUTDOWN_TIMEOUT_MS;
+	return n;
+}
+
 /**
  * Helper function to emit session_shutdown event to extensions.
  * Returns true if the event was emitted, false if there were no handlers.
+ *
+ * Bounded by a wall-clock timeout (default 5s, PIT_SESSION_SHUTDOWN_TIMEOUT_MS,
+ * 0 = unlimited). A hung extension must not block graceful quit / terminal restore.
  */
 export async function emitSessionShutdownEvent(
 	extensionRunner: ExtensionRunner,
 	event: SessionShutdownEvent,
 ): Promise<boolean> {
-	if (extensionRunner.hasHandlers("session_shutdown")) {
-		await extensionRunner.emit(event);
+	if (!extensionRunner.hasHandlers("session_shutdown")) {
+		return false;
+	}
+	const timeoutMs = resolveSessionShutdownTimeoutMs();
+	const pending = extensionRunner.emit(event);
+	// Swallow late rejections after we timed out so they never become unhandledRejection.
+	pending.catch(() => {});
+	if (timeoutMs <= 0) {
+		await pending;
 		return true;
 	}
-	return false;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		await Promise.race([
+			pending,
+			new Promise<never>((_resolve, reject) => {
+				timer = setTimeout(() => {
+					reject(new Error(`session_shutdown handlers timed out after ${timeoutMs}ms`));
+				}, timeoutMs);
+				(timer as { unref?: () => void }).unref?.();
+			}),
+		]);
+	} catch {
+		// Timed out or handler error already recorded by emit — continue teardown.
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+	}
+	return true;
 }
 
 const noOpUIContext: ExtensionUIContext = {

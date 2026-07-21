@@ -11,7 +11,6 @@ import {
 	capDiffPreview,
 	diffStat,
 	EDIT_EXPANDED_MAX_LINES,
-	glyphFor,
 	isEditFamilyTool,
 	mcpActivityTarget,
 	parseMcpToolName,
@@ -31,12 +30,14 @@ type LineState = "pending" | "success" | "error";
 
 const ICON_SUCCESS = "✓"; // light check (U+2713), renders 1 cell — consistent with the rest of the UI
 const ICON_ERROR = "✗";
+const ICON_ABORTED = "◦"; // muted — user interrupt is not a failure
 
 /** One action call on its own verb-led line. No gutter — the state icon frames
- * it. The wrapped exec renders only when expanded or on a genuine error.
- * Sibling of NavGroupComponent. */
+ * it. The wrapped exec renders only when expanded or on a genuine error. Used as a
+ * promoted (edit/write/task/bookkeeping) row inside a WorkGroupComponent. */
 export class ActivityLineComponent extends Container {
 	private ui: TUI;
+	private isFrozen: () => boolean;
 	private exec!: ToolExecutionComponent;
 	private expanded = false;
 	private spinnerGlyph: string | null = null;
@@ -60,7 +61,7 @@ export class ActivityLineComponent extends Container {
 	// Sequence number for an unnamed `task` agent (assigned by ActivityStacker,
 	// per turn). 0 = not a task / unassigned.
 	private taskOrdinal = 0;
-	// Count of identical consecutive actions folded into this one line. >1 renders
+	// Count of identical actions folded into this one line. >1 renders
 	// a muted `×N` suffix (e.g. `Updated todos ×4`) instead of stacking N rows.
 	private count = 1;
 	// Accumulated diffstat across coalesced edits to the same target.
@@ -71,9 +72,10 @@ export class ActivityLineComponent extends Container {
 	// spinner ticker's 1s reduced-motion tick (M0) keeps it advancing.
 	private pendingSinceMs = 0;
 
-	constructor(ui: TUI) {
+	constructor(ui: TUI, isFrozen: () => boolean = () => false) {
 		super();
 		this.ui = ui;
+		this.isFrozen = isFrozen;
 		this.iconEase = new ColorEase(ui, () => this.ui.requestRender());
 	}
 
@@ -116,7 +118,7 @@ export class ActivityLineComponent extends Container {
 	/** Fold an identical repeated action into this line: bump the `×N` counter and
 	 * adopt the newest exec so the line's state/spinner/target track the latest
 	 * call (the earlier identical call has already settled). Used by ActivityStacker
-	 * for consecutive same-target actions so they collapse to one row. */
+	 * for repeated same-target actions so they collapse to one row. */
 	coalesce(exec: ToolExecutionComponent): void {
 		this.count += 1;
 		this.absorbDiffStat(exec);
@@ -165,6 +167,7 @@ export class ActivityLineComponent extends Container {
 					this.ticker = null;
 				}
 			},
+			this.isFrozen,
 		);
 	}
 
@@ -190,10 +193,14 @@ export class ActivityLineComponent extends Container {
 	}
 
 	private icon(state: LineState): string {
-		// All state glyphs (spinner, ✓, ✗) render a single cell, matching the width
+		// All state glyphs (spinner, ✓, ✗, ◦) render a single cell, matching the width
 		// model — so the header's single space shows cleanly and the label never
 		// shifts column when the spinner settles.
 		if (state === "pending") return theme.fg("gutterToolPending", this.spinnerGlyph ?? SPINNER_FRAMES[0]);
+		// User abort/interrupt — muted marker, never success-green or error-red.
+		if (this.exec.isAborted()) {
+			return theme.fg("muted", ICON_ABORTED);
+		}
 		const glyph = state === "error" ? ICON_ERROR : ICON_SUCCESS;
 		const steady: ThemeColor = state === "error" ? "gutterToolError" : "gutterToolSuccess";
 		// Crossfade on settle: hold the last spinner frame through the first half of
@@ -312,16 +319,12 @@ export class ActivityLineComponent extends Container {
 				target = "";
 			}
 		}
-		// `<state-icon> <type-glyph> <verb> <target>`: the state icon shows
-		// pending/ok/error, the type glyph (✎ $ ⌕ ▸ ◆) lets edit/run/search/read be
-		// told apart at a glance. Both render a single cell.
-		const glyph = glyphFor(name);
 		// `×N` when identical actions were folded in; muted so it reads as a counter.
 		const countSuffix = this.count > 1 ? ` ${theme.fg("muted", `×${this.count}`)}` : "";
 		const elapsedSuffix = pending ? this.pendingElapsedSuffix() : "";
 		const rawHeader = stripAnsi(target).trim()
-			? `${this.icon(state)} ${glyph} ${theme.bold(label)} ${target}${countSuffix}${elapsedSuffix}`
-			: `${this.icon(state)} ${glyph} ${theme.bold(label)}${countSuffix}${elapsedSuffix}`;
+			? `${this.icon(state)} ${theme.bold(label)} ${target}${countSuffix}${elapsedSuffix}`
+			: `${this.icon(state)} ${theme.bold(label)}${countSuffix}${elapsedSuffix}`;
 		const headerText = rawHeader;
 		// Cap the assembled header once so no branch (free-form agent label, MCP tool
 		// name, web_search query, edit path) can overflow the terminal width. ANSI is

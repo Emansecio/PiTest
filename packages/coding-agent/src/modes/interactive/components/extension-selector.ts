@@ -16,7 +16,7 @@ import {
 	themedScrollPositionHint,
 } from "./keybinding-hints.ts";
 import { SelectableRow } from "./selectable-row.ts";
-import { SelectorCard } from "./selector-card.ts";
+import { beginSelectorSurface } from "./selector-surface.ts";
 
 export interface ExtensionSelectorOptions {
 	tui?: TUI;
@@ -52,7 +52,7 @@ export class ExtensionSelectorComponent extends Container {
 		this.onToggleToolsExpanded = opts?.onToggleToolsExpanded;
 		this.baseTitle = title;
 
-		const card = new SelectorCard();
+		const { surface: card, mount } = beginSelectorSurface(this, true);
 		card.addChild(new Spacer(1));
 
 		// Muted bold title to match the shared SelectorShell heading (selector-shell.ts).
@@ -84,7 +84,7 @@ export class ExtensionSelectorComponent extends Container {
 			),
 		);
 		card.addChild(new Spacer(1));
-		this.addChild(card);
+		mount();
 
 		this.updateList();
 	}

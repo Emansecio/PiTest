@@ -1,5 +1,5 @@
 import { getRuntimeDiagnostics } from "@pit/ai";
-import { type Component, type TUI, truncateToWidth, visibleWidth } from "@pit/tui";
+import { type Component, SPINNER_FRAMES, type TUI, truncateToWidth, visibleWidth } from "@pit/tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import type { ContextUsage } from "../../../core/extensions/index.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
@@ -8,9 +8,10 @@ import { isReducedMotion } from "../../../utils/env-flags.ts";
 import { buildWorkspaceCwdLabels, formatGitBranchWithDiff, type WorkspaceCwdLabels } from "../display-utils.ts";
 import { formatModelDisplayName } from "../model-display-name.ts";
 import { interpolateFg } from "../theme/color-interpolation.ts";
-import { CONTEXT_USAGE_WARN_PERCENT, theme } from "../theme/theme.ts";
+import { CONTEXT_USAGE_CRITICAL_PERCENT, theme } from "../theme/theme.ts";
 import { COLOR_EASE_MS } from "./color-ease.ts";
 import { resolveGaugeGlyphs } from "./gauge-glyphs.ts";
+import { spinnerGlyphAt } from "./spinner-ticker.ts";
 
 /** Minimum terminal width for single-line identity (pwd + model). */
 const FOOTER_IDENTITY_SINGLE_LINE_MIN = 48;
@@ -147,26 +148,16 @@ function asKnownThinkingLevel(value: unknown): ThinkingLevel {
 		: "off";
 }
 
-interface CumulativeTotals {
-	input: number;
-	output: number;
-	cacheRead: number;
-	cacheWrite: number;
-	cost: number;
-}
-
 /**
  * Footer component that shows pwd, token stats, and context usage.
  *
  * Layout (top to bottom; line 1 is the line closest to the editor):
  *   1. Identity: `cwd (branch) • session` (left, muted)  |  `model • thinking-level` (right, foreground + thinking color)
- *   2. Metrics: `CTX %·used/window` (left, state-colored) | `↑in ↓out auto` (right, dim)
+ *   2. Metrics: `CTX %·used/window` (left, state-colored) | mode/alarms (right, dim)
  *   3. Optional: extension statuses, single line
  *
- * Cumulative usage stats are cached and updated incrementally (tail-only scan)
- * to keep render O(diff) instead of O(N) per keystroke. Reset on
- * `invalidate()`, on session swap, or when `entries.length` shrinks (fork,
- * compaction, /clear).
+ * Render output is memoized by `buildRenderCacheKey()`; goal spinner glyphs are
+ * overlaid outside that cache so the strip is not rebuilt every animation frame.
  */
 export class FooterComponent implements Component {
 	private autoCompactEnabled = true;
@@ -174,14 +165,6 @@ export class FooterComponent implements Component {
 	private footerData: ReadonlyFooterDataProvider;
 	/** Launcher cwd — compared against session cwd for shell/session divergence. */
 	private launchCwd: string;
-	private statsCacheLen = 0;
-	private statsCacheTotals: CumulativeTotals = {
-		input: 0,
-		output: 0,
-		cacheRead: 0,
-		cacheWrite: 0,
-		cost: 0,
-	};
 	private fusionLiveActive = false;
 	private density: FooterDensity = "calm";
 	private renderCacheKey = "";
@@ -217,7 +200,6 @@ export class FooterComponent implements Component {
 
 	setSession(session: AgentSession): void {
 		if (this.session !== session) {
-			this.resetStatsCache();
 			this.renderCacheLines = null;
 			this.stopFillEase();
 			this.displayedFill = 0;
@@ -244,12 +226,10 @@ export class FooterComponent implements Component {
 	}
 
 	/**
-	 * Drops the cumulative-usage cache. Called by the interactive mode on
-	 * session-info change; safe to call any time. Git branch is handled by the
-	 * data provider (no-op here).
+	 * Drops the render memo. Called by the interactive mode on session-info
+	 * change; safe to call any time. Git branch is handled by the data provider.
 	 */
 	invalidate(): void {
-		this.resetStatsCache();
 		this.renderCacheLines = null;
 	}
 
@@ -316,32 +296,6 @@ export class FooterComponent implements Component {
 		this.lastFillFingerprint = fingerprint;
 		this.renderCacheLines = null;
 		return true;
-	}
-
-	private resetStatsCache(): void {
-		this.statsCacheLen = 0;
-		this.statsCacheTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
-	}
-
-	private getCumulativeTotals(): CumulativeTotals {
-		const entries = this.session.sessionManager.getEntries();
-		// Tail-incremental cache: only walk entries beyond the cached length.
-		// If entries shrunk (fork/clear/compaction replace), reset and rescan.
-		if (entries.length < this.statsCacheLen) {
-			this.resetStatsCache();
-		}
-		for (let i = this.statsCacheLen; i < entries.length; i++) {
-			const entry = entries[i];
-			if (entry.type === "message" && entry.message.role === "assistant") {
-				this.statsCacheTotals.input += entry.message.usage.input;
-				this.statsCacheTotals.output += entry.message.usage.output;
-				this.statsCacheTotals.cacheRead += entry.message.usage.cacheRead;
-				this.statsCacheTotals.cacheWrite += entry.message.usage.cacheWrite;
-				this.statsCacheTotals.cost += entry.message.usage.cost.total;
-			}
-		}
-		this.statsCacheLen = entries.length;
-		return this.statsCacheTotals;
 	}
 
 	private getOverthinkGuardCount(): number {
@@ -502,12 +456,10 @@ export class FooterComponent implements Component {
 	render(width: number): string[] {
 		const cacheKey = this.buildRenderCacheKey(width);
 		if (!this.fillEaseActive() && this.renderCacheLines !== null && cacheKey === this.renderCacheKey) {
-			return this.renderCacheLines;
+			return this.withGoalSpinner(this.renderCacheLines);
 		}
 
 		const state = this.session.state;
-		const totals = this.getCumulativeTotals();
-
 		// Context usage from session (handles compaction correctly). Reuses the value
 		// buildRenderCacheKey() just computed above (this render() call is always
 		// preceded by that call, immediately, with no code in between).
@@ -546,12 +498,15 @@ export class FooterComponent implements Component {
 		let thinkingChip: { text: string; width: number } | undefined;
 		if (state.model?.reasoning) {
 			const level = asKnownThinkingLevel(state.thinkingLevel);
-			const levelLabel = level === "off" ? "Thinking off" : `${level[0].toUpperCase()}${level.slice(1)}`;
-			const colorize = theme.getThinkingBorderColor(level);
-			thinkingChip = {
-				text: `${theme.fg("muted", " • ")}${colorize(levelLabel)}`,
-				width: visibleWidth(` • ${levelLabel}`),
-			};
+			// Hide the chip when thinking is off.
+			if (level !== "off") {
+				const levelLabel = `${level[0].toUpperCase()}${level.slice(1)}`;
+				const colorize = theme.getThinkingBorderColor(level);
+				thinkingChip = {
+					text: `${theme.fg("muted", " • ")}${colorize(levelLabel)}`,
+					width: visibleWidth(` • ${levelLabel}`),
+				};
+			}
 		}
 
 		const mode = this.getPermissionMode();
@@ -668,14 +623,7 @@ export class FooterComponent implements Component {
 			ctxText = `${ctxLabel} ${bar} ${est ? theme.fg("dim", "~") : ""}${percentLabel} ${theme.fg("dim", "·")} ${counts}`;
 		}
 
-		// Group A — usage: `↑in ↓out` kept together on the right.
-		const usageGroup: string[] = [];
-		const io: string[] = [];
-		if (totals.input) io.push(`↑${formatTokens(totals.input)}`);
-		if (totals.output) io.push(`↓${formatTokens(totals.output)}`);
-		if (io.length) usageGroup.push(io.join(" "));
-
-		// Group B — session mode bits (permission / auto-compact).
+		// Session mode bits (permission / auto-compact). Cumulative I/O stays out of the footer.
 		const modeBits: string[] = [];
 		// In fusion the orchestration status is `fusion · plan`, which getPermissionMode
 		// clips to just "fusion" — exactly what the `fusion: <members>` segment already
@@ -701,7 +649,6 @@ export class FooterComponent implements Component {
 		const groups: string[] = [];
 		// Calm: skip long fusion: members string (still on identity mode chip when relevant).
 		if (fusionSegment && !calm) groups.push(theme.fg("accent", fusionSegment));
-		if (usageGroup.length) groups.push(usageGroup.join(" · "));
 		if (goalStatus) groups.push(theme.fg("accent", goalStatus));
 		if (modeBits.length) groups.push(modeBits.join(" · "));
 		// Calm progressive disclosure: fusion + extension statuses stay hidden, but
@@ -716,7 +663,7 @@ export class FooterComponent implements Component {
 		// warning/error past the threshold. Add a terse textual nudge only when
 		// auto-compact is armed and we're past the warn band, colorized to match so
 		// it escalates with the number rather than shouting in plain text.
-		if (this.autoCompactEnabled && contextPercentValue > CONTEXT_USAGE_WARN_PERCENT && width >= 48) {
+		if (this.autoCompactEnabled && contextPercentValue > CONTEXT_USAGE_CRITICAL_PERCENT && width >= 48) {
 			rightText = rightText ? `${rightText} ${ctxColorize("⚠ compact soon")}` : ctxColorize("⚠ compact soon");
 		}
 
@@ -754,7 +701,26 @@ export class FooterComponent implements Component {
 
 		this.renderCacheKey = cacheKey;
 		this.renderCacheLines = lines;
-		return lines;
+		return this.withGoalSpinner(lines);
+	}
+
+	/** Append the driving spinner without busting the footer render cache. */
+	private withGoalSpinner(lines: string[]): string[] {
+		if (!this.session.goalIsDriving()) return lines;
+		const goal = this.session.goalStatusLine();
+		if (!goal || !goal.includes("active")) return lines;
+		const glyph = spinnerGlyphAt(Date.now());
+		const out = lines.slice();
+		for (let i = 0; i < out.length; i++) {
+			let plain = out[i]!;
+			if (!plain.includes(goal)) continue;
+			for (const frame of SPINNER_FRAMES) {
+				plain = plain.split(` ${frame}`).join("");
+			}
+			out[i] = plain.replace(goal, `${goal} ${glyph}`);
+			break;
+		}
+		return out;
 	}
 }
 

@@ -54,6 +54,15 @@ interface ChromeToolSpec<S extends TSchema> {
 	run: (mgr: Manager, input: Static<S>, signal: AbortSignal | undefined) => Promise<ChromeResult>;
 }
 
+const CHROME_PROMPT_GUIDELINES = [
+	"Browser flow: navigate, inspect with snapshot/get_text, interact, wait or check console/network as needed, then close_page when done.",
+	"Prefer snapshot/get_text for structure or content; use screenshots only for visual evidence.",
+];
+
+function chromeGuidelines(...specific: string[]): string[] {
+	return [...CHROME_PROMPT_GUIDELINES, ...specific];
+}
+
 function buildChromeTool<S extends TSchema>(spec: ChromeToolSpec<S>): ToolDefinition<S, ChromeToolDetails> {
 	return {
 		name: spec.name,
@@ -290,7 +299,7 @@ export function createChromeListPagesDefinition(): ToolDefinition<typeof emptySc
 		activity: "navigation",
 		description: "List the inspectable Chrome tabs/pages (id, title, url).",
 		snippet: "List open Chrome tabs",
-		guidelines: ["Use to find a page id before chrome_devtools_select_page."],
+		guidelines: chromeGuidelines(),
 		schema: emptySchema,
 		run: async (mgr, _input, signal) => {
 			const pages = await mgr.listPages(signal);
@@ -305,7 +314,7 @@ export function createChromeSelectPageDefinition(): ToolDefinition<typeof select
 		name: "chrome_devtools_select_page",
 		description: "Select the active page for subsequent chrome_devtools operations.",
 		snippet: "Select the active Chrome page",
-		guidelines: ["Pass an id from chrome_devtools_list_pages."],
+		guidelines: chromeGuidelines(),
 		schema: selectSchema,
 		run: async (mgr, input, signal) => {
 			const t = await mgr.selectPage(input.id, signal);
@@ -320,12 +329,7 @@ export function createChromeNavigateDefinition(): ToolDefinition<typeof navigate
 		description:
 			"Navigate to a URL. Auto-starts Chrome if needed (no manual setup) and opens a new tab when newTab is set or no page is selected.",
 		snippet: "Open a URL in Chrome (new tab)",
-		guidelines: [
-			"Just call this to use the browser — Chrome is launched automatically if it isn't already running.",
-			"Set newTab to open a fresh tab instead of reusing the selected page.",
-			"Full cycle: navigate (auto-launches Chrome) -> snapshot/get_text -> interact (click/fill/press_key) -> when the browser task is done, call chrome_devtools_close_page to close the tab, then answer the user.",
-			"After loading, chrome_devtools_snapshot shows the page structure — use it to pick selectors for chrome_devtools_click / chrome_devtools_fill.",
-		],
+		guidelines: chromeGuidelines("Chrome launches automatically; set newTab to avoid reusing the selected page."),
 		schema: navigateSchema,
 		run: async (mgr, input, signal) => {
 			const r = await mgr.navigate({ url: input.url, newTab: input.newTab }, signal);
@@ -341,10 +345,7 @@ export function createChromeClosePageDefinition(): ToolDefinition<typeof closePa
 		description:
 			"Close a Chrome tab/page (the selected one by default, or a given id). Use to finish a browser task and return to a clean state.",
 		snippet: "Close a Chrome tab",
-		guidelines: [
-			"Close the tab when you are done with the browser task so tabs do not pile up, then just answer the user -- Chrome itself stays available for the next use.",
-			"Omit id to close the currently selected page; pass an id from chrome_devtools_list_pages to close a specific one.",
-		],
+		guidelines: chromeGuidelines(),
 		schema: closePageSchema,
 		run: async (mgr, input, signal) => {
 			const r = await mgr.closePage(input.id, signal);
@@ -358,7 +359,7 @@ export function createChromeEvaluateDefinition(): ToolDefinition<typeof evaluate
 		name: "chrome_devtools_evaluate",
 		description: "Evaluate JavaScript in the selected page and return the result.",
 		snippet: "Evaluate JS in the page",
-		guidelines: ["The expression runs in the page; the last value is returned (await is supported)."],
+		guidelines: chromeGuidelines("Page evaluation supports await and returns the last value."),
 		schema: evaluateSchema,
 		run: async (mgr, input, signal) => {
 			const r = await mgr.evaluate(input.expression, signal);
@@ -376,10 +377,7 @@ export function createChromeScreenshotDefinition(): ToolDefinition<typeof screen
 		description:
 			"Capture a screenshot of the selected page (optionally the full page). Defaults to a compact JPEG at CSS-pixel resolution; pass format:'png' (and/or a quality) for lossless/pixel-exact detail.",
 		snippet: "Screenshot the page",
-		guidelines: [
-			"Select or navigate to a page first.",
-			"Default is jpeg q60 — request format:'png' only when you truly need lossless pixels.",
-		],
+		guidelines: chromeGuidelines("Screenshots default to compact JPEG; request PNG only for lossless detail."),
 		schema: screenshotSchema,
 		run: async (mgr, input, signal) => {
 			const shot = await mgr.screenshot(
@@ -402,7 +400,7 @@ export function createChromeReadConsoleDefinition(): ToolDefinition<typeof conso
 		activity: "navigation",
 		description: "Read buffered console messages from the selected page.",
 		snippet: "Read the page console",
-		guidelines: ["Filter by level (e.g. 'error') to focus on problems."],
+		guidelines: chromeGuidelines("Filter console messages by level when diagnosing errors."),
 		schema: consoleSchema,
 		run: async (mgr, input) => {
 			// CDP stores levels lowercase; normalize the filter so 'Error'/'WARNING'
@@ -423,10 +421,9 @@ export function createChromeReadNetworkDefinition(): ToolDefinition<typeof netwo
 		description:
 			"Read buffered network requests from the selected page, or return full redacted request/response detail for one requestId and redirect hop.",
 		snippet: "Read network requests",
-		guidelines: [
-			"List mode shows entry id, status, method, url, resource type and mime. Pass requestId (and optional hop) for headers, body, timing, initiator and redirect metadata.",
-			'Filter to find the real call fast, e.g. type:"XHR" or type:"Fetch" for API calls, urlPattern:"/api", or status:">=400" for failures.',
-		],
+		guidelines: chromeGuidelines(
+			"Filter network requests by type, URL, or failing status; pass requestId for full request details.",
+		),
 		schema: networkSchema,
 		run: async (mgr, input) => {
 			if (input.requestId) {
@@ -461,10 +458,7 @@ export function createChromeClickDefinition(): ToolDefinition<typeof clickSchema
 		activity: "action",
 		description: "Click an element in the selected page by CSS selector (real mouse events).",
 		snippet: "Click an element",
-		guidelines: [
-			"The element is scrolled into view and clicked at its center.",
-			"Use chrome_devtools_snapshot (or chrome_devtools_get_text) to discover selectors first.",
-		],
+		guidelines: chromeGuidelines(),
 		schema: clickSchema,
 		run: async (mgr, input, signal) => {
 			await mgr.click(input.selector, signal);
@@ -479,7 +473,7 @@ export function createChromeFillDefinition(): ToolDefinition<typeof fillSchema, 
 		activity: "action",
 		description: "Fill an input/textarea/contenteditable in the selected page (replaces current content).",
 		snippet: "Fill a form field",
-		guidelines: ["Focuses the element, selects existing content and types the value (input events fire normally)."],
+		guidelines: chromeGuidelines(),
 		schema: fillSchema,
 		run: async (mgr, input, signal) => {
 			await mgr.fill(input.selector, input.value, signal);
@@ -494,7 +488,7 @@ export function createChromePressKeyDefinition(): ToolDefinition<typeof pressKey
 		activity: "action",
 		description: "Press a key on the focused element of the selected page (e.g. Enter to submit).",
 		snippet: "Press a key in the page",
-		guidelines: ["Focus a field first (chrome_devtools_fill or chrome_devtools_click), then press e.g. Enter."],
+		guidelines: chromeGuidelines(),
 		schema: pressKeySchema,
 		run: async (mgr, input, signal) => {
 			await mgr.pressKey(input.key, signal);
@@ -513,7 +507,7 @@ export function createChromeGetTextDefinition(): ToolDefinition<typeof getTextSc
 			activity: "navigation",
 			description: "Read the visible text of the selected page (cheaper than a screenshot for content checks).",
 			snippet: "Read the page text",
-			guidelines: ["Prefer this over screenshot when you only need the text content."],
+			guidelines: chromeGuidelines(),
 			schema: getTextSchema,
 			run: async (mgr, input, signal) => {
 				// N2: collapse repeated consecutive lines (duplicated nav/sidebar/footer
@@ -541,7 +535,7 @@ export function createChromeWaitForDefinition(): ToolDefinition<typeof waitForSc
 		activity: "navigation",
 		description: "Wait until a CSS selector is visible or a text appears in the selected page.",
 		snippet: "Wait for an element/text",
-		guidelines: ["Use after navigate/click on dynamic pages before reading or interacting."],
+		guidelines: chromeGuidelines(),
 		schema: waitForSchema,
 		run: async (mgr, input, signal) => {
 			const r = await mgr.waitFor(
@@ -561,7 +555,7 @@ export function createChromeHoverDefinition(): ToolDefinition<typeof hoverSchema
 		activity: "action",
 		description: "Hover an element in the selected page by CSS selector (triggers mouseover/tooltips/menus).",
 		snippet: "Hover an element",
-		guidelines: ["Use before clicking items inside hover-only menus."],
+		guidelines: chromeGuidelines(),
 		schema: hoverSchema,
 		run: async (mgr, input, signal) => {
 			await mgr.hover(input.selector, signal);
@@ -576,7 +570,7 @@ export function createChromeSelectOptionDefinition(): ToolDefinition<typeof sele
 		activity: "action",
 		description: "Select an option of a <select> element by value, label or visible text.",
 		snippet: "Select a dropdown option",
-		guidelines: ["Fires input/change events so framework bindings update."],
+		guidelines: chromeGuidelines(),
 		schema: selectOptionSchema,
 		run: async (mgr, input, signal) => {
 			const r = await mgr.selectOption(input.selector, input.value, signal);
@@ -593,7 +587,7 @@ export function createChromeUploadFileDefinition(
 		activity: "action",
 		description: 'Attach local files to an <input type="file"> in the selected page.',
 		snippet: "Upload files to a file input",
-		guidelines: ["Paths are validated locally before being attached; relative paths resolve from the session cwd."],
+		guidelines: chromeGuidelines("Upload paths are local; relative paths resolve from the session cwd."),
 		schema: uploadFileSchema,
 		run: async (mgr, input, signal) => {
 			const resolved = input.files.map((f) => path.resolve(cwd ?? process.cwd(), f));
@@ -610,10 +604,7 @@ export function createChromeSnapshotDefinition(): ToolDefinition<typeof snapshot
 		description:
 			"Accessibility-tree snapshot of the selected page (roles + names, indented). Cheaper than a screenshot for understanding structure and finding targets.",
 		snippet: "Snapshot the page structure",
-		guidelines: [
-			"Prefer this over screenshot to discover what is clickable/fillable.",
-			"Pass selector to scope a big page down to one region (e.g. 'form', '#main').",
-		],
+		guidelines: chromeGuidelines("Scope large snapshots with selector."),
 		schema: snapshotSchema,
 		run: async (mgr, input, signal) => {
 			return textResult(await mgr.a11ySnapshot(input.selector, signal));
@@ -631,10 +622,9 @@ export function createChromeGetNetworkBodyDefinition(): ToolDefinition<typeof ne
 			description:
 				"Fetch the response body of a request listed by chrome_devtools_read_network. Text/JSON/XML bodies are captured when the request finishes, so they stay readable for the page's lifetime even after Chrome would have evicted them.",
 			snippet: "Read a network response body",
-			guidelines: [
-				"Get the requestId from chrome_devtools_read_network first.",
-				"Binary, oversized, or script/style bodies are not cached and fall back to a live fetch — which can fail if Chrome already evicted them.",
-			],
+			guidelines: chromeGuidelines(
+				"Use a requestId from read_network; binary or oversized bodies may be unavailable after Chrome evicts them.",
+			),
 			schema: networkBodySchema,
 			run: async (mgr, input, signal) => {
 				const r = await mgr.getResponseBody(input.requestId, signal);
@@ -696,11 +686,9 @@ export function createChromeElementToSourceDefinition(): ToolDefinition<
 		description:
 			"Map an element (CSS selector) to the source-code handler(s) bound to it: resolves each event listener to file:line in the ORIGINAL source via CDP getEventListeners + source maps. Degrades to the transpiled position when no dev source map exists.",
 		snippet: "Locate an element's handler in source",
-		guidelines: [
-			"Use after a click/interaction to find WHERE a handler lives instead of grepping.",
-			"Pass a specific selector (e.g. '#submit', 'button.save'); the first match is used.",
-			"mapped:false means no source map was available — the position is the transpiled bundle.",
-		],
+		guidelines: chromeGuidelines(
+			"Use a specific selector to locate its handler; mapped:false reports the transpiled position.",
+		),
 		schema: elementToSourceSchema,
 		run: async (mgr, input, signal) => {
 			return textResult(formatElementToSource(await mgr.elementToSource(input.selector, signal)));

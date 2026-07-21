@@ -71,7 +71,27 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).toContain("custom result");
 	});
 
-	test("flags a genuine error in the framed header with a `✗ error` label (audit 1.3)", () => {
+	test("renders standalone tools with a compact gutter and no rounded card", () => {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderCall: () => new Text("custom call", 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-compact",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		const lines = component.render(120).map(stripAnsi);
+		expect(lines.some((line) => line.startsWith("╭") || line.startsWith("╰"))).toBe(false);
+		expect(lines.some((line) => line.includes("│ custom call"))).toBe(true);
+	});
+
+	test("flags a genuine error in the compact gutter with a `✗ error` label (audit 1.3)", () => {
 		const toolDefinition: ToolDefinition = {
 			...createBaseToolDefinition(),
 			renderCall: () => new Text("custom call", 0, 0),
@@ -92,7 +112,7 @@ describe("ToolExecutionComponent parity", () => {
 		component.updateResult({ content: [{ type: "text", text: "ok" }], details: {}, isError: false }, false);
 		expect(stripAnsi(component.render(120).join("\n"))).not.toContain("✗ error");
 
-		// A settled error surfaces the header marker on the framed card.
+		// A settled error surfaces the gutter label.
 		component.updateResult({ content: [{ type: "text", text: "boom" }], details: {}, isError: true }, false);
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("✗ error");
@@ -119,7 +139,7 @@ describe("ToolExecutionComponent parity", () => {
 		expect(stripAnsi(component.render(120).join("\n"))).not.toContain("✗ error");
 	});
 
-	test("suppresses the framed error label when rendered as an activity child (audit 1.3)", () => {
+	test("suppresses the gutter error label when rendered as an activity child (audit 1.3)", () => {
 		const toolDefinition: ToolDefinition = {
 			...createBaseToolDefinition(),
 			renderResult: () => new Text("boom", 0, 0),

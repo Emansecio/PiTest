@@ -3,35 +3,14 @@ import type { AgentSession } from "../src/core/agent-session.js";
 import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.js";
 import { FooterComponent } from "../src/modes/interactive/components/footer.js";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
-import { stripAnsi } from "../src/utils/ansi.js";
 
-interface MutableEntries {
-	push: (input: number, output: number, cost: number) => void;
-}
-
-function makeAssistantEntry(input: number, output: number, cost: number) {
-	return {
-		type: "message" as const,
-		message: {
-			role: "assistant" as const,
-			usage: { input, output, cacheRead: 0, cacheWrite: 0, cost: { total: cost } },
-		},
-	};
-}
-
-/**
- * Build a session+entries pair where the test owns the entries array.
- * The session's `getEntries` returns the live array reference so mutations
- * between renders are visible to the footer.
- */
-function createMutableSession(opts?: {
+function createActiveSession(opts?: {
 	thinkingLevel?: string;
 	reasoning?: boolean;
 	modelId?: string;
 	cwd?: string;
 	contextPercent?: number;
-}) {
-	const entries: ReturnType<typeof makeAssistantEntry>[] = [];
+}): AgentSession {
 	const session = {
 		state: {
 			model: {
@@ -43,33 +22,19 @@ function createMutableSession(opts?: {
 			thinkingLevel: opts?.thinkingLevel ?? "off",
 		},
 		sessionManager: {
-			getEntries: () => entries,
+			getEntries: () => [],
 			getSessionName: () => "",
 			getCwd: () => opts?.cwd ?? "/tmp/project",
 		},
-		// Active session (non-zero percent + assistant entries) ⇒ a user turn
-		// has happened; include it so the footer reads as non-pristine and
-		// renders the full metrics line ("12% · 25k/200k"), not "CTX 200k".
+		// A user message makes this an active session, so the footer renders
+		// the full context metrics rather than the pristine capacity-only state.
 		messages: [{ role: "user", content: "hi", timestamp: 0 }],
 		getContextUsage: () => ({ contextWindow: 200_000, percent: opts?.contextPercent ?? 12.3, tokens: 24_600 }),
 		modelRegistry: { isUsingOAuth: () => false },
+		goalIsDriving: () => false,
 		goalStatusLine: () => "",
 	};
-	const ctrl: MutableEntries = {
-		push: (input, output, cost) => {
-			entries.push(makeAssistantEntry(input, output, cost));
-		},
-	};
-	return {
-		session: session as unknown as AgentSession,
-		entries,
-		ctrl,
-		// Cheap accessor for tests that want to splice/replace entries directly.
-		replaceEntries: (next: ReturnType<typeof makeAssistantEntry>[]) => {
-			entries.length = 0;
-			entries.push(...next);
-		},
-	};
+	return session as unknown as AgentSession;
 }
 
 function createFooterData(providerCount = 1): ReadonlyFooterDataProvider {
@@ -86,118 +51,6 @@ function createFooterData(providerCount = 1): ReadonlyFooterDataProvider {
 	};
 }
 
-function getMetricsLine(footer: FooterComponent): string {
-	// Layout: line 0 = identity, line 1 = metrics, line 2 = (optional) ext statuses
-	return footer.render(200)[1];
-}
-
-describe("FooterComponent stats cache", () => {
-	beforeAll(() => {
-		initTheme(undefined, false);
-	});
-
-	it("accumulates totals across renders when entries grow", () => {
-		const { session, ctrl } = createMutableSession();
-		const footer = new FooterComponent(session, createFooterData());
-
-		ctrl.push(1000, 500, 0.01);
-		const first = getMetricsLine(footer);
-		expect(first).toContain("↑1k");
-		expect(first).toContain("↓500");
-
-		ctrl.push(2000, 1500, 0.05);
-		const second = getMetricsLine(footer);
-		expect(second).toContain("↑3k");
-		expect(second).toContain("↓2k");
-	});
-
-	it("only walks the new tail on subsequent renders (incremental cache)", () => {
-		const { session, entries, ctrl } = createMutableSession();
-		const footer = new FooterComponent(session, createFooterData());
-
-		ctrl.push(100, 50, 0.001);
-		getMetricsLine(footer); // primes the cache
-
-		// Swap the existing entry's usage to a different value. If the footer
-		// were rescanning from scratch each render, it would pick up the new
-		// numbers. With the tail-incremental cache it should NOT — the
-		// already-counted entry is frozen in the cumulative total.
-		entries[0].message.usage.input = 9999;
-		entries[0].message.usage.output = 9999;
-		entries[0].message.usage.cost.total = 9.999;
-
-		const second = getMetricsLine(footer);
-		expect(second).toContain("↑100");
-		expect(second).toContain("↓50");
-	});
-
-	it("resets the cache when entries shrink (fork / clear / compaction replace)", () => {
-		const { session, entries, ctrl } = createMutableSession();
-		const footer = new FooterComponent(session, createFooterData());
-
-		ctrl.push(1000, 500, 0.01);
-		ctrl.push(2000, 1500, 0.05);
-		getMetricsLine(footer); // prime: totals = 3000/2000/$0.06
-
-		// Simulate a fork that dropped the second message.
-		entries.pop();
-
-		const after = getMetricsLine(footer);
-		expect(after).toContain("↑1k");
-		expect(after).toContain("↓500");
-	});
-
-	it("resets the cache on invalidate()", () => {
-		const { session, entries, ctrl } = createMutableSession();
-		const footer = new FooterComponent(session, createFooterData());
-
-		ctrl.push(1000, 500, 0.01);
-		getMetricsLine(footer);
-
-		// Mutate in-place to a smaller value, then invalidate. After
-		// invalidate the cache should rescan from index 0 and pick up the new
-		// numbers.
-		entries[0].message.usage.input = 42;
-		entries[0].message.usage.output = 7;
-		entries[0].message.usage.cost.total = 0.002;
-		footer.invalidate();
-
-		const after = getMetricsLine(footer);
-		expect(after).toContain("↑42");
-		expect(after).toContain("↓7");
-	});
-
-	it("resets the cache on setSession() to a different session reference", () => {
-		const a = createMutableSession();
-		const b = createMutableSession();
-		const footer = new FooterComponent(a.session, createFooterData());
-
-		a.ctrl.push(1000, 500, 0.01);
-		getMetricsLine(footer); // primes against session A
-
-		b.ctrl.push(42, 7, 0.002);
-		footer.setSession(b.session);
-
-		const after = getMetricsLine(footer);
-		expect(after).toContain("↑42");
-		expect(after).toContain("↓7");
-	});
-
-	it("handles assistant entries with zero usage without crashing", () => {
-		const { session, ctrl } = createMutableSession();
-		const footer = new FooterComponent(session, createFooterData());
-
-		ctrl.push(0, 0, 0);
-		const line = getMetricsLine(footer);
-		// With everything zero the metric arrows drop out; only the CTX headline
-		// remains (segment-colored, so compare with ANSI stripped).
-		expect(line).not.toContain("↑");
-		expect(line).not.toContain("↓");
-		expect(stripAnsi(line)).toContain("12% · 25k/200k");
-		expect(stripAnsi(line)).toContain("▰");
-	});
-});
-
 describe("FooterComponent context color thresholds", () => {
 	beforeAll(() => {
 		initTheme(undefined, false);
@@ -212,9 +65,8 @@ describe("FooterComponent context color thresholds", () => {
 	// Returns the raw (ANSI-bearing) escape run immediately before the percent
 	// token — the state color of the gauge (the CTX label itself is fixed dim).
 	const ctxPercentEscape = (contextPercent: number): string => {
-		const { session, ctrl } = createMutableSession({ contextPercent });
+		const session = createActiveSession({ contextPercent });
 		const footer = new FooterComponent(session, createFooterData());
-		ctrl.push(100, 50, 0.001);
 		const line = footer.render(200)[1];
 		const pctIndex = line.indexOf(`${Math.round(contextPercent)}%`);
 		const match = line.slice(0, pctIndex).match(/(?:\x1b\[[0-9;]+m)+$/);
@@ -251,9 +103,8 @@ describe("FooterComponent identity line", () => {
 	});
 
 	it("places the model name on the identity line (line 0), not the metrics line", () => {
-		const { session, ctrl } = createMutableSession({ modelId: "test-model-x" });
+		const session = createActiveSession({ modelId: "test-model-x" });
 		const footer = new FooterComponent(session, createFooterData());
-		ctrl.push(100, 50, 0.001);
 
 		const [identity, metrics] = footer.render(200);
 		expect(identity).toContain("test-model-x");
@@ -267,13 +118,12 @@ describe("FooterComponent identity line", () => {
 		// on the theme's color-mode runtime; instead we assert (a) the level
 		// label "high" is present and (b) it is wrapped in *some* SGR escape
 		// (the un-themed dark theme initializer above selects 24-bit).
-		const { session, ctrl } = createMutableSession({
+		const session = createActiveSession({
 			modelId: "gpt-5",
 			reasoning: true,
 			thinkingLevel: "high",
 		});
 		const footer = new FooterComponent(session, createFooterData());
-		ctrl.push(100, 50, 0.001);
 
 		const identity = footer.render(200)[0];
 		expect(identity).toContain("High");
@@ -285,13 +135,12 @@ describe("FooterComponent identity line", () => {
 	});
 
 	it("falls back to plain text when the model has no reasoning support", () => {
-		const { session, ctrl } = createMutableSession({
+		const session = createActiveSession({
 			modelId: "tiny",
 			reasoning: false,
 			thinkingLevel: "high",
 		});
 		const footer = new FooterComponent(session, createFooterData());
-		ctrl.push(100, 50, 0.001);
 
 		const identity = footer.render(200)[0];
 		expect(identity).toContain("tiny");
@@ -301,16 +150,16 @@ describe("FooterComponent identity line", () => {
 	});
 
 	it("normalizes an unknown thinkingLevel value to 'off' instead of throwing", () => {
-		const { session, ctrl } = createMutableSession({
+		const session = createActiveSession({
 			modelId: "tiny",
 			reasoning: true,
 			thinkingLevel: "bogus",
 		});
 		const footer = new FooterComponent(session, createFooterData());
-		ctrl.push(100, 50, 0.001);
 
 		const identity = footer.render(200)[0];
 		expect(identity).toContain("tiny");
-		expect(identity).toContain("Thinking off");
+		// Unknown levels normalize to off — chip stays hidden.
+		expect(identity).not.toContain("Thinking off");
 	});
 });

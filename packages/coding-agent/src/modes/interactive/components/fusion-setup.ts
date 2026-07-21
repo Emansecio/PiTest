@@ -17,7 +17,7 @@ import {
 	themedScrollPositionHint,
 } from "./keybinding-hints.ts";
 import { SelectableRow } from "./selectable-row.ts";
-import { SelectorCard } from "./selector-card.ts";
+import { beginSelectorSurface } from "./selector-surface.ts";
 
 const MAX_VISIBLE = 8;
 
@@ -113,7 +113,7 @@ export class FusionSetupComponent extends Container implements Focusable {
 			else if (this.slots[0] && this.slots[1]) this.pickingSlot = 0;
 		}
 
-		const card = new SelectorCard();
+		const { surface: card, mount } = beginSelectorSurface(this, true);
 		card.addChild(new Spacer(1));
 
 		this.headerText = new Text(this.buildHeader(), 0, 0);
@@ -139,7 +139,7 @@ export class FusionSetupComponent extends Container implements Focusable {
 		this.hintText = new Text(this.buildHint(), 0, 0);
 		card.addChild(this.hintText);
 		card.addChild(new Spacer(1));
-		this.addChild(card);
+		mount();
 
 		this.updateList();
 	}

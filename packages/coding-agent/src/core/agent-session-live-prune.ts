@@ -15,7 +15,9 @@ import { recordDiagnostic, type ToolResultMessage } from "@pit/ai";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { isMutatingToolCall } from "./agent-session-tool-end.ts";
 import {
+	adoptSupersedeScanState,
 	applySupersedeOnly,
+	cloneForArgElision,
 	cloneToolResultMessagesForPrune,
 	elideMutatingToolCallArguments,
 	estimateContextTokens,
@@ -60,7 +62,10 @@ export function applyLiveContextEconomyAfterToolSuccess(
 		return { messages, reclaimed: 0, supersedeReclaimed: 0, argElisionReclaimed: 0 };
 	}
 
-	const copy = cloneToolResultMessagesForPrune(messages);
+	// Arg-elision-only path (every mutating tool call): O(1) clone of just the
+	// target assistant message instead of the whole history.
+	const copy = runSupersede ? cloneToolResultMessagesForPrune(messages) : cloneForArgElision(messages, [toolCall.id]);
+	adoptSupersedeScanState(messages, copy);
 	let supersedeReclaimed = 0;
 	let argElisionReclaimed = 0;
 
@@ -124,7 +129,13 @@ export function applyLightContextEconomyAtTurnEnd(
 		return empty;
 	}
 
-	const copy = cloneToolResultMessagesForPrune(messages);
+	const copy = runSupersede
+		? cloneToolResultMessagesForPrune(messages)
+		: cloneForArgElision(
+				messages,
+				toolResults.filter((result) => !result.isError).map((result) => result.toolCallId),
+			);
+	adoptSupersedeScanState(messages, copy);
 	let supersedeReclaimed = 0;
 	let argElisionReclaimed = 0;
 

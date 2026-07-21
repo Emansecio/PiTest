@@ -49,6 +49,44 @@ import { retargetToolsForWorktree } from "./worktree-tools.ts";
 
 const execFileP = promisify(execFile);
 
+/** Wall-clock budget for git worktree add/remove (index.lock must not hang forever). */
+const DEFAULT_WORKTREE_GIT_TIMEOUT_MS = 60_000;
+
+function resolveWorktreeGitTimeoutMs(): number {
+	const raw = process.env.PIT_WORKTREE_GIT_TIMEOUT_MS;
+	if (raw === undefined || raw === "") return DEFAULT_WORKTREE_GIT_TIMEOUT_MS;
+	const n = Number(raw);
+	if (!Number.isFinite(n) || n < 0) return DEFAULT_WORKTREE_GIT_TIMEOUT_MS;
+	return n === 0 ? 0 : n;
+}
+
+function execFileWithTimeout(
+	file: string,
+	args: string[],
+	options: { cwd: string },
+	timeoutMs: number,
+): Promise<{ stdout: string; stderr: string }> {
+	if (timeoutMs <= 0) {
+		return execFileP(file, args, options);
+	}
+	return new Promise((resolve, reject) => {
+		const child = execFile(
+			file,
+			args,
+			{ ...options, timeout: timeoutMs, killSignal: "SIGKILL" },
+			(err, stdout, stderr) => {
+				if (err) {
+					reject(err);
+					return;
+				}
+				resolve({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+			},
+		);
+		// Ensure timeout path never surfaces as uncaughtException.
+		child.on("error", () => {});
+	});
+}
+
 const SUBAGENT_ERROR_USAGE = Symbol("pit.subagentErrorUsage");
 
 /** Preserve incurred usage on exceptional exits without changing the public error type/message. */
@@ -266,13 +304,15 @@ async function createWorktree(parentCwd: string, taskName: string, spec: Worktre
 	// Use --detach so the worktree is on a detached HEAD copy of current HEAD;
 	// this avoids branch conflicts and keeps the parent branch untouched.
 	const args = ["worktree", "add", "--detach", "--", dir, spec.branch ?? "HEAD"];
-	await execFileP("git", args, { cwd: parentCwd });
+	const timeoutMs = resolveWorktreeGitTimeoutMs();
+	await execFileWithTimeout("git", args, { cwd: parentCwd }, timeoutMs);
 	return { path: dir, cleanup: spec.cleanup ?? "auto" };
 }
 
 export async function cleanupSubagentWorktree(parentCwd: string, path: string): Promise<void> {
 	try {
-		await execFileP("git", ["worktree", "remove", "--force", path], { cwd: parentCwd });
+		const timeoutMs = resolveWorktreeGitTimeoutMs();
+		await execFileWithTimeout("git", ["worktree", "remove", "--force", path], { cwd: parentCwd }, timeoutMs);
 	} catch {
 		// Best-effort cleanup: git may have already pruned, or the directory is
 		// gone. Swallow to avoid masking the real task error.
@@ -392,6 +432,8 @@ async function runSpawned(
 	if (options.timeoutMs && options.timeoutMs > 0) {
 		const ms = options.timeoutMs;
 		timeoutHandle = setTimeout(() => controller.abort(new Error(`aborted: timeout after ${ms}ms`)), ms);
+		// Do not pin the process open solely for an idle subagent timeout.
+		timeoutHandle.unref?.();
 	}
 
 	const systemPromptBase = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;

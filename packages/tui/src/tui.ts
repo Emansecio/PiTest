@@ -459,6 +459,7 @@ export class TUI extends Container {
 	public onDebug?: () => void;
 	private renderRequested = false;
 	private renderTimer: NodeJS.Timeout | undefined;
+	private inputRenderQueued = false;
 	private lastRenderAt = 0;
 	// Guards against registering more than one onDrain() callback per
 	// backpressure episode (see _doRenderCore); cleared when that callback fires.
@@ -479,6 +480,12 @@ export class TUI extends Container {
 	// tick; a callback is only ever present here while it has an active streak.
 	private animationFaultCounts = new Map<AnimationFrameCallback, number>();
 	private static readonly ANIMATION_FAULT_EVICT_AFTER = 5;
+	// Consecutive doRender() failures that re-request a frame. Without a cap,
+	// a persistent render throw (diff/compositing) reschedules at ~60Hz forever
+	// and never commits a good frame (CPU pegged, UI looks frozen).
+	private consecutiveRenderFaults = 0;
+	private static readonly RENDER_FAULT_EVICT_AFTER = 5;
+	private renderFaultSuppressed = false;
 	private cursorRow = 0; // Logical cursor row (end of rendered content)
 	private hardwareCursorRow = 0; // Actual terminal cursor row (may differ due to IME positioning)
 	// Last DECTCEM visibility (show/hide) actually written, so positionHardwareCursor
@@ -870,6 +877,32 @@ export class TUI extends Container {
 	}
 
 	/**
+	 * Paint editor input on the next tick instead of making keystrokes wait for
+	 * the 60 Hz animation throttle. Multiple input chunks delivered in the same
+	 * turn still collapse into one differential render.
+	 */
+	private requestInputRender(): void {
+		if (this.stopped) return;
+		this.renderRequested = true;
+		if (this.inputRenderQueued) return;
+		this.inputRenderQueued = true;
+		process.nextTick(() => {
+			this.inputRenderQueued = false;
+			if (this.stopped || !this.renderRequested) return;
+			if (this.renderTimer) {
+				clearTimeout(this.renderTimer);
+				this.renderTimer = undefined;
+			}
+			this.renderRequested = false;
+			this.lastRenderAt = performance.now();
+			// Keystroke after a render-fault storm: clear suppress so we retry once.
+			this.renderFaultSuppressed = false;
+			this.doRender();
+			if (this.renderRequested) this.scheduleRender();
+		});
+	}
+
+	/**
 	 * Subscribe to the shared animation ticker. Every animated component derives
 	 * its frame from the single monotonic clock passed to the callback, so
 	 * spinners and pulses stay phase-locked instead of drifting against one
@@ -954,7 +987,7 @@ export class TUI extends Container {
 			// focused component's handleInput must NOT become an uncaughtException
 			// (process death) on a keystroke. Drop the offending event and keep the
 			// session alive; the next render reflects current state.
-			this.requestRender();
+			this.requestInputRender();
 		}
 	}
 
@@ -1009,7 +1042,7 @@ export class TUI extends Container {
 				return;
 			}
 			this.focusedComponent.handleInput(data);
-			this.requestRender();
+			this.requestInputRender();
 		}
 	}
 
@@ -1560,13 +1593,18 @@ export class TUI extends Container {
 	 * never escalate into the crash we're trying to make legible.
 	 */
 	private logRenderOverflow(lineIndex: number, line: string, width: number, allLines: string[]): void {
+		// Dump only a window around the offending line: measuring visibleWidth of
+		// every transcript line (20k+) made assert-mode crashes take seconds.
+		const WINDOW = 25;
+		const start = Math.max(0, lineIndex - WINDOW);
+		const end = Math.min(allLines.length, lineIndex + WINDOW + 1);
 		const data = [
 			`Crash at ${new Date().toISOString()}`,
 			`Terminal width: ${width}`,
 			`Line ${lineIndex} visible width: ${visibleWidth(line)}`,
 			"",
-			"=== All rendered lines ===",
-			...allLines.map((l, idx) => `[${idx}] (w=${visibleWidth(l)}) ${l}`),
+			`=== Rendered lines ${start}..${end - 1} of ${allLines.length} ===`,
+			...allLines.slice(start, end).map((l, idx) => `[${start + idx}] (w=${visibleWidth(l)}) ${l}`),
 			"",
 		].join("\n");
 		try {
@@ -1670,8 +1708,16 @@ export class TUI extends Container {
 	}
 
 	private doRender(force = false): void {
+		// After RENDER_FAULT_EVICT_AFTER consecutive failures, stop auto-retry
+		// until the next forced paint (input/resize/requestRender(true)) so a
+		// stuck throw cannot pin the event loop at 60fps.
+		if (this.renderFaultSuppressed && !force) {
+			return;
+		}
 		try {
 			this._doRenderCore(force);
+			this.consecutiveRenderFaults = 0;
+			this.renderFaultSuppressed = false;
 		} catch (error) {
 			// doRender runs from a nextTick/timer callback, so a throw from any
 			// component render() (markdown, an extension overlay, compositeOverlays)
@@ -1679,6 +1725,12 @@ export class TUI extends Container {
 			// `this.previous*` state is only committed at the end of a successful render,
 			// so the next requestRender diffs against the last good frame.
 			this.recordRenderFault("render", error);
+			this.consecutiveRenderFaults += 1;
+			if (this.consecutiveRenderFaults >= TUI.RENDER_FAULT_EVICT_AFTER) {
+				this.renderFaultSuppressed = true;
+				// One more forced paint so the fault banner is visible; no loop.
+				return;
+			}
 			this.requestRender();
 		}
 	}

@@ -40,6 +40,24 @@ describe("bash output budget (item 1)", () => {
 		expect(raw).toContain("[REDACTED:openai-key]");
 		rmSync(snapshot.fullOutputPath as string, { force: true });
 	});
+
+	test("caps complete-output artifacts instead of growing with unbounded command output", async () => {
+		const acc = new OutputAccumulator({
+			maxLines: 1,
+			maxBytes: 16,
+			maxArtifactBytes: 64,
+			tempFilePrefix: "pit-artifact-cap-test",
+		});
+		acc.append(Buffer.from("x".repeat(256)));
+		acc.finish();
+		const snapshot = acc.snapshot({ persistIfTruncated: true });
+		await acc.closeTempFile();
+
+		const raw = readFileSync(snapshot.fullOutputPath as string, "utf8");
+		expect(raw).toContain("artifact capped at 64B");
+		expect(Buffer.byteLength(raw, "utf8")).toBeLessThan(160);
+		rmSync(snapshot.fullOutputPath as string, { force: true });
+	});
 });
 
 describe("ReadDedupeStore (item 2)", () => {

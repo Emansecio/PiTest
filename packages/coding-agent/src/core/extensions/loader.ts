@@ -550,6 +550,36 @@ function applyExternalSideEffectMarkers(extension: Extension, resolvedPath: stri
 	}
 }
 
+/** Wall-clock budget per extension import+factory (boot must not hang forever). */
+const DEFAULT_EXTENSION_LOAD_TIMEOUT_MS = 30_000;
+
+function resolveExtensionLoadTimeoutMs(): number {
+	const raw = process.env.PIT_EXTENSION_LOAD_TIMEOUT_MS;
+	if (raw === undefined || raw === "") return DEFAULT_EXTENSION_LOAD_TIMEOUT_MS;
+	const n = Number(raw);
+	if (!Number.isFinite(n) || n < 0) return DEFAULT_EXTENSION_LOAD_TIMEOUT_MS;
+	return n;
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+	if (timeoutMs <= 0) return promise;
+	promise.catch(() => {});
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<never>((_resolve, reject) => {
+				timer = setTimeout(() => {
+					reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+				}, timeoutMs);
+				(timer as { unref?: () => void }).unref?.();
+			}),
+		]);
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+	}
+}
+
 async function loadExtension(
 	extensionPath: string,
 	cwd: string,
@@ -557,10 +587,15 @@ async function loadExtension(
 	runtime: ExtensionRuntime,
 ): Promise<{ extension: Extension | null; error: string | null }> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
+	const loadTimeoutMs = resolveExtensionLoadTimeoutMs();
 
 	try {
 		const tLoad = Date.now();
-		const factory = await loadExtensionModule(resolvedPath);
+		const factory = await withTimeout(
+			loadExtensionModule(resolvedPath),
+			loadTimeoutMs,
+			`Extension import ${extensionPath}`,
+		);
 		const loadMs = Date.now() - tLoad;
 		if (!factory) {
 			return { extension: null, error: `Extension does not export a valid factory function: ${extensionPath}` };
@@ -569,7 +604,9 @@ async function loadExtension(
 		const extension = createExtension(extensionPath, resolvedPath);
 		const api = createExtensionAPI(extension, runtime, cwd, eventBus);
 		const tFactory = Date.now();
-		await factory(api);
+		// Shared remaining budget for factory when import already used some wall time.
+		const factoryBudget = loadTimeoutMs <= 0 ? 0 : Math.max(1_000, loadTimeoutMs - (Date.now() - tLoad));
+		await withTimeout(Promise.resolve(factory(api)), factoryBudget, `Extension factory ${extensionPath}`);
 		const factoryMs = Date.now() - tFactory;
 		if (process.env.PIT_TIMING === "1") {
 			console.error(`  [perf]   ${path.basename(resolvedPath)}: import=${loadMs}ms factory=${factoryMs}ms`);

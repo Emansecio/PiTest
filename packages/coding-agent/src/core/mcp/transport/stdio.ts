@@ -41,7 +41,10 @@ function registerStdioExitHook(): void {
 	process.on("exit", () => {
 		for (const proc of liveStdioProcs) {
 			try {
-				proc.kill();
+				// Tree-kill so npx/node child trees are not orphaned on hard crash
+				// (mirrors killProc / dispose). Plain proc.kill() only hits the root.
+				if (typeof proc.pid === "number") killProcessTree(proc.pid);
+				else proc.kill();
 			} catch {
 				// ignore
 			}
@@ -80,7 +83,10 @@ export class StdioTransport implements McpTransport {
 		this.config = config;
 	}
 
-	async start(): Promise<void> {
+	async start(signal?: AbortSignal): Promise<void> {
+		if (signal?.aborted) {
+			throw signal.reason instanceof Error ? signal.reason : new Error("aborted");
+		}
 		// A reconnect re-runs start() on the same instance: tear down any stale
 		// process first so we always hand the handshake a fresh subprocess.
 		this.killProc();
@@ -104,6 +110,9 @@ export class StdioTransport implements McpTransport {
 		const useShell = needsWindowsShell(resolved);
 		const spawnCommand = useShell ? quoteWindowsShellArg(resolved) : resolved;
 		const spawnArgs = useShell ? args.map(quoteWindowsShellArg) : args;
+		if (signal?.aborted) {
+			throw signal.reason instanceof Error ? signal.reason : new Error("aborted");
+		}
 
 		const proc = spawnProcess(spawnCommand, spawnArgs, {
 			cwd,

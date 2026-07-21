@@ -3,7 +3,7 @@ import type { AuthStatus, AuthStorage } from "../../../core/auth-storage.ts";
 import { theme } from "../theme/theme.ts";
 import { selectionCursor, themedScrollPositionHint } from "./keybinding-hints.ts";
 import { SelectableRow } from "./selectable-row.ts";
-import { SelectorCard } from "./selector-card.ts";
+import { beginSelectorSurface } from "./selector-surface.ts";
 
 export type AuthSelectorProvider = {
 	id: string;
@@ -55,7 +55,7 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		this.onSelectCallback = onSelect;
 		this.onCancelCallback = onCancel;
 
-		const card = new SelectorCard();
+		const { surface: card, mount } = beginSelectorSurface(this, true);
 		card.addChild(new Spacer(1));
 
 		// Add title
@@ -82,8 +82,7 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 
 		card.addChild(new Spacer(1));
 		// Uniform breathing room above the card (matches session/tree/config).
-		this.addChild(new Spacer(1));
-		this.addChild(card);
+		mount();
 
 		// Initial render
 		this.filterProviders("");

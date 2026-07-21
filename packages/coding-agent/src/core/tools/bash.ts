@@ -261,8 +261,28 @@ export function killBashBackgroundJob(id: string): boolean {
 	const job = backgroundJobs.get(id);
 	if (!job) return false;
 	job.kill();
+	if (job.pid) untrackDetachedChildPid(job.pid);
 	backgroundJobs.delete(id);
 	return true;
+}
+
+/**
+ * Kill every tracked background bash job and clear the registry.
+ * Called on session dispose and process shutdown so promoted/auto-bg jobs
+ * cannot outlive the session (or the agent process on graceful quit).
+ */
+export function disposeBashBackgroundJobs(): void {
+	for (const job of [...backgroundJobs.values()]) {
+		if (!job.exited) {
+			try {
+				job.kill();
+			} catch {
+				// best-effort teardown
+			}
+		}
+		if (job.pid) untrackDetachedChildPid(job.pid);
+	}
+	backgroundJobs.clear();
 }
 
 // Test-only reset so suites don't leak registry state across cases. No prod path
@@ -422,6 +442,9 @@ function spawnSpareShell(shell: string, args: string[], cwd: string, env: NodeJS
 		stdio: ["pipe", "pipe", "pipe"],
 		windowsHide: true,
 	});
+	// Swallow stdin EPIPE so a dead/broken spare never surfaces as
+	// uncaughtException on the write path (stdin.end(command)).
+	child.stdin?.on("error", () => {});
 	const spare: SpareShell = { child, shell, args, cwd, env, dead: false, ttlHandle: undefined };
 	if (child.pid) trackDetachedChildPid(child.pid);
 	// A spare that dies before ever being consumed (bad shell/cwd, killed
@@ -638,9 +661,20 @@ export function createLocalBashOperations(options?: {
 				// actually exit. If BOTH taskkill and its fallback failed (permissions, an
 				// unreapable zombie), waitForChildProcess would otherwise wait forever —
 				// reject instead so the model gets an explicit error, not a hung tool call.
+				const detachDataListeners = () => {
+					// After the foreground promise settles (kill-grace / abort / promote),
+					// late stdout must not reach the caller's onData — the tool's
+					// OutputAccumulator may already be finished, and a throw from a
+					// ChildProcess "data" handler becomes an uncaughtException that
+					// kills the whole TUI process.
+					child.stdout?.off("data", onData);
+					child.stderr?.off("data", onData);
+				};
+
 				const armKillGrace = (reason: string) => {
 					clearTimeout(killGraceHandle);
 					killGraceHandle = setTimeout(() => {
+						detachDataListeners();
 						reject(
 							new Error(
 								`${reason}, but the process (pid ${child.pid ?? "unknown"}) did not terminate after being killed`,
@@ -672,6 +706,7 @@ export function createLocalBashOperations(options?: {
 					// from the waitForChildProcess path (signal?.aborted) below.
 					settled.done = true;
 					if (autoBgHandle) clearTimeout(autoBgHandle);
+					detachDataListeners();
 					killTree();
 					armKillGrace("Command was aborted");
 				};
@@ -702,30 +737,38 @@ export function createLocalBashOperations(options?: {
 					// message + the queryable registry (listBashBackgroundJobs). A dedicated
 					// `process.background` category in @pit/ai is a clean follow-up.
 					// Stop feeding the caller's `onData`: the foreground tool call is about
-					// to finish its accumulator, and appending to it post-finish throws.
-					// Post-promotion output goes only into the bounded ring buffer below.
-					child.stdout?.off("data", onData);
-					child.stderr?.off("data", onData);
+					// to finish its accumulator. Post-promotion output goes only into the
+					// bounded ring buffer below.
+					detachDataListeners();
 					// Keep capturing output into a bounded ring buffer for later polling.
 					// The pre-promotion bytes already went to the caller via `onData`.
-					// Streaming decoder: a chunk boundary can split a multi-byte UTF-8
-					// sequence, and per-chunk `.toString("utf-8")` would render the split
-					// half as U+FFFD. `{ stream: true }` holds any incomplete trailing
-					// bytes for the next chunk instead.
+					// Streaming decoder + rolling Buffer chunks: avoid re-encoding the
+					// whole ring on every chunk (was O(n²) under chatty bg jobs).
 					const ringDecoder = new TextDecoder();
+					const ringChunks: Buffer[] = [];
+					let ringBytes = 0;
 					const appendRing = (data: Buffer) => {
-						job.ringBuffer += ringDecoder.decode(data, { stream: true });
-						// Byte-measured cap (BASH_BG_RING_MAX_BYTES is a byte budget, not a
-						// JS string length) and a code-point-safe cut: walk forward from the
-						// target boundary to the next UTF-8 lead byte so a slice never splits
-						// a multi-byte character (mirrors OutputAccumulator.trimTail).
-						const buf = Buffer.from(job.ringBuffer, "utf-8");
-						if (buf.length > BASH_BG_RING_MAX_BYTES) {
-							let start = buf.length - BASH_BG_RING_MAX_BYTES;
-							while (start < buf.length && (buf[start] & 0xc0) === 0x80) start++;
-							job.ringBuffer = buf.subarray(start).toString("utf-8");
+						const text = ringDecoder.decode(data, { stream: true });
+						if (!text) return;
+						const chunk = Buffer.from(text, "utf-8");
+						ringChunks.push(chunk);
+						ringBytes += chunk.length;
+						// Drop oldest whole chunks first (O(1) per drop), then trim the
+						// single remaining head if still over the byte cap.
+						while (ringBytes > BASH_BG_RING_MAX_BYTES && ringChunks.length > 1) {
+							const head = ringChunks.shift()!;
+							ringBytes -= head.length;
 							job.ringTruncated = true;
 						}
+						if (ringBytes > BASH_BG_RING_MAX_BYTES && ringChunks.length === 1) {
+							const head = ringChunks[0]!;
+							let start = ringBytes - BASH_BG_RING_MAX_BYTES;
+							while (start < head.length && (head[start]! & 0xc0) === 0x80) start++;
+							ringChunks[0] = head.subarray(start);
+							ringBytes = ringChunks[0]!.length;
+							job.ringTruncated = true;
+						}
+						job.ringBuffer = Buffer.concat(ringChunks).toString("utf-8");
 					};
 					child.stdout?.on("data", appendRing);
 					child.stderr?.on("data", appendRing);
