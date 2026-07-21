@@ -550,7 +550,7 @@ function main(): void {
 	const argv = process.argv.slice(2);
 	const outDir = argv.find((a) => !a.startsWith("--"));
 	const outIdx = argv.indexOf("--out");
-	const file = outIdx >= 0 ? argv[outIdx + 1] : join(process.cwd(), "docs/reports/BENCHMARK-REPORT.md");
+	const file = outIdx >= 0 ? argv[outIdx + 1] : join(process.cwd(), "bench/runs/BENCHMARK-REPORT.md");
 	if (!outDir || !existsSync(outDir)) {
 		console.error("uso: npx tsx bench/report.mts <outDir-da-rodada> [--out <arquivo.md>]");
 		process.exit(2);

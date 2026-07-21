@@ -29,6 +29,8 @@ terminals/
 agent-tools/
 mcps/
 .pi-subagents/
+.superpowers/
+profiles-node/
 
 # Package specific
 .npm/

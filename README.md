@@ -8,8 +8,6 @@ This repository is maintained at [Emansecio/Pit](https://github.com/Emansecio/Pi
 
 Product and architecture areas (harness, context economy, guards, orchestration, …) are mapped in [Taxonomia.md](Taxonomia.md). Domain terms live in [CONTEXT.md](CONTEXT.md).
 
-The unified Grok Build and AMP-inspired product proposal is documented in [GROK_PIT-AMPO.md](GROK_PIT-AMPO.md).
-
 ## What you get
 
 Interactive coding agent CLI plus the shared libraries behind it:

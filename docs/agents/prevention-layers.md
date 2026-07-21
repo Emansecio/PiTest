@@ -4,8 +4,6 @@
 > Read this before proposing a new guard/validation: it shows the layered pipeline that
 > already wraps every model turn and every tool call, **in execution order**, so you can
 > see where an error is caught — and not re-propose a layer that exists.
-> Per-layer audit findings and the improvement backlog live in
-> [`prevention-layers-audit.md`](prevention-layers-audit.md).
 
 The Pit defends against model mistakes in **four bands**: around the model (per turn),
 **before** a tool runs (preventive — these block the wrong call), **after** a tool runs

@@ -55,9 +55,11 @@ not inline in `agent-session.ts` (see [docs/CONTEXT.md](docs/CONTEXT.md)
 ## Documentation layout
 
 - `docs/adr/` — architecture decision records.
-- `docs/agents/` — agent-type docs and TUI/UX plans.
-- `docs/reports/` — analysis and audit reports.
-- `docs/optimization/`, `docs/plans/`, `docs/specs/`, `docs/superpowers/` — design docs.
+- `docs/agents/` — agent-facing maps (`already-built`, prevention layers, workflow).
+- `docs/optimization/` — active context-economy inventory / backlog.
+- `docs/CONTEXT.md`, `docs/token-economy-tuning.md`, `docs/RELEASING.md` — harness glossary, `PIT_*` flags, release process.
+- `Taxonomia.md` — product/architecture area map (linked from README).
+- Package user docs live under `packages/*/docs/` (especially `packages/coding-agent/docs/`).
 
 ## Environment / tuning
 

@@ -323,5 +323,4 @@ Notas:
 - Auditoria inicial: 5 agentes paralelos (2026-06-28)  
 - Revisão código: 2 agentes + verificação manual (`_pruneContextForProvider`, `validation.ts`, `lean` default)  
 - Revalidação extra manual (2026-06-28): contagens corrigidas, D4 removido, E16 adicionado  
-- Baselines pós-K5 (2026-06-28): `bench-prompt-size.mts` + `bench-session-tokens.mts` (3 cenários)  
-- Roadmap: [`pit-agent-performance-quality-roadmap.md`](./pit-agent-performance-quality-roadmap.md)
+- Baselines pós-K5 (2026-06-28): `bench-prompt-size.mts` + `bench-session-tokens.mts` (3 cenários)

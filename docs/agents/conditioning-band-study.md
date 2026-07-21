@@ -1,9 +1,8 @@
 # Estudo: Banda de Condicionamento (Band P) — tornando o condicionamento nativo no PIT
 
 > **Documento aprovado** (estudo 2026-07-02; decisões fechadas em sessão de grill no mesmo
-> dia — ver §8). Companion de [`prevention-layers.md`](prevention-layers.md) e
-> [`prevention-layers-audit.md`](prevention-layers-audit.md). Cada fase do roadmap (§7)
-> vira um spec de implementação.
+> dia — ver §8). Companion de [`prevention-layers.md`](prevention-layers.md). Cada fase do
+> roadmap (§7) vira um spec de implementação.
 >
 > Método: três varreduras profundas e paralelas do código (infra de contexto/grounding,
 > máquina de fluxo/plano/review, telemetria/dosagem), sintetizadas aqui. Todos os anchors

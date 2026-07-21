@@ -60,10 +60,9 @@ Each is a wired extension. Don't propose adding any of these:
 - Loop/stagnation steering (doom-loop, stagnation, todo-cadence reminders) is wired in the session — don't propose "detect loops".
 
 ## TUI motion & animation
-Already shipped — full audit + **implementation guide (difficulty & pitfalls)** in
-[`cli-animations.md`](cli-animations.md). Don't re-propose "unify spinners", "coalesce
-animation frames", or "add reduced motion" without reading it. Picking up backlog items
-A–G: read the **Implementation guide** section there first.
+Already shipped in the interactive TUI motion paths (`spinner-ticker`, loaders, reveal).
+Don't re-propose "unify spinners", "coalesce animation frames", or "add reduced motion"
+without reading the anchors below first.
 
 - **Shared animation ticker** — `packages/tui/src/tui.ts` `addAnimationCallback`: one 16ms
   loop, `performance.now()` phase-lock, dirty-coalesced `requestRender()`.
