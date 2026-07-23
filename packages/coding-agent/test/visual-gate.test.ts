@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Integration test for the visual definition-of-done nudge: when a turn changes
  * a rendered artifact (.tsx/.html/.svg/...) without ever calling `preview`, the
  * gate injects a one-shot nudge to render and review it.
@@ -11,7 +11,7 @@ import { createHarness, getUserTexts, type Harness } from "./suite/harness.js";
 // Isolate the visual nudge from sibling verification phases that can hang under
 // full-suite load (functional-web Chrome probes, self-review subagent up to 90s).
 const VISUAL_ONLY = {
-	verification: { visual: true, functionalWeb: false },
+	verification: { mode: "post-turn", visual: true, functionalWeb: false },
 } as const;
 
 describe("visual definition-of-done gate", () => {
@@ -65,7 +65,7 @@ describe("visual definition-of-done gate", () => {
 
 	it("does not nudge when verification.visual is disabled", async () => {
 		const harness = await createHarness({
-			settings: { verification: { visual: false, functionalWeb: false } },
+			settings: { verification: { mode: "post-turn", visual: false, functionalWeb: false } },
 		});
 		harnesses.push(harness);
 		const file = join(harness.tempDir, "page.html");

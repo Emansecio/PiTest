@@ -122,7 +122,8 @@ export class WorkGroupComponent extends Container {
 			this.counted.push(exec);
 			this.countsCache = null;
 			this.headerStateCache = null;
-			this.countEase.begin("text", "toolOutput");
+			// Live summary steadies on `text`; pulse from quiet sealed token up to it.
+			this.countEase.begin("toolOutput", "text");
 			if (this.headerState() === "pending") this.ensureTicker();
 			this.ui.requestRender();
 			return;
@@ -424,7 +425,9 @@ export class WorkGroupComponent extends Container {
 		const summary = this.countedCounts(hidden);
 		if (summary) {
 			const icon = this.icon(this.headerState());
-			lines.push(truncateToWidth(`${icon} ${this.countEase.colorize("toolOutput", summary)}`, width));
+			// Live/expanded summary one step above sealed `toolOutput` (same token as
+			// muted in built-ins) so the active phase reads slightly brighter.
+			lines.push(truncateToWidth(`${icon} ${this.countEase.colorize("text", summary)}`, width));
 		}
 		for (const entry of visible) {
 			for (const l of entry.line.render(width)) lines.push(l);

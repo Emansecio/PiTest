@@ -126,6 +126,8 @@ export interface MarkdownTheme {
 	heading1?: (text: string) => string;
 	/** Optional H2-specific styling (defaults to bold `heading` when omitted). */
 	heading2?: (text: string) => string;
+	/** Optional H3-specific styling (defaults to bold `heading` when omitted). */
+	heading3?: (text: string) => string;
 	link: (text: string) => string;
 	linkUrl: (text: string) => string;
 	code: (text: string) => string;
@@ -908,6 +910,8 @@ export class Markdown implements Component {
 					headingStyleFn = (text: string) => this.theme.heading1!(text);
 				} else if (headingLevel === 2 && this.theme.heading2) {
 					headingStyleFn = (text: string) => this.theme.heading2!(text);
+				} else if (headingLevel === 3 && this.theme.heading3) {
+					headingStyleFn = (text: string) => this.theme.heading3!(text);
 				} else if (headingLevel === 1) {
 					headingStyleFn = (text: string) => this.theme.heading(this.theme.bold(this.theme.underline(text)));
 				} else {

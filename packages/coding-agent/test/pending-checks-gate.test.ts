@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Integration test for the end-of-turn background-check guard: when the agent
  * backgrounds a test/check that is still running as the turn ends, the session
  * waits for it to settle and re-injects the outcome so it never reports done /
@@ -19,8 +19,9 @@ const RUNNING_MARKER = "is STILL running";
 
 // pollIntervalMs shrinks the drain's re-check cadence so a job that settles a few
 // ms after the turn ends is detected almost immediately instead of after a fixed
-// 500ms poll — the assertions (pass/fail/re-injection) are unchanged.
+// 500ms poll â€” the assertions (pass/fail/re-injection) are unchanged.
 const pendingChecksOn = {
+	verification: { mode: "post-turn" as const },
 	pendingChecks: { enabled: true, maxWaitMs: 5000, maxFixAttempts: 1, pollIntervalMs: 20 },
 };
 
@@ -51,7 +52,7 @@ describe("background-check guard", () => {
 		const harness = await createHarness({ settings: pendingChecksOn });
 		harnesses.push(harness);
 		harness.setResponses([
-			fauxAssistantMessage("All done — you can commit."),
+			fauxAssistantMessage("All done â€” you can commit."),
 			fauxAssistantMessage("understood, I'll wait and fix it"),
 		]);
 
@@ -83,11 +84,14 @@ describe("background-check guard", () => {
 			// Job never settles: the drain must wait out maxWaitMs and then warn. Keep
 			// that wait short (200ms) with a fast poll so the "still running" path is
 			// proven without a full second of real waiting.
-			settings: { pendingChecks: { enabled: true, maxWaitMs: 200, maxFixAttempts: 1, pollIntervalMs: 20 } },
+			settings: {
+				verification: { mode: "post-turn" as const },
+				pendingChecks: { enabled: true, maxWaitMs: 200, maxFixAttempts: 1, pollIntervalMs: 20 },
+			},
 		});
 		harnesses.push(harness);
 		harness.setResponses([
-			fauxAssistantMessage("Done — ready to commit."),
+			fauxAssistantMessage("Done â€” ready to commit."),
 			fauxAssistantMessage("ok, I'll wait for the test"),
 		]);
 

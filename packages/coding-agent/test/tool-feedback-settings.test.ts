@@ -74,9 +74,9 @@ describe("SettingsManager.getToolFeedbackSettings", () => {
 		expect(sm.getToolFeedbackSettings().errorReflection.enabled).toBe(false);
 	});
 
-	it("defaults overthinkGuard to ON with 1000/2500/2", () => {
+	it("defaults overthinkGuard to OFF with 1000/2500/2 thresholds retained", () => {
 		const cfg = SettingsManager.inMemory().getToolFeedbackSettings();
-		expect(cfg.overthinkGuard.enabled).toBe(true);
+		expect(cfg.overthinkGuard.enabled).toBe(false);
 		expect(cfg.overthinkGuard.weakTokenThreshold).toBe(1000);
 		expect(cfg.overthinkGuard.strongTokenThreshold).toBe(2500);
 		expect(cfg.overthinkGuard.maxRetriesPerTurn).toBe(2);

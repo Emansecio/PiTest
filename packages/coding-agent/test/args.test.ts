@@ -33,6 +33,32 @@ describe("parseArgs", () => {
 		});
 	});
 
+	describe("--max-wall flag", () => {
+		test("parses a positive seconds value", () => {
+			const result = parseArgs(["--max-wall", "850", "-p", "go"]);
+			expect(result.maxWall).toBe(850);
+			expect(result.diagnostics).toEqual([]);
+		});
+
+		test("accepts fractional seconds", () => {
+			const result = parseArgs(["--max-wall", "0.5"]);
+			expect(result.maxWall).toBe(0.5);
+		});
+
+		test("rejects non-numeric and non-positive values with a warning", () => {
+			for (const bad of ["abc", "0", "-5"]) {
+				const result = parseArgs(["--max-wall", bad]);
+				expect(result.maxWall).toBeUndefined();
+				expect(result.diagnostics).toHaveLength(1);
+				expect(result.diagnostics[0].message).toContain("--max-wall");
+			}
+		});
+
+		test("is absent when the flag is not given", () => {
+			expect(parseArgs(["-p", "go"]).maxWall).toBeUndefined();
+		});
+	});
+
 	describe("--print flag", () => {
 		test("parses --print flag", () => {
 			const result = parseArgs(["--print"]);

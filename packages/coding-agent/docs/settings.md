@@ -15,8 +15,8 @@ Edit directly or use `/settings` for common options.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `defaultProvider` | string | - | Default provider (e.g., `"anthropic"`, `"openai"`) |
-| `defaultModel` | string | - | Default model ID |
+| `defaultProvider` | string | - | Last-used provider; restored on every fresh session start (updated by `/model` and model cycling) |
+| `defaultModel` | string | - | Last-used model ID; restored on every fresh session start even when it is outside `enabledModels` |
 | `defaultThinkingLevel` | string | - | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`, `"ultra"` |
 | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level |
@@ -44,7 +44,7 @@ Three layers work together:
 | **Cycling ring** | Models cycled with Ctrl+P / Shift+Ctrl+P | `enabledModels` in settings, or `--models` on the CLI. `/model` can filter **all** vs **enabled** with Tab |
 | **Path/role overrides** | Auto-switch by file path or role | `modelRoles` entries (`.model`, `.thinkingLevel`, `.paths`, `.fallbackChain`) |
 
-**Precedence for the initial model** (first turn): CLI `--provider` / `--model` → first entry in the enabled ring → `defaultModel` → first available provider model.
+**Precedence for the initial model** (first turn): CLI `--provider` / `--model` → last-used `defaultProvider`/`defaultModel` (even outside the enabled ring) → first entry in the enabled ring → first available provider model.
 
 See also [Model Cycling](#model-cycling) for `enabledModels` format.
 
@@ -236,7 +236,7 @@ When multiple sources specify a session directory, precedence is `--session-dir`
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `enabledModels` | string[] | - | Model patterns for Ctrl+P cycling (same format as `--models` CLI flag) |
+| `enabledModels` | string[] | - | Model patterns for Ctrl+P cycling only (same format as `--models` CLI flag). Does **not** restrict which model boots a session — last-used `defaultModel` wins even when outside this list |
 
 ```json
 {
@@ -356,11 +356,18 @@ See [memory.md](memory.md) for the file format and discovery order.
 
 ### Verification
 
-After a code-modifying turn, Pit can run the project check command and self-correct on failure.
+Where verification happens is governed by `verification.mode`:
+
+- **`in-turn`** (default) — the model is instructed via system prompt to run the project check (configured or auto-detected) and fix failures **before** writing its final reply. Nothing runs after the turn: no post-reply check command, no injected fix turns, no self-review pass, no pending-checks drain. Claude Code-like.
+- **`post-turn`** — the legacy harness gate: after a code-modifying turn the harness runs the check, re-injects failures as fix turns (bounded by `maxAttempts`), runs the visual/functional-web DoD and the P4 self-review, and drains backgrounded checks.
+- **`off`** — neither.
+
+Back-compat: explicit `enabled: false` resolves to `off`; explicit `enabled: true` resolves to `post-turn`.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `verification.enabled` | boolean | `true` | Run the verification gate after code-modifying turns |
+| `verification.mode` | string | `"in-turn"` | `in-turn` \| `post-turn` \| `off` — see above |
+| `verification.enabled` | boolean | `true` | Legacy switch; see `mode` back-compat mapping |
 | `verification.command` | string | `null` | Check command; `null` auto-detects from `package.json` scripts (check/typecheck/lint/test) |
 | `verification.maxAttempts` | number | `2` | Fix attempts before giving up and reporting the failure (min 1) |
 | `verification.timeoutMs` | number | `180000` | Timeout for the check command. Floor 50ms so an explicitly configured short timeout is honored |
@@ -371,7 +378,7 @@ After a code-modifying turn, Pit can run the project check command and self-corr
 
 ### Pending Checks
 
-Long-running project checks can be backgrounded and drained at end of turn; Pit waits for them to settle and self-corrects on failure.
+Long-running project checks can be backgrounded and drained at end of turn; Pit waits for them to settle and self-corrects on failure. The drain only runs in `verification.mode: "post-turn"` — in the default `in-turn` mode nothing runs after the reply.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
@@ -547,12 +554,13 @@ The `search_tool_bm25` tool is always registered; these settings gate auto-seedi
 | `toolFeedback.todoCadenceReminder.enabled` | boolean | `true` | Inject a sync reminder when an `in_progress` todo goes stale without an update |
 | `toolFeedback.todoCadenceReminder.threshold` | number | `3` | Turns a todo may sit `in_progress` without an update before the reminder fires |
 | `toolFeedback.todoCadenceReminder.cooldownMs` | number | `30000` | Minimum gap between reminders |
-| `toolFeedback.overthinkGuard.enabled` | boolean | `true` | Live guard that interrupts a stream when one thinking block exceeds a token estimate without any tool call. Also disabled by `PIT_NO_OVERTHINK_GUARD=1` — the setting and the env flag are two independent kill paths |
-| `toolFeedback.overthinkGuard.tokenThreshold` | number | unset | Override threshold (est. tokens) for all models; when unset, the weak/strong defaults apply |
-| `toolFeedback.overthinkGuard.weakTokenThreshold` | number | `1000` | Threshold (est. tokens) for open/weak providers |
-| `toolFeedback.overthinkGuard.strongTokenThreshold` | number | `2500` | Threshold (est. tokens) for native frontier providers |
-| `toolFeedback.overthinkGuard.maxRetriesPerTurn` | number | `2` | Interrupt injections per turn before bailing |
-| `toolFeedback.overthinkGuard.watchTextDelta` | boolean | unset | When unset, weak/open providers watch `text_delta`; frontier providers do not |
+| `toolFeedback.overthinkGuard.enabled` | boolean | `false` | **Permanently inactive.** The product path never arms the overthink guard for any model (`resolveOverthinkGuardForModel` always returns `enabled: false`). Setting `true` is stored but has no effect |
+| `toolFeedback.overthinkGuard.tokenThreshold` | number | unset | Retained for settings round-trip; unused while the guard is off |
+| `toolFeedback.overthinkGuard.weakTokenThreshold` | number | `1000` | Retained for settings round-trip; unused while the guard is off |
+| `toolFeedback.overthinkGuard.strongTokenThreshold` | number | `2500` | Retained for settings round-trip; unused while the guard is off |
+| `toolFeedback.overthinkGuard.maxRetriesPerTurn` | number | `2` | Retained for settings round-trip; unused while the guard is off |
+| `toolFeedback.overthinkGuard.watchTextDelta` | boolean | unset | Retained for settings round-trip; unused while the guard is off |
+| `toolFeedback.overthinkGuard.modelOverrides` | object | unset | Retained for settings round-trip; unused while the guard is off |
 
 The **failure budget** tracks how many times each tool (keyed by name, regardless of
 arguments or error text) has failed in the current turn. Once a tool hits `maxPerTurn`
@@ -592,7 +600,7 @@ A few `PIT_*` env flags silently shadow a settings key at resolve time. The prec
 | `PIT_CLEAR_ON_SHRINK` | `terminal.clearOnShrink` | Setting wins; env is only the fallback default when the setting is unset |
 | `PIT_HARDWARE_CURSOR` | `showHardwareCursor` | Setting wins; env is only the fallback default when the setting is unset |
 | `PIT_NO_PENDING_CHECKS` | `pendingChecks.enabled` | Env wins — `=1` forces the checks off regardless of the setting |
-| `PIT_NO_OVERTHINK_GUARD` | `toolFeedback.overthinkGuard.enabled` | Two independent kill paths — either the setting (`enabled: false`) or the env flag disables the guard |
+| `PIT_NO_OVERTHINK_GUARD` | `toolFeedback.overthinkGuard.enabled` | Legacy no-op: overthink guard is permanently off for all models |
 | `PIT_NO_CLAUDE_CODE_SKILLS` | `skillDiscovery.noClaudeCode` | OR — either the setting or the env flag opts out (also `PIT_DISABLE_CLAUDE_CODE_SKILLS`) |
 | `PIT_NO_LEGACY_SKILLS` | `skillDiscovery.noLegacy` | OR — either the setting or the env flag opts out |
 | `PIT_GREP_ENGINE` | `grep.engine` | Env wins (`fff`\|`rg`) |

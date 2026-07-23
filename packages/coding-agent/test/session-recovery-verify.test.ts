@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Verification gate honors session-recovery maxAttempts bonus in guided mode.
  */
 
@@ -19,7 +19,7 @@ describe("session recovery verification budget", () => {
 	it("allows one extra fix attempt when recovery is guided", async () => {
 		const harness = await createHarness({
 			settings: {
-				verification: { command: NODE_FAIL, maxAttempts: 1 },
+				verification: { mode: "post-turn", command: NODE_FAIL, maxAttempts: 1 },
 				toolFeedback: { doomLoopReminder: { enabled: true, threshold: 2 } },
 			},
 		});
@@ -38,7 +38,7 @@ describe("session recovery verification budget", () => {
 			failRead,
 			fauxAssistantMessage([fauxToolCall("write", { path: file, content: "hi" })], { stopReason: "toolUse" }),
 			fauxAssistantMessage("wrote it"),
-			// Extra fix turn enabled by guided (+1 maxAttempts → 2 total fixes).
+			// Extra fix turn enabled by guided (+1 maxAttempts â†’ 2 total fixes).
 			fauxAssistantMessage("attempted another fix"),
 			fauxAssistantMessage("honest summary"),
 		]);

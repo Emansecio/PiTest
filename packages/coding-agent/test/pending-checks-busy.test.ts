@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Asserts prompt() stays busy while pending-checks drain polls a running bg job.
  */
 
@@ -12,6 +12,7 @@ import {
 import { createHarness, type Harness } from "./suite/harness.js";
 
 const pendingChecksOn = {
+	verification: { mode: "post-turn" as const },
 	pendingChecks: { enabled: true, maxWaitMs: 5000, maxFixAttempts: 1 },
 };
 

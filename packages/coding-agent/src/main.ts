@@ -448,16 +448,22 @@ function buildSessionOptions(
 	}
 
 	if (!options.model && scopedModels.length > 0 && !hasExistingSession) {
-		// Check if saved default is in scoped models - use it if so, otherwise first scoped model
+		// Prefer the last-used model from settings even when it is outside the
+		// enabledModels / --models cycling ring. That ring controls Ctrl+P
+		// cycling only — not which model boots a fresh session. Falling back to
+		// scopedModels[0] when the saved model was out-of-ring caused every
+		// restart to snap back to the first enabled entry (e.g. Opus).
 		const savedProvider = settingsManager.getDefaultProvider();
 		const savedModelId = settingsManager.getDefaultModel();
 		const savedModel = savedProvider && savedModelId ? modelRegistry.find(savedProvider, savedModelId) : undefined;
-		const savedInScope = savedModel ? scopedModels.find((sm) => modelsAreEqual(sm.model, savedModel)) : undefined;
+		const savedUsable = savedModel && modelRegistry.hasConfiguredAuth(savedModel) ? savedModel : undefined;
+		const savedInScope = savedUsable ? scopedModels.find((sm) => modelsAreEqual(sm.model, savedUsable)) : undefined;
 
-		if (savedInScope) {
-			options.model = savedInScope.model;
-			// Use thinking level from scoped model config if explicitly set
-			if (!parsed.thinking && savedInScope.thinkingLevel) {
+		if (savedUsable) {
+			options.model = savedUsable;
+			// Use thinking level from scoped model config if the last-used model
+			// is also in the ring and has an explicit level.
+			if (!parsed.thinking && savedInScope?.thinkingLevel) {
 				options.thinkingLevel = savedInScope.thinkingLevel;
 			}
 		} else {
@@ -1020,6 +1026,7 @@ export async function main(args: string[], options?: MainOptions) {
 			messages: parsed.messages,
 			initialMessage,
 			initialImages,
+			maxWallMs: parsed.maxWall !== undefined ? Math.round(parsed.maxWall * 1000) : undefined,
 		});
 		await stopThemeWatcherLazy();
 		restoreStdout();

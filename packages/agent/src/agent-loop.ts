@@ -7,6 +7,8 @@ import {
 	type AssistantMessage,
 	type Context,
 	EventStream,
+	iterateWithWallClock,
+	RoundWallClockTimeoutError,
 	recordDiagnostic,
 	streamSimple,
 	suggestClosest,
@@ -144,6 +146,35 @@ function resolveAgentBoundaryTimeoutMs(): number {
 	if (raw === undefined || raw === "") return DEFAULT_AGENT_BOUNDARY_TIMEOUT_MS;
 	const parsed = Number(raw);
 	if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_AGENT_BOUNDARY_TIMEOUT_MS;
+	return parsed;
+}
+
+/**
+ * Non-rearming wall-clock cap on a single model round (one stream attempt).
+ * The idle-timeout rearms on every chunk, so a stream kept alive by keepalives
+ * or sparse deltas can pend for many minutes with no guard reacting — and in
+ * headless runs (-p / benchmarks / orchestration) nobody is watching to hit Esc.
+ * When the cap fires the stream is cancelled and the round fails with a
+ * retryable error, taking the same retry/fallback path as an idle timeout.
+ * Default is deliberately high (600s) so legitimate long reasoning never trips
+ * it. Override with PIT_ROUND_WALL_CLOCK_MS (0 disables); kill-switch
+ * PIT_NO_ROUND_WATCHDOG=1.
+ */
+const DEFAULT_ROUND_WALL_CLOCK_MS = 600_000;
+
+function resolveRoundWallClockMs(configValue?: number): number {
+	const disable = typeof process !== "undefined" ? process.env.PIT_NO_ROUND_WATCHDOG : undefined;
+	if (disable) {
+		const v = disable.toLowerCase();
+		if (v === "1" || v === "true" || v === "yes") return 0;
+	}
+	if (typeof configValue === "number" && Number.isFinite(configValue) && configValue >= 0) {
+		return configValue;
+	}
+	const raw = typeof process !== "undefined" ? process.env.PIT_ROUND_WALL_CLOCK_MS : undefined;
+	if (raw === undefined || raw === "") return DEFAULT_ROUND_WALL_CLOCK_MS;
+	const parsed = Number(raw);
+	if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_ROUND_WALL_CLOCK_MS;
 	return parsed;
 }
 
@@ -772,6 +803,13 @@ async function streamAssistantResponse(
 		? new OverthinkTracker(overthinkGuard.watchTextDelta === true)
 		: undefined;
 
+	// Hoisted out of the try so the round-watchdog catch below can publish a
+	// clean error turn (replacing any partial message) and drain pending
+	// coalesced updates before message_end.
+	let partialMessage: AssistantMessage | null = null;
+	let addedPartial = false;
+	let drainStreamUpdates: (() => Promise<void>) | undefined;
+
 	// Single cleanup point: every exit path (normal returns, TTSR interrupt, and
 	// — the case the per-return removals missed — an exception from streamFunction,
 	// response.result(), or the `for await`) runs the finally, so the abort
@@ -782,9 +820,6 @@ async function streamAssistantResponse(
 			apiKey: resolvedApiKey,
 			signal: ttsrAbort.signal,
 		});
-
-		let partialMessage: AssistantMessage | null = null;
-		let addedPartial = false;
 
 		// Delta coalescing: accumulate consecutive *_delta events of the same kind
 		// and contentIndex, emitting at most once per 16ms (60fps frame budget).
@@ -862,6 +897,7 @@ async function streamAssistantResponse(
 			flushPendingDelta();
 			await drainMessageUpdates();
 		};
+		drainStreamUpdates = flushAndDrainMessageUpdates;
 
 		const finalizeStreamInterrupt = async (): Promise<StreamInterrupt> => {
 			await flushAndDrainMessageUpdates();
@@ -873,7 +909,21 @@ async function streamAssistantResponse(
 			return streamInterrupt as StreamInterrupt;
 		};
 
-		for await (const event of response) {
+		// Round watchdog: hard wall-clock ceiling over the whole stream attempt.
+		// Provider-agnostic on purpose — wrapping here covers every provider with
+		// one guard instead of threading a second timeout through each SSE loop.
+		const roundWallClockMs = resolveRoundWallClockMs(config.roundWallClockMs);
+		const eventSource =
+			roundWallClockMs > 0
+				? iterateWithWallClock(response, {
+						wallClockMs: roundWallClockMs,
+						// Cancel just this stream (frees the socket); the outer run signal
+						// stays clean so the session-level retry can start a fresh attempt.
+						onTimeout: () => ttsrAbort.abort(),
+					})
+				: response;
+
+		for await (const event of eventSource) {
 			switch (event.type) {
 				case "start":
 					partialMessage = event.partial;
@@ -1045,6 +1095,19 @@ async function streamAssistantResponse(
 		const finalMessage = settled;
 		await publishFinalAssistantMessage(context, finalMessage, addedPartial, emit);
 		return finalMessage;
+	} catch (err) {
+		if (err instanceof RoundWallClockTimeoutError) {
+			// The round exceeded its wall-clock budget; onTimeout already aborted the
+			// child stream (socket freed). Convert to a normal error turn — the
+			// message contains "timed out", so the session's retryable matcher picks
+			// it up and the standard retry/fallback path takes over, instead of the
+			// run pending until an external orchestrator kills the process.
+			await drainStreamUpdates?.().catch(() => {});
+			const errorTurn = buildErrorTurn(config.model, err.message);
+			await publishFinalAssistantMessage(context, errorTurn, addedPartial, emit);
+			return errorTurn;
+		}
+		throw err;
 	} finally {
 		if (signal) signal.removeEventListener("abort", forwardAbort);
 	}

@@ -115,6 +115,11 @@ export interface AgentOptions {
 	 * undefined lets the stream function fall back to its configured default.
 	 */
 	idleTimeoutMs?: number;
+	/**
+	 * Wall-clock cap (ms) for a single model round. Non-rearming complement to
+	 * idleTimeoutMs; see {@link AgentLoopConfig.roundWallClockMs}. Mutable per run.
+	 */
+	roundWallClockMs?: number;
 	toolExecution?: ToolExecutionMode;
 	/** Time-Traveling Stream Rules matcher. Passed through to the loop config. */
 	ttsrMatcher?: TTSRMatcher;
@@ -243,6 +248,8 @@ export class Agent {
 	public maxRetryDelayMs?: number;
 	/** Body idle-timeout override forwarded to the stream function; see AgentOptions. */
 	public idleTimeoutMs?: number;
+	/** Wall-clock cap override for a single model round; see AgentLoopConfig.roundWallClockMs. */
+	public roundWallClockMs?: number;
 	/** Tool execution strategy for assistant messages that contain multiple tool calls. */
 	public toolExecution: ToolExecutionMode;
 	/** Optional Time-Traveling Stream Rules matcher. */
@@ -277,6 +284,7 @@ export class Agent {
 		this.transport = options.transport ?? "auto";
 		this.maxRetryDelayMs = options.maxRetryDelayMs;
 		this.idleTimeoutMs = options.idleTimeoutMs;
+		this.roundWallClockMs = options.roundWallClockMs;
 		this.toolExecution = options.toolExecution ?? "parallel";
 		this.ttsrMatcher = options.ttsrMatcher;
 		this.getOverthinkGuard = options.getOverthinkGuard;
@@ -569,6 +577,7 @@ export class Agent {
 			thinkingBudgets: this.thinkingBudgets,
 			maxRetryDelayMs: this.maxRetryDelayMs,
 			idleTimeoutMs: this.idleTimeoutMs,
+			roundWallClockMs: this.roundWallClockMs,
 			toolExecution: this.toolExecution,
 			toolAbortControllers: this.toolAbortControllers,
 			beforeToolCall: this.beforeToolCall,

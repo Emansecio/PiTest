@@ -140,7 +140,7 @@
 				},
 				"thinkingText": {
 					"$ref": "#/$defs/colorValue",
-					"description": "Thinking block text color"
+					"description": "Thinking/reasoning text (distinct from muted meta)"
 				},
 				"selectedBg": {
 					"$ref": "#/$defs/colorValue",
@@ -180,7 +180,7 @@
 				},
 				"toolTitle": {
 					"$ref": "#/$defs/colorValue",
-					"description": "Tool execution box title color"
+					"description": "Tool target/path color (paths, queries; not body text)"
 				},
 				"toolOutput": {
 					"$ref": "#/$defs/colorValue",
@@ -188,7 +188,7 @@
 				},
 				"mdHeading": {
 					"$ref": "#/$defs/colorValue",
-					"description": "Markdown heading text"
+					"description": "Markdown heading fallback (H4+); H1–H3 use dedicated wiring"
 				},
 				"mdLink": {
 					"$ref": "#/$defs/colorValue",

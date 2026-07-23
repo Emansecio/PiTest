@@ -33,7 +33,7 @@
 		"muted": "muted",
 		"dim": "dim",
 		"text": "text",
-		"thinkingText": "muted",
+		"thinkingText": "lavender",
 
 		"selectedBg": "selectedBg",
 		"userMessageBg": "userMsgBg",
@@ -44,7 +44,7 @@
 		"toolPendingBg": "toolPendingBg",
 		"toolSuccessBg": "toolSuccessBg",
 		"toolErrorBg": "toolErrorBg",
-		"toolTitle": "text",
+		"toolTitle": "cyanBlue",
 		"toolOutput": "muted",
 
 		"mdHeading": "gold",

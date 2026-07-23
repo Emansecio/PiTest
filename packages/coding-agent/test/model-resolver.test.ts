@@ -423,6 +423,8 @@ describe("default model selection", () => {
 		};
 
 		const registry = {
+			find: () => undefined,
+			hasConfiguredAuth: () => false,
 			getAvailable: async () => [aiGatewayModel],
 		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
 
@@ -434,6 +436,71 @@ describe("default model selection", () => {
 
 		expect(result.model?.provider).toBe("vercel-ai-gateway");
 		expect(result.model?.id).toBe("anthropic/claude-opus-4-6");
+	});
+
+	test("findInitialModel prefers last-used saved default over first scoped model", async () => {
+		const lastUsed = mockModels[1]; // gpt-4o
+		const scopedFirst = mockModels[0]; // claude-sonnet-5
+		const registry = {
+			find: (provider: string, modelId: string) =>
+				provider === lastUsed.provider && modelId === lastUsed.id ? lastUsed : undefined,
+			hasConfiguredAuth: (model: Model<any>) => model.id === lastUsed.id,
+			getAvailable: async () => mockModels,
+		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
+
+		const result = await findInitialModel({
+			scopedModels: [{ model: scopedFirst }, { model: lastUsed }],
+			isContinuing: false,
+			defaultProvider: lastUsed.provider,
+			defaultModelId: lastUsed.id,
+			modelRegistry: registry,
+		});
+
+		expect(result.model?.provider).toBe(lastUsed.provider);
+		expect(result.model?.id).toBe(lastUsed.id);
+	});
+
+	test("findInitialModel uses last-used model even when it is outside the scoped ring", async () => {
+		const lastUsed = mockOpenRouterModels[0]; // qwen…
+		const scopedOnly = mockModels[0]; // claude in enabledModels ring
+		const registry = {
+			find: (provider: string, modelId: string) =>
+				provider === lastUsed.provider && modelId === lastUsed.id ? lastUsed : undefined,
+			hasConfiguredAuth: () => true,
+			getAvailable: async () => [...mockModels, ...mockOpenRouterModels],
+		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
+
+		const result = await findInitialModel({
+			scopedModels: [{ model: scopedOnly }],
+			isContinuing: false,
+			defaultProvider: lastUsed.provider,
+			defaultModelId: lastUsed.id,
+			modelRegistry: registry,
+		});
+
+		expect(result.model?.provider).toBe(lastUsed.provider);
+		expect(result.model?.id).toBe(lastUsed.id);
+	});
+
+	test("findInitialModel falls back to first scoped model when last-used has no auth", async () => {
+		const lastUsed = mockOpenRouterModels[0];
+		const scopedFirst = mockModels[0];
+		const registry = {
+			find: (provider: string, modelId: string) =>
+				provider === lastUsed.provider && modelId === lastUsed.id ? lastUsed : undefined,
+			hasConfiguredAuth: () => false,
+			getAvailable: async () => mockModels,
+		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
+
+		const result = await findInitialModel({
+			scopedModels: [{ model: scopedFirst }],
+			isContinuing: false,
+			defaultProvider: lastUsed.provider,
+			defaultModelId: lastUsed.id,
+			modelRegistry: registry,
+		});
+
+		expect(result.model?.id).toBe(scopedFirst.id);
 	});
 });
 

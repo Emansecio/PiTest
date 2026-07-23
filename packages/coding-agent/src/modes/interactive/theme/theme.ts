@@ -1413,7 +1413,8 @@ export function getMarkdownTheme(): MarkdownTheme {
 	return {
 		heading: (text: string) => theme.fg("mdHeading", text),
 		heading1: (text: string) => theme.bold(theme.underline(h1Gradient(text))),
-		heading2: (text: string) => theme.fg("accent", "▎ ") + theme.fg("mdHeading", theme.bold(text)),
+		heading2: (text: string) => theme.fg("accent", "▎ ") + theme.bold(theme.fg("accent", text)),
+		heading3: (text: string) => theme.bold(theme.fg("customMessageLabel", text)),
 		link: (text: string) => theme.fg("mdLink", text),
 		linkUrl: (text: string) => theme.fg("mdLinkUrl", text),
 		code: (text: string) => theme.fg("mdCode", text),

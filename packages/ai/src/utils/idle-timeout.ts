@@ -160,6 +160,100 @@ export async function raceReadWithIdle<T>(
 }
 
 /**
+ * Thrown when a whole model round exceeds its wall-clock budget. Distinct from
+ * {@link IdleStreamTimeoutError}: the idle watchdog rearms on every chunk, so a
+ * stream kept alive by pings/keepalives (or sparse deltas) can pend for many
+ * minutes without ever tripping it — this error is the non-rearming upper bound.
+ * The message intentionally contains "timed out" so it satisfies the retryable
+ * matcher in AgentSession and takes the normal retry/fallback path.
+ */
+export class RoundWallClockTimeoutError extends Error {
+	readonly wallClockMs: number;
+
+	constructor(wallClockMs: number) {
+		super(
+			`Model round wall-clock timeout: stream did not complete within ${wallClockMs}ms (round timed out; the stream was cancelled)`,
+		);
+		this.name = "RoundWallClockTimeoutError";
+		this.wallClockMs = wallClockMs;
+	}
+}
+
+export interface IterateWithWallClockOptions {
+	/** Wall-clock budget for the whole iteration, in milliseconds. */
+	wallClockMs: number;
+	/** Invoked once when the deadline fires, before the error is thrown (e.g. abort the stream). */
+	onTimeout?: (wallClockMs: number) => void;
+}
+
+/**
+ * Wall-clock watchdog for a `for await` over an async iterable. Unlike
+ * {@link iterateWithIdleTimeout}, the timer is armed ONCE for the entire
+ * iteration and never rearmed: a healthy-but-endless stream (keepalives, sparse
+ * deltas) still hits the deadline. When it fires, `onTimeout` runs (callers
+ * abort the underlying request there), the iterator is torn down fire-and-forget
+ * (same rationale as iterateWithIdleTimeout's finally), and a retryable
+ * {@link RoundWallClockTimeoutError} is thrown.
+ *
+ * The timer is unref'd so it never keeps the event loop alive, and cleared on
+ * every exit path.
+ */
+export async function* iterateWithWallClock<T>(
+	iterable: AsyncIterable<T>,
+	options: IterateWithWallClockOptions,
+): AsyncGenerator<T> {
+	const { wallClockMs, onTimeout } = options;
+	const iterator = iterable[Symbol.asyncIterator]();
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const deadline = new Promise<never>((_resolve, reject) => {
+		timer = setTimeout(() => {
+			onTimeout?.(wallClockMs);
+			recordDiagnostic({
+				category: "stream.wall-clock-timeout",
+				level: "warn",
+				source: "idle-timeout.iterateWithWallClock",
+				context: { ms: wallClockMs },
+			});
+			reject(new RoundWallClockTimeoutError(wallClockMs));
+		}, wallClockMs);
+		(timer as { unref?: () => void }).unref?.();
+	});
+	// The race below may finish (stream done) before the deadline ever fires; a
+	// later rejection with no listener would be an unhandled rejection. clearTimeout
+	// in the finally prevents the late fire, and this no-op handler covers the
+	// window where the timer fires while the consumer is between next() calls.
+	deadline.catch(() => {});
+
+	try {
+		while (true) {
+			const next = iterator.next();
+			// Swallow a late rejection from a next() the deadline outraced (the
+			// aborted request may reject it after we have already thrown).
+			next.catch(() => {});
+			const result = await Promise.race([next, deadline]);
+			if (result.done) {
+				return;
+			}
+			yield result.value;
+		}
+	} finally {
+		if (timer !== undefined) {
+			clearTimeout(timer);
+		}
+		// Same protocol hazard as iterateWithIdleTimeout: return() queues behind a
+		// pending next(), so awaiting it here could block forever. Fire-and-forget.
+		try {
+			const ret = iterator.return?.();
+			if (ret && typeof (ret as Promise<unknown>).then === "function") {
+				(ret as Promise<unknown>).then(undefined, () => {});
+			}
+		} catch {
+			// iterator may already be torn down
+		}
+	}
+}
+
+/**
  * Idle watchdog for a `for await` over an async iterable (e.g. an SDK stream like
  * the OpenAI/Google clients return, which expose `[Symbol.asyncIterator]` rather
  * than a raw `reader.read()`). Same guarantee as {@link raceReadWithIdle}: each

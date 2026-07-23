@@ -1,15 +1,15 @@
-/**
+﻿/**
  * Regressions for the "late check verdict" symptom: verdicts/turnos chegando
  * depois da resposta final do modelo, e checks de turnos antigos ressurgindo.
  *
- *  1. Um check que apenas ESTOURA O TIMEOUT (não falhou) é inconclusivo: o gate
- *     não pode injetar fix turns nem mensagem terminal de "still failing".
- *  2. goal_complete não pode ficar permanentemente bloqueado por um probe que
- *     estoura timeout (check pesado ≠ check vermelho).
- *  3. Um check em background que o drain já abandonou num turno anterior não
- *     ressurge no fim de um turno posterior sem relação.
- *  4. Um check backgroundado DURANTE os fix turns do gate ainda é drenado no
- *     mesmo turno (re-drain pós-gate), em vez de sobreviver ao handoff.
+ *  1. Um check que apenas ESTOURA O TIMEOUT (nÃ£o falhou) Ã© inconclusivo: o gate
+ *     nÃ£o pode injetar fix turns nem mensagem terminal de "still failing".
+ *  2. goal_complete nÃ£o pode ficar permanentemente bloqueado por um probe que
+ *     estoura timeout (check pesado â‰  check vermelho).
+ *  3. Um check em background que o drain jÃ¡ abandonou num turno anterior nÃ£o
+ *     ressurge no fim de um turno posterior sem relaÃ§Ã£o.
+ *  4. Um check backgroundado DURANTE os fix turns do gate ainda Ã© drenado no
+ *     mesmo turno (re-drain pÃ³s-gate), em vez de sobreviver ao handoff.
  */
 
 import { join } from "node:path";
@@ -25,10 +25,10 @@ import { createGoalCompleteToolDefinition } from "../src/core/tools/goal-complet
 import { setCurrentVerificationProbe } from "../src/core/verification/verification.js";
 import { createHarness, getUserTexts, type Harness } from "./suite/harness.js";
 
-// Dorme além do timeoutMs configurado e sai VERDE — nada está quebrado. O sleep
-// só precisa ultrapassar o timeoutMs (150ms) para ser morto antes de terminar.
+// Dorme alÃ©m do timeoutMs configurado e sai VERDE â€” nada estÃ¡ quebrado. O sleep
+// sÃ³ precisa ultrapassar o timeoutMs (150ms) para ser morto antes de terminar.
 const NODE_SLOW_OK = `node -e "setTimeout(()=>process.exit(0),4000)"`;
-// Verde rápido, mas lento o bastante para registrar um job "durante o gate".
+// Verde rÃ¡pido, mas lento o bastante para registrar um job "durante o gate".
 const NODE_MEDIUM_OK = `node -e "setTimeout(()=>process.exit(0),200)"`;
 
 function bgJob(over: Partial<BashBackgroundJob>): BashBackgroundJob {
@@ -56,16 +56,16 @@ describe("late-check regressions", () => {
 		while (harnesses.length > 0) await harnesses.pop()?.cleanup();
 	});
 
-	it("gate: timeout do check é inconclusivo — sem fix turns, sem 'still failing'", async () => {
+	it("gate: timeout do check Ã© inconclusivo â€” sem fix turns, sem 'still failing'", async () => {
 		const harness = await createHarness({
-			settings: { verification: { command: NODE_SLOW_OK, maxAttempts: 1, timeoutMs: 150 } },
+			settings: { verification: { mode: "post-turn", command: NODE_SLOW_OK, maxAttempts: 1, timeoutMs: 150 } },
 		});
 		harnesses.push(harness);
 		const file = join(harness.tempDir, "out.txt");
 		harness.setResponses([
 			fauxAssistantMessage([fauxToolCall("write", { path: file, content: "hi" })], { stopReason: "toolUse" }),
 			fauxAssistantMessage("Tudo pronto."),
-			// Sobressalentes: só consumidos se o gate (indevidamente) injetar turnos.
+			// Sobressalentes: sÃ³ consumidos se o gate (indevidamente) injetar turnos.
 			fauxAssistantMessage("(fix turn indevido)"),
 			fauxAssistantMessage("(terminal indevido)"),
 		]);
@@ -75,13 +75,13 @@ describe("late-check regressions", () => {
 		const v = harness.eventsOfType("verification");
 		expect(v.some((e) => e.phase === "timeout")).toBe(true);
 		expect(v.some((e) => e.phase === "failed")).toBe(false);
-		// Nenhum prompt injetado após a resposta final.
+		// Nenhum prompt injetado apÃ³s a resposta final.
 		expect(getUserTexts(harness)).toEqual(["crie out.txt"]);
 	}, 30_000);
 
-	it("gate: check que estourou timeout não é re-executado nos turnos seguintes da sessão", async () => {
+	it("gate: check que estourou timeout nÃ£o Ã© re-executado nos turnos seguintes da sessÃ£o", async () => {
 		const harness = await createHarness({
-			settings: { verification: { command: NODE_SLOW_OK, maxAttempts: 1, timeoutMs: 150 } },
+			settings: { verification: { mode: "post-turn", command: NODE_SLOW_OK, maxAttempts: 1, timeoutMs: 150 } },
 		});
 		harnesses.push(harness);
 		const fileA = join(harness.tempDir, "a.txt");
@@ -101,12 +101,12 @@ describe("late-check regressions", () => {
 		await harness.session.prompt("crie b.txt");
 		const runsAfterSecond = harness.eventsOfType("verification").filter((e) => e.phase === "running").length;
 
-		// O segundo turno NÃO paga outra rodada fadada ao timeout.
+		// O segundo turno NÃƒO paga outra rodada fadada ao timeout.
 		expect(runsAfterSecond).toBe(runsAfterFirst);
 		expect(Date.now() - t0).toBeLessThan(650);
 	}, 30_000);
 
-	it("goal_complete: probe que estoura timeout não bloqueia a conclusão", async () => {
+	it("goal_complete: probe que estoura timeout nÃ£o bloqueia a conclusÃ£o", async () => {
 		const mgr = new GoalManager();
 		mgr.start("ship it", {});
 		setCurrentGoalManager(mgr);
@@ -126,15 +126,18 @@ describe("late-check regressions", () => {
 		expect(mgr.get()?.status).toBe("complete");
 	});
 
-	it("drain: check abandonado num turno anterior não ressurge no turno seguinte", async () => {
+	it("drain: check abandonado num turno anterior nÃ£o ressurge no turno seguinte", async () => {
 		const harness = await createHarness({
 			// Job never terminates: the owner turn waits out maxWaitMs. Short wait +
 			// fast poll proves the "no resurgence" invariant without a real long sleep.
-			settings: { pendingChecks: { enabled: true, maxWaitMs: 200, maxFixAttempts: 1, pollIntervalMs: 20 } },
+			settings: {
+				verification: { mode: "post-turn" as const },
+				pendingChecks: { enabled: true, maxWaitMs: 200, maxFixAttempts: 1, pollIntervalMs: 20 },
+			},
 		});
 		harnesses.push(harness);
 		harness.setResponses([
-			fauxAssistantMessage("Pronto — mas o check segue rodando."),
+			fauxAssistantMessage("Pronto â€” mas o check segue rodando."),
 			fauxAssistantMessage("ok, vou aguardar o teste"),
 			fauxAssistantMessage("resposta do segundo prompt"),
 		]);
@@ -147,18 +150,18 @@ describe("late-check regressions", () => {
 		const textsAfterFirst = getUserTexts(harness).length;
 		expect(eventsAfterFirst).toBeGreaterThan(0); // o turno dono do job esperou por ele
 
-		await harness.session.prompt("segundo pedido, sem relação");
+		await harness.session.prompt("segundo pedido, sem relaÃ§Ã£o");
 
-		// O job velho (ainda rodando) NÃO pode gerar novas esperas nem novos
+		// O job velho (ainda rodando) NÃƒO pode gerar novas esperas nem novos
 		// prompts injetados no segundo turno.
 		expect(harness.eventsOfType("pending_check").length).toBe(eventsAfterFirst);
 		expect(getUserTexts(harness).length).toBe(textsAfterFirst + 1);
 	}, 30_000);
 
-	it("re-drain: check backgroundado durante o gate é drenado no mesmo turno", async () => {
+	it("re-drain: check backgroundado durante o gate Ã© drenado no mesmo turno", async () => {
 		const harness = await createHarness({
 			settings: {
-				verification: { command: NODE_MEDIUM_OK, maxAttempts: 1, timeoutMs: 10_000 },
+				verification: { mode: "post-turn", command: NODE_MEDIUM_OK, maxAttempts: 1, timeoutMs: 10_000 },
 				pendingChecks: { enabled: true, maxWaitMs: 5000, maxFixAttempts: 1, pollIntervalMs: 20 },
 			},
 		});
@@ -169,10 +172,10 @@ describe("late-check regressions", () => {
 			fauxAssistantMessage("Tudo pronto."),
 		]);
 
-		// Registra o job assim que o gate começa a rodar (após o primeiro drain),
+		// Registra o job assim que o gate comeÃ§a a rodar (apÃ³s o primeiro drain),
 		// simulando um check backgroundado num fix turn; ele termina verde quando
-		// o drain pós-gate começa a esperar por ele. Tudo dirigido por eventos —
-		// sem corridas de relógio.
+		// o drain pÃ³s-gate comeÃ§a a esperar por ele. Tudo dirigido por eventos â€”
+		// sem corridas de relÃ³gio.
 		const job = bgJob({ id: "bg-mid-gate", command: "npm run check", exited: false });
 		let registered = false;
 		harness.session.subscribe((e: { type: string; phase?: string }) => {
@@ -191,7 +194,7 @@ describe("late-check regressions", () => {
 		await harness.session.prompt("crie out.txt");
 
 		expect(registered).toBe(true);
-		// O drain pós-gate viu o job e confirmou o resultado dentro do turno.
+		// O drain pÃ³s-gate viu o job e confirmou o resultado dentro do turno.
 		const pc = harness.eventsOfType("pending_check");
 		expect(pc.some((e) => e.phase === "passed")).toBe(true);
 	}, 30_000);

@@ -6,8 +6,8 @@
  * `-p` contract); it returns undefined for everything that must NOT be surfaced.
  */
 
-import { describe, expect, it } from "vitest";
-import { provenanceStderrLine } from "../src/modes/print-mode.ts";
+import { afterEach, describe, expect, it } from "vitest";
+import { DEFAULT_JSON_HEARTBEAT_MS, provenanceStderrLine, resolveJsonHeartbeatMs } from "../src/modes/print-mode.ts";
 
 describe("T2 #6: provenance events surfaced on stderr in text mode", () => {
 	it("formats a fallback_warning (silent model downgrade)", () => {
@@ -35,5 +35,31 @@ describe("T2 #6: provenance events surfaced on stderr in text mode", () => {
 		expect(provenanceStderrLine({ type: "message_update" })).toBeUndefined();
 		expect(provenanceStderrLine({ type: "auto_retry_start", attempt: 1 })).toBeUndefined();
 		expect(provenanceStderrLine({})).toBeUndefined();
+	});
+});
+
+describe("resolveJsonHeartbeatMs (--mode json generation_progress cadence)", () => {
+	afterEach(() => {
+		delete process.env.PIT_NO_JSON_HEARTBEAT;
+		delete process.env.PIT_JSON_HEARTBEAT_MS;
+	});
+
+	it("defaults to DEFAULT_JSON_HEARTBEAT_MS", () => {
+		expect(resolveJsonHeartbeatMs()).toBe(DEFAULT_JSON_HEARTBEAT_MS);
+	});
+
+	it("PIT_NO_JSON_HEARTBEAT=1 disables (returns 0), overriding a cadence override", () => {
+		process.env.PIT_NO_JSON_HEARTBEAT = "1";
+		process.env.PIT_JSON_HEARTBEAT_MS = "5000";
+		expect(resolveJsonHeartbeatMs()).toBe(0);
+	});
+
+	it("PIT_JSON_HEARTBEAT_MS overrides the cadence; garbage falls back to the default", () => {
+		process.env.PIT_JSON_HEARTBEAT_MS = "5000";
+		expect(resolveJsonHeartbeatMs()).toBe(5000);
+		process.env.PIT_JSON_HEARTBEAT_MS = "banana";
+		expect(resolveJsonHeartbeatMs()).toBe(DEFAULT_JSON_HEARTBEAT_MS);
+		process.env.PIT_JSON_HEARTBEAT_MS = "-1";
+		expect(resolveJsonHeartbeatMs()).toBe(DEFAULT_JSON_HEARTBEAT_MS);
 	});
 });

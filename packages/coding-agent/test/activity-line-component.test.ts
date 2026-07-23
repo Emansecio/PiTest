@@ -348,4 +348,45 @@ describe("ActivityLineComponent — agent labels", () => {
 		expect(stripAnsi(c.render(120)[0])).not.toMatch(/· \d+s/);
 		now.mockRestore();
 	});
+
+	it("uses a quiet muted verb when settled and collapsed, accent when pending", () => {
+		const settled = new ActivityLineComponent(fakeTui());
+		settled.setExec(execStub({}));
+		const settledRaw = settled.render(120)[0]!;
+		const settledVerbAnsi = settledRaw.slice(0, settledRaw.indexOf("Edited") + "Edited".length);
+
+		const pending = new ActivityLineComponent(fakeTui());
+		pending.setExec(execStub({ getActivityState: () => "pending" }));
+		const pendingRaw = pending.render(120)[0]!;
+		const pendingVerbAnsi = pendingRaw.slice(0, pendingRaw.indexOf("Editing") + "Editing".length);
+
+		// Both verbs are styled (SGR present); pending ≠ settled palette.
+		expect(/\x1b\[[0-9;]+m/.test(settledVerbAnsi)).toBe(true);
+		expect(/\x1b\[[0-9;]+m/.test(pendingVerbAnsi)).toBe(true);
+		expect(settledVerbAnsi).not.toBe(pendingVerbAnsi);
+	});
+
+	it("colors bash command targets differently from edit paths", () => {
+		const edit = new ActivityLineComponent(fakeTui());
+		edit.setExec(execStub({}));
+		const editRaw = edit.render(120)[0]!;
+		const pathIdx = editRaw.indexOf("foo.ts");
+		const pathAnsi = editRaw.slice(Math.max(0, pathIdx - 24), pathIdx);
+
+		const bash = new ActivityLineComponent(fakeTui());
+		bash.setExec(
+			execStub({
+				getToolName: () => "bash",
+				getArgs: () => ({ command: "npm test" }),
+				getResultDetails: () => undefined,
+			}),
+		);
+		const bashRaw = bash.render(120)[0]!;
+		const cmdIdx = bashRaw.indexOf("npm test");
+		const cmdAnsi = bashRaw.slice(Math.max(0, cmdIdx - 24), cmdIdx);
+
+		expect(/\x1b\[[0-9;]+m/.test(pathAnsi)).toBe(true);
+		expect(/\x1b\[[0-9;]+m/.test(cmdAnsi)).toBe(true);
+		expect(pathAnsi).not.toBe(cmdAnsi);
+	});
 });

@@ -146,6 +146,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
 
 	/**
+	 * Non-rearming wall-clock cap (ms) on a single model round (one stream
+	 * attempt). Complements the per-chunk idle timeout: a stream kept alive by
+	 * keepalives or sparse deltas never trips the idle guard but still hits this
+	 * ceiling, failing the round with a retryable error. `undefined` uses the
+	 * loop default (600s, PIT_ROUND_WALL_CLOCK_MS); `0` disables.
+	 */
+	roundWallClockMs?: number;
+
+	/**
 	 * Optional registry of per-tool abort controllers, keyed by tool-call id. The
 	 * loop registers a controller for each executing tool — combined with the run
 	 * signal via `AbortSignal.any`, so a run abort still cancels every tool — and

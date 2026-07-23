@@ -21,12 +21,13 @@ Applied before/while talking to the model, not per tool call.
 | transformContext | before send | last hook to mutate the message list before the model sees it | `agent-loop.ts:497` |
 | compaction / pre-send overflow guard | before send | keeps context under the window; summarizes + prunes. The presend phase fires at `assembled > window * 0.95` (`PRESEND_OVERFLOW_RATIO`) and **re-estimates after awaiting any in-flight background compaction** so it never double-compacts; opt out `PIT_NO_PRESEND_OVERFLOW_GUARD=1` | `core/compaction/`, `agent-session-compaction.ts:44,483` |
 | thinking cap | before send (compaction serialize) | trims stale assistant thinking blocks beyond the protected recent turns to head+tail (~1.5k chars) so old reasoning stops paying rent; opt out `PIT_NO_THINKING_CAP=1` | `capThinkingForContext` in `core/compaction/utils.ts`, applied `core/compaction/compaction.ts:1351` |
-| overthink guard | during stream | live thinking-delta tracker: one contiguous reasoning block past the per-model-tier token threshold (weak ~1000 / frontier ~2500) without a tool call aborts the stream and injects a reminder; max 2 retries/turn; `watchTextDelta` counts plain-text reasoning for open models; opt out `PIT_NO_OVERTHINK_GUARD=1` | `packages/agent/src/overthink-guard.ts`, `core/overthink-policy.ts` |
+| overthink guard | during stream | **permanently disabled for all models** — no longer interrupts streams on long reasoning or self-reversal rumination. Tracker + display helpers remain for historical transcripts; product path always returns `enabled: false` | `packages/agent/src/overthink-guard.ts`, `core/overthink-policy.ts` |
 | system-prompt build | before send | lean + conditional; volatile data kept in the suffix after `SYSTEM_PROMPT_DYNAMIC_MARKER`, out of the cached prefix. A custom prompt that omits the marker (or puts it at offset 0) triggers a warn-once `quality.cache-marker` diagnostic (`_checkDynamicMarkerPresence`) | `core/system-prompt.ts`, `packages/ai/src/types.ts` |
 | plan-mode prompt | before send (`before_agent_start`) | while permission mode is `plan`, the permissions extension appends a `<plan_mode>` section telling the model it is read-only and must research → build a DAG → call `exit_plan`; never invalidates the cached prefix | `core/built-ins/permissions-extension.ts`, `core/permissions/plan-mode-prompt.ts` |
 | prompt cache breakpoints | on send | 4 Anthropic breakpoints + stable OpenAI `prompt_cache_key` | `packages/ai/src/providers/anthropic.ts` |
 | connect-guard | during connect | connect-phase timeout + instant abort (anti-wedge) | `packages/ai/src/utils/connect-guard.ts` |
-| idle-timeout | during stream | stalled-body watchdog, retryable | `packages/ai/src/utils/idle-timeout.ts` |
+| idle-timeout | during stream | stalled-body watchdog (rearmed per chunk), retryable | `packages/ai/src/utils/idle-timeout.ts` |
+| round wall-clock watchdog | during stream | non-rearming ceiling on a whole model round — catches keepalive-alive/sparse-delta streams the idle guard can't; fails the round with a retryable error into the normal retry/fallback path. Default 600s; `PIT_ROUND_WALL_CLOCK_MS`, kill-switch `PIT_NO_ROUND_WATCHDOG=1` | `iterateWithWallClock` in `packages/ai/src/utils/idle-timeout.ts`, wired in `agent-loop.ts` `streamAssistantResponse` |
 | TTSR matcher | during stream | interrupts the stream when output matches a stop rule (`ttsrMatcher`) | `agent-loop.ts` |
 
 ## Band B — Before a tool runs (PREVENTIVE — these can block the wrong call)
@@ -50,8 +51,9 @@ Fixed order inside `prepareSingleToolCall` (`agent-loop.ts:1066+`). Each step ca
 2. **afterToolCall / `tool_result` hooks** (`:1262`) — can rewrite the result:
    - **patch-audit** — audits edit/write diffs.
    - **read-guard** — records file mtime post-read (feeds edit-precondition).
-3. **Verification gate** (turn end, `core/verification/verification.ts` + `_runVerificationGate` in `agent-session.ts`) — the heaviest corrective layer: a successful write/edit/edit_v2/ast_edit **arms** the gate (`armVerificationGate`, `agent-session-tool-end.ts`); after the turn ends, the session runs the project's check command (auto-detected: check → typecheck → lint → test scripts, falling back to local `tsc --noEmit`, then syntax-only checks on touched files). A failure is re-injected as a fix prompt for up to `verification.maxAttempts` rounds (recovery-adjusted, `agent-session.ts:3289`); when exhausted, a terminal message forbids reporting the task as done. Failures also feed `upsertLearnedErrorOnFailure`.
-4. **Pending-checks drain** (`core/verification/pending-checks.ts`, `_awaitPendingChecksBeforeHandoff` in `agent-session.ts`) — background verification-class bash jobs are tracked and drained before handoff, independent of `verification.enabled`: a still-running check blocks "done", a failed one is re-injected for fixes.
+3. **Verification** — governed by `verification.mode` (default **`in-turn`**, Claude Code-like): the model is instructed via a system-prompt guideline (built in `_rebuildSystemPrompt`, with the configured or auto-detected check command) to run the check and fix failures BEFORE its final reply — **nothing runs after the turn** in this mode (no post-reply check, no injected fix turns, no self-review, no pending-checks drain). The layers below only exist in `mode: "post-turn"` (legacy opt-in; explicit `enabled: true` also maps there):
+   - **Verification gate** (turn end, `core/verification/verification.ts` + `_runVerificationGate` in `agent-session.ts`): a successful write/edit/edit_v2/ast_edit **arms** the gate (`armVerificationGate`, `agent-session-tool-end.ts`); after the turn ends, the session runs the project's check command (auto-detected: check → typecheck → lint → test scripts, falling back to local `tsc --noEmit`, then syntax-only checks on touched files). A failure is re-injected as a fix prompt for up to `verification.maxAttempts` rounds (recovery-adjusted); when exhausted, a terminal message forbids reporting the task as done. Failures also feed `upsertLearnedErrorOnFailure`.
+4. **Pending-checks drain** (`core/verification/pending-checks.ts`, `_awaitPendingChecksBeforeHandoff` in `agent-session.ts`) — post-turn mode only: background verification-class bash jobs are tracked and drained before handoff; a still-running check blocks "done", a failed one is re-injected for fixes.
 
 ## Band D — Session / turn lifecycle
 - **before_agent_start**: task-rigor, clarify-nudge, mcp connect.
@@ -110,10 +112,12 @@ behavior), Band P shapes what the model sees and intends BEFORE it generates:
   block with the head of the best same-directory/same-suffix neighbor of the file
   being edited; `assistido`/`padrao` only, counted inside the P1 cap.
 - **P4 — structured self-review** (`core/self-review.ts` + `core/turn-risk.ts`):
-  per-cycle changed-line aggregate closes the many-small-edits gap; HIGH risk (any
-  level) or MEDIUM (at `assistido`) runs a read-only review subagent (schema-bound,
-  fusion-verify pattern) after the check phase, sharing the verification fix budget;
-  unresolved high findings re-inject fix prompts and block `goal_complete` (R9).
+  `verification.mode: "post-turn"` only (skipped entirely in the default in-turn
+  mode). Per-cycle changed-line aggregate closes the many-small-edits gap; HIGH risk
+  (any level) or MEDIUM (at `assistido`) runs a read-only review subagent
+  (schema-bound, fusion-verify pattern) after the check phase, sharing the
+  verification fix budget; unresolved high findings re-inject fix prompts and block
+  `goal_complete` (R9). Kill-switch `PIT_NO_SELF_REVIEW=1`.
 - **P5 — conventions contract** (`core/session-contract.ts`): failed checks parsed
   (biome rule ids, recurring TS codes, TS1294 special-case) into ≤5 standing session
   constraints rendered as `<session_contract>` in the dynamic suffix; a constraint

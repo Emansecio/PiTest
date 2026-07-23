@@ -3,6 +3,8 @@ import {
 	DEFAULT_IDLE_TIMEOUT_MS,
 	IdleStreamTimeoutError,
 	iterateWithIdleTimeout,
+	iterateWithWallClock,
+	RoundWallClockTimeoutError,
 	raceReadWithIdle,
 } from "../src/utils/idle-timeout.js";
 
@@ -256,5 +258,90 @@ describe("iterateWithIdleTimeout", () => {
 			received.push(v);
 		}
 		expect(received).toEqual([1, 2, 3]);
+	});
+});
+
+describe("iterateWithWallClock", () => {
+	it("(8) fires even when chunks keep arriving — the keepalive-forever case idle can't catch", async () => {
+		// Yields every 10ms forever: rearming idle would never trip, the wall
+		// clock must.
+		async function* keepalive(): AsyncGenerator<number> {
+			let n = 0;
+			while (true) {
+				await new Promise((r) => setTimeout(r, 10));
+				yield n++;
+			}
+		}
+		let timedOutMs: number | undefined;
+		const received: number[] = [];
+		const start = Date.now();
+
+		await expect(
+			(async () => {
+				for await (const v of iterateWithWallClock(keepalive(), {
+					wallClockMs: 80,
+					onTimeout: (ms) => {
+						timedOutMs = ms;
+					},
+				})) {
+					received.push(v);
+				}
+			})(),
+		).rejects.toBeInstanceOf(RoundWallClockTimeoutError);
+
+		expect(Date.now() - start).toBeLessThan(2000);
+		// Chunks flowed until the deadline (the guard is a ceiling, not a gate).
+		expect(received.length).toBeGreaterThan(0);
+		expect(timedOutMs).toBe(80);
+	});
+
+	it("(8b) wall-clock error message matches the AgentSession RETRYABLE_ERROR_RE", () => {
+		const RETRYABLE_ERROR_RE =
+			/overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|stream ended before message_stop|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i;
+		expect(RETRYABLE_ERROR_RE.test(new RoundWallClockTimeoutError(600_000).message)).toBe(true);
+	});
+
+	it("(9) rejects promptly on a frozen stream even with return() wedged behind next()", async () => {
+		async function* frozen(): AsyncGenerator<number> {
+			await new Promise<void>(() => {});
+			yield 1;
+		}
+		const start = Date.now();
+		await expect(
+			(async () => {
+				for await (const _ of iterateWithWallClock(frozen(), { wallClockMs: 40 })) {
+					// no chunk ever arrives
+				}
+			})(),
+		).rejects.toBeInstanceOf(RoundWallClockTimeoutError);
+		expect(Date.now() - start).toBeLessThan(2000);
+	});
+
+	it("(10) a stream that completes within budget passes through untouched and clears its timer", async () => {
+		async function* gen(): AsyncGenerator<number> {
+			for (const v of [1, 2, 3]) {
+				await new Promise((r) => setTimeout(r, 5));
+				yield v;
+			}
+		}
+		const wallClockMs = 5000;
+		const setSpy = vi.spyOn(globalThis, "setTimeout");
+		const clearSpy = vi.spyOn(globalThis, "clearTimeout");
+
+		const received: number[] = [];
+		for await (const v of iterateWithWallClock(gen(), { wallClockMs })) {
+			received.push(v);
+		}
+		expect(received).toEqual([1, 2, 3]);
+
+		// Exactly one wall-clock timer armed for the whole iteration (non-rearming),
+		// and it was cleared (no dangling handle).
+		const armed = setSpy.mock.calls.filter((call) => call[1] === wallClockMs);
+		expect(armed.length).toBe(1);
+		const handles = new Set(
+			setSpy.mock.results.filter((_r, i) => setSpy.mock.calls[i]?.[1] === wallClockMs).map((r) => r.value),
+		);
+		const cleared = clearSpy.mock.calls.filter((call) => handles.has(call[0]));
+		expect(cleared.length).toBe(1);
 	});
 });

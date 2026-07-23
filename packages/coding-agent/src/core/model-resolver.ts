@@ -662,10 +662,13 @@ export interface InitialModelResult {
 /**
  * Find the initial model to use based on priority:
  * 1. CLI args (provider + model)
- * 2. First model from scoped models (if not continuing/resuming)
- * 3. Restored from session (if continuing/resuming)
- * 4. Saved default from settings
- * 5. First available model with valid API key
+ * 2. Saved default from settings (last used — wins over the cycling ring)
+ * 3. First model from scoped models (if not continuing/resuming)
+ * 4. First available model with valid API key
+ *
+ * Session restore is handled by createAgentSession before this runs.
+ * `enabledModels` / `--models` are a Ctrl+P cycling ring, not a boot allowlist:
+ * a last-used model outside the ring still boots when it has configured auth.
  */
 export async function findInitialModel(options: {
 	cliProvider?: string;
@@ -707,25 +710,34 @@ export async function findInitialModel(options: {
 		}
 	}
 
-	// 2. Use first model from scoped models (skip if continuing/resuming)
-	if (scopedModels.length > 0 && !isContinuing) {
-		return {
-			model: scopedModels[0].model,
-			thinkingLevel: scopedModels[0].thinkingLevel ?? defaultThinkingLevel ?? DEFAULT_THINKING_LEVEL,
-			fallbackMessage: undefined,
-		};
-	}
-
-	// 3. Try saved default from settings
+	// 2. Last-used model from settings (even when outside the scoped/enabled ring)
 	if (defaultProvider && defaultModelId) {
 		const found = modelRegistry.find(defaultProvider, defaultModelId);
-		if (found) {
+		if (found && modelRegistry.hasConfiguredAuth(found)) {
 			model = found;
 			if (defaultThinkingLevel) {
 				thinkingLevel = defaultThinkingLevel;
+			} else {
+				const scopedMatch = scopedModels.find((sm) => modelsAreEqual(sm.model, found));
+				if (scopedMatch?.thinkingLevel) {
+					thinkingLevel = scopedMatch.thinkingLevel;
+				}
 			}
 			return { model, thinkingLevel, fallbackMessage: undefined };
 		}
+		// Found in registry but no auth — fall through so we can pick a usable model.
+		if (found && defaultThinkingLevel) {
+			thinkingLevel = defaultThinkingLevel;
+		}
+	}
+
+	// 3. First model from scoped models (skip if continuing/resuming)
+	if (scopedModels.length > 0 && !isContinuing) {
+		return {
+			model: scopedModels[0].model,
+			thinkingLevel: scopedModels[0].thinkingLevel ?? thinkingLevel,
+			fallbackMessage: undefined,
+		};
 	}
 
 	// 4. Try first available model with valid API key

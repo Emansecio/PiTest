@@ -31,6 +31,28 @@ export function provenanceStderrLine(event: { type?: string; [k: string]: unknow
 }
 
 /**
+ * Heartbeat cadence for `--mode json`. `message_update` deltas are dropped from
+ * the JSONL stream (O(tokens²) to serialize), so a long model round is otherwise
+ * completely silent — an external orchestrator cannot tell active generation
+ * from a stalled stream or a retry backoff. While a turn is active we emit a
+ * throttled `generation_progress` event instead: `elapsedMs` growing with
+ * `outputChars` frozen reads as a stall; both growing reads as healthy
+ * generation. Kill-switch PIT_NO_JSON_HEARTBEAT=1; cadence override
+ * PIT_JSON_HEARTBEAT_MS. Exported for testing.
+ */
+export const DEFAULT_JSON_HEARTBEAT_MS = 15_000;
+
+export function resolveJsonHeartbeatMs(): number {
+	const disable = process.env.PIT_NO_JSON_HEARTBEAT;
+	if (disable && ["1", "true", "yes"].includes(disable.toLowerCase())) return 0;
+	const raw = process.env.PIT_JSON_HEARTBEAT_MS;
+	if (raw === undefined || raw === "") return DEFAULT_JSON_HEARTBEAT_MS;
+	const parsed = Number(raw);
+	if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_JSON_HEARTBEAT_MS;
+	return parsed;
+}
+
+/**
  * Options for print mode.
  */
 export interface PrintModeOptions {
@@ -42,6 +64,14 @@ export interface PrintModeOptions {
 	initialMessage?: string;
 	/** Images to attach to the initial message */
 	initialImages?: ImageContent[];
+	/**
+	 * Wall-clock budget for the whole headless run, in milliseconds (`--max-wall`,
+	 * given in seconds on the CLI). When it expires the current turn is aborted so
+	 * the run closes with coherent partial state (session saved, diagnostics
+	 * flushed) instead of being killed mid-flight by an external orchestrator.
+	 * Emits a `max_wall_reached` event (json) or stderr line (text) and exits 124.
+	 */
+	maxWallMs?: number;
 }
 
 /**
@@ -60,6 +90,52 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 	let unsubscribe: (() => void) | undefined;
 	let disposed = false;
 	const signalCleanupHandlers: Array<() => void> = [];
+
+	// Turn heartbeat state (json mode only) — see resolveJsonHeartbeatMs.
+	const heartbeatMs = mode === "json" ? resolveJsonHeartbeatMs() : 0;
+	let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+	let turnStartedAt = 0;
+	let turnOutputChars = 0;
+	const stopHeartbeat = (): void => {
+		if (heartbeatTimer !== undefined) {
+			clearInterval(heartbeatTimer);
+			heartbeatTimer = undefined;
+		}
+	};
+	const startHeartbeat = (): void => {
+		turnStartedAt = Date.now();
+		turnOutputChars = 0;
+		if (heartbeatMs <= 0 || heartbeatTimer !== undefined) return;
+		heartbeatTimer = setInterval(() => {
+			writeRawStdout(
+				`${JSON.stringify({
+					type: "generation_progress",
+					elapsedMs: Date.now() - turnStartedAt,
+					outputChars: turnOutputChars,
+				})}\n`,
+			);
+		}, heartbeatMs);
+		(heartbeatTimer as unknown as { unref?: () => void }).unref?.();
+	};
+
+	// Wall-clock budget (--max-wall): abort the in-flight turn when it expires so
+	// the run closes itself instead of dying to an external SIGKILL mid-implementation.
+	let maxWallTimer: ReturnType<typeof setTimeout> | undefined;
+	let maxWallHit = false;
+	if (options.maxWallMs && options.maxWallMs > 0) {
+		maxWallTimer = setTimeout(() => {
+			maxWallHit = true;
+			if (mode === "json") {
+				writeRawStdout(`${JSON.stringify({ type: "max_wall_reached", budgetMs: options.maxWallMs })}\n`);
+			} else {
+				process.stderr.write(
+					`[max-wall] time budget (${options.maxWallMs}ms) reached — closing with partial state\n`,
+				);
+			}
+			void session.abort();
+		}, options.maxWallMs);
+		(maxWallTimer as unknown as { unref?: () => void }).unref?.();
+	}
 
 	const disposeRuntime = async (): Promise<void> => {
 		if (disposed) return;
@@ -129,7 +205,15 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 			if (mode === "json") {
 				// Skip streaming deltas — consumers only need completed messages and
 				// lifecycle events; serializing every partial update is O(tokens²).
-				if (event.type === "message_update") return;
+				// Their delta lengths still feed the heartbeat counter so
+				// generation_progress can distinguish generation from a stall.
+				if (event.type === "message_update") {
+					const delta = (event as { assistantMessageEvent?: { delta?: unknown } }).assistantMessageEvent?.delta;
+					if (typeof delta === "string") turnOutputChars += delta.length;
+					return;
+				}
+				if (event.type === "turn_start") startHeartbeat();
+				else if (event.type === "turn_end" || event.type === "agent_end") stopHeartbeat();
 				writeRawStdout(`${JSON.stringify(event)}\n`);
 				return;
 			}
@@ -150,11 +234,13 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 		await rebindSession();
 
-		if (initialMessage) {
+		if (initialMessage && !maxWallHit) {
 			await session.prompt(initialMessage, { images: initialImages });
 		}
 
 		for (const message of messages) {
+			// Budget already spent: don't start further prompts; close with what we have.
+			if (maxWallHit) break;
 			await session.prompt(message);
 		}
 
@@ -191,11 +277,16 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 			}
 		}
 
+		// Timeout convention (same as GNU timeout): lets an orchestrator tell
+		// "closed with partial state at the budget" apart from success/failure.
+		if (maxWallHit) exitCode = 124;
 		return exitCode;
 	} catch (error: unknown) {
 		console.error(error instanceof Error ? error.message : String(error));
-		return 1;
+		return maxWallHit ? 124 : 1;
 	} finally {
+		stopHeartbeat();
+		if (maxWallTimer !== undefined) clearTimeout(maxWallTimer);
 		for (const cleanup of signalCleanupHandlers) {
 			cleanup();
 		}

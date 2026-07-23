@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Integration test for the native verification gate: after a turn that modifies
  * a file, the session runs the project check and (on failure) re-injects the
  * output so the agent self-corrects, bounded by maxAttempts.
@@ -24,7 +24,9 @@ describe("verification gate", () => {
 	});
 
 	it("runs the check after a file-modifying turn and stays silent when it passes", async () => {
-		const harness = await createHarness({ settings: { verification: { command: NODE_OK, maxAttempts: 2 } } });
+		const harness = await createHarness({
+			settings: { verification: { mode: "post-turn", command: NODE_OK, maxAttempts: 2 } },
+		});
 		harnesses.push(harness);
 		const file = join(harness.tempDir, "out.txt");
 		harness.setResponses([
@@ -41,7 +43,9 @@ describe("verification gate", () => {
 	});
 
 	it("re-injects the failure, then communicates terminally after exhausting maxAttempts", async () => {
-		const harness = await createHarness({ settings: { verification: { command: NODE_FAIL, maxAttempts: 1 } } });
+		const harness = await createHarness({
+			settings: { verification: { mode: "post-turn", command: NODE_FAIL, maxAttempts: 1 } },
+		});
 		harnesses.push(harness);
 		const file = join(harness.tempDir, "out.txt");
 		harness.setResponses([
@@ -71,7 +75,7 @@ describe("verification gate", () => {
 
 	it("does NOT inject a terminal message when a fix lands within maxAttempts", async () => {
 		const harness = await createHarness({
-			settings: { verification: { command: NODE_FAIL_UNTIL_SENTINEL, maxAttempts: 2 } },
+			settings: { verification: { mode: "post-turn", command: NODE_FAIL_UNTIL_SENTINEL, maxAttempts: 2 } },
 		});
 		harnesses.push(harness);
 		const file = join(harness.tempDir, "out.txt");
@@ -96,14 +100,16 @@ describe("verification gate", () => {
 	});
 
 	it("appends an explicit contradiction when the last message claimed completion", async () => {
-		const harness = await createHarness({ settings: { verification: { command: NODE_FAIL, maxAttempts: 1 } } });
+		const harness = await createHarness({
+			settings: { verification: { mode: "post-turn", command: NODE_FAIL, maxAttempts: 1 } },
+		});
 		harnesses.push(harness);
 		const file = join(harness.tempDir, "out.txt");
 		harness.setResponses([
 			fauxAssistantMessage([fauxToolCall("write", { path: file, content: "hi" })], { stopReason: "toolUse" }),
 			fauxAssistantMessage("wrote it"),
 			// Fix turn ends with a completion claim while the check is still red.
-			fauxAssistantMessage("All done — the task is complete."),
+			fauxAssistantMessage("All done â€” the task is complete."),
 			fauxAssistantMessage("ok, honest summary"),
 		]);
 
@@ -117,7 +123,9 @@ describe("verification gate", () => {
 	});
 
 	it("is inert when the turn modified no files", async () => {
-		const harness = await createHarness({ settings: { verification: { command: NODE_FAIL, maxAttempts: 2 } } });
+		const harness = await createHarness({
+			settings: { verification: { mode: "post-turn", command: NODE_FAIL, maxAttempts: 2 } },
+		});
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("just talking, no edits")]);
 
@@ -127,11 +135,13 @@ describe("verification gate", () => {
 	});
 
 	it("runs the check after a turn that mutates only through an effectful bash command", async () => {
-		const harness = await createHarness({ settings: { verification: { command: NODE_OK, maxAttempts: 1 } } });
+		const harness = await createHarness({
+			settings: { verification: { mode: "post-turn", command: NODE_OK, maxAttempts: 1 } },
+		});
 		harnesses.push(harness);
 		harness.setResponses([
 			// `node ...` is not a known read-only command, so classifyBashCommand
-			// taints it to "action" — a mutation the path-based extractor never saw.
+			// taints it to "action" â€” a mutation the path-based extractor never saw.
 			fauxAssistantMessage([fauxToolCall("bash", { command: NODE_OK })], { stopReason: "toolUse" }),
 			fauxAssistantMessage("ran the script"),
 		]);
@@ -142,10 +152,12 @@ describe("verification gate", () => {
 	});
 
 	it("stays inert after a read-only bash command (no mutation to verify)", async () => {
-		const harness = await createHarness({ settings: { verification: { command: NODE_FAIL, maxAttempts: 1 } } });
+		const harness = await createHarness({
+			settings: { verification: { mode: "post-turn", command: NODE_FAIL, maxAttempts: 1 } },
+		});
 		harnesses.push(harness);
 		harness.setResponses([
-			// `echo` is read-only → classified as navigation → the gate must not arm.
+			// `echo` is read-only â†’ classified as navigation â†’ the gate must not arm.
 			fauxAssistantMessage([fauxToolCall("bash", { command: "echo hello" })], { stopReason: "toolUse" }),
 			fauxAssistantMessage("just looked around"),
 		]);

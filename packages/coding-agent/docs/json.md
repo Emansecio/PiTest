@@ -60,8 +60,15 @@ Events match `AgentSessionEvent` in [`src/core/agent-session-events.ts`](../src/
 | `verification` | yes | Check command lifecycle |
 | `pending_check` | yes | Background job drain |
 | `visual_review` | yes | Visual DoD nudge |
+| **Headless liveness** | | |
+| `generation_progress` | yes | Heartbeat while a turn is active (print-JSON only): `{elapsedMs, outputChars}` every 15s (`PIT_JSON_HEARTBEAT_MS`; kill-switch `PIT_NO_JSON_HEARTBEAT=1`). `outputChars` frozen while `elapsedMs` grows = stalled stream or retry backoff; both growing = healthy generation |
+| `max_wall_reached` | yes | The `--max-wall <seconds>` budget expired: the in-flight turn is aborted and the run closes with partial state (exit code 124) |
 
 For field-level examples of fusion, subagent, and goal-pipeline events, see [RPC mode — Events](rpc.md#events).
+
+## Time budget (`--max-wall`)
+
+For orchestrated runs with an external hard timeout (benchmarks, CI), pass an *internal* budget slightly below it, e.g. `--max-wall 850` when the orchestrator kills at 900s. On expiry pit aborts the in-flight turn, emits `max_wall_reached`, saves the session, flushes diagnostics, and exits `124` — coherent partial state instead of a SIGKILL mid-implementation. Applies to `-p` and `--mode json`.
 
 ## Message Types
 

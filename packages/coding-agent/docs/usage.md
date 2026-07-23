@@ -156,6 +156,7 @@ See [Pit Packages](packages.md) for package sources and security notes.
 | `-p`, `--print` | Print response and exit |
 | `--mode json` | Output all events as JSON lines; see [JSON mode](json.md) |
 | `--mode rpc` | RPC mode over stdin/stdout; see [RPC mode](rpc.md) |
+| `--max-wall <seconds>` | Headless time budget: abort the in-flight turn at the limit and close with coherent partial state (exit 124); see [JSON mode](json.md#time-budget---max-wall) |
 | `--export <in> [out]` | Export a session to HTML |
 
 In print mode, pit also reads piped stdin and merges it into the initial prompt:

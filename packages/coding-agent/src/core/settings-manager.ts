@@ -90,8 +90,21 @@ export interface RetrySettings {
 	cooldownMs?: number; // default: 300000 — cooldown before retrying a failed model in a fallback chain (agent-session.ts)
 }
 
+export type VerificationMode = "in-turn" | "post-turn" | "off";
+
 export interface VerificationSettings {
-	enabled?: boolean; // default: true — after a code-modifying turn, run the project check and self-correct on failure
+	/**
+	 * Where verification happens. `"in-turn"` (default): the model is instructed
+	 * via system prompt to run the project check BEFORE its final reply — nothing
+	 * runs after the turn (Claude Code-like; no post-reply commands, no injected
+	 * fix turns, no self-review pass, no pending-checks drain). `"post-turn"`:
+	 * legacy harness gate — after a code-modifying turn the harness runs the
+	 * check, injects fix turns on failure, and runs the P4 self-review.
+	 * `"off"`: neither. Back-compat: explicit `enabled: false` resolves to
+	 * `"off"`, explicit `enabled: true` resolves to `"post-turn"`.
+	 */
+	mode?: VerificationMode;
+	enabled?: boolean; // legacy switch — see `mode` (explicit true → post-turn, false → off)
 	command?: string | null; // default: null → auto-detect from package.json scripts (check/typecheck/lint/test)
 	maxAttempts?: number; // default: 2 — fix attempts before giving up and reporting the failure to the user
 	timeoutMs?: number; // default: 180000
@@ -177,11 +190,12 @@ export interface TodoCadenceReminderSettings {
 }
 
 /**
- * Live overthink guard — interrupts a stream when one thinking block exceeds a
- * token estimate without any tool call. Complements the context thinking cap (K4).
+ * Overthink guard settings (retained for settings round-trip).
+ * Product path permanently disables the guard for every model via
+ * {@link resolveOverthinkGuardForModel} — these fields have no runtime effect.
  */
 export interface OverthinkGuardSettings {
-	enabled?: boolean; // default: true (opt out with enabled: false)
+	enabled?: boolean; // default: false; product path always off regardless
 	/** Override threshold for all models. When unset, weak/strong defaults apply. */
 	tokenThreshold?: number;
 	/** Default for open/weak providers. Default: 1000 estimated tokens. */
@@ -191,6 +205,20 @@ export interface OverthinkGuardSettings {
 	/** Injections per turn before bailing. Default: 2. */
 	maxRetriesPerTurn?: number;
 	/** When unset, weak/open providers watch text_delta; frontier providers do not. */
+	watchTextDelta?: boolean;
+	/**
+	 * Per-model overrides keyed by model id (e.g. "qwen3.8-max-preview") or
+	 * "provider/model" (e.g. "qwencloud/qwen3.8-max-preview"). The provider-qualified
+	 * key wins over the bare model id. Fields fall back to the global settings.
+	 */
+	modelOverrides?: Record<string, OverthinkGuardModelOverride>;
+}
+
+/** Per-model overthink guard override — all fields optional, merged over the global config. */
+export interface OverthinkGuardModelOverride {
+	enabled?: boolean;
+	tokenThreshold?: number;
+	maxRetriesPerTurn?: number;
 	watchTextDelta?: boolean;
 }
 
@@ -454,6 +482,7 @@ export interface ResolvedOverthinkGuardSettings {
 	strongTokenThreshold: number;
 	maxRetriesPerTurn: number;
 	watchTextDelta?: boolean;
+	modelOverrides?: Record<string, OverthinkGuardModelOverride>;
 }
 
 export interface ResolvedToolFeedbackSettings {
@@ -1709,12 +1738,16 @@ export class SettingsManager {
 				cooldownMs: tcCooldownMs,
 			},
 			overthinkGuard: {
-				enabled: og?.enabled !== false,
+				// Permanently off by default; product path never arms the guard
+				// (see resolveOverthinkGuardForModel). Explicit true is still stored
+				// for settings round-trip but has no effect until the policy re-enables.
+				enabled: og?.enabled === true,
 				tokenThreshold: ogTokenThreshold,
 				weakTokenThreshold: ogWeak,
 				strongTokenThreshold: ogStrong,
 				maxRetriesPerTurn: ogMaxRetries,
 				watchTextDelta: og?.watchTextDelta,
+				modelOverrides: og?.modelOverrides,
 			},
 		};
 	}
@@ -1749,6 +1782,7 @@ export class SettingsManager {
 	}
 
 	getVerificationSettings(): {
+		mode: VerificationMode;
 		enabled: boolean;
 		command: string | null;
 		maxAttempts: number;
@@ -1759,7 +1793,13 @@ export class SettingsManager {
 		functionalWebMaxInteractions: number;
 	} {
 		const v = this.settings.verification;
+		// Explicit mode wins; the legacy `enabled` switch maps false → off and
+		// explicit true → post-turn (an opt-in to the harness-run gate). With
+		// neither set, the default is the in-turn (Claude Code-like) behavior.
+		const mode: VerificationMode =
+			v?.mode ?? (v?.enabled === false ? "off" : v?.enabled === true ? "post-turn" : "in-turn");
 		return {
+			mode,
 			enabled: v?.enabled ?? true,
 			command: v?.command ?? null,
 			maxAttempts: Math.max(1, v?.maxAttempts ?? 2),

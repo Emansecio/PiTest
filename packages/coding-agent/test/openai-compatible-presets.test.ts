@@ -24,9 +24,33 @@ describe("openai-compatible presets", () => {
 		expect(models.some((m) => m.provider === "verboo")).toBe(true);
 	});
 
+	test("qwencloud qwen3.8-max-preview opts out of developer role (Aliyun rejects it)", () => {
+		const models = getPresetProviderModels();
+		const qwen = models.find((m) => m.provider === "qwencloud" && m.id === "qwen3.8-max-preview");
+		expect(qwen).toBeDefined();
+		expect(qwen?.reasoning).toBe(true);
+		expect(qwen?.api).toBe("openai-completions");
+		expect(qwen?.baseUrl).toContain("aliyuncs.com");
+		const compat = qwen?.compat as
+			| {
+					supportsDeveloperRole?: boolean;
+					supportsStore?: boolean;
+					supportsLongCacheRetention?: boolean;
+					supportsReasoningEffort?: boolean;
+			  }
+			| undefined;
+		// Reasoning + supportsDeveloperRole:true would send role:"developer", which
+		// Aliyun MaaS rejects with invalid_parameter_error.
+		expect(compat?.supportsDeveloperRole).toBe(false);
+		expect(compat?.supportsStore).toBe(false);
+		expect(compat?.supportsLongCacheRetention).toBe(false);
+		expect(compat?.supportsReasoningEffort).toBe(true);
+	});
+
 	test("isPresetProviderId recognizes preset ids only", () => {
 		expect(isPresetProviderId("zai")).toBe(true);
 		expect(isPresetProviderId("verboo")).toBe(true);
+		expect(isPresetProviderId("qwencloud")).toBe(true);
 		expect(isPresetProviderId("anthropic")).toBe(false);
 	});
 

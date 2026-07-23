@@ -111,6 +111,16 @@ describe("FooterComponent identity line", () => {
 		expect(metrics).not.toContain("test-model-x");
 	});
 
+	it("styles the model id with bold text SGR on the identity line", () => {
+		const session = createActiveSession({ modelId: "test-model-x" });
+		const footer = new FooterComponent(session, createFooterData());
+		const identity = footer.render(200)[0]!;
+		const idx = identity.indexOf("test-model-x");
+		const before = identity.slice(Math.max(0, idx - 24), idx);
+		// bold (\x1b[1m) and/or fg SGR immediately preceding the model id
+		expect(/\x1b\[[0-9;]*m/.test(before)).toBe(true);
+	});
+
 	it("tints the thinking-level token with the matching theme palette", () => {
 		// Theme has thinkingHigh="#b294bb" (dark) — we just check that the
 		// rendered line embeds the ANSI escape sequence the colorizer would

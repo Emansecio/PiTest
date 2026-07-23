@@ -70,6 +70,11 @@ export interface Args {
 	slow?: boolean | string;
 	plan?: boolean | string;
 	/**
+	 * Wall-clock budget in SECONDS for a headless run (`-p` / `--mode json`).
+	 * Threaded to print mode as `maxWallMs`; ignored in interactive mode.
+	 */
+	maxWall?: number;
+	/**
 	 * Session tool-surface profile. `minimal` disables default-on heavy tools
 	 * (eval, lsp, debug, chrome, hindsight, webSearch, agentMessaging) via
 	 * settings overrides — does not change package defaults for other sessions.
@@ -155,6 +160,17 @@ export function parseArgs(args: string[]): Args {
 				result.diagnostics.push({
 					type: "warning",
 					message: `Invalid thinking level "${level}". Valid values: ${VALID_THINKING_LEVELS.join(", ")}`,
+				});
+			}
+		} else if (arg === "--max-wall" && i + 1 < args.length) {
+			const raw = args[++i];
+			const seconds = Number(raw);
+			if (Number.isFinite(seconds) && seconds > 0) {
+				result.maxWall = seconds;
+			} else {
+				result.diagnostics.push({
+					type: "warning",
+					message: `Invalid --max-wall value "${raw}". Expected a positive number of seconds.`,
 				});
 			}
 		} else if (arg === "--print" || arg === "-p") {
@@ -346,6 +362,7 @@ ${chalk.bold("Options:")}
   --append-system-prompt <text>  Append text or file contents to the system prompt (can be used multiple times)
   --mode <mode>                  Output mode: text (default), json, or rpc
   --print, -p                    Non-interactive mode: process prompt and exit
+  --max-wall <seconds>           Headless wall-clock budget: abort the in-flight turn at the limit and close with partial state (exit 124)
   --continue, -c                 Continue previous session
   --resume, -r                   Select a session to resume
   --session <path|id>            Use specific session file or partial UUID

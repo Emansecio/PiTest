@@ -2789,3 +2789,104 @@ describe("P04 message_update fire-and-forget", () => {
 		expect(last.errorMessage).toMatch(/Stream ended without a terminal event/);
 	});
 });
+
+describe("round wall-clock watchdog", () => {
+	it("converts a keepalive-forever stream into a retryable error turn at the cap", async () => {
+		const context: AgentContext = { systemPrompt: "s", messages: [], tools: [] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			roundWallClockMs: 80,
+		};
+		let interval: ReturnType<typeof setInterval> | undefined;
+		const streamFn = (_model: unknown, _ctx: unknown, options?: { signal?: AbortSignal }) => {
+			const stream = new MockAssistantStream();
+			const partial = createAssistantMessage([{ type: "text", text: "" }]);
+			queueMicrotask(() => {
+				stream.push({ type: "start", partial });
+				// Deltas keep arriving every 10ms: a rearming idle guard would never
+				// fire; only the non-rearming wall clock can end this round.
+				interval = setInterval(() => {
+					stream.push({ type: "text_delta", contentIndex: 0, delta: "x", partial });
+				}, 10);
+			});
+			options?.signal?.addEventListener("abort", () => {
+				if (interval) clearInterval(interval);
+			});
+			return stream;
+		};
+
+		const start = Date.now();
+		const loop = agentLoop([createUserMessage("go")], context, config, undefined, streamFn as any);
+		for await (const _event of loop) {
+			/* drain */
+		}
+		const messages = await loop.result();
+		if (interval) clearInterval(interval);
+
+		expect(Date.now() - start).toBeLessThan(5000);
+		const last = messages[messages.length - 1] as AssistantMessage;
+		expect(last.role).toBe("assistant");
+		expect(last.stopReason).toBe("error");
+		expect(last.errorMessage).toMatch(/wall-clock timeout.*timed out/i);
+	});
+
+	it("PIT_NO_ROUND_WATCHDOG=1 disables the cap even when config sets one", async () => {
+		process.env.PIT_NO_ROUND_WATCHDOG = "1";
+		try {
+			const context: AgentContext = { systemPrompt: "s", messages: [], tools: [] };
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				roundWallClockMs: 30,
+			};
+			const streamFn = () => {
+				const stream = new MockAssistantStream();
+				const message = createAssistantMessage([{ type: "text", text: "slow but fine" }]);
+				// Completes well past the (disabled) 30ms cap.
+				setTimeout(() => {
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: "stop", message });
+				}, 120);
+				return stream;
+			};
+
+			const loop = agentLoop([createUserMessage("go")], context, config, undefined, streamFn);
+			for await (const _event of loop) {
+				/* drain */
+			}
+			const messages = await loop.result();
+			const last = messages[messages.length - 1] as AssistantMessage;
+			expect(last.stopReason).toBe("stop");
+			expect(last.content[0]).toEqual({ type: "text", text: "slow but fine" });
+		} finally {
+			delete process.env.PIT_NO_ROUND_WATCHDOG;
+		}
+	});
+
+	it("a stream that completes within the cap is untouched", async () => {
+		const context: AgentContext = { systemPrompt: "s", messages: [], tools: [] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			roundWallClockMs: 5000,
+		};
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			const message = createAssistantMessage([{ type: "text", text: "done" }]);
+			queueMicrotask(() => {
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+
+		const loop = agentLoop([createUserMessage("go")], context, config, undefined, streamFn);
+		for await (const _event of loop) {
+			/* drain */
+		}
+		const messages = await loop.result();
+		const last = messages[messages.length - 1] as AssistantMessage;
+		expect(last.stopReason).toBe("stop");
+	});
+});

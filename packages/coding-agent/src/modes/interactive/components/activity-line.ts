@@ -192,11 +192,19 @@ export class ActivityLineComponent extends Container {
 		return ` ${theme.fg("dim", `· ${formatElapsed(elapsedMs)}`)}`;
 	}
 
+	/** Pending spinner color by tool family (bash/task stand out; others stay muted). */
+	private pendingIconColor(): ThemeColor {
+		const name = this.exec?.getToolName() ?? "";
+		if (name === "bash") return "gutterBash";
+		if (name === "task") return "gutterCustom";
+		return "gutterToolPending";
+	}
+
 	private icon(state: LineState): string {
 		// All state glyphs (spinner, ✓, ✗, ◦) render a single cell, matching the width
 		// model — so the header's single space shows cleanly and the label never
 		// shifts column when the spinner settles.
-		if (state === "pending") return theme.fg("gutterToolPending", this.spinnerGlyph ?? SPINNER_FRAMES[0]);
+		if (state === "pending") return theme.fg(this.pendingIconColor(), this.spinnerGlyph ?? SPINNER_FRAMES[0]);
 		// User abort/interrupt — muted marker, never success-green or error-red.
 		if (this.exec.isAborted()) {
 			return theme.fg("muted", ICON_ABORTED);
@@ -210,6 +218,13 @@ export class ActivityLineComponent extends Container {
 			return this.iconEase.colorize(steady, this.lastSpinnerGlyph ?? SPINNER_FRAMES[0]);
 		}
 		return this.iconEase.colorize(steady, glyph);
+	}
+
+	/** Verb color by lifecycle: accent while live, muted when collapsed, text when expanded. */
+	private verbStyle(label: string, pending: boolean): string {
+		if (pending) return theme.bold(theme.fg("accent", label));
+		if (!this.expanded) return theme.bold(theme.fg("muted", label));
+		return theme.bold(theme.fg("text", label));
 	}
 
 	private target(width: number): string {
@@ -231,7 +246,7 @@ export class ActivityLineComponent extends Container {
 			return clampBashCommandRow({
 				command: String(args.command ?? ""),
 				width: Math.max(0, width - 12),
-				colorKey: "toolTitle",
+				colorKey: "bashMode",
 				// The row already carries the `$` family glyph + "Ran" verb, so drop the
 				// redundant `$ ` sigil and elide the `cd …/dir &&` boilerplate; the
 				// verbatim command stays available on expand.
@@ -242,7 +257,7 @@ export class ActivityLineComponent extends Container {
 			});
 		}
 		if (name === "web_search") {
-			return theme.fg("toolTitle", String(args.query ?? ""));
+			return theme.fg("mdLink", String(args.query ?? ""));
 		}
 		// edit / write / ast_edit / edit_v2 and unknown action tools — basename only
 		// in the header; the full path stays in the expanded diff (ctrl+o).
@@ -279,7 +294,7 @@ export class ActivityLineComponent extends Container {
 		// fades in from dim. Snaps without truecolor (see ColorEase).
 		if (state !== this.prevState) {
 			if (state !== "pending") {
-				const from: ThemeColor = this.prevState === "pending" ? "gutterToolPending" : "dim";
+				const from: ThemeColor = this.prevState === "pending" ? this.pendingIconColor() : "dim";
 				const to: ThemeColor = state === "error" ? "gutterToolError" : "gutterToolSuccess";
 				this.iconEase.begin(from, to);
 			}
@@ -303,7 +318,7 @@ export class ActivityLineComponent extends Container {
 			// makes the task line read as an agent, not a plain tool. The agent's own
 			// label (delegated name / prompt snippet / "Agent N") rides in the target.
 			label = pending ? "Delegating" : "Delegated";
-			target = theme.fg("toolTitle", this.taskLabel());
+			target = theme.fg("customMessageLabel", this.taskLabel());
 		} else {
 			label = verbFor(name, pending);
 			target = this.target(width);
@@ -319,12 +334,13 @@ export class ActivityLineComponent extends Container {
 				target = "";
 			}
 		}
+		const styledVerb = this.verbStyle(label, pending);
 		// `×N` when identical actions were folded in; muted so it reads as a counter.
 		const countSuffix = this.count > 1 ? ` ${theme.fg("muted", `×${this.count}`)}` : "";
 		const elapsedSuffix = pending ? this.pendingElapsedSuffix() : "";
 		const rawHeader = stripAnsi(target).trim()
-			? `${this.icon(state)} ${theme.bold(label)} ${target}${countSuffix}${elapsedSuffix}`
-			: `${this.icon(state)} ${theme.bold(label)}${countSuffix}${elapsedSuffix}`;
+			? `${this.icon(state)} ${styledVerb} ${target}${countSuffix}${elapsedSuffix}`
+			: `${this.icon(state)} ${styledVerb}${countSuffix}${elapsedSuffix}`;
 		const headerText = rawHeader;
 		// Cap the assembled header once so no branch (free-form agent label, MCP tool
 		// name, web_search query, edit path) can overflow the terminal width. ANSI is

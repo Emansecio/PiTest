@@ -1429,4 +1429,16 @@ bar`,
 			assert.ok(plain.includes("H2:Section title"));
 		});
 	});
+
+	describe("Heading 3 styling", () => {
+		it("uses heading3 theme when provided", () => {
+			const themeWithH3 = {
+				...defaultMarkdownTheme,
+				heading3: (text: string) => `H3:${text}`,
+			};
+			const markdown = new Markdown("### Section title", 0, 0, themeWithH3);
+			const plain = stripAnsi(markdown.render(80)[0]);
+			assert.ok(plain.includes("H3:Section title"));
+		});
+	});
 });

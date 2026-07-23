@@ -25,6 +25,8 @@ export interface OpenAICompatiblePresetModel {
 	id: string;
 	name: string;
 	reasoning?: boolean;
+	/** Maps Pit thinking levels to provider-specific reasoning_effort values. */
+	thinkingLevelMap?: Model<Api>["thinkingLevelMap"];
 	input?: ("text" | "image")[];
 	contextWindow?: number;
 	maxTokens?: number;
@@ -60,6 +62,48 @@ export interface OpenAICompatiblePreset {
  * endpoint" with the URL from your Verboo dashboard (the probe will tell you).
  */
 export const OPENAI_COMPATIBLE_PRESETS: readonly OpenAICompatiblePreset[] = [
+	{
+		id: "qwencloud",
+		name: "QwenCloud (Aliyun MaaS)",
+		baseUrl: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+		api: "openai-completions",
+		// Aliyun MaaS chat/completions rejects OpenAI-only params (developer role,
+		// store, long cache retention). Reasoning models would otherwise auto-send
+		// role:"developer" via detectCompat (unknown base URL → "standard").
+		compat: {
+			supportsDeveloperRole: false,
+			supportsStore: false,
+			supportsLongCacheRetention: false,
+		},
+		models: [
+			{
+				id: "qwen3.8-max-preview",
+				name: "Qwen3.8 Max (Preview)",
+				reasoning: true,
+				contextWindow: 262_000,
+				maxTokens: 65_536,
+				// qwen3.8-max-preview: thinking always on; depth via openai-style reasoning_effort (xhigh|high|low, default xhigh).
+				thinkingLevelMap: { off: "low", minimal: "low", low: "low", medium: "high", high: "high", xhigh: "xhigh" },
+				compat: { supportsReasoningEffort: true } as PresetCompat,
+			},
+			{
+				id: "glm-5.2",
+				name: "GLM-5.2",
+				reasoning: true,
+				contextWindow: 1_000_000,
+				maxTokens: 65_536,
+				compat: { thinkingFormat: "deepseek" } as PresetCompat,
+			},
+			{
+				id: "deepseek-v4-pro",
+				name: "DeepSeek V4 Pro",
+				reasoning: true,
+				contextWindow: 1_000_000,
+				maxTokens: 65_536,
+				compat: { thinkingFormat: "deepseek" } as PresetCompat,
+			},
+		],
+	},
 	{
 		id: "zai",
 		name: "Z.ai GLM (Coding Plan)",
@@ -127,7 +171,7 @@ function presetModelToModel(preset: OpenAICompatiblePreset, model: OpenAICompati
 		provider: preset.id,
 		baseUrl: preset.baseUrl,
 		reasoning: model.reasoning ?? false,
-		thinkingLevelMap: undefined,
+		thinkingLevelMap: model.thinkingLevelMap,
 		input: model.input ?? ["text"],
 		cost: ZERO_COST,
 		contextWindow: model.contextWindow ?? 128_000,

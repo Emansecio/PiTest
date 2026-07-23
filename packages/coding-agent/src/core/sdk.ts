@@ -276,8 +276,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	let model = options.model;
 	let modelFallbackMessage: string | undefined;
+	const lastUsedProvider = settingsManager.getDefaultProvider();
+	const lastUsedModelId = settingsManager.getDefaultModel();
 
-	// If session has data, try to restore model from it
+	// Prefer the global last-used model for every boot path (new or continued
+	// conversation). Session-local model history is only a fallback when the
+	// saved default is missing or has no auth — so restarting PIT always lands
+	// on the model the user last selected via /model or cycling.
+	if (!model && lastUsedProvider && lastUsedModelId) {
+		const lastUsed = modelRegistry.find(lastUsedProvider, lastUsedModelId);
+		if (lastUsed && modelRegistry.hasConfiguredAuth(lastUsed)) {
+			model = lastUsed;
+		}
+	}
+
+	// If session has data and last-used was unavailable, try the session model
 	if (!model && hasExistingSession && existingSession.model) {
 		const restoredModel = modelRegistry.find(existingSession.model.provider, existingSession.model.modelId);
 		if (restoredModel && modelRegistry.hasConfiguredAuth(restoredModel)) {
@@ -293,8 +306,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const result = await findInitialModel({
 			scopedModels: options.scopedModels ?? [],
 			isContinuing: hasExistingSession,
-			defaultProvider: settingsManager.getDefaultProvider(),
-			defaultModelId: settingsManager.getDefaultModel(),
+			defaultProvider: lastUsedProvider,
+			defaultModelId: lastUsedModelId,
 			defaultThinkingLevel: settingsManager.getDefaultThinkingLevel(),
 			modelRegistry,
 		});
@@ -312,13 +325,24 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		prewarmProviderModule(model.api);
 	}
 
-	// Persist the resolved model as the default so the next fresh start
-	// reuses the same model instead of re-resolving from settings defaults
-	// (which may be stale or undefined). The explicit /model switch and
-	// cycleModel paths already call setDefaultModelAndProvider — this makes
-	// the startup path symmetrical.
-	if (model) {
+	// Persist the resolved model as the default only for fresh sessions.
+	// Restoring an older conversation's model must not clobber the user's
+	// last-used preference (e.g. continue an Opus session while default is Qwen).
+	// Explicit /model and cycleModel paths still call setDefaultModelAndProvider.
+	if (model && !hasExistingSession) {
 		settingsManager.setDefaultModelAndProvider(model.provider, model.id);
+	}
+
+	// When a continued conversation boots on the global last-used model (which
+	// may differ from the model recorded in the session file), record the switch
+	// so the transcript stays consistent with the live agent state.
+	if (
+		model &&
+		hasExistingSession &&
+		existingSession.model &&
+		(existingSession.model.provider !== model.provider || existingSession.model.modelId !== model.id)
+	) {
+		sessionManager.appendModelChange(model.provider, model.id);
 	}
 
 	let thinkingLevel = options.thinkingLevel;
