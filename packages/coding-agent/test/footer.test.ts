@@ -428,25 +428,29 @@ it("shows shell cwd when launcher and session cwd diverge", () => {
 
 it("shows only the model id, never the provider, even with several providers available", () => {
 	const footer = makeFooter({ providerCount: 2 });
-	const lines = footer.render(80).map(stripAnsi);
-	expect(lines[0]).toContain("test-model");
-	expect(lines[0]).not.toContain("anthropic");
+	const all = footer.render(80).map(stripAnsi).join("\n");
+	expect(all).toContain("test-model");
+	expect(all).not.toContain("anthropic");
 });
 
 it("renders a compact model name in the composer identity", () => {
 	const footer = makeFooter({ modelId: "claude-opus-4-8" });
-	const lines = footer.render(80).map(stripAnsi);
-	expect(lines[0]).toContain("Opus 4.8");
-	expect(lines[0]).not.toContain("claude-opus-4-8");
+	const all = footer.render(80).map(stripAnsi).join("\n");
+	expect(all).toContain("Opus 4.8");
+	expect(all).not.toContain("claude-opus-4-8");
 });
 
 it("renders the thinking level without a decorative icon on reasoning models", () => {
 	const footer = makeFooter({ thinkingLevel: "high" });
-	const lines = footer.render(80).map(stripAnsi);
+	// The model · thinking cluster now rides the CTX line; find it by the model id.
+	const modelLine = footer
+		.render(80)
+		.map(stripAnsi)
+		.find((l) => l.includes("test-model"))!;
 	// Dense `·` separator (not the airier `•` bullet) across the whole footer.
-	expect(lines[0]).toContain("test-model · High");
-	expect(lines[0]).not.toContain("✦");
-	expect(lines[0]).not.toContain("•");
+	expect(modelLine).toContain("test-model · High");
+	expect(modelLine).not.toContain("✦");
+	expect(modelLine).not.toContain("•");
 });
 
 it("keeps the thinking chip intact on a narrow line, truncating the model id instead", () => {

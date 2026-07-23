@@ -102,21 +102,23 @@ describe("FooterComponent identity line", () => {
 		initTheme(undefined, false);
 	});
 
-	it("places the model name on the identity line (line 0), not the metrics line", () => {
+	it("places the model name on the CTX line, not on the pwd/identity line", () => {
 		const session = createActiveSession({ modelId: "test-model-x" });
 		const footer = new FooterComponent(session, createFooterData());
 
-		const [identity, metrics] = footer.render(200);
-		expect(identity).toContain("test-model-x");
-		expect(metrics).not.toContain("test-model-x");
+		const lines = footer.render(200);
+		const ctxLine = lines.find((l) => l.includes("CTX"))!;
+		const pwdLine = lines.find((l) => l.includes("/tmp/project"))!;
+		expect(ctxLine).toContain("test-model-x");
+		expect(pwdLine).not.toContain("test-model-x");
 	});
 
-	it("styles the model id with bold text SGR on the identity line", () => {
+	it("styles the model id with bold text SGR on the CTX line", () => {
 		const session = createActiveSession({ modelId: "test-model-x" });
 		const footer = new FooterComponent(session, createFooterData());
-		const identity = footer.render(200)[0]!;
-		const idx = identity.indexOf("test-model-x");
-		const before = identity.slice(Math.max(0, idx - 24), idx);
+		const modelLine = footer.render(200).find((l) => l.includes("test-model-x"))!;
+		const idx = modelLine.indexOf("test-model-x");
+		const before = modelLine.slice(Math.max(0, idx - 24), idx);
 		// bold (\x1b[1m) and/or fg SGR immediately preceding the model id
 		expect(/\x1b\[[0-9;]*m/.test(before)).toBe(true);
 	});
@@ -135,12 +137,13 @@ describe("FooterComponent identity line", () => {
 		});
 		const footer = new FooterComponent(session, createFooterData());
 
-		const identity = footer.render(200)[0];
-		expect(identity).toContain("High");
+		// The model · thinking cluster now rides the CTX line; find it by the level.
+		const modelLine = footer.render(200).find((l) => l.includes("High"))!;
+		expect(modelLine).toContain("High");
 		// The level token must be inside an ANSI SGR (\x1b[...m) sequence
 		// distinct from the muted/dim wrappers used elsewhere on the line.
-		const idxHigh = identity.indexOf("High");
-		const slice = identity.slice(Math.max(0, idxHigh - 32), idxHigh);
+		const idxHigh = modelLine.indexOf("High");
+		const slice = modelLine.slice(Math.max(0, idxHigh - 32), idxHigh);
 		expect(/\x1b\[[0-9;]+m/.test(slice)).toBe(true);
 	});
 
@@ -152,11 +155,11 @@ describe("FooterComponent identity line", () => {
 		});
 		const footer = new FooterComponent(session, createFooterData());
 
-		const identity = footer.render(200)[0];
-		expect(identity).toContain("tiny");
-		// Non-reasoning models should NOT show a thinking-level token.
-		expect(identity).not.toContain("High");
-		expect(identity).not.toContain("Thinking off");
+		const all = footer.render(200).join("\n");
+		expect(all).toContain("tiny");
+		// Non-reasoning models should NOT show a thinking-level token anywhere.
+		expect(all).not.toContain("High");
+		expect(all).not.toContain("Thinking off");
 	});
 
 	it("normalizes an unknown thinkingLevel value to 'off' instead of throwing", () => {
@@ -167,9 +170,9 @@ describe("FooterComponent identity line", () => {
 		});
 		const footer = new FooterComponent(session, createFooterData());
 
-		const identity = footer.render(200)[0];
-		expect(identity).toContain("tiny");
+		const all = footer.render(200).join("\n");
+		expect(all).toContain("tiny");
 		// Unknown levels normalize to off — chip stays hidden.
-		expect(identity).not.toContain("Thinking off");
+		expect(all).not.toContain("Thinking off");
 	});
 });

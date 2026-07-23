@@ -27,9 +27,9 @@ function identityLineWouldOverflow(pwd: string, identityRight: string, width: nu
 	return leftWidth + minPadding + rightWidth + suffixWidth > width;
 }
 
-function metricsLineWouldOverflow(ctxText: string, rightText: string, width: number): boolean {
+function metricsLineWouldOverflow(ctxText: string, rightText: string, width: number, suffixWidth = 0): boolean {
 	const leftWidth = visibleWidth(ctxText);
-	const rightWidth = visibleWidth(rightText);
+	const rightWidth = visibleWidth(rightText) + suffixWidth;
 	const minPadding = leftWidth > 0 && rightWidth > 0 ? 2 : 0;
 	if (leftWidth > width) return true;
 	return leftWidth + minPadding + rightWidth > width;
@@ -602,21 +602,37 @@ export class FooterComponent implements Component {
 			protectedSuffix2: modeSuffix,
 		};
 
-		const splitIdentity =
-			(!collapseLine2 && width < FOOTER_IDENTITY_SINGLE_LINE_MIN) ||
-			identityLineWouldOverflow(pwd, identityRight, width, suffixWidth);
-
 		const lines: string[] = [];
-		if (splitIdentity) {
+		// The model · thinking cluster rides the CTX (metrics) line, right-aligned,
+		// so it sits next to the context readout instead of on a line of its own
+		// between the input box and the context. Pristine sessions (`collapseLine2`)
+		// have no metrics row, so there the model stays on the identity line.
+		const modelCluster: FooterModelCluster = {
+			idText: theme.bold(theme.fg("text", modelName)),
+			idWidth: visibleWidth(modelName),
+			chip: thinkingChip,
+		};
+
+		if (collapseLine2) {
+			// Pristine: keep the model on the identity line (there is no CTX row here).
+			const splitIdentity =
+				width < FOOTER_IDENTITY_SINGLE_LINE_MIN ||
+				identityLineWouldOverflow(pwd, identityRight, width, suffixWidth);
+			if (splitIdentity) {
+				lines.push(truncateToWidth(pwd, width, theme.fg("muted", "…")));
+				lines.push(
+					composeLeftRight("", identityRight, width, {
+						...identityComposeOptions,
+						leftColor: (text) => text,
+					}),
+				);
+			} else {
+				lines.push(composeLeftRight(pwd, identityRight, width, identityComposeOptions));
+			}
+		} else if (visibleWidth(pwd) > 0) {
+			// Non-pristine: identity line carries ONLY the pwd/branch. Skipped entirely
+			// when pwd is empty so no blank line floats above the context row.
 			lines.push(truncateToWidth(pwd, width, theme.fg("muted", "…")));
-			lines.push(
-				composeLeftRight("", identityRight, width, {
-					...identityComposeOptions,
-					leftColor: (text) => text,
-				}),
-			);
-		} else {
-			lines.push(composeLeftRight(pwd, identityRight, width, identityComposeOptions));
 		}
 
 		// --- Metrics (line 2) ------------------------------------------------
@@ -725,11 +741,17 @@ export class FooterComponent implements Component {
 		}
 
 		lines.push(
-			...layoutMetricsLines(ctxText, rightText, width, {
-				leftColor: (text) => text,
-				rightColor: (text) => theme.fg("dim", text),
-				ellipsis: theme.fg("dim", "…"),
-			}),
+			...layoutMetricsLines(
+				ctxText,
+				rightText,
+				width,
+				{
+					leftColor: (text) => text,
+					rightColor: (text) => theme.fg("dim", text),
+					ellipsis: theme.fg("dim", "…"),
+				},
+				modelCluster,
+			),
 		);
 
 		// --- No-rails alert --------------------------------------------------
@@ -844,25 +866,80 @@ function composeLeftRight(rawLeft: string, rawRight: string, width: number, opti
 	return fullRightWidth > 0 ? styledLeft + padding + fullRight : styledLeft + padding;
 }
 
+/**
+ * The model · thinking cluster shown next to the context. `idText`/`idWidth` is
+ * the (already-styled) model id, truncatable; `chip` is the thinking-level token
+ * (`· High`), which is protected from truncation so the level stays readable
+ * even when the id must shrink.
+ */
+interface FooterModelCluster {
+	idText: string;
+	idWidth: number;
+	chip?: { text: string; width: number };
+}
+
 function layoutMetricsLines(
 	ctxText: string,
 	rightText: string,
 	width: number,
 	composeOptions: Pick<ComposeOptions, "leftColor" | "rightColor" | "ellipsis">,
+	// The model · thinking cluster rides the CTX line, right-aligned on the same
+	// row as the context so the active model is always visible next to it.
+	model?: FooterModelCluster,
 ): string[] {
-	const shouldStack = width < FOOTER_METRICS_COMPOSE_MIN || metricsLineWouldOverflow(ctxText, rightText, width);
-	if (shouldStack) {
-		const stacked = [truncateToWidth(ctxText, width, composeOptions.ellipsis)];
-		if (rightText) {
-			stacked.push(truncateToWidth(rightText, width, composeOptions.ellipsis));
+	const ctxWidth = visibleWidth(ctxText);
+	const chipWidth = model?.chip?.width ?? 0;
+	const modelWidth = model ? model.idWidth + chipWidth : 0;
+	const modelSuffix: { text: string; width: number } | undefined = model
+		? { text: `${model.idText}${model.chip?.text ?? ""}`, width: modelWidth }
+		: undefined;
+	// The model can ride the CTX line as a protected (untruncatable) suffix only
+	// when it genuinely fits beside the context text. On a terminal too narrow for
+	// both, forcing it would overflow — so there it drops to its own row below the
+	// context, where the id truncates but the thinking chip is still protected.
+	const modelFitsCtx = modelWidth === 0 || ctxWidth + 2 + modelWidth <= width;
+
+	if (modelFitsCtx) {
+		const fitsOneLine =
+			width >= FOOTER_METRICS_COMPOSE_MIN && !metricsLineWouldOverflow(ctxText, rightText, width, modelWidth);
+		if (fitsOneLine) {
+			// CTX · chips … model — everything on one row.
+			return [
+				composeLeftRight(ctxText, rightText, width, {
+					...composeOptions,
+					protectedSuffix: modelSuffix,
+				}),
+			];
 		}
-		return stacked;
+		// CTX … model on row 1 (model stays next to the context); chips stack below.
+		const lines = [
+			composeLeftRight(ctxText, "", width, {
+				...composeOptions,
+				protectedSuffix: modelSuffix,
+			}),
+		];
+		if (rightText) {
+			lines.push(truncateToWidth(rightText, width, composeOptions.ellipsis));
+		}
+		return lines;
 	}
-	return [
-		composeLeftRight(ctxText, rightText, width, {
-			leftColor: composeOptions.leftColor,
-			rightColor: composeOptions.rightColor,
-			ellipsis: composeOptions.ellipsis,
-		}),
-	];
+
+	// Too narrow for the model beside the context: stack context, then the model on
+	// its own row (id truncatable, thinking chip protected), then the chips.
+	const lines = [truncateToWidth(ctxText, width, composeOptions.ellipsis)];
+	if (model) {
+		lines.push(
+			composeLeftRight("", model.idText, width, {
+				leftColor: composeOptions.leftColor,
+				// idText is already styled; don't re-wrap it.
+				rightColor: (text) => text,
+				ellipsis: composeOptions.ellipsis,
+				protectedSuffix: model.chip,
+			}),
+		);
+	}
+	if (rightText) {
+		lines.push(truncateToWidth(rightText, width, composeOptions.ellipsis));
+	}
+	return lines;
 }

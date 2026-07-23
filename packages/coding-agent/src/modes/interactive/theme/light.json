@@ -78,9 +78,9 @@
 
 		"thinkingOff": "borderMuted",
 		"thinkingMinimal": "dim",
-		"thinkingLow": "#3f7e98",
-		"thinkingMedium": "#1f8a7e",
-		"thinkingHigh": "#5f7ab0",
+		"thinkingLow": "#2f8a54",
+		"thinkingMedium": "#178a46",
+		"thinkingHigh": "#0f8a46",
 		"thinkingXhigh": "lavender",
 
 		"bashMode": "bashSignal",
