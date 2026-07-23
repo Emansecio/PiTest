@@ -26,10 +26,9 @@ import { initTheme } from "../src/modes/interactive/theme/theme.js";
 import { stripAnsi } from "../src/utils/ansi.js";
 
 const ESC = "\x1b";
-const PAGE_UP = "\x1b[5~";
-const PAGE_DOWN = "\x1b[6~";
-const HOME = "\x1b[H";
 const END = "\x1b[F";
+const DOWN = "\x1b[B";
+const SPACE = " ";
 
 function createFakeTui(): TUI {
 	return { requestRender: () => {} } as unknown as TUI;
@@ -255,26 +254,31 @@ describe("ModelSelectorComponent navigation & Esc", () => {
 		return new ModelSelectorComponent(createFakeTui(), current, settingsManager, registry, [], () => {}, onCancel);
 	}
 
-	it("jumps to the last/first item with End/Home and moves by a window with Page keys", async () => {
+	it("expands a group with Space, then navigates its models with arrows/End", async () => {
 		const selector = makeSelector();
 		await waitForAsyncRender();
 
-		// Current model is pinned first; the sorted list keeps a1..a5 order.
+		// All groups collapsed on open: the highlighted row is the provider group,
+		// so no model is selected yet.
+		expect(selector.getSelectedModel()).toBeUndefined();
+
+		// Space expands "alpha"; its models become navigable.
+		selector.handleInput(SPACE);
+		selector.handleInput(DOWN); // step onto the first model
 		expect(selector.getSelectedModel()?.id).toBe("a1");
 
 		selector.handleInput(END);
 		expect(selector.getSelectedModel()?.id).toBe("a5");
 
-		selector.handleInput(HOME);
-		expect(selector.getSelectedModel()?.id).toBe("a1");
+		// Down from the last row wraps to the group header.
+		selector.handleInput(DOWN);
+		expect(selector.getSelectedModel()).toBeUndefined();
 
-		// Page down jumps a full window (clamped at the last item, no wrap).
-		selector.handleInput(PAGE_DOWN);
-		expect(selector.getSelectedModel()?.id).toBe("a5");
-
-		// Page up jumps back a full window (clamped at the first item, no wrap).
-		selector.handleInput(PAGE_UP);
-		expect(selector.getSelectedModel()?.id).toBe("a1");
+		// On the group header, Space collapses it again — the models disappear and
+		// the cursor stays on the (now collapsed) header.
+		selector.handleInput(SPACE);
+		expect(selector.getSelectedModel()).toBeUndefined();
+		expect(stripAnsi(selector.render(120).join("\n"))).not.toContain("Alpha One");
 	});
 
 	it("uses a two-step Esc when searching: first clears the query, then closes", async () => {
@@ -291,11 +295,15 @@ describe("ModelSelectorComponent navigation & Esc", () => {
 		expect(stripAnsi(selector.render(120).join("\n"))).toContain("Alpha Five");
 		expect(stripAnsi(selector.render(120).join("\n"))).not.toContain("Alpha One");
 
-		// First Esc: clears the query and re-filters, does NOT close.
+		// First Esc: clears the query and re-filters, does NOT close. Cleared search
+		// returns to the collapsed accordion — the provider group header is shown,
+		// its models stay hidden until expanded.
 		selector.handleInput(ESC);
 		expect(cancelled).toBe(0);
 		expect(selector.getSearchInput().getValue()).toBe("");
-		expect(stripAnsi(selector.render(120).join("\n"))).toContain("Alpha One");
+		const cleared = stripAnsi(selector.render(120).join("\n"));
+		expect(cleared).toContain("alpha");
+		expect(cleared).not.toContain("Alpha One");
 
 		// Second Esc (empty query): closes via onCancel.
 		selector.handleInput(ESC);
@@ -306,9 +314,13 @@ describe("ModelSelectorComponent navigation & Esc", () => {
 		const selector = makeSelector();
 		await waitForAsyncRender();
 
-		// The footer detail line always leads with provider/id (other segments
-		// depend on registry defaults, which are covered by formatModelDetailLine).
-		const joined = stripAnsi(selector.render(120).join("\n"));
-		expect(joined).toContain("alpha/a1");
+		// A highlighted group shows a count hint, not a model detail line.
+		expect(stripAnsi(selector.render(120).join("\n"))).toContain("Space to expand");
+
+		// Expand and step onto a model — the detail line leads with provider/id (other
+		// segments depend on registry defaults, covered by formatModelDetailLine).
+		selector.handleInput(SPACE);
+		selector.handleInput(DOWN);
+		expect(stripAnsi(selector.render(120).join("\n"))).toContain("alpha/a1");
 	});
 });
