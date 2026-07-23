@@ -711,6 +711,16 @@ export class TUI extends Container {
 		return this.overlayStack.some((o) => this.isOverlayVisible(o));
 	}
 
+	/**
+	 * True when a focus-capturing (modal) overlay is currently visible. Purely
+	 * decorative, non-capturing overlays are excluded, so an inline decoration
+	 * (e.g. the pet companion beside the editor) can cede the screen while a real
+	 * modal picker/dialog is up without counting itself or other decorations.
+	 */
+	hasCapturingOverlay(): boolean {
+		return this.getTopmostVisibleOverlay() !== undefined;
+	}
+
 	/** Check if an overlay entry is currently visible */
 	private isOverlayVisible(entry: (typeof this.overlayStack)[number]): boolean {
 		if (entry.hidden) return false;

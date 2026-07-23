@@ -190,6 +190,12 @@ import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.ts";
 import { OverthinkSteerMessageComponent } from "./components/overthink-steer-message.ts";
 import { PendingUserMessageComponent } from "./components/pending-user-message.ts";
+import {
+	createPetCompanion,
+	PET_COMPANION_FOOTPRINT,
+	PET_COMPANION_MIN_COLS,
+	type PetCompanion,
+} from "./components/pet-companion.ts";
 import { RewindSelectorComponent } from "./components/rewind-selector.ts";
 import { SendNowChooser } from "./components/send-now-chooser.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
@@ -574,6 +580,16 @@ export class InteractiveMode {
 	// Live "above editor" goal panel (sits ABOVE the todo overlay; auto-hides
 	// when no goal is active; lingers briefly on complete then vanishes).
 	private goalOverlay: GoalOverlay | undefined;
+
+	// Pet companion: the mid-conversation mascot painted beside the input frame
+	// (right gutter of the ComposerChrome). Off entirely under PIT_NO_PET. Its
+	// moods track the agent lifecycle; the shared ticker drives its idle blink and
+	// mood sweeps.
+	private petCompanion: PetCompanion | undefined;
+	private petCompanionUnsub: (() => void) | undefined;
+	// Sticky per-turn flag: an assistant message ended in error, so agent_end picks
+	// the `error` mood over `done`. Reset at agent_start.
+	private petTurnErrored = false;
 
 	// Guard so the cheatsheet hotkey toggles a single overlay (no stacking).
 	private cheatsheetOpen = false;
@@ -963,6 +979,7 @@ export class InteractiveMode {
 		// input surface. Empty (renders nothing) unless a chooser is open.
 		this.ui.addChild(this.sendNowChooserContainer);
 		this.ui.addChild(this.composerChrome);
+		this.setupPetCompanion();
 		this.ui.setFocus(this.editor);
 
 		this.setupKeyHandlers();
@@ -1711,6 +1728,32 @@ export class InteractiveMode {
 		// terminals running Pit are dark, so the last-resort fallback is near-black.
 		const bg = tuple(theme.getRgb("petBg")) ?? [12, 14, 18];
 		return { stroke, eye, bg };
+	}
+
+	/**
+	 * Create the pet companion and hang it off the composer as a right-gutter
+	 * decoration beside the input frame. Off entirely under `PIT_NO_PET`. Hidden
+	 * on the welcome (which has its own hero pet), while a modal overlay is up, and
+	 * in narrow terminals (< {@link PET_COMPANION_MIN_COLS} cols) — where the
+	 * editor reclaims the full width. Under reduced motion the pet renders static
+	 * (eyes open) and no ticker is subscribed.
+	 */
+	private setupPetCompanion(): void {
+		if (isTruthyEnvFlag(process.env.PIT_NO_PET)) return;
+		const reducedMotion = isReducedMotion();
+		const pet = createPetCompanion({
+			getColors: () => this.resolvePetColors(),
+			reducedMotion,
+		});
+		this.petCompanion = pet;
+		this.composerChrome.setRightGutter(
+			pet,
+			PET_COMPANION_FOOTPRINT,
+			(width) => width >= PET_COMPANION_MIN_COLS && !this.welcomeActive && !this.ui.hasCapturingOverlay(),
+		);
+		if (!reducedMotion) {
+			this.petCompanionUnsub = this.ui.addAnimationCallback((now) => pet.tick(now));
+		}
 	}
 
 	/** Load recent resumable sessions for the current cwd and push them into the
@@ -3579,6 +3622,8 @@ export class InteractiveMode {
 					this.syncActivitySpinnersFrozen();
 				}
 				this.setWorkingPhase("Thinking…");
+				this.petTurnErrored = false;
+				this.petCompanion?.setMood("thinking");
 				this.ui.requestRender();
 				break;
 
@@ -3750,6 +3795,9 @@ export class InteractiveMode {
 					this.streamingComponent.updateContent(this.streamingMessage);
 
 					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
+						// Only a genuine error drives the pet's error mood; a user abort is an
+						// intentional cancel, not a distress signal.
+						if (this.streamingMessage.stopReason === "error") this.petTurnErrored = true;
 						if (!errorMessage) {
 							errorMessage = this.streamingMessage.errorMessage || "Error";
 						}
@@ -3803,6 +3851,7 @@ export class InteractiveMode {
 				// Esc changes meaning while tools are cancellable — swap the loader
 				// hint at the boundary, not on the next stream tick.
 				this.refreshLoaderTrailingSuffix();
+				this.petCompanion?.setMood("working");
 				this.ui.requestRender();
 				break;
 			}
@@ -3825,6 +3874,9 @@ export class InteractiveMode {
 					// (parallel tools keep their "Running …" label until all finish).
 					if (this.pendingTools.size === 0) {
 						this.setWorkingPhase("Thinking…");
+						// No tools running → back to reasoning; the pet stops the fast
+						// working sweep and resumes the calmer thinking scan.
+						this.petCompanion?.setMood("thinking");
 					}
 					if (!event.isError && MUTATING_TOOLS_FOR_DIFF_REFRESH.has(event.toolName)) {
 						this.footerDataProvider.scheduleWorkingTreeRefresh();
@@ -3841,6 +3893,10 @@ export class InteractiveMode {
 				this.setTerminalProgress(false);
 				this.clearInterruptWatchdog();
 				this.disposeFusionLive();
+				// A retry keeps the turn alive (pet stays thinking); a real end plays the
+				// double-blink, or the two-shake error tell if the turn errored. Both
+				// transient moods auto-return to idle.
+				if (!event.willRetry) this.petCompanion?.setMood(this.petTurnErrored ? "error" : "done");
 				if (this.shouldRetireWorkingLoaderOnAgentEnd(event.willRetry)) {
 					const elapsedMs = this.getWorkingLoaderElapsedMs();
 					this.stopWorkingLoader();
@@ -8118,6 +8174,10 @@ Customize: \`${keybindingsPath}\` — \`/reload\` to apply.
 		stopThemeWatcher();
 		this.ephemeralStatus.dispose();
 		this.stopStartupAnimation();
+		this.petCompanionUnsub?.();
+		this.petCompanionUnsub = undefined;
+		this.composerChrome.setRightGutter(undefined);
+		this.petCompanion = undefined;
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;

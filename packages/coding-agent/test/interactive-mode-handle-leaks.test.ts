@@ -73,6 +73,9 @@ type StopThis = {
 	_themePreviewInvalidateTimer: ReturnType<typeof setTimeout> | undefined;
 	ephemeralStatus: { dispose: () => void };
 	stopStartupAnimation: () => void;
+	petCompanionUnsub: (() => void) | undefined;
+	composerChrome: { setRightGutter: (component: undefined) => void };
+	petCompanion: unknown;
 	loadingAnimation: { stop: () => void } | undefined;
 	clearExtensionTerminalInputListeners: () => void;
 	footer: { dispose: () => void };
@@ -99,6 +102,9 @@ describe("Leak 2: interactive stop() closes the theme watcher", () => {
 			_themePreviewInvalidateTimer: undefined,
 			ephemeralStatus: { dispose: vi.fn() },
 			stopStartupAnimation: vi.fn(),
+			petCompanionUnsub: undefined,
+			composerChrome: { setRightGutter: vi.fn() },
+			petCompanion: undefined,
 			loadingAnimation: undefined,
 			clearExtensionTerminalInputListeners: vi.fn(),
 			footer: { dispose: vi.fn() },

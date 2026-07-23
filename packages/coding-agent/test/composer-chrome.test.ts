@@ -1,10 +1,32 @@
 import { stripVTControlCharacters } from "node:util";
-import { Text, visibleWidth } from "@pit/tui";
+import { type Component, type PetColors, Text, visibleWidth } from "@pit/tui";
 import { describe, expect, test } from "vitest";
 import { ComposerChrome } from "../src/modes/interactive/components/composer-chrome.ts";
+import {
+	createPetCompanion,
+	PET_COMPANION_FOOTPRINT,
+	PET_COMPANION_MIN_COLS,
+} from "../src/modes/interactive/components/pet-companion.ts";
 
 function plain(lines: string[]): string[] {
 	return lines.map((line) => stripVTControlCharacters(line));
+}
+
+const PET_COLORS: PetColors = { bg: [10, 11, 14], stroke: [240, 240, 245], eye: [63, 224, 122] };
+
+/** A single-line content stand-in for the editor that records the width it was
+ * asked to render at, so we can assert the frame narrows/recovers. */
+class WidthProbe implements Component {
+	lastWidth = -1;
+	render(width: number): string[] {
+		this.lastWidth = width;
+		return ["input"];
+	}
+	invalidate(): void {}
+}
+
+function hasPetGlyph(lines: string[]): boolean {
+	return lines.some((line) => line.includes("▀") || line.includes("▄"));
 }
 
 describe("ComposerChrome", () => {
@@ -45,5 +67,61 @@ describe("ComposerChrome", () => {
 		composer.setFooter(new Text("new", 0, 0));
 		expect(plain(composer.render(20)).join("\n")).not.toContain("old");
 		expect(plain(composer.render(20)).join("\n")).toContain("new");
+	});
+});
+
+describe("ComposerChrome pet gutter", () => {
+	function build(visiblePredicate = (w: number) => w >= PET_COMPANION_MIN_COLS) {
+		const content = new WidthProbe();
+		const footer = new Text("workspace · model · tokens", 0, 0);
+		const composer = new ComposerChrome(content, footer);
+		const pet = createPetCompanion({ getColors: () => PET_COLORS });
+		composer.setRightGutter(pet, PET_COMPANION_FOOTPRINT, visiblePredicate);
+		return { composer, content };
+	}
+
+	test("perches the pet beside the editor and narrows the frame at cols=120", () => {
+		const { composer, content } = build();
+		const raw = composer.render(120);
+		const lines = plain(raw);
+		// The pet renders (half-block glyphs) on the frame rows.
+		expect(hasPetGlyph(lines.slice(0, 3))).toBe(true);
+		// The editor frame gave up exactly the pet footprint: innerWidth = width - footprint - 2 borders.
+		expect(content.lastWidth).toBe(120 - PET_COMPANION_FOOTPRINT - 2);
+		// Every frame row still spans the full terminal width (frame + gutter).
+		for (const line of lines.slice(0, 3)) expect(visibleWidth(line)).toBe(120);
+		// The footer keeps the FULL width — the pet only borrows from the frame.
+		expect(visibleWidth(lines.at(-1)!)).toBeLessThanOrEqual(120);
+		expect(content.lastWidth).toBeLessThan(120 - 2);
+	});
+
+	test("hides the pet and restores full editor width at cols=80", () => {
+		const { composer, content } = build();
+		const lines = plain(composer.render(80));
+		expect(hasPetGlyph(lines)).toBe(false);
+		// Frame reclaims the whole width: innerWidth = 80 - 2 borders.
+		expect(content.lastWidth).toBe(80 - 2);
+		expect(lines[0]).toMatch(/^╭─+╮$/);
+		expect(visibleWidth(lines[0])).toBe(80);
+	});
+
+	test("cedes to a modal: the visibility predicate can hide the pet even when wide", () => {
+		let modalOpen = false;
+		const { composer, content } = build((w) => w >= PET_COMPANION_MIN_COLS && !modalOpen);
+		expect(hasPetGlyph(plain(composer.render(120)).slice(0, 3))).toBe(true);
+		modalOpen = true;
+		const hidden = plain(composer.render(120));
+		expect(hasPetGlyph(hidden)).toBe(false);
+		// Editor recovers the full frame width while the pet is ceded.
+		expect(content.lastWidth).toBe(120 - 2);
+	});
+
+	test("clearing the gutter restores the plain composer", () => {
+		const { composer, content } = build();
+		composer.render(120);
+		expect(content.lastWidth).toBe(120 - PET_COMPANION_FOOTPRINT - 2);
+		composer.setRightGutter(undefined);
+		expect(hasPetGlyph(plain(composer.render(120)))).toBe(false);
+		expect(content.lastWidth).toBe(120 - 2);
 	});
 });
