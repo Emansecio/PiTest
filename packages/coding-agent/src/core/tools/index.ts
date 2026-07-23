@@ -638,13 +638,40 @@ export const allToolNames: Set<ToolName> = new Set(Object.keys(TOOL_REGISTRY) as
 const registry: Record<ToolName, ToolRegistryEntry> = TOOL_REGISTRY;
 
 /**
+ * P1 speculative-execution allowlist: tools the agent loop may execute while
+ * the assistant message is still streaming. Deliberately NARROWER than the
+ * registry's `readOnly` surface — only cheap, idempotent, purely-local
+ * FS/index reads qualify. Excluded on purpose: `web_search` (network +
+ * quota), `chrome_devtools_*` (live browser side effects), `lsp` (server
+ * state churn), recall tools (deferred-store bookkeeping). Expand only after
+ * auditing the candidate's execute for in-process state it writes on the
+ * discard path (read qualifies because `onSpeculationDiscarded` un-records
+ * its dedupe entry).
+ */
+const SPECULATION_SAFE_TOOLS: ReadonlySet<string> = new Set([
+	"read",
+	"grep",
+	"find",
+	"ls",
+	"symbol",
+	"find_symbol",
+	"repo_map",
+	"ast_grep",
+]);
+
+/**
  * Build a tool from a registry entry. Uses the entry's explicit `factory` when
  * present; otherwise derives it from `definitionFactory` the same way every
  * built-in factory does — `wrapToolDefinition(definitionFactory(cwd, options))`.
  */
 function buildTool(entry: ToolRegistryEntry, cwd: string, options?: unknown): Tool {
-	if (entry.factory) return entry.factory(cwd, options);
-	return wrapToolDefinition(entry.definitionFactory(cwd, options));
+	const tool = entry.factory ? entry.factory(cwd, options) : wrapToolDefinition(entry.definitionFactory(cwd, options));
+	// Central speculation stamp: allowlist ∩ readOnly, never overriding a
+	// definition-level opt-in/out.
+	if (tool.speculationSafe === undefined && entry.readOnly && SPECULATION_SAFE_TOOLS.has(tool.name)) {
+		tool.speculationSafe = true;
+	}
+	return tool;
 }
 
 /** Every tool name in canonical (registry insertion) order. */

@@ -693,6 +693,18 @@ export function createReadToolDefinition(
 		name: "read",
 		activity: "navigation",
 		label: "read",
+		// P1: a discarded speculative read already recorded its body in the
+		// dedupe store; un-record it so the model's next REAL identical read is
+		// sent in full instead of being suppressed against content it never saw.
+		onSpeculationDiscarded: (_toolCallId, args) => {
+			const rawPath = (args as { path?: unknown } | undefined)?.path;
+			if (typeof rawPath !== "string" || rawPath.length === 0) return;
+			try {
+				options?.readDedupeStore?.invalidatePath(canonicalPathKey(resolveReadPath(rawPath, cwd)));
+			} catch {
+				// Best-effort cleanup: an unresolvable path means nothing was recorded.
+			}
+		},
 		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete. Set outline:true for a symbol outline (names + line ranges) instead of file content; path also accepts pr://, issue://, and conflict:// virtual schemes to pull a GitHub PR, issue, or merge-conflict directly.
 
 Common mistakes to avoid:

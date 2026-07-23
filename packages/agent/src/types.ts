@@ -409,6 +409,16 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * context) — see `AgentOptions.emitRepairNotes`. See {@link buildRepairNote}.
 	 */
 	emitRepairNotes?: boolean;
+
+	/**
+	 * Optional harness veto over speculative tool execution (P1). When present
+	 * and returning `false` for a call, that call is never executed during the
+	 * stream — it waits for the normal post-stream flow. Lets the harness gate
+	 * speculation on state the loop cannot see (e.g. a permission mode that
+	 * would prompt interactively). Absent → speculation is governed solely by
+	 * `AgentTool.speculationSafe` and the `PIT_NO_SPECULATIVE_TOOLS` kill-switch.
+	 */
+	canSpeculateToolCall?: (toolCall: AgentToolCall) => boolean;
 }
 
 /**
@@ -575,6 +585,23 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	 * If omitted, the default execution mode applies.
 	 */
 	executionMode?: ToolExecutionMode;
+	/**
+	 * Marks this tool as safe to execute SPECULATIVELY while the assistant
+	 * message is still streaming (P1): its `execute` must be free of
+	 * world-visible side effects AND idempotent, because a speculative run can
+	 * be discarded (stream abort/interrupt, or the call missing from the final
+	 * message) and later re-executed. Only ever honored for tools whose
+	 * `executionMode` is not "sequential". Default: false (never speculated).
+	 */
+	speculationSafe?: boolean;
+	/**
+	 * Cleanup hook invoked when a speculative execution of this tool is
+	 * DISCARDED (its result was never delivered to the model). Use it to undo
+	 * in-process bookkeeping the execute performed (e.g. the read tool's
+	 * dedupe-store record, which would otherwise suppress the body of a later
+	 * legitimate identical read). Failures are swallowed by the loop.
+	 */
+	onSpeculationDiscarded?: (toolCallId: string, args: unknown) => void;
 }
 
 /** Context snapshot passed into the low-level agent loop. */

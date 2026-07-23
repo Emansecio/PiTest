@@ -195,6 +195,8 @@ export function wrapToolDefinition<TDetails = unknown>(
 		parameters: definition.parameters,
 		prepareArguments: definition.prepareArguments,
 		executionMode: definition.executionMode,
+		speculationSafe: definition.speculationSafe,
+		onSpeculationDiscarded: definition.onSpeculationDiscarded,
 		execute: async (toolCallId, params, signal, onUpdate) => {
 			try {
 				const ctx = ctxFactory?.() as ExtensionContext | undefined;

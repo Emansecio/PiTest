@@ -496,8 +496,22 @@ async function runLoop(
 			const overthinkGuard = config.overthinkGuard;
 			const overthinkMaxRetries = overthinkGuard?.enabled ? overthinkGuard.maxRetriesPerTurn : 0;
 			config.ttsrMatcher?.reset();
+			// P1: one speculation scope per stream attempt. A retried attempt
+			// (TTSR/overthink) discards the previous attempt's un-consumed
+			// speculations at the top of the next iteration; the discards after the
+			// tool batch / on the error-stop path reap whatever the executor did not
+			// take (call absent from the final message, no tool calls, abort).
+			let speculation: SpeculationController | undefined;
 			while (true) {
-				const response = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
+				speculation?.discardLeftovers();
+				speculation = new SpeculationController(currentContext, config, signal);
+				let response: AssistantMessage | StreamInterrupt;
+				try {
+					response = await streamAssistantResponse(currentContext, config, signal, emit, streamFn, speculation);
+				} catch (err) {
+					speculation.discardLeftovers();
+					throw err;
+				}
 				if (!isStreamInterrupt(response)) {
 					message = response;
 					break;
@@ -549,6 +563,7 @@ async function runLoop(
 			newMessages.push(message);
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
+				speculation?.discardLeftovers();
 				await emit({ type: "turn_end", message, toolResults: [] });
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
@@ -561,7 +576,15 @@ async function runLoop(
 			const toolResults: ToolResultMessage[] = [];
 			hasMoreToolCalls = false;
 			if (toolCalls.length > 0) {
-				const executedToolBatch = await executeToolCalls(currentContext, message, toolCalls, config, signal, emit);
+				const executedToolBatch = await executeToolCalls(
+					currentContext,
+					message,
+					toolCalls,
+					config,
+					signal,
+					emit,
+					speculation,
+				);
 				toolResults.push(...executedToolBatch.messages);
 				hasMoreToolCalls = !executedToolBatch.terminate && !signal?.aborted;
 
@@ -570,6 +593,9 @@ async function runLoop(
 					newMessages.push(result);
 				}
 			}
+			// P1: reap speculations the executor did not consume (absent from the
+			// final message, no tool calls at all, or a sequential-forced route).
+			speculation?.discardLeftovers();
 
 			await emit({ type: "turn_end", message, toolResults });
 
@@ -745,6 +771,7 @@ async function streamAssistantResponse(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 	streamFn?: StreamFn,
+	speculation?: SpeculationController,
 ): Promise<AssistantMessage | StreamInterrupt> {
 	// Apply context transform if configured (AgentMessage[] → AgentMessage[]).
 	// Bounded by an idle cap so a hung hook fails the turn instead of wedging it.
@@ -1033,6 +1060,12 @@ async function streamAssistantResponse(
 							assistantMessageEvent: event,
 							message: { ...partialMessage },
 						});
+						if (event.type === "toolcall_end") {
+							// P1: this call's args are complete mid-stream — start the
+							// speculative prepare+execute now (fire-and-forget; all gates
+							// live inside maybeStart). Consumed post-stream by the executor.
+							speculation?.maybeStart(event.toolCall as AgentToolCall, partialMessage);
+						}
 					}
 					break;
 
@@ -1150,10 +1183,13 @@ async function executeToolCalls(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
+	speculation?: SpeculationController,
 ): Promise<ExecutedToolCallBatch> {
 	const toolMap = buildToolMap(currentContext.tools);
 	// `toolExecution: "sequential"` forces the whole run serial — no partition,
-	// no per-call probe.
+	// no per-call probe. (Speculation never starts under these routes — the
+	// maybeStart gates mirror this routing — so the sequential executors never
+	// see a speculative entry; leftovers are reaped by the runLoop discard.)
 	if (config.toolExecution === "sequential") {
 		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, toolMap, config, signal, emit);
 	}
@@ -1166,12 +1202,30 @@ async function executeToolCalls(
 		if (toolMap.get(tc.name)?.executionMode === "sequential") sequentialCount++;
 	}
 	if (sequentialCount === 0) {
-		return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, toolMap, config, signal, emit);
+		return executeToolCallsParallel(
+			currentContext,
+			assistantMessage,
+			toolCalls,
+			toolMap,
+			config,
+			signal,
+			emit,
+			speculation,
+		);
 	}
 	if (sequentialCount === toolCalls.length || isBatchPartitionDisabled()) {
 		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, toolMap, config, signal, emit);
 	}
-	return executeToolCallsPartitioned(currentContext, assistantMessage, toolCalls, toolMap, config, signal, emit);
+	return executeToolCallsPartitioned(
+		currentContext,
+		assistantMessage,
+		toolCalls,
+		toolMap,
+		config,
+		signal,
+		emit,
+		speculation,
+	);
 }
 
 type ExecutedToolCallBatch = {
@@ -1197,6 +1251,155 @@ function makePerToolSignal(
 	registry.set(toolCallId, controller);
 	const signal = runSignal ? AbortSignal.any([runSignal, controller.signal]) : controller.signal;
 	return { signal, release: () => registry.delete(toolCallId) };
+}
+
+/**
+ * P1 — speculative tool execution (docs/proposals/2026-07-22-propostas-fronteira.md).
+ *
+ * While the assistant message is still streaming, `toolcall_end` already
+ * carries a completed tool call. For tools that opt in (`speculationSafe`,
+ * never "sequential"-mode), the FULL prepare funnel (rewrite registry → repair
+ * → validation → beforeToolCall guards) and the execute itself run
+ * immediately, with every event they would emit buffered instead of emitted.
+ * The post-stream executor consumes the settled outcome in the call's normal
+ * position and replays the buffered events there — transcript order, guard
+ * semantics (hooks fire exactly once) and stats accounting stay byte-identical
+ * to the non-speculative flow; only the wall-clock start of the I/O moves
+ * earlier, overlapping the tail of the stream.
+ *
+ * A speculation that is never consumed (stream interrupt/retry, abort, args
+ * fingerprint mismatch, or the call absent from the final message) is
+ * DISCARDED: buffered events are dropped and the tool's
+ * `onSpeculationDiscarded` cleanup runs (e.g. the read tool un-records its
+ * dedupe entry so a later legitimate identical read is not suppressed).
+ * Kill-switch: `PIT_NO_SPECULATIVE_TOOLS=1`.
+ */
+function isSpeculativeToolsDisabled(): boolean {
+	const raw = typeof process !== "undefined" ? process.env.PIT_NO_SPECULATIVE_TOOLS : undefined;
+	if (!raw) return false;
+	const v = raw.toLowerCase();
+	return v === "1" || v === "true" || v === "yes";
+}
+
+function safeArgsFingerprint(args: unknown): string {
+	try {
+		return JSON.stringify(args) ?? "undefined";
+	} catch {
+		return "unserializable";
+	}
+}
+
+type SpeculativeOutcome = {
+	preparation: PreparedToolCall | ImmediateToolCallOutcome;
+	/** Absent when the preparation short-circuited (immediate). */
+	executed: ExecutedToolCallOutcome | undefined;
+	/** Events the speculative run would have emitted, in order, for replay at consumption. */
+	events: AgentEvent[];
+};
+
+type SpeculativeEntry = {
+	toolCall: AgentToolCall;
+	argsJson: string;
+	outcome: Promise<SpeculativeOutcome>;
+	release: () => void;
+};
+
+class SpeculationController {
+	private readonly entries = new Map<string, SpeculativeEntry>();
+	private toolMapMemo: Map<string, AgentTool<any>> | undefined;
+	private readonly context: AgentContext;
+	private readonly config: AgentLoopConfig;
+	private readonly signal: AbortSignal | undefined;
+
+	constructor(context: AgentContext, config: AgentLoopConfig, signal: AbortSignal | undefined) {
+		this.context = context;
+		this.config = config;
+		this.signal = signal;
+	}
+
+	private toolMap(): Map<string, AgentTool<any>> {
+		this.toolMapMemo ??= buildToolMap(this.context.tools);
+		return this.toolMapMemo;
+	}
+
+	/** Fire-and-forget: start a speculative prepare+execute for a just-completed streamed call. */
+	maybeStart(toolCall: AgentToolCall, partialMessage: AssistantMessage): void {
+		if (isSpeculativeToolsDisabled() || isBatchPartitionDisabled()) return;
+		if (this.config.toolExecution === "sequential") return;
+		if (this.signal?.aborted || this.entries.has(toolCall.id)) return;
+		const tool = this.toolMap().get(toolCall.name);
+		if (!tool || tool.speculationSafe !== true || tool.executionMode === "sequential") return;
+		if (this.config.canSpeculateToolCall?.(toolCall) === false) return;
+
+		const { signal: toolSignal, release } = makePerToolSignal(toolCall.id, this.signal, this.config);
+		const events: AgentEvent[] = [];
+		const bufferEmit: AgentEventSink = (event) => {
+			events.push(event);
+		};
+		const outcome = (async (): Promise<SpeculativeOutcome> => {
+			const preparation = await prepareToolCall(
+				this.context,
+				partialMessage,
+				toolCall,
+				this.toolMap(),
+				this.config,
+				toolSignal,
+				bufferEmit,
+			);
+			if (preparation.kind === "immediate") return { preparation, executed: undefined, events };
+			const executed = await executePreparedToolCall(preparation, toolSignal, bufferEmit, this.config);
+			return { preparation, executed, events };
+		})();
+		this.entries.set(toolCall.id, {
+			toolCall,
+			argsJson: safeArgsFingerprint(toolCall.arguments),
+			outcome,
+			release,
+		});
+	}
+
+	/**
+	 * Hand a speculation to the consuming executor. A name/args fingerprint
+	 * mismatch against the FINAL message's call (provider edge) discards the
+	 * entry and returns undefined so the normal path re-prepares from scratch.
+	 * The caller owns `release()` after awaiting `outcome`.
+	 */
+	take(toolCall: AgentToolCall): SpeculativeEntry | undefined {
+		const entry = this.entries.get(toolCall.id);
+		if (!entry) return undefined;
+		this.entries.delete(toolCall.id);
+		if (entry.toolCall.name !== toolCall.name || entry.argsJson !== safeArgsFingerprint(toolCall.arguments)) {
+			this.discardEntry(entry);
+			return undefined;
+		}
+		return entry;
+	}
+
+	/** Reap every un-consumed speculation: drop buffered events, run per-tool cleanup. */
+	discardLeftovers(): void {
+		for (const entry of this.entries.values()) {
+			this.discardEntry(entry);
+		}
+		this.entries.clear();
+	}
+
+	private discardEntry(entry: SpeculativeEntry): void {
+		// Trip the per-tool controller (when a registry is wired) so an in-flight
+		// execute stops doing work nobody will read; cleanup runs on settle.
+		this.config.toolAbortControllers?.get(entry.toolCall.id)?.abort();
+		void entry.outcome
+			.then((outcome) => {
+				entry.release();
+				const tool = this.toolMap().get(entry.toolCall.name);
+				const args = outcome.preparation.kind === "prepared" ? outcome.preparation.args : entry.toolCall.arguments;
+				try {
+					tool?.onSpeculationDiscarded?.(entry.toolCall.id, args);
+				} catch {
+					// Cleanup is best-effort; a throwing hook must never surface.
+				}
+			})
+			.catch(() => entry.release());
+	}
 }
 
 async function executeToolCallsSequential(
@@ -1287,6 +1490,104 @@ async function executeToolCallsSequential(
 	};
 }
 
+/** Phase-1 output shared by the two parallel executors. */
+type PhaseOnePreparation = {
+	toolCall: AgentToolCall;
+	preparation: PreparedToolCall | ImmediateToolCallOutcome;
+	/** Present when a speculative run already executed this call during the stream (P1). */
+	specExecuted?: ExecutedToolCallOutcome;
+};
+
+/**
+ * Phase 1 of the parallel executors: emit start, then either consume a settled
+ * speculative run (replaying its buffered events in this call's normal
+ * transcript position — consumption NEVER re-runs the prepare funnel, so hooks
+ * with side effects fire exactly once) or run the normal prepare.
+ */
+async function prepareParallelCall(
+	currentContext: AgentContext,
+	assistantMessage: AssistantMessage,
+	toolCall: AgentToolCall,
+	toolMap: Map<string, AgentTool<any>>,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+	speculation: SpeculationController | undefined,
+): Promise<PhaseOnePreparation> {
+	await emit({
+		type: "tool_execution_start",
+		toolCallId: toolCall.id,
+		toolName: toolCall.name,
+		args: toolCall.arguments,
+	});
+	const spec = speculation?.take(toolCall);
+	if (spec) {
+		const outcome = await spec.outcome;
+		spec.release();
+		for (const event of outcome.events) {
+			await emit(event);
+		}
+		return { toolCall, preparation: outcome.preparation, specExecuted: outcome.executed };
+	}
+	const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, toolMap, config, signal, emit);
+	return { toolCall, preparation };
+}
+
+/**
+ * Phase 2 of the parallel executors: execute (unless a speculative run already
+ * did) and finalize. Identical flow/emissions to the pre-P1 inline bodies.
+ */
+async function finalizeParallelCall(
+	currentContext: AgentContext,
+	assistantMessage: AssistantMessage,
+	phaseOne: PhaseOnePreparation,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+): Promise<FinalizedToolCallOutcome> {
+	const { toolCall, preparation, specExecuted } = phaseOne;
+	if (preparation.kind === "immediate") {
+		const finalized = await finalizeImmediatePreparation(toolCall, preparation, config, emit);
+		await emitToolExecutionEnd(finalized, emit);
+		return finalized;
+	}
+	if (specExecuted) {
+		// P1: executed during the stream; finalize in the normal position. The
+		// speculative per-tool signal was already released at consumption.
+		const finalized = await finalizeExecutedToolCall(
+			currentContext,
+			assistantMessage,
+			preparation,
+			specExecuted,
+			config,
+			signal,
+			emit,
+		);
+		await emitToolExecutionEnd(finalized, emit);
+		return finalized;
+	}
+	// Per-tool abort: run this tool under a signal that a single
+	// cancelTool(id) can trip, while a run abort still cancels it
+	// (AbortSignal.any inside makePerToolSignal).
+	const { signal: toolSignal, release } = makePerToolSignal(toolCall.id, signal, config);
+	try {
+		const executed = await executePreparedToolCall(preparation, toolSignal, emit, config);
+		const finalized = await finalizeExecutedToolCall(
+			currentContext,
+			assistantMessage,
+			preparation,
+			executed,
+			config,
+			toolSignal,
+			emit,
+		);
+		await emitToolExecutionEnd(finalized, emit);
+		return finalized;
+	} finally {
+		release();
+	}
+}
+
 async function executeToolCallsParallel(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
@@ -1295,58 +1596,20 @@ async function executeToolCallsParallel(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
+	speculation?: SpeculationController,
 ): Promise<ExecutedToolCallBatch> {
 	// Run preparation in parallel: emit start + prepare per tool concurrently.
 	// beforeToolCall hook (potentially IO) no longer serializes the batch.
 	const preparations = await Promise.all(
-		toolCalls.map(async (toolCall) => {
-			await emit({
-				type: "tool_execution_start",
-				toolCallId: toolCall.id,
-				toolName: toolCall.name,
-				args: toolCall.arguments,
-			});
-			const preparation = await prepareToolCall(
-				currentContext,
-				assistantMessage,
-				toolCall,
-				toolMap,
-				config,
-				signal,
-				emit,
-			);
-			return { toolCall, preparation };
-		}),
+		toolCalls.map((toolCall) =>
+			prepareParallelCall(currentContext, assistantMessage, toolCall, toolMap, config, signal, emit, speculation),
+		),
 	);
 
 	const orderedFinalizedCalls = await Promise.all(
-		preparations.map(async ({ toolCall, preparation }) => {
-			if (preparation.kind === "immediate") {
-				const finalized = await finalizeImmediatePreparation(toolCall, preparation, config, emit);
-				await emitToolExecutionEnd(finalized, emit);
-				return finalized;
-			}
-			// Per-tool abort: run this tool under a signal that a single
-			// cancelTool(id) can trip, while a run abort still cancels it
-			// (AbortSignal.any inside makePerToolSignal).
-			const { signal: toolSignal, release } = makePerToolSignal(toolCall.id, signal, config);
-			try {
-				const executed = await executePreparedToolCall(preparation, toolSignal, emit, config);
-				const finalized = await finalizeExecutedToolCall(
-					currentContext,
-					assistantMessage,
-					preparation,
-					executed,
-					config,
-					toolSignal,
-					emit,
-				);
-				await emitToolExecutionEnd(finalized, emit);
-				return finalized;
-			} finally {
-				release();
-			}
-		}),
+		preparations.map((phaseOne) =>
+			finalizeParallelCall(currentContext, assistantMessage, phaseOne, config, signal, emit),
+		),
 	);
 	const messages = orderedFinalizedCalls.map(createToolResultMessage);
 	// Serial emit (not Promise.all): listeners persist messages by mutating the
@@ -1390,6 +1653,7 @@ async function executeToolCallsPartitioned(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
+	speculation?: SpeculationController,
 ): Promise<ExecutedToolCallBatch> {
 	// Partition by original index so results can be re-interleaved afterward.
 	const parallelIndices: number[] = [];
@@ -1405,50 +1669,14 @@ async function executeToolCallsPartitioned(
 	// minus the result-message emit (deferred to the merged replay below). ---
 	const parallelCalls = parallelIndices.map((i) => toolCalls[i]);
 	const preparations = await Promise.all(
-		parallelCalls.map(async (toolCall) => {
-			await emit({
-				type: "tool_execution_start",
-				toolCallId: toolCall.id,
-				toolName: toolCall.name,
-				args: toolCall.arguments,
-			});
-			const preparation = await prepareToolCall(
-				currentContext,
-				assistantMessage,
-				toolCall,
-				toolMap,
-				config,
-				signal,
-				emit,
-			);
-			return { toolCall, preparation };
-		}),
+		parallelCalls.map((toolCall) =>
+			prepareParallelCall(currentContext, assistantMessage, toolCall, toolMap, config, signal, emit, speculation),
+		),
 	);
 	const parallelFinalized = await Promise.all(
-		preparations.map(async ({ toolCall, preparation }) => {
-			if (preparation.kind === "immediate") {
-				const finalized = await finalizeImmediatePreparation(toolCall, preparation, config, emit);
-				await emitToolExecutionEnd(finalized, emit);
-				return finalized;
-			}
-			const { signal: toolSignal, release } = makePerToolSignal(toolCall.id, signal, config);
-			try {
-				const executed = await executePreparedToolCall(preparation, toolSignal, emit, config);
-				const finalized = await finalizeExecutedToolCall(
-					currentContext,
-					assistantMessage,
-					preparation,
-					executed,
-					config,
-					toolSignal,
-					emit,
-				);
-				await emitToolExecutionEnd(finalized, emit);
-				return finalized;
-			} finally {
-				release();
-			}
-		}),
+		preparations.map((phaseOne) =>
+			finalizeParallelCall(currentContext, assistantMessage, phaseOne, config, signal, emit),
+		),
 	);
 	parallelIndices.forEach((origIdx, k) => {
 		finalizedByIndex[origIdx] = parallelFinalized[k];

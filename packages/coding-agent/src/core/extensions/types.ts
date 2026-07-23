@@ -472,6 +472,23 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	executionMode?: ToolExecutionMode;
 
 	/**
+	 * P1 speculative execution: marks this tool as safe to execute while the
+	 * assistant message is still streaming (side-effect-free on the world AND
+	 * idempotent — a speculative run may be discarded and later re-executed).
+	 * Built-ins are stamped centrally from the registry allowlist in
+	 * tools/index.ts `buildTool`; a definition-level `true` also works.
+	 */
+	speculationSafe?: boolean;
+
+	/**
+	 * P1 cleanup hook: invoked when a speculative execution of this tool was
+	 * DISCARDED (result never delivered to the model). Undo in-process
+	 * bookkeeping the execute performed (e.g. read's dedupe-store record).
+	 * Failures are swallowed by the loop.
+	 */
+	onSpeculationDiscarded?: (toolCallId: string, args: unknown) => void;
+
+	/**
 	 * Side-effect class for plan-mode gating (and docs).
 	 * - "none": read-only / session bookkeeping safe in plan (todo, ask, …)
 	 * - "workspace": mutates files on disk
