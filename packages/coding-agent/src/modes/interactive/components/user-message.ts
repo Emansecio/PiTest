@@ -24,10 +24,11 @@ const OSC133_PROMPT_END = "\x1b]133;B\x07"; // FTCS B: command entered / end of 
 /**
  * Component that renders a user message.
  *
- * Layout: the unified `MessageShell` with a blue (`gutterUser`) gutter using
- * the heavier `▌` glyph and no label — weight + color are two redundant
- * signals for "what I asked", since several other block types also carry a
- * thin colored `│`. No background fill (D1=B), no internal padding. The
+ * Layout: the unified `MessageShell` with a delicate green (`gutterUser`)
+ * marker — the thin `❯` prompt glyph, dim, one column, echoing the editor's
+ * own `❯` so a sent message reads as "what I typed at the prompt". No label,
+ * no background fill (D1=B), no internal padding, and no heavy `▌` block: the
+ * old thick cyan gutter is gone, replaced by a minimal accent tick. The
  * markdown body shares the assistant's reading column so a long prompt and
  * its answer wrap at the same measure on wide terminals.
  *
@@ -54,7 +55,7 @@ export class UserMessageComponent extends MessageShell {
 	) {
 		super({
 			gutterColor: (content: string) => theme.fg("gutterUser", content),
-			gutterChar: "▌",
+			gutterChar: "❯",
 		});
 		const markdown = new Markdown(text, 0, 0, markdownTheme, {
 			color: (content: string) => theme.fg("userMessageText", content),

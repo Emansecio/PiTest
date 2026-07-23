@@ -1,37 +1,55 @@
 /**
- * PetCompanion — the mid-conversation mascot that perches to the right of the
- * input editor. A tiny half-block render of the shared pet geometry
- * ({@link @pit/tui} `renderPetCells`) whose eyes animate with the agent's mood
- * ({@link PetMood}).
+ * PetCompanion — the mid-conversation mascot that perches on its OWN rows
+ * directly above the input editor, aligned to the right edge ("perched" on the
+ * composer box). Its eyes animate with the agent's mood ({@link PetMood}).
  *
- * WHY CELLS, NOT SIXEL: the companion shares terminal rows with the editor
- * frame (they are composited side-by-side by {@link ComposerChrome}). A sixel
- * DCS anywhere on a line makes the renderer treat the WHOLE line as an image
- * (`isImageLine`), which would break the editor half of that row (no width
- * measuring, no cell diff). Half-block cells are ordinary colored text: they
- * composite beside the editor and diff cleanly. The editor region is also
- * repainted every frame and never scrolls into history, so — unlike a pinned
- * body overlay — there is no ghosting to design around.
+ * WHERE / HOW IT DRAWS: the pet owns dedicated rows in the composer perch (see
+ * {@link ComposerChrome.setPerch}), so — unlike the old side-gutter companion
+ * that shared rows with the editor — it can render at full sprite resolution:
  *
- * The component memoizes its rendered lines by (width, quantized params,
- * colors) so a frame where nothing about the pet changed hands back the SAME
- * array reference, letting the ComposerChrome cache hit while the pet sits idle.
+ *   - SIXEL when {@link getSixelSupport}: reuses the proven startup-screen
+ *     pattern. `PET_PERCH_SIXEL_ROWS - 1` blank rows plus a final image line
+ *     that self-clears the reserved rows and pins the cursor with DECSC/DECRC,
+ *     so the transparent sprite draws into its rows without disturbing the
+ *     renderer's row accounting (see {@link buildPetSixelLines} in
+ *     startup-screen.ts for the full rationale). `isImageLine()` keeps the
+ *     differential renderer from measuring or slicing that row.
+ *   - half-block CELLS otherwise: a small anti-aliased block, right-aligned.
+ *
+ * The pet no longer shares a terminal row with the editor, so the sixel-vs-cell
+ * choice is now purely about fidelity — sixel is the crisp default and cells are
+ * the universal fallback (the old low-res "rock" beside the input is gone).
+ *
+ * Moods/state machine ({@link PetMood}) are untouched; only the sprite's
+ * placement and renderer changed.
+ *
+ * The component memoizes its rendered lines by (width, sixel-vs-cell, quantized
+ * params, colors) so a frame where nothing about the pet changed hands back the
+ * SAME array reference, letting the ComposerChrome cache hit while the pet idles.
  */
 
 import { performance } from "node:perf_hooks";
-import { type Component, type PetColors, type PetParams, renderPetCells } from "@pit/tui";
+import {
+	type Component,
+	getCellDimensions,
+	getSixelSupport,
+	type PetColors,
+	type PetParams,
+	renderPetCells,
+	renderPetSixel,
+} from "@pit/tui";
 import { PetMood, type PetMoodOptions, type PetMoodState } from "./pet-mood.ts";
 
-/** Half-block width of the mascot (cells). */
-export const PET_COMPANION_COLS = 12;
-/** Height of the mascot in rows — matches a single-line editor's framed height. */
-export const PET_COMPANION_ROWS = 3;
-/** Breathing space between the editor's right border and the pet. */
-export const PET_COMPANION_GAP = 2;
-/** Total columns the companion reserves beside the editor (pet + gap). */
-export const PET_COMPANION_FOOTPRINT = PET_COMPANION_COLS + PET_COMPANION_GAP;
-/** Below this terminal width the companion hides and the editor reclaims the space. */
+/** Below this terminal width the perch hides and the editor keeps the full width. */
 export const PET_COMPANION_MIN_COLS = 100;
+
+/** Reserved rows for the sixel perch; pixel height derives from the cell size. */
+export const PET_PERCH_SIXEL_ROWS = 3;
+/** Sixel canvas aspect (width : height). ~96×48px on a standard 16px cell. */
+const PET_PERCH_ASPECT = 2;
+/** Half-block cell fallback footprint (rows × cols). */
+export const PET_PERCH_CELL_ROWS = 4;
+export const PET_PERCH_CELL_COLS = 16;
 
 export interface PetCompanionOptions extends PetMoodOptions {
 	/** Resolved pet colors, read fresh each render so a theme switch is picked up. */
@@ -47,7 +65,7 @@ export class PetCompanion implements Component {
 	private readonly reducedMotion: boolean;
 	// Dirty-tracking for the ticker: last quantized frame key requested a render for.
 	private lastTickKey = "";
-	// Render memo: identical (width, params, colors) hands back the same array.
+	// Render memo: identical (width, mode, params, colors) hands back the same array.
 	private renderKey = "";
 	private renderLines: string[] = [];
 
@@ -91,18 +109,49 @@ export class PetCompanion implements Component {
 	}
 
 	render(width: number): string[] {
-		const cols = Math.max(1, Math.min(width, PET_COMPANION_COLS));
 		const params = this.mood.params(this.clock());
 		const colors = this.getColors();
-		const key = `${cols}|${this.frameKey(params)}|${colors.stroke.join(",")}|${colors.eye.join(",")}|${colors.bg.join(",")}`;
+		const sixel = getSixelSupport();
+		const key = `${width}|${sixel ? "s" : "c"}|${this.frameKey(params)}|${colors.stroke.join(",")}|${colors.eye.join(",")}|${colors.bg.join(",")}`;
 		if (key === this.renderKey) return this.renderLines;
 		this.renderKey = key;
-		this.renderLines = renderPetCells(cols, PET_COMPANION_ROWS, {
+		this.renderLines = sixel
+			? this.renderPerchSixel(width, colors, params)
+			: this.renderPerchCells(width, colors, params);
+		return this.renderLines;
+	}
+
+	/**
+	 * Sixel perch: `PET_PERCH_SIXEL_ROWS` lines, right-aligned so the pet sits on
+	 * the box's top-right corner. The last line carries the image and self-clears
+	 * ALL reserved rows before redrawing (DECSC → clear-up → sixel → DECRC), the
+	 * exact pattern proven by startup-screen.ts's `buildPetSixelLines`.
+	 */
+	private renderPerchSixel(width: number, colors: PetColors, params: PetParams): string[] {
+		const cell = getCellDimensions();
+		const heightPx = PET_PERCH_SIXEL_ROWS * cell.heightPx;
+		const widthPx = Math.round(heightPx * PET_PERCH_ASPECT);
+		const petCols = Math.ceil(widthPx / Math.max(1, cell.widthPx));
+		const leftPad = Math.max(0, width - petCols);
+		const sixel = renderPetSixel(widthPx, heightPx, { blinkK: params.blinkK, eyeShift: params.eyeShift, colors });
+
+		const lines: string[] = [];
+		for (let i = 0; i < PET_PERCH_SIXEL_ROWS - 1; i++) lines.push("");
+		const clearUp = "\x1b[1A\x1b[2K".repeat(PET_PERCH_SIXEL_ROWS - 1);
+		lines.push(`${" ".repeat(leftPad)}\x1b7\x1b[2K${clearUp}${sixel}\x1b8`);
+		return lines;
+	}
+
+	/** Half-block cell fallback: a small right-aligned sprite block. */
+	private renderPerchCells(width: number, colors: PetColors, params: PetParams): string[] {
+		const cols = Math.max(1, Math.min(width, PET_PERCH_CELL_COLS));
+		const cells = renderPetCells(cols, PET_PERCH_CELL_ROWS, {
 			blinkK: params.blinkK,
 			eyeShift: params.eyeShift,
 			colors,
 		});
-		return this.renderLines;
+		const pad = " ".repeat(Math.max(0, width - cols));
+		return cells.map((line) => pad + line);
 	}
 }
 

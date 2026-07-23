@@ -4,8 +4,8 @@ import { describe, expect, test } from "vitest";
 import { ComposerChrome } from "../src/modes/interactive/components/composer-chrome.ts";
 import {
 	createPetCompanion,
-	PET_COMPANION_FOOTPRINT,
 	PET_COMPANION_MIN_COLS,
+	PET_PERCH_CELL_ROWS,
 } from "../src/modes/interactive/components/pet-companion.ts";
 
 function plain(lines: string[]): string[] {
@@ -64,35 +64,38 @@ describe("ComposerChrome", () => {
 	});
 });
 
-describe("ComposerChrome pet gutter", () => {
+describe("ComposerChrome pet perch", () => {
 	function build(visiblePredicate = (w: number) => w >= PET_COMPANION_MIN_COLS) {
 		const content = new WidthProbe();
 		const footer = new Text("workspace · model · tokens", 0, 0);
 		const composer = new ComposerChrome(content, footer);
 		const pet = createPetCompanion({ getColors: () => PET_COLORS });
-		composer.setRightGutter(pet, PET_COMPANION_FOOTPRINT, visiblePredicate);
+		composer.setPerch(pet, visiblePredicate);
 		return { composer, content };
 	}
 
-	test("perches the pet beside the editor and narrows the content at cols=120", () => {
+	test("perches the pet on its own rows ABOVE the editor at cols=120", () => {
 		const { composer, content } = build();
 		const raw = composer.render(120);
 		const lines = plain(raw);
-		// The pet renders (half-block glyphs) on the content rows.
-		expect(hasPetGlyph(lines.slice(0, -1))).toBe(true);
-		// The content gave up exactly the pet footprint — no border columns reserved.
-		expect(content.lastWidth).toBe(120 - PET_COMPANION_FOOTPRINT);
-		// Every content row still spans the full terminal width (content + gutter).
+		// The pet renders (half-block glyphs) on the TOP rows — its own perch,
+		// above the editor content (cells fallback: getSixelSupport() is false in tests).
+		expect(hasPetGlyph(lines.slice(0, PET_PERCH_CELL_ROWS))).toBe(true);
+		// The editor keeps the FULL width — the perch borrows no columns from it.
+		expect(content.lastWidth).toBe(120);
+		// The editor row sits below the perch; the "input" text is not on a perch row.
+		expect(hasPetGlyph([lines.at(-2)!])).toBe(false);
+		expect(plain([lines.at(-2)!])[0]).toContain("input");
+		// Every perch + content row spans the full terminal width; footer is free to be shorter.
 		for (const line of lines.slice(0, -1)) expect(visibleWidth(line)).toBe(120);
-		// The footer keeps the FULL width — the pet only borrows from the content.
 		expect(visibleWidth(lines.at(-1)!)).toBeLessThanOrEqual(120);
 	});
 
-	test("hides the pet and restores full editor width at cols=80", () => {
+	test("hides the pet and keeps the plain composer at cols=80", () => {
 		const { composer, content } = build();
 		const lines = plain(composer.render(80));
 		expect(hasPetGlyph(lines)).toBe(false);
-		// Content reclaims the whole width — no border columns to give back either.
+		// No perch rows: editor content row then footer only.
 		expect(content.lastWidth).toBe(80);
 		expect(visibleWidth(lines[0]!)).toBe(80);
 	});
@@ -100,19 +103,18 @@ describe("ComposerChrome pet gutter", () => {
 	test("cedes to a modal: the visibility predicate can hide the pet even when wide", () => {
 		let modalOpen = false;
 		const { composer, content } = build((w) => w >= PET_COMPANION_MIN_COLS && !modalOpen);
-		expect(hasPetGlyph(plain(composer.render(120)).slice(0, -1))).toBe(true);
+		expect(hasPetGlyph(plain(composer.render(120)).slice(0, PET_PERCH_CELL_ROWS))).toBe(true);
 		modalOpen = true;
 		const hidden = plain(composer.render(120));
 		expect(hasPetGlyph(hidden)).toBe(false);
-		// Editor recovers the full content width while the pet is ceded.
+		// Editor keeps the full width whether or not the perch is shown.
 		expect(content.lastWidth).toBe(120);
 	});
 
-	test("clearing the gutter restores the plain composer", () => {
+	test("clearing the perch restores the plain composer", () => {
 		const { composer, content } = build();
-		composer.render(120);
-		expect(content.lastWidth).toBe(120 - PET_COMPANION_FOOTPRINT);
-		composer.setRightGutter(undefined);
+		expect(hasPetGlyph(plain(composer.render(120)).slice(0, PET_PERCH_CELL_ROWS))).toBe(true);
+		composer.setPerch(undefined);
 		expect(hasPetGlyph(plain(composer.render(120)))).toBe(false);
 		expect(content.lastWidth).toBe(120);
 	});

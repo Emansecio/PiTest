@@ -194,12 +194,7 @@ import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.ts";
 import { OverthinkSteerMessageComponent } from "./components/overthink-steer-message.ts";
 import { PendingUserMessageComponent } from "./components/pending-user-message.ts";
-import {
-	createPetCompanion,
-	PET_COMPANION_FOOTPRINT,
-	PET_COMPANION_MIN_COLS,
-	type PetCompanion,
-} from "./components/pet-companion.ts";
+import { createPetCompanion, PET_COMPANION_MIN_COLS, type PetCompanion } from "./components/pet-companion.ts";
 import { RewindSelectorComponent } from "./components/rewind-selector.ts";
 import { SendNowChooser } from "./components/send-now-chooser.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
@@ -1771,12 +1766,12 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Create the pet companion and hang it off the composer as a right-gutter
-	 * decoration beside the input frame. Off entirely under `PIT_NO_PET`. Hidden
-	 * on the welcome (which has its own hero pet), while a modal overlay is up, and
-	 * in narrow terminals (< {@link PET_COMPANION_MIN_COLS} cols) — where the
-	 * editor reclaims the full width. Under reduced motion the pet renders static
-	 * (eyes open) and no ticker is subscribed.
+	 * Create the pet companion and hang it off the composer as a PERCH — its own
+	 * rows directly above the input, aligned to the box's right edge. Off entirely
+	 * under `PIT_NO_PET`. Hidden on the welcome (which has its own hero pet), while
+	 * a modal overlay is up, and in narrow terminals (< {@link PET_COMPANION_MIN_COLS}
+	 * cols) — where the editor keeps the full width and the perch collapses. Under
+	 * reduced motion the pet renders static (eyes open) and no ticker is subscribed.
 	 */
 	private setupPetCompanion(): void {
 		if (isTruthyEnvFlag(process.env.PIT_NO_PET)) return;
@@ -1786,9 +1781,8 @@ export class InteractiveMode {
 			reducedMotion,
 		});
 		this.petCompanion = pet;
-		this.composerChrome.setRightGutter(
+		this.composerChrome.setPerch(
 			pet,
-			PET_COMPANION_FOOTPRINT,
 			(width) => width >= PET_COMPANION_MIN_COLS && !this.welcomeActive && !this.ui.hasCapturingOverlay(),
 		);
 		if (!reducedMotion) {
@@ -8447,7 +8441,7 @@ Customize: \`${keybindingsPath}\` — \`/reload\` to apply.
 		this.stopStartupAnimation();
 		this.petCompanionUnsub?.();
 		this.petCompanionUnsub = undefined;
-		this.composerChrome.setRightGutter(undefined);
+		this.composerChrome.setPerch(undefined);
 		this.petCompanion = undefined;
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();

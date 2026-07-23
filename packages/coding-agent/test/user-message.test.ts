@@ -7,11 +7,11 @@ const OSC133_PROMPT_START = "\x1b]133;A\x07"; // FTCS A: prompt start
 const OSC133_PROMPT_END = "\x1b]133;B\x07"; // FTCS B: command entered
 const OSC133_OUTPUT_START = "\x1b]133;C\x07"; // FTCS C: belongs to the assistant, not here
 
-// Gutter character used by the user role: the heavier `▌` (vs the shell's
-// default `│`) so the user's prompt is scannable by weight as well as color.
-// Duplicating the literal here keeps the test independent of the shell module
-// surface.
-const GUTTER_CHAR = "▌";
+// Gutter character used by the user role: the delicate `❯` prompt tick (vs the
+// shell's default `│`) — a minimal 1-column green marker echoing the editor's
+// own prompt glyph, replacing the old heavy `▌` block. Duplicating the literal
+// here keeps the test independent of the shell module surface.
+const GUTTER_CHAR = "❯";
 
 describe("UserMessageComponent", () => {
 	test("renders the message text on a gutter-prefixed line", () => {

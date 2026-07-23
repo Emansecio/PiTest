@@ -1503,9 +1503,9 @@ export function getEditorTheme(): EditorTheme {
 	return {
 		borderColor: (text: string) => theme.fg("border", text),
 		selectList: getSelectListTheme(),
-		// Slash commands (`/chrome`, …) render their leading token in blue,
-		// matching Claude Code's input. `border` resolves to the blue var in
-		// both built-in themes.
+		// Slash commands (`/chrome`, …) render their leading token in the accent
+		// border color — `border` resolves to the green accent-border var in both
+		// built-in themes, keeping the input chrome inside the green family.
 		commandColor: (text: string) => theme.fg("border", text),
 		placeholderColor: (t) => theme.fg("dim", t),
 	};

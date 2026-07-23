@@ -5,16 +5,17 @@ interface ComposerCache {
 	contentLines: string[];
 	lowerLines: string[];
 	footerLines: string[];
-	gutterActive: boolean;
-	gutterLines: string[];
+	perchActive: boolean;
+	perchLines: string[];
 	lines: string[];
 }
 
 /**
- * Unframed composer: stacks the editor content, optional lower widgets, and the
- * footer strip flush-left at the full requested width — no boxed border. The mode
- * signal the border used to carry (bash/plan/accent) now rides on the editor's own
- * `❯` prompt glyph and leading `!` bang-prefix (see custom-editor/interactive-mode's
+ * Unframed composer: stacks an optional perch decoration (the pet companion),
+ * the editor content, optional lower widgets, and the footer strip flush-left at
+ * the full requested width — no boxed border. The mode signal the border used to
+ * carry (bash/plan/accent) now rides on the editor's own `❯` prompt glyph and
+ * leading `!` bang-prefix (see custom-editor/interactive-mode's
  * `updateEditorBorderColor`), so there is nothing left for this component to color.
  */
 export class ComposerChrome implements Component {
@@ -22,12 +23,13 @@ export class ComposerChrome implements Component {
 	private readonly lowerContent: Component | undefined;
 	private footer: Component;
 	private cache: ComposerCache | undefined;
-	// Optional decoration composited to the RIGHT of the input (the pet
-	// companion). It only borrows columns from the content — never from the
-	// footer strip below, which always spans the full width.
-	private rightGutter: Component | undefined;
-	private rightGutterFootprint = 0;
-	private rightGutterVisible: ((width: number) => boolean) | undefined;
+	// Optional decoration painted ABOVE the input on its own rows — the pet
+	// companion, "perched" on top of the composer box. Unlike a side gutter it
+	// borrows no columns from the editor: it spans the full width and
+	// right-aligns its sprite. Its rows pass through VERBATIM (no truncate/pad)
+	// so a sixel image line survives — the pet decides sixel vs. half-block cells.
+	private perch: Component | undefined;
+	private perchVisible: ((width: number) => boolean) | undefined;
 
 	constructor(content: Component, footer: Component, lowerContent?: Component) {
 		this.content = content;
@@ -42,15 +44,14 @@ export class ComposerChrome implements Component {
 	}
 
 	/**
-	 * Attach (or clear, with `component: undefined`) a decoration painted beside
-	 * the input. `footprint` is the total columns reserved for it (glyph +
-	 * breathing gap); `visible` gates it per-frame on the current width. Only the
-	 * content narrows to make room — the footer keeps the full width.
+	 * Attach (or clear, with `component: undefined`) a decoration painted on its
+	 * own rows directly above the input. `visible` gates it per-frame on the
+	 * current width (so the pet hides on narrow terminals / while a modal is up).
+	 * The editor keeps its full width — the perch never narrows the content.
 	 */
-	setRightGutter(component: Component | undefined, footprint = 0, visible?: (width: number) => boolean): void {
-		this.rightGutter = component;
-		this.rightGutterFootprint = Math.max(0, footprint);
-		this.rightGutterVisible = visible;
+	setPerch(component: Component | undefined, visible?: (width: number) => boolean): void {
+		this.perch = component;
+		this.perchVisible = visible;
 		this.cache = undefined;
 	}
 
@@ -59,25 +60,17 @@ export class ComposerChrome implements Component {
 		this.content.invalidate?.();
 		this.lowerContent?.invalidate?.();
 		this.footer.invalidate?.();
-		this.rightGutter?.invalidate?.();
+		this.perch?.invalidate?.();
 	}
 
 	render(width: number): string[] {
-		// The gutter only ever borrows from content wide enough to still leave the
-		// editor a usable column after the reservation.
-		const gutterActive =
-			!!this.rightGutter &&
-			this.rightGutterFootprint > 0 &&
-			width - this.rightGutterFootprint >= 1 &&
-			(this.rightGutterVisible?.(width) ?? true);
-		const gutterFootprint = gutterActive ? this.rightGutterFootprint : 0;
-		const contentWidth = Math.max(1, width - gutterFootprint);
-
+		const contentWidth = Math.max(1, width);
 		const contentLines = this.content.render(contentWidth);
 		const lowerLines = this.lowerContent?.render(contentWidth) ?? [];
 		const footerWidth = Math.max(1, width);
 		const footerLines = this.footer.render(footerWidth);
-		const gutterLines = gutterActive ? this.rightGutter!.render(gutterFootprint) : [];
+		const perchActive = !!this.perch && (this.perchVisible?.(width) ?? true);
+		const perchLines = perchActive ? this.perch!.render(width) : [];
 		const cache = this.cache;
 		if (
 			cache &&
@@ -85,54 +78,27 @@ export class ComposerChrome implements Component {
 			cache.contentLines === contentLines &&
 			cache.lowerLines === lowerLines &&
 			cache.footerLines === footerLines &&
-			cache.gutterActive === gutterActive &&
-			cache.gutterLines === gutterLines
+			cache.perchActive === perchActive &&
+			cache.perchLines === perchLines
 		) {
 			return cache.lines;
 		}
 
 		const footerStrip = footerLines.map((line) => truncateToWidth(line, footerWidth));
-		// Pad every content/lower row to the full content width — cosmetically
-		// unnecessary alone, but required when the pet gutter rides alongside: rows
-		// of differing length would otherwise shift the gutter's column per row.
+		// Pad every content/lower row to the full width — the editor rows read as a
+		// filled surface and, when the perch rides above, keep a stable width so the
+		// pet's right edge does not appear to jitter between frames of differing text.
 		const padToContentWidth = (line: string): string => {
 			const truncated = truncateToWidth(line, contentWidth);
 			return `${truncated}${" ".repeat(Math.max(0, contentWidth - visibleWidth(truncated)))}`;
 		};
-		let body = [...contentLines, ...lowerLines].map(padToContentWidth);
+		const body = [...contentLines, ...lowerLines].map(padToContentWidth);
 
-		// With no boxed frame, a single-line (or otherwise short) input no longer
-		// gets 2 free border rows to lend the gutter. Center the real content
-		// within the gutter's row span instead (blank content-width rows above
-		// and below) so a fixed-height decoration like the pet companion still
-		// has room and keeps its old vertical alignment (content on its middle row).
-		if (gutterActive && gutterLines.length > body.length) {
-			const blankRow = " ".repeat(contentWidth);
-			const padCount = gutterLines.length - body.length;
-			const topPad = Math.floor(padCount / 2);
-			const bottomPad = padCount - topPad;
-			body = [...Array(topPad).fill(blankRow), ...body, ...Array(bottomPad).fill(blankRow)];
-		}
+		// Perch rows sit ABOVE the input, verbatim — a sixel image line (or an
+		// already right-aligned cell block) must not be truncated or re-padded.
+		const lines = [...perchLines, ...body, ...footerStrip];
 
-		const lines = gutterActive
-			? body.map((bodyLine, i) => {
-					const gutter =
-						i < gutterLines.length
-							? this.alignGutter(gutterLines[i]!, gutterFootprint)
-							: " ".repeat(gutterFootprint);
-					return `${bodyLine}${gutter}`;
-				})
-			: body;
-		lines.push(...footerStrip);
-
-		this.cache = { width, contentLines, lowerLines, footerLines, gutterActive, gutterLines, lines };
+		this.cache = { width, contentLines, lowerLines, footerLines, perchActive, perchLines, lines };
 		return lines;
-	}
-
-	/** Right-align a gutter line within `footprint` columns (pad on the left). */
-	private alignGutter(line: string, footprint: number): string {
-		const w = visibleWidth(line);
-		if (w >= footprint) return truncateToWidth(line, footprint);
-		return `${" ".repeat(footprint - w)}${line}`;
 	}
 }

@@ -59,9 +59,9 @@ export interface MessageShellOptions {
 	 */
 	gutterColor?: (text: string) => string;
 	/**
-	 * Gutter glyph override (default `│`). The user role passes the heavier
-	 * `▌` so "what I asked" is scannable by weight as well as color — color
-	 * alone is a single 1-column signal shared with several other block types.
+	 * Gutter glyph override (default `│`). The user role passes the delicate
+	 * `❯` prompt tick so a sent message echoes the editor's own prompt glyph —
+	 * a minimal 1-column accent marker rather than the old heavy `▌` block.
 	 */
 	gutterChar?: string;
 	/**
