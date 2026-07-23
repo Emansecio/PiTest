@@ -73,6 +73,45 @@ describe("Loader elapsed with frozen indicator", () => {
 		assert.match(text, /Thinking/);
 	});
 
+	it("renders the detail suffix between the message and the elapsed counter", () => {
+		const t = trackingTui();
+		const loader = new Loader(
+			t.ui,
+			(s) => s,
+			(s) => s,
+			"Thinking…",
+			{ frames: ["⠋"] },
+		);
+		loader.setElapsedEnabled(true);
+		(loader as unknown as { startedAtMs: number }).startedAtMs = Date.now() - 8000;
+		t.tick(0);
+		loader.setDetailSuffix(" ·…tail of the reasoning");
+		loader.setTrailingSuffix(" · hint");
+		const text = loader.render(80).join("\n");
+		const messageIdx = text.indexOf("Thinking…");
+		const detailIdx = text.indexOf("tail of the reasoning");
+		const elapsedIdx = text.indexOf("8s");
+		const hintIdx = text.indexOf("hint");
+		assert.ok(messageIdx >= 0 && detailIdx > messageIdx, "detail suffix follows the message");
+		assert.ok(elapsedIdx > detailIdx, "elapsed counter follows the detail suffix");
+		assert.ok(hintIdx > elapsedIdx, "trailing suffix still renders after elapsed");
+	});
+
+	it("setDetailSuffix is independent of setTrailingSuffix and clears with an empty string", () => {
+		const t = trackingTui();
+		const loader = new Loader(
+			t.ui,
+			(s) => s,
+			(s) => s,
+			"Thinking…",
+			{ frames: ["⠋"] },
+		);
+		loader.setDetailSuffix(" ·…partial thought");
+		assert.match(loader.render(80).join("\n"), /partial thought/);
+		loader.setDetailSuffix("");
+		assert.doesNotMatch(loader.render(80).join("\n"), /partial thought/);
+	});
+
 	it("getElapsedMs discounts paused intervals", () => {
 		const t = trackingTui();
 		const loader = new Loader(

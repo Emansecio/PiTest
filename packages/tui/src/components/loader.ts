@@ -104,6 +104,12 @@ export class Loader extends Text {
 	private elapsedPaused = false;
 	private pausedAtMs = 0;
 
+	// Optional detail segment rendered between the message and the elapsed
+	// counter (e.g. a live "…tail of what's happening now" fragment). Distinct
+	// from `coloredTrailingSuffix`, which renders after the elapsed counter —
+	// this segment sits closer to the phase label. See setDetailSuffix().
+	private coloredDetailSuffix = "";
+
 	// Wraps the inner Text's rendered lines with a leading blank line. The
 	// loader stays visible for the whole streaming turn, so re-allocating this
 	// wrapper array every frame — even when the inner Text returned its cached
@@ -187,6 +193,20 @@ export class Loader extends Text {
 		const next = suffix.length > 0 ? this.messageColorFn(suffix) : "";
 		if (next === this.coloredTrailingSuffix) return;
 		this.coloredTrailingSuffix = next;
+		this.updateDisplay();
+	}
+
+	/**
+	 * Set an optional detail segment rendered between the message and the
+	 * elapsed counter — e.g. a live preview of what the underlying process is
+	 * doing right now. Same coloring convention as {@link setTrailingSuffix}
+	 * (pass an already-ANSI-colored string if a caller needs a color other than
+	 * `messageColorFn`); pass an empty string to hide it.
+	 */
+	setDetailSuffix(suffix: string): void {
+		const next = suffix.length > 0 ? this.messageColorFn(suffix) : "";
+		if (next === this.coloredDetailSuffix) return;
+		this.coloredDetailSuffix = next;
 		this.updateDisplay();
 	}
 
@@ -408,7 +428,7 @@ export class Loader extends Text {
 		const paletteRow = this.coloredFrames[this.paletteIndex] ?? this.coloredFrames[0] ?? [];
 		const renderedFrame = paletteRow[this.currentFrame] ?? rawFrame;
 		const indicator = rawFrame.length > 0 ? `${renderedFrame} ` : "";
-		return `${indicator}${this.coloredMessage}${this.coloredElapsed}${this.coloredTrailingSuffix}`;
+		return `${indicator}${this.coloredMessage}${this.coloredDetailSuffix}${this.coloredElapsed}${this.coloredTrailingSuffix}`;
 	}
 
 	/** Imperative repaint for non-tick changes (message/indicator/elapsed

@@ -44,6 +44,7 @@ type RenderSessionContextThis = {
 	toolOutputExpanded: boolean;
 	isInitialized: boolean;
 	updateEditorBorderColor(): void;
+	gearboxObserveToolEnd(toolName: string, result: unknown, isError: boolean): void;
 	getRegisteredToolDefinition(toolName: string): undefined;
 	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void;
 	setWorkingPhase(label: string): void;
@@ -83,6 +84,9 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		toolOutputExpanded: false,
 		isInitialized: true,
 		updateEditorBorderColor: vi.fn(),
+		// P8b: handleEvent's tool_execution_end branch calls the gearbox observer;
+		// this hand-built `this` needs the stub like the other lifecycle hooks above.
+		gearboxObserveToolEnd: vi.fn(),
 		getRegisteredToolDefinition: (_toolName: string) => undefined,
 		addMessageToChat(message: AgentMessage) {
 			chatContainer.addChild(new Text(message.role, 0, 0));

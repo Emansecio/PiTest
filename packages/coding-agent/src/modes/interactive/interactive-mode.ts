@@ -15,6 +15,7 @@ import {
 } from "@pit/agent-core";
 import {
 	type AssistantMessage,
+	type AssistantMessageEvent,
 	type DiagnosticEvent,
 	getProviders,
 	getRuntimeDiagnostics,
@@ -266,6 +267,7 @@ import {
 	Theme,
 	theme,
 } from "./theme/theme.ts";
+import { deriveThinkingTail } from "./thinking-preview.ts";
 import { buildTurnDoneSnapshot, shouldRenderTurnDone } from "./turn-done-format.ts";
 
 /**
@@ -464,6 +466,20 @@ export class InteractiveMode {
 	private _fusionWriterLoaderActive = false;
 	private workingMessage: string | undefined = undefined;
 	private streamTextCharCount = 0;
+	// Thinking preview (working-loader tail of live extended-thinking text):
+	// raw, unsanitized accumulator for the in-flight assistant stream's
+	// thinking block(s). Ephemeral — never persisted, reset on every new
+	// assistant stream and cleared the moment text/tool activity starts. See
+	// handleThinkingPreviewEvent / clearThinkingPreview.
+	private thinkingPreviewRaw = "";
+	// Date.now() of the last preview repaint actually pushed to the loader,
+	// for the ~300ms throttle in flushThinkingPreview.
+	private thinkingPreviewLastAppliedAt = 0;
+	// Last tail string actually pushed to the loader's detail suffix; lets
+	// applyThinkingPreview skip a redundant Loader call when the throttled
+	// recompute yields the same text. Reset whenever a new Loader instance is
+	// built (createWorkingLoader) so a rebuilt loader always gets repainted.
+	private lastAppliedThinkingPreview = "";
 	// Output tokens accrued in the CURRENT turn from assistant messages that have
 	// already finalized (their usage.output is only known at message_end). Reset to
 	// 0 at agent_start; the in-flight streaming message's partial usage is added on
@@ -2105,6 +2121,79 @@ export class InteractiveMode {
 		this.loadingAnimation.setTrailingSuffix(suffix);
 	}
 
+	/** Minimum gap (ms) between thinking-preview repaints. Piggybacks on the
+	 * natural cadence of thinking_delta message_update events rather than a new
+	 * timer — see PIT_NO_THINKING_PREVIEW for the kill switch. */
+	private static readonly THINKING_PREVIEW_THROTTLE_MS = 300;
+	/** Hard cap on the tail's visible width, independent of terminal size. */
+	private static readonly THINKING_PREVIEW_MAX_WIDTH = 70;
+
+	/** Budget for the thinking-tail text: ~70 cols, or less on a narrow
+	 * terminal after reserving room for the spinner, phase word, separator, and
+	 * the elapsed/interrupt chips sharing the same line. */
+	private thinkingPreviewMaxWidth(): number {
+		const columns = this.ui.terminal.columns || 0;
+		if (columns <= 0) return InteractiveMode.THINKING_PREVIEW_MAX_WIDTH;
+		const reservedForChrome = 30;
+		return Math.max(16, Math.min(InteractiveMode.THINKING_PREVIEW_MAX_WIDTH, columns - reservedForChrome));
+	}
+
+	/** Push a tail string to the loader, deduped against the last value applied
+	 * to the CURRENT loader instance (reset in createWorkingLoader on rebuild). */
+	private applyThinkingPreview(tail: string): void {
+		if (tail === this.lastAppliedThinkingPreview) return;
+		this.lastAppliedThinkingPreview = tail;
+		const suffix = tail.length > 0 ? theme.fg("dim", `${InteractiveMode.LOADER_META_SEP}${tail}`) : "";
+		this.loadingAnimation?.setDetailSuffix(suffix);
+	}
+
+	/** Ephemeral reset: drop the accumulated thinking text and hide the tail.
+	 * Called on every new assistant stream, at the text/tool boundary that ends
+	 * the reasoning phase, and at message/agent end — the preview must never
+	 * survive into the transcript, the token count, or a later turn. */
+	private clearThinkingPreview(): void {
+		this.thinkingPreviewRaw = "";
+		this.thinkingPreviewLastAppliedAt = 0;
+		this.applyThinkingPreview("");
+	}
+
+	/** Recompute and (throttled) repaint the thinking-tail from the accumulated
+	 * raw text. No-op without a live loader — nothing to paint onto. */
+	private flushThinkingPreview(): void {
+		if (!this.loadingAnimation) return;
+		const now = Date.now();
+		if (now - this.thinkingPreviewLastAppliedAt < InteractiveMode.THINKING_PREVIEW_THROTTLE_MS) return;
+		this.thinkingPreviewLastAppliedAt = now;
+		const tail = deriveThinkingTail(this.thinkingPreviewRaw, this.thinkingPreviewMaxWidth());
+		this.applyThinkingPreview(tail);
+	}
+
+	/** Route a raw assistant-stream boundary/delta event into the thinking-tail
+	 * preview. `thinking_delta` accumulates and (throttled) repaints; the
+	 * text/tool start boundary hides the tail — reasoning is done, the turn is
+	 * writing or calling a tool now. Every other event is a no-op here (handled
+	 * elsewhere for its own concern). No-op entirely behind the kill switch. */
+	private handleThinkingPreviewEvent(assistantMessageEvent: AssistantMessageEvent): void {
+		if (isTruthyEnvFlag(process.env.PIT_NO_THINKING_PREVIEW)) return;
+		switch (assistantMessageEvent.type) {
+			case "thinking_delta": {
+				const delta = assistantMessageEvent.delta;
+				// Ignore whitespace-only deltas: no visible content to add, and
+				// skipping avoids a throttle-timer tick + recompute for nothing.
+				if (!delta || delta.trim().length === 0) return;
+				this.thinkingPreviewRaw += delta;
+				this.flushThinkingPreview();
+				break;
+			}
+			case "text_start":
+			case "toolcall_start":
+				this.clearThinkingPreview();
+				break;
+			default:
+				break;
+		}
+	}
+
 	private createWorkingLoader(): Loader {
 		const loader = new Loader(
 			this.ui,
@@ -2128,6 +2217,11 @@ export class InteractiveMode {
 		}
 		loader.setElapsedOrigin(this.workingClockOriginMs);
 		this.resetStreamRateCounters();
+		// A fresh Loader instance starts with an empty detail suffix; drop the
+		// dedupe cache too so the next thinking-preview repaint always pushes to
+		// THIS instance instead of skipping because the tail text happens to
+		// match what the previous (now-discarded) loader last showed.
+		this.lastAppliedThinkingPreview = "";
 		const interruptSuffix = this.getLoaderInterruptSuffix();
 		loader.setTrailingSuffix(interruptSuffix);
 		this.lastAppliedLoaderSuffix = interruptSuffix;
@@ -2153,6 +2247,10 @@ export class InteractiveMode {
 		// Turn settled (or was interrupted): the next loader starts a new clock.
 		this.workingClockOriginMs = undefined;
 		this.resetStreamRateCounters();
+		// No live loader left to paint onto — drop the ephemeral preview state too.
+		this.thinkingPreviewRaw = "";
+		this.thinkingPreviewLastAppliedAt = 0;
+		this.lastAppliedThinkingPreview = "";
 		this.clearStatusContainer();
 	}
 
@@ -3732,6 +3830,10 @@ export class InteractiveMode {
 							this.disposeFusionLive();
 						}
 						this.disposeActiveStreamingComponent();
+						// A new assistant stream begins its own reasoning phase — the
+						// previous message's thinking preview (if any escaped its own
+						// text/tool clear) must not bleed into this one.
+						this.clearThinkingPreview();
 						this.streamingComponent = new AssistantMessageComponent(
 							undefined,
 							this.hideThinkingBlock,
@@ -3768,6 +3870,7 @@ export class InteractiveMode {
 
 			case "message_update":
 				if (this.streamingComponent && event.message.role === "assistant") {
+					this.handleThinkingPreviewEvent(event.assistantMessageEvent);
 					this.streamingMessage = event.message;
 					this.streamingComponent.updateContent(this.streamingMessage);
 					if (this.streamingAttached) {
@@ -3805,6 +3908,10 @@ export class InteractiveMode {
 
 			case "message_end":
 				if (event.message.role === "user") break;
+				// Turn (or this message's part of it) is done: the reasoning phase is
+				// over one way or another. Safety net for the text_start/toolcall_start
+				// clear above — e.g. a message that ends with only a thinking block.
+				this.clearThinkingPreview();
 				if (event.message.role === "assistant" && isStreamGuardAbortMessage(event.message)) {
 					this.disposeActiveStreamingComponent();
 					break;
@@ -3930,6 +4037,9 @@ export class InteractiveMode {
 				this.setTerminalProgress(false);
 				this.clearInterruptWatchdog();
 				this.disposeFusionLive();
+				// Belt-and-suspenders: the turn is over one way or another, so the
+				// preview must not linger into post-turn gates (verification etc.).
+				this.clearThinkingPreview();
 				// A retry keeps the turn alive (pet stays thinking); a real end plays the
 				// double-blink, or the two-shake error tell if the turn errored. Both
 				// transient moods auto-return to idle.
