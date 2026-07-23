@@ -53,7 +53,9 @@ import {
 	type CompactionHost,
 	checkCompaction,
 	checkPresendOverflow,
+	clearSpeculativeCompaction,
 	compactSession,
+	maybeStartSpeculativeCompaction,
 	measureMidTurnWirePressure,
 	resolveCompactModel,
 } from "./agent-session-compaction.ts";
@@ -1923,6 +1925,19 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 					}
 				}
 
+				// P2: speculative compaction — precompute the summary in the background
+				// (fire-and-forget) once wire pressure crosses the early band, so the
+				// real compaction (post-turn / presend) can apply it apply-only instead
+				// of paying the LLM on the critical path. Guards live inside the helper;
+				// this must never throw or block the tool round.
+				if (pressure.contextWindow > 0) {
+					maybeStartSpeculativeCompaction(this.compaction, {
+						pressure: pressure.pressure,
+						contextWindow: pressure.contextWindow,
+						settings: this.settingsManager.getCompactionSettings(),
+					});
+				}
+
 				// Adaptive per-turn thinking downshift: a turn digesting a successful
 				// tool result is downshifted to "low"; a tool error restores the
 				// user's configured level. The user's level is a CEILING — read via
@@ -2876,6 +2891,10 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		// (and pollutes the hindsight bank) when the user switches/forks/new-sessions.
 		this.abortCompaction();
 		await awaitBackgroundCompaction(this.compaction);
+		// P2: abort/drop any in-flight or ready speculative precompute so its
+		// background compact() cannot settle after dispose (it never mutates session
+		// state, but the abort reaps the LLM call and clears the slot).
+		clearSpeculativeCompaction(this.compaction);
 		// Opt-in stats export for baseline measurement. Set PIT_STATS_EXPORT_DIR
 		// to a writable directory to get one JSON file per session containing
 		// tool-call totals + per-rule rewrite/reject counts. Used to measure
@@ -5784,6 +5803,10 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	abortCompaction(): void {
 		this.compaction.compactionAbortController?.abort();
 		this.compaction.autoCompactionAbortController?.abort();
+		// P2 note: the speculative precompute is deliberately NOT cleared here. This
+		// runs on ESC/interrupt too, and the precompute is independent of the turn —
+		// anchor validation at consumption covers any rewind. dispose() clears it
+		// explicitly (via clearSpeculativeCompaction) when the session tears down.
 	}
 
 	/**

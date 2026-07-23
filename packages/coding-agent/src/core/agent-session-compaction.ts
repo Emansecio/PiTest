@@ -225,6 +225,41 @@ export interface PresendWireSurface {
 	tools: WireToolSurface[];
 }
 
+/**
+ * P2 — speculative compaction slot. Holds one in-flight (or ready) pre-computed
+ * summary generated mid-turn (between tool rounds) while the context is still a
+ * band below the hard threshold. When the real compaction later trips, the ready
+ * `result` is applied apply-only (no LLM call on the critical path) provided the
+ * lineage anchors still match. Independent of `backgroundCompactionPromise` and
+ * of `isCompacting` — the precompute never mutates session state.
+ */
+export interface SpeculativeCompactionSlot {
+	/** Resolves when the precompute settles (success or fail); never rejects. */
+	promise: Promise<void>;
+	/** Aborts the in-flight `compact()` call (dispose / abortCompaction / real compaction / stale). */
+	abort: AbortController;
+	/** Ready summary once the precompute succeeds; undefined while in flight. */
+	result?: CompactionResult;
+	/** `getLatestCompactionEntry(getBranch())?.id` at precompute time X. */
+	anchorLatestCompactionId: string | undefined;
+	/** Session leaf entry id at precompute time X (lineage anchor for branch/rewind detection). */
+	anchorLeafEntryId: string | undefined;
+	/** Wire pressure at precompute time X, for the growth-refresh (>25% band → discard). */
+	tokensAtPrecompute: number;
+	/** Custom instructions at precompute time X (invalidate if they differ at consumption). */
+	customInstructionsAtX: string | undefined;
+}
+
+/**
+ * Fraction of the HARD threshold at which the mid-turn speculative precompute
+ * trips — deliberately earlier than the prune / presend bands so the cheap
+ * sibling-model summary is usually ready before the real (hard/presend) wall is
+ * reached. Reuses the same hard-threshold math (`computeDynamicReserve`) as
+ * `shouldCompact`; this is only the multiplier on it. Not env-tunable (the sole
+ * escape is the `PIT_NO_SPECULATIVE_COMPACTION` kill-switch); exported for tests.
+ */
+export const SPECULATIVE_COMPACT_RATIO = 0.8;
+
 /** Mutable compaction state owned per session. */
 export class CompactionController {
 	readonly host: CompactionHost;
@@ -248,6 +283,8 @@ export class CompactionController {
 	backgroundCompactionPromise?: Promise<unknown>;
 	compactionAbortController?: AbortController;
 	autoCompactionAbortController?: AbortController;
+	/** P2 — at most one speculative precompute in flight or ready at a time. */
+	speculative?: SpeculativeCompactionSlot;
 
 	constructor(host: CompactionHost) {
 		this.host = host;
@@ -476,6 +513,255 @@ export async function resolveCompactModel(
 	}
 }
 
+// ============================================================================
+// P2 — speculative compaction (mid-turn precompute + apply-only consumption)
+// ============================================================================
+
+/**
+ * Pure predicate: does the current mid-turn wire pressure warrant STARTING a
+ * speculative precompute? Trips a band below the hard threshold (see
+ * {@link SPECULATIVE_COMPACT_RATIO}), reusing the exact reserve math of
+ * `shouldCompact` — this is only the multiplier on the hard threshold, never a
+ * parallel threshold. Exported for tests.
+ */
+export function shouldPrecomputeSpeculativeCompaction(
+	pressure: number,
+	contextWindow: number,
+	settings: CompactionSettings,
+	ratio: number = SPECULATIVE_COMPACT_RATIO,
+): boolean {
+	if (!settings.enabled) return false;
+	if (!Number.isFinite(contextWindow) || contextWindow <= 0) return false;
+	const reserve = computeDynamicReserve(contextWindow, settings.reserveTokens);
+	const hardThreshold = contextWindow - reserve;
+	return hardThreshold > 0 && pressure > hardThreshold * ratio;
+}
+
+/** Abort any in-flight speculative precompute and drop the slot. Idempotent. */
+export function clearSpeculativeCompaction(ctx: CompactionController): void {
+	const slot = ctx.speculative;
+	if (!slot) return;
+	ctx.speculative = undefined;
+	try {
+		slot.abort.abort();
+	} catch {
+		// abort() never throws in practice; stay fail-open regardless.
+	}
+}
+
+export interface SpeculativeTriggerInput {
+	/** Current mid-turn wire pressure (assembled + thinking headroom). */
+	pressure: number;
+	contextWindow: number;
+	settings: CompactionSettings;
+	/** Override the trip ratio (tests). Defaults to SPECULATIVE_COMPACT_RATIO. */
+	ratio?: number;
+}
+
+/**
+ * Mid-turn gate for the speculative precompute — FIRE-AND-FORGET, never blocks
+ * the tool round. Runs all trigger guards (kill-switch, band, no real/background
+ * compaction in flight, no precompute already in flight), handles the
+ * growth-refresh (a ready summary whose window grew >25% of the hard threshold is
+ * discarded so the next trip re-precomputes), and kicks off
+ * {@link startSpeculativeCompaction} when clear.
+ */
+export function maybeStartSpeculativeCompaction(ctx: CompactionController, input: SpeculativeTriggerInput): void {
+	if (isTruthyEnvFlag(process.env.PIT_NO_SPECULATIVE_COMPACTION)) return;
+	if (!shouldPrecomputeSpeculativeCompaction(input.pressure, input.contextWindow, input.settings, input.ratio)) return;
+	// A real compaction (foreground or background) owns the window while it runs.
+	if (ctx.host.isCompacting || ctx.backgroundCompactionPromise) return;
+
+	const slot = ctx.speculative;
+	if (slot) {
+		// Still in flight → let it finish; never start a second.
+		if (!slot.result) return;
+		// Ready result: refresh only if the window grew > 25% of the hard threshold
+		// since X (the summary would then omit too much). Otherwise keep it —
+		// re-firing would just reproduce the same summary.
+		const reserve = computeDynamicReserve(input.contextWindow, input.settings.reserveTokens);
+		const hardThreshold = input.contextWindow - reserve;
+		const growth = input.pressure - slot.tokensAtPrecompute;
+		if (hardThreshold > 0 && growth > hardThreshold * 0.25) {
+			clearSpeculativeCompaction(ctx);
+			recordDiagnostic({
+				category: "compaction.speculative",
+				level: "info",
+				source: "agent-session.maybeStartSpeculativeCompaction",
+				context: { note: `discard=growth grew=${Math.round(growth)}tok` },
+			});
+		}
+		// Whether discarded or kept, do not start a fresh precompute this trip; the
+		// next trip sees an empty slot (if discarded) and starts one.
+		return;
+	}
+
+	// Fire-and-forget: never awaited, never allowed to surface a rejection.
+	void startSpeculativeCompaction(ctx, input.settings, input.pressure).catch(() => undefined);
+}
+
+/**
+ * Generate the summary in the BACKGROUND without applying it. Mirrors the miolo
+ * of `runAutoCompaction` (prepare → resolve compact model → `compact()`) but
+ * stores the {@link CompactionResult} in `ctx.speculative` instead of appending
+ * it. Never sets `isCompacting`, never emits session events, never touches
+ * `agent.state`. The slot is set synchronously (before any await) so the
+ * in-flight guard is correct on the very next tool round. Fail-open: any
+ * error/abort clears the slot silently (at most a diagnostic).
+ */
+export async function startSpeculativeCompaction(
+	ctx: CompactionController,
+	settings: CompactionSettings,
+	tokensAtPrecompute: number,
+): Promise<void> {
+	// Extensions that intercept compaction keep the current flow intact — the
+	// precompute never emits session_before_compact speculatively (conservative).
+	if (ctx.host.extensionRunner.hasHandlers("session_before_compact")) return;
+	const model = ctx.host.model;
+	if (!model) return;
+
+	// Snapshot moment X synchronously (before any await) so the anchors and the
+	// preparation describe the same instant.
+	const pathEntries = ctx.host.sessionManager.getBranch();
+	const knownTokens = estimateContextTokens(ctx.host.agent.state.messages).tokens;
+	const frameTokens = estimateCompactionFrameTokens(getLatestCompactionEntry(pathEntries)?.details);
+	const keepOverride = adaptiveKeepRecentTokens(model.contextWindow ?? 0, settings, frameTokens);
+	const preparation = prepareCompaction(pathEntries, settings, model.contextWindow, true, knownTokens, keepOverride);
+	if (!preparation) return;
+	preparation.cwd = ctx.host.cwd;
+
+	const abort = new AbortController();
+	const slot: SpeculativeCompactionSlot = {
+		promise: Promise.resolve(),
+		abort,
+		anchorLatestCompactionId: getLatestCompactionEntry(pathEntries)?.id,
+		anchorLeafEntryId: ctx.host.sessionManager.getLeafId() ?? undefined,
+		tokensAtPrecompute,
+		customInstructionsAtX: undefined,
+	};
+	ctx.speculative = slot;
+
+	recordDiagnostic({
+		category: "compaction.speculative",
+		level: "info",
+		source: "agent-session.startSpeculativeCompaction",
+		context: { note: "start" },
+	});
+
+	slot.promise = (async () => {
+		try {
+			let apiKey: string | undefined;
+			let headers: Record<string, string> | undefined;
+			if (ctx.host.agent.streamFn === streamSimple) {
+				const authResult = await ctx.host.modelRegistry.getApiKeyAndHeaders(model);
+				if (!authResult.ok || !authResult.apiKey) {
+					if (ctx.speculative === slot) ctx.speculative = undefined;
+					return;
+				}
+				apiKey = authResult.apiKey;
+				headers = authResult.headers;
+			} else {
+				({ apiKey, headers } = await ctx.host.getCompactionRequestAuth(model));
+			}
+
+			const compactModel = await resolveCompactModel(ctx, model, { apiKey, headers }, ctx.host.thinkingLevel);
+			const result = await compact(
+				preparation,
+				compactModel.model,
+				compactModel.apiKey,
+				compactModel.headers,
+				undefined,
+				abort.signal,
+				compactModel.thinkingLevel,
+				ctx.host.agent.streamFn,
+			);
+			if (abort.signal.aborted || ctx.speculative !== slot) return;
+			slot.result = result;
+			recordDiagnostic({
+				category: "compaction.speculative",
+				level: "info",
+				source: "agent-session.startSpeculativeCompaction",
+				context: { note: "ready" },
+			});
+		} catch (error) {
+			if (ctx.speculative === slot) ctx.speculative = undefined;
+			recordDiagnostic({
+				category: "compaction.speculative",
+				level: "info",
+				source: "agent-session.startSpeculativeCompaction",
+				context: { note: `error=${error instanceof Error ? error.message : String(error)}` },
+			});
+		}
+	})();
+
+	// Never surfaces a rejection (the inner catch self-clears); awaiting here just
+	// lets tests await settle via the returned promise.
+	await slot.promise;
+}
+
+/**
+ * Validate the speculative slot for apply-only consumption at real-compaction
+ * time. Returns the ready summary iff EVERY anchor still holds:
+ *   (a) no compaction applied since X (latest compaction entry id unchanged);
+ *   (b) the moment-X leaf still lies on the active path (no branch/rewind/fork);
+ *   (c) custom instructions unchanged;
+ *   (d) the precompute already settled (in flight → do NOT wait).
+ * Any miss clears the slot (aborting an in-flight precompute) and returns
+ * undefined so the caller pays the normal LLM compaction. On a hit the slot is
+ * consumed (cleared) so it can never be applied twice.
+ */
+export function consumeSpeculativeCompaction(
+	ctx: CompactionController,
+	currentCustomInstructions: string | undefined,
+): CompactionResult | undefined {
+	const slot = ctx.speculative;
+	if (!slot) return undefined;
+
+	// In flight at consumption → do NOT wait; abort and fall through to normal flow.
+	if (!slot.result) {
+		clearSpeculativeCompaction(ctx);
+		recordDiagnostic({
+			category: "compaction.speculative",
+			level: "info",
+			source: "agent-session.consumeSpeculativeCompaction",
+			context: { note: "invalid=in-flight" },
+		});
+		return undefined;
+	}
+
+	const branch = ctx.host.sessionManager.getBranch();
+	const latestCompactionId = getLatestCompactionEntry(branch)?.id;
+	let invalidReason: string | undefined;
+	if (latestCompactionId !== slot.anchorLatestCompactionId) {
+		invalidReason = "compaction-applied";
+	} else if (slot.anchorLeafEntryId === undefined || !branch.some((e) => e.id === slot.anchorLeafEntryId)) {
+		invalidReason = "lineage";
+	} else if ((currentCustomInstructions ?? undefined) !== (slot.customInstructionsAtX ?? undefined)) {
+		invalidReason = "custom-instructions";
+	}
+
+	if (invalidReason) {
+		clearSpeculativeCompaction(ctx);
+		recordDiagnostic({
+			category: "compaction.speculative",
+			level: "info",
+			source: "agent-session.consumeSpeculativeCompaction",
+			context: { note: `invalid=${invalidReason}` },
+		});
+		return undefined;
+	}
+
+	const result = slot.result;
+	clearSpeculativeCompaction(ctx);
+	recordDiagnostic({
+		category: "compaction.speculative",
+		level: "info",
+		source: "agent-session.consumeSpeculativeCompaction",
+		context: { note: "hit" },
+	});
+	return result;
+}
+
 export async function executeCompactionPipeline(
 	ctx: CompactionController,
 	options: {
@@ -488,14 +774,20 @@ export async function executeCompactionPipeline(
 		customInstructions?: string;
 		/** Thinking level for the summarization call; defaults to the session's. */
 		thinkingLevel?: ThinkingLevel;
+		/**
+		 * P2 — a pre-computed summary to apply APPLY-ONLY (skips both the
+		 * `session_before_compact` emit and the `compact()` LLM call). Enters at the
+		 * same seam as an extension-supplied compaction, but with `fromExtension=false`.
+		 */
+		precomputed?: CompactionResult;
 	},
 ): Promise<CompactionResult> {
-	const { preparation, pathEntries, model, apiKey, headers, abortSignal, customInstructions } = options;
+	const { preparation, pathEntries, model, apiKey, headers, abortSignal, customInstructions, precomputed } = options;
 	const thinkingLevel = options.thinkingLevel ?? ctx.host.thinkingLevel;
-	let extensionCompaction: CompactionResult | undefined;
+	let extensionCompaction: CompactionResult | undefined = precomputed;
 	let fromExtension = false;
 
-	if (ctx.host.extensionRunner.hasHandlers("session_before_compact")) {
+	if (!precomputed && ctx.host.extensionRunner.hasHandlers("session_before_compact")) {
 		const result = (await ctx.host.extensionRunner.emit({
 			type: "session_before_compact",
 			preparation,
@@ -554,6 +846,10 @@ export async function executeCompactionPipeline(
 	);
 	const sessionContext = ctx.host.sessionManager.buildSessionContext();
 	ctx.host.agent.state.messages = sessionContext.messages;
+
+	// P2: a compaction was just applied (real or precomputed) — any speculative
+	// slot is now stale (its anchor no longer matches). Abort/drop it.
+	clearSpeculativeCompaction(ctx);
 
 	const savedCompactionEntry = ctx.host.sessionManager.getEntry(compactionId) as CompactionEntry | undefined;
 	if (ctx.host.extensionRunner && savedCompactionEntry) {
@@ -1028,6 +1324,11 @@ export async function runAutoCompaction(
 			return false;
 		}
 
+		// P2: if a valid pre-computed summary is waiting, apply it apply-only and
+		// skip the LLM summarization entirely. The auto path never carries custom
+		// instructions, so the anchor's customInstructionsAtX must be undefined too.
+		const precomputed = consumeSpeculativeCompaction(ctx, undefined);
+
 		// Route the summarization call to the `compact` role when configured;
 		// fail open to the session model otherwise. Thresholds above stay on the
 		// session model (`ctx.host.model`).
@@ -1041,6 +1342,7 @@ export async function runAutoCompaction(
 			headers: compactModel.headers,
 			abortSignal: autoAbort.signal,
 			thinkingLevel: compactModel.thinkingLevel,
+			precomputed,
 		});
 
 		ctx.host.emit({ type: "compaction_end", reason, result, aborted: false, willRetry });

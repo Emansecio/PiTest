@@ -51,6 +51,10 @@ export type DiagnosticCategory =
 	| "quality.recovery"
 	| "quality.supervision"
 	| "compaction.presend-overflow-guard"
+	// P2 speculative compaction: a background summary was pre-computed mid-turn
+	// (start), applied apply-only when the real threshold hit (hit), or discarded
+	// (stale by growth / invalid anchor / error). `note` carries which and why.
+	| "compaction.speculative"
 	| "fusion.member-failed"
 	| "fusion.judge-retry"
 	| "fusion.degraded"
