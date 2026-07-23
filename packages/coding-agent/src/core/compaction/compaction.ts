@@ -28,7 +28,7 @@ import { getLivingRepoMap, livingRepoMapToDigests } from "../repo-map/living-ind
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.ts";
 import { MUTATING_TOOL_NAMES } from "../stagnation.ts";
 import { crushJson } from "../tools/json-crush.ts";
-import { FS_CASE_INSENSITIVE } from "../tools/path-utils.ts";
+import { canonicalPathKey, FS_CASE_INSENSITIVE } from "../tools/path-utils.ts";
 import { buildFileDigests, formatFileDigests, MAX_DIGEST_BYTES } from "./file-digests.ts";
 import { groundSummaryPaths } from "./summary-grounding.ts";
 import {
@@ -987,16 +987,40 @@ export interface ContextPrunePlan {
 	 * duplicate/N4 supersedes use the default (marker-less) collapse.
 	 */
 	supersededMutationCauses: Map<number, SupersededMutationCause>;
+	/**
+	 * P5 `/pin`: message indices immune to prune/supersede/elision because a file
+	 * pin makes that file's window evidence load-bearing. Empty (and byte-identical
+	 * to the pin-less pipeline) whenever no file is pinned.
+	 */
+	pinnedIndices: Set<number>;
 }
 
+/** Shared empty set so the pin-less path allocates nothing extra per plan. */
+const EMPTY_PINNED_PATHS: ReadonlySet<string> = new Set();
+
 /** One O(n) walk producing protect window + supersede index for reuse. */
-export function planContextPrune(messages: AgentMessage[], protectTurns = PRUNE_PROTECT_TURNS): ContextPrunePlan {
+export function planContextPrune(
+	messages: AgentMessage[],
+	protectTurns = PRUNE_PROTECT_TURNS,
+	pinnedPaths?: ReadonlySet<string>,
+): ContextPrunePlan {
 	const protectFromIndex = computePruneProtectFromIndex(messages, protectTurns);
 	const derivation = buildSupersededToolResultIndices(messages, protectFromIndex);
+	const pinnedIndices = computePinnedToolResultIndices(messages, pinnedPaths ?? EMPTY_PINNED_PATHS);
+	// A file pin makes its window evidence load-bearing: never supersede-collapse
+	// it. deriveSupersededIndices always returns fresh containers, so mutating them
+	// here is safe. No-op when nothing is pinned.
+	if (pinnedIndices.size > 0) {
+		for (const i of pinnedIndices) {
+			derivation.indices.delete(i);
+			derivation.mutationCauses.delete(i);
+		}
+	}
 	return {
 		protectFromIndex,
 		supersededIndices: derivation.indices,
 		supersededMutationCauses: derivation.mutationCauses,
+		pinnedIndices,
 	};
 }
 
@@ -1551,6 +1575,56 @@ function computePruneProtectFromIndex(messages: AgentMessage[], protectTurns: nu
 }
 
 /**
+ * File-pin (P5) path-bearing tools. Their tool-result (or, for mutations, the
+ * assistant call) is protected when the target path is pinned — the same
+ * `path`/`file`/`file_path` arg the supersede scan reads (see {@link pathArgOf}).
+ */
+const PINNABLE_TOOL_NAMES = new Set(["read", "grep", "find", "write", "edit", "edit_v2", "ast_edit"]);
+
+/**
+ * Canonical key for a verbatim tool-call path arg, matching the key a pin stores.
+ * Uses the shared `canonicalPathKey` on BOTH the pin set and this side, so
+ * spelling variants (relative/absolute, slash direction, case, symlinks) agree.
+ * Relative paths resolve against `process.cwd()`, mirroring the supersede scan.
+ */
+function canonicalPinnedPathKey(pathArg: string): string {
+	return canonicalPathKey(isAbsolute(pathArg) ? pathArg : resolve(pathArg));
+}
+
+/**
+ * Message indices a FILE pin protects from prune/supersede/elision: the
+ * tool-result of any pinnable call over a pinned path, PLUS the assistant message
+ * that issued a MUTATING call to a pinned path (whose heavy body lives in the
+ * args, not the result, so it must survive mutation-arg elision). Returns an
+ * empty set — and the early return keeps the O(messages) walk off the hot path —
+ * whenever nothing is pinned, so the prune pipeline stays byte-identical.
+ */
+function computePinnedToolResultIndices(messages: AgentMessage[], pinnedPaths: ReadonlySet<string>): Set<number> {
+	const pinned = new Set<number>();
+	if (pinnedPaths.size === 0) return pinned;
+	const pinnedCallIds = new Set<string>();
+	for (let i = 0; i < messages.length; i++) {
+		const msg = messages[i];
+		if (msg.role === "assistant" && Array.isArray(msg.content)) {
+			let protectMessage = false;
+			for (const block of msg.content) {
+				if (block.type !== "toolCall" || !PINNABLE_TOOL_NAMES.has(block.name)) continue;
+				const p = pathArgOf(block.arguments);
+				if (p === undefined || !pinnedPaths.has(canonicalPinnedPathKey(p))) continue;
+				pinnedCallIds.add(block.id);
+				// A mutating call carries its heavy body in the ARGS, not the result —
+				// protect the assistant message so arg-elision skips it.
+				if (MUTATING_TOOL_NAMES.has(block.name)) protectMessage = true;
+			}
+			if (protectMessage) pinned.add(i);
+		} else if (msg.role === "toolResult" && pinnedCallIds.has(msg.toolCallId)) {
+			pinned.add(i);
+		}
+	}
+	return pinned;
+}
+
+/**
  * toolCallId -> isError over the toolResults in `messages`, so mutation-arg
  * elision can pick the honest marker (a rejected write must not be labeled
  * "applied to disk"). Calls with no result present map to absent (treated as
@@ -1571,16 +1645,17 @@ export function wouldPruneOldToolOutputs(
 	protectTurns = PRUNE_PROTECT_TURNS,
 	plan?: ContextPrunePlan,
 ): boolean {
-	const { protectFromIndex, supersededIndices: supersededReadIndices } = resolveContextPrunePlan(
-		messages,
-		protectTurns,
-		plan,
-	);
+	const {
+		protectFromIndex,
+		supersededIndices: supersededReadIndices,
+		pinnedIndices,
+	} = resolveContextPrunePlan(messages, protectTurns, plan);
 	// N5 parity: user pastes only prune when a store is open (defer mandatory), so
 	// with no store they never make this pre-check fire. Resolved once per call.
 	const userPasteStore = getCurrentDeferredOutputStore();
 	const firstUserIndex = userPasteStore !== undefined ? firstUserMessageIndex(messages) : -1;
 	for (let i = 0; i < protectFromIndex; i++) {
+		if (pinnedIndices.has(i)) continue; // P5: file pin — never prune this index
 		const msg = messages[i];
 		if (msg.role === "user") {
 			if (i === firstUserIndex) continue;
@@ -1867,6 +1942,7 @@ export function pruneOldToolOutputs(
 		protectFromIndex,
 		supersededIndices: supersededReadIndices,
 		supersededMutationCauses,
+		pinnedIndices,
 	} = resolveContextPrunePlan(messages, protectTurns, plan);
 
 	let prunedTokens = 0;
@@ -1876,6 +1952,10 @@ export function pruneOldToolOutputs(
 	const firstUserIndex = firstUserMessageIndex(messages);
 
 	for (let i = 0; i < protectFromIndex; i++) {
+		// P5: a file pin protects this index from size-prune, superseded-collapse
+		// AND mutation-arg elision (the assistant call of a pinned mutation is in the
+		// set). No-op when nothing is pinned — pin-less prune stays byte-identical.
+		if (pinnedIndices.has(i)) continue;
 		const msg = messages[i];
 		// N5: pasted logs/stacks in OLD user messages can be 5-50k tokens. Above
 		// the same threshold, shrink to head+tail + recall id. The defer is
@@ -1993,11 +2073,15 @@ export function applySupersedeOnly(
 		protectFromIndex,
 		supersededIndices: supersededReadIndices,
 		supersededMutationCauses,
+		pinnedIndices,
 	} = resolveContextPrunePlan(messages, protectTurns, plan);
 	let prunedTokens = 0;
 	const store = getCurrentDeferredOutputStore();
 
 	for (let i = 0; i < protectFromIndex; i++) {
+		// P5: file pin — never collapse (redundant with the plan's supersede
+		// subtraction, kept as a defensive belt so the two can never drift).
+		if (pinnedIndices.has(i)) continue;
 		if (!supersededReadIndices.has(i)) continue;
 		const msg = messages[i];
 		if (msg.role !== "toolResult" || !Array.isArray(msg.content)) continue;

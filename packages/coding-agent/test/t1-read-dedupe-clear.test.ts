@@ -154,6 +154,34 @@ describe("T09: selective read-dedupe prune after compaction", () => {
 		expect(store.peek(key)).toBeDefined();
 	});
 
+	it("invalidatePath drops every range entry for one path, leaves others untouched", () => {
+		const store = new ReadDedupeStore();
+		const targetPath = canonicalPathKey("/repo/target.ts");
+		const otherPath = canonicalPathKey("/repo/other.ts");
+		const fullKey = `${targetPath}  `;
+		const rangeKey = `${targetPath} 10 20`;
+		const otherKey = `${otherPath}  `;
+		store.record(fullKey, "h1", "full-body", true);
+		store.record(rangeKey, "h2", "range-body", true);
+		store.record(otherKey, "h3", "other-body", true);
+
+		store.invalidatePath(targetPath);
+
+		expect(store.peek(fullKey)).toBeUndefined();
+		expect(store.peek(rangeKey)).toBeUndefined();
+		expect(store.peek(otherKey)).toBeDefined();
+	});
+
+	it("invalidatePath on an untracked path is a no-op", () => {
+		const store = new ReadDedupeStore();
+		const key = `${canonicalPathKey("/repo/a.ts")}  `;
+		store.record(key, "h1", "body", true);
+
+		store.invalidatePath(canonicalPathKey("/repo/never-read.ts"));
+
+		expect(store.peek(key)).toBeDefined();
+	});
+
 	it("pruneReadDedupeAfterCompaction keeps summary paths and drops others", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pit-t09-dedupe-"));
 		try {

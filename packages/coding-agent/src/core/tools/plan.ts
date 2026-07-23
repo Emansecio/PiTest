@@ -13,11 +13,15 @@
 import type { AgentTool } from "@pit/agent-core";
 import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
+import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
+import { type BashResult, executeBashWithOperations } from "../bash-executor.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentPlanManager, type PlanStep, type PlanStepInput, PlanValidationError } from "../plan/plan-manager.ts";
 import { coerceJsonArrayField } from "./argument-prep.ts";
+import { createLocalBashOperations } from "./bash.ts";
 import { getTextOutput } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
+import { truncateHeadTail } from "./truncate.ts";
 
 const stepSchema = Type.Object(
 	{
@@ -27,7 +31,12 @@ const stepSchema = Type.Object(
 			Type.Array(Type.String(), { description: "Ids of steps that must finish before this one." }),
 		),
 		produces: Type.Optional(Type.String({ description: "Artifact this step produces (file/symbol/output)." })),
-		verify: Type.Optional(Type.String({ description: "Command/check that proves this step is done." })),
+		verify: Type.Optional(
+			Type.String({
+				description:
+					"Command that proves this step is done. Runs automatically on step_done (60s timeout); a non-zero exit/timeout blocks completion and returns the failure output instead.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -69,7 +78,82 @@ export interface PlanToolDetails {
 	error?: string;
 }
 
-export interface PlanToolOptions {}
+/** Executes a step's `verify` command; returns the same shape as the bash executor. Overridable so tests never spawn a real shell. */
+export type PlanStepVerifyRunner = (cmd: string, cwd: string, signal: AbortSignal) => Promise<BashResult>;
+
+export interface PlanToolOptions {
+	/**
+	 * Verify executor for `step_done` (P8a). Defaults to the project's local bash
+	 * executor (bash-executor.ts's `executeBashWithOperations` + `createLocalBashOperations`,
+	 * the same infra `!`-prefixed shell commands use) — override only for tests.
+	 */
+	runStepVerify?: PlanStepVerifyRunner;
+}
+
+/** Hard timeout for a step's verify command. Fixed by design — not model/user configurable. */
+const STEP_VERIFY_TIMEOUT_MS = 60_000;
+/** Byte budget for the head+tail excerpt of verify output kept in a failure result. */
+const VERIFY_OUTPUT_MAX_BYTES = 2000;
+
+function isStepVerifyDisabled(): boolean {
+	return isTruthyEnvFlag(process.env.PIT_NO_STEP_VERIFY);
+}
+
+/** Default verify runner: the same local-shell backend the `!` bash path uses, no spare-pool
+ * (this call has no bounded dispose lifecycle to safely own a pooled spare). */
+async function defaultRunStepVerify(cmd: string, cwd: string, signal: AbortSignal): Promise<BashResult> {
+	return executeBashWithOperations(cmd, cwd, createLocalBashOperations(), { signal });
+}
+
+interface VerifyOutcome {
+	ok: boolean;
+	/** Populated only when !ok: reason + capped output + a short fix-and-retry instruction. */
+	message: string;
+}
+
+function verifyFailureMessage(cmd: string, reason: string, output?: string): string {
+	const lines = [`verify failed: ${reason}`, `command: ${cmd}`];
+	const trimmed = output?.trim();
+	if (trimmed) {
+		lines.push("", truncateHeadTail(trimmed, { maxBytes: VERIFY_OUTPUT_MAX_BYTES }).content);
+	}
+	lines.push("", "Fix the issue and call `plan step_done` again, or `plan revise` if the verify command is wrong.");
+	return lines.join("\n");
+}
+
+/**
+ * Run a step's verify command under a fixed timeout, never throwing — any exec/spawn
+ * failure becomes a readable VerifyOutcome instead of an unhandled rejection. A caller
+ * abort (turn interrupt) is honored alongside the internal timeout.
+ */
+async function runStepVerify(
+	cmd: string,
+	cwd: string,
+	runner: PlanStepVerifyRunner,
+	callerSignal: AbortSignal | undefined,
+): Promise<VerifyOutcome> {
+	const timeoutSignal = AbortSignal.timeout(STEP_VERIFY_TIMEOUT_MS);
+	const signal = callerSignal ? AbortSignal.any([callerSignal, timeoutSignal]) : timeoutSignal;
+	let result: BashResult;
+	try {
+		result = await runner(cmd, cwd, signal);
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		return { ok: false, message: verifyFailureMessage(cmd, `could not start (${reason})`) };
+	}
+	if (result.cancelled) {
+		return {
+			ok: false,
+			message: verifyFailureMessage(cmd, `timed out after ${STEP_VERIFY_TIMEOUT_MS}ms`, result.output),
+		};
+	}
+	if (result.exitCode !== 0) {
+		const codeLabel =
+			result.exitCode === undefined ? "no exit code (process killed)" : `exit code ${result.exitCode}`;
+		return { ok: false, message: verifyFailureMessage(cmd, codeLabel, result.output) };
+	}
+	return { ok: true, message: "" };
+}
 
 function toStepInputs(steps: PlanStepArg[] | undefined): PlanStepInput[] {
 	if (!Array.isArray(steps)) return [];
@@ -95,9 +179,10 @@ function verifyMissingNote(steps: PlanStep[]): string {
 }
 
 export function createPlanToolDefinition(
-	_cwd: string,
-	_options?: PlanToolOptions,
+	cwd: string,
+	options?: PlanToolOptions,
 ): ToolDefinition<typeof planSchema, PlanToolDetails> {
+	const verifyRunner = options?.runStepVerify ?? defaultRunStepVerify;
 	const snapshot = () => {
 		const mgr = getCurrentPlanManager();
 		const cur = mgr?.current();
@@ -118,10 +203,11 @@ export function createPlanToolDefinition(
 		promptGuidelines: [
 			"When a multi-step task has real dependencies/artifacts, prefer `plan` (a DAG) over `todo` (a flat list); mark steps done as you go and `revise` to re-shape. Todo remains the everyday tracker (ADR-0007).",
 			"Fill `brief` with the context the executor needs (constraints, invariants, key files read, decisions and why); every code-changing step should have `produces` and `verify`.",
+			"step_done runs the step's `verify` command (60s timeout) before marking it done; a failing/timed-out verify blocks completion and returns the capped output — fix and retry step_done, or `revise` if the verify command itself is wrong.",
 		],
 		parameters: planSchema,
 		prepareArguments: preparePlanArguments,
-		async execute(_toolCallId: string, input: PlanToolInput) {
+		async execute(_toolCallId: string, input: PlanToolInput, signal?: AbortSignal) {
 			const mgr = getCurrentPlanManager();
 			if (!mgr) return fail(input.op, "Plan is unavailable in this session.");
 
@@ -158,11 +244,43 @@ export function createPlanToolDefinition(
 				}
 				case "step_done": {
 					if (!input.step_id?.trim()) return fail("step_done", "step_done requires a `step_id`.");
+					const current = mgr.current();
+					const target = current?.steps.find((s) => s.id === input.step_id);
+					if (!target) return fail("step_done", `No step with id ${input.step_id} in the current plan.`);
+
+					// PIT_NO_STEP_VERIFY restores the 100% advisory behavior: step_done never
+					// executes anything, exactly like before this feature existed.
+					const verifyDisabled = isStepVerifyDisabled();
+					if (target.verifyCmd && !verifyDisabled) {
+						// Validate dependsOn BEFORE spending a verify run — mirrors
+						// PlanManager.stepDone's own check so an unmet dependency never pays for
+						// a command execution it was always going to reject anyway.
+						const statusById = new Map((current?.steps ?? []).map((s) => [s.id, s.status]));
+						const unmet = target.dependsOn.filter((d) => statusById.get(d) !== "done");
+						if (unmet.length > 0) {
+							return fail(
+								"step_done",
+								`Cannot mark step ${target.id} done: unmet dependsOn: ${unmet.join(", ")}.`,
+							);
+						}
+
+						const outcome = await runStepVerify(target.verifyCmd, cwd, verifyRunner, signal);
+						if (!outcome.ok) {
+							// Fail-closed: the step stays exactly as it was — never marked done.
+							return {
+								content: [{ type: "text" as const, text: outcome.message }],
+								isError: true as const,
+								details: { op: "step_done" as const, ...snapshot(), error: outcome.message },
+							};
+						}
+					}
+
 					try {
 						const step = mgr.stepDone(input.step_id);
 						if (!step) return fail("step_done", `No step with id ${input.step_id} in the current plan.`);
+						const verifyLine = target.verifyCmd && !verifyDisabled ? `\n\nverify ok: ${target.verifyCmd}` : "";
 						return {
-							content: [{ type: "text" as const, text: mgr.render() }],
+							content: [{ type: "text" as const, text: `${mgr.render()}${verifyLine}` }],
 							details: { op: "step_done" as const, ...snapshot() },
 						};
 					} catch (error) {

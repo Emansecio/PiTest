@@ -73,6 +73,7 @@ import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage, isOAuthReauth
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import { getCurrentPredictedImpactPaths, wasFileInPredictedImpact } from "./built-ins/impact-extension.ts";
 import { reconcileFusionModeInvariant } from "./built-ins/permissions-extension.ts";
+import { type CacheKeepalive, type CacheKeepaliveHost, createCacheKeepalive } from "./cache-keepalive.ts";
 import { type CacheStats, computeCacheStats } from "./cache-stats.js";
 import type { ChromeDevtoolsManager } from "./chrome/chrome-devtools-manager.ts";
 import * as chromeDevtoolsManagerModule from "./chrome/chrome-devtools-manager.ts";
@@ -195,6 +196,7 @@ import {
 import type { ModelRegistry } from "./model-registry.js";
 import { type RoleResolution, resolveRole } from "./model-resolver.js";
 import { describeToolAction } from "./permissions/index.ts";
+import { getCurrentPinManager, PinManager, type PinStateSnapshot, setCurrentPinManager } from "./pins.ts";
 import { getCurrentPlanManager, PlanManager, type PlanState, setCurrentPlanManager } from "./plan/plan-manager.ts";
 import {
 	createPreviewQueue,
@@ -574,7 +576,7 @@ const IDLE_TIMEOUT_ERROR_RE = /idle timeout|idlestreamtimeout/i;
 // AgentSession Class
 // ============================================================================
 
-export class AgentSession implements CompactionHost, FusionHost {
+export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveHost {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settingsManager: SettingsManager;
@@ -585,6 +587,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 	private _unsubscribeAgent?: () => void;
 	private _eventBus!: AgentSessionEventBus;
 	readonly compaction!: CompactionController;
+	/** Idle prompt-cache TTL refresh (P3) — see cache-keepalive.ts. */
+	private readonly _cacheKeepalive!: CacheKeepalive;
 
 	// Fusion orchestration facet (session-local; resets to "solo" on a new session in v1).
 	private _orchestration: Orchestration = "solo";
@@ -815,6 +819,11 @@ export class AgentSession implements CompactionHost, FusionHost {
 	// Native todo list (the `todo` tool + /todos command + live overlay).
 	private readonly _todo = new TodoManager();
 	private readonly _plan = new PlanManager();
+	// P5 /pin: context immune to forgetting. Fact pins ride the per-turn <pinned>
+	// section; file pins protect their tool-results from prune/supersede/elision.
+	private readonly _pins = new PinManager();
+	/** Optional UI repaint hook (footer `pin:N` chip); persistence is wired separately. */
+	private _pinUiListener: (() => void) | undefined;
 	/** Published to goal_complete via setCurrentVerificationProbe; cleared on dispose. */
 	private _verificationProbe: (() => Promise<CheckResult | null>) | undefined;
 	/** Band P / P5 conventions contract; registry-published, released on dispose. */
@@ -1013,6 +1022,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 			},
 		});
 		this.compaction = new CompactionController(this);
+		this._cacheKeepalive = createCacheKeepalive(this);
 
 		this._openHindsightBank();
 		this._openDeferredOutputStore();
@@ -1052,6 +1062,15 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// _restoreGoalFromSession → _restoreStateFromSession (restores both).
 		setCurrentTodoManager(this._todo);
 		setCurrentPlanManager(this._plan);
+
+		// P5 /pin: publish the manager for the `pin` tool, and persist on every
+		// mutation (in- or out-of-turn), forwarding to the UI repaint hook. Restore
+		// already happened above via _restoreStateFromSession.
+		setCurrentPinManager(this._pins);
+		this._pins.setChangeListener(() => {
+			this._persistPins();
+			this._pinUiListener?.();
+		});
 
 		// Publish a one-shot project-check runner so goal_complete can refuse while red.
 		this._verificationProbe = () => this.runConfiguredCheck();
@@ -1877,10 +1896,12 @@ export class AgentSession implements CompactionHost, FusionHost {
 				const contextWindow = this.model?.contextWindow ?? 0;
 				let nextMessages = messages;
 				let reclaimed = 0;
+				// P5: file-pinned tool-results are immune to supersede/elision/prune.
+				const pinnedPaths = this._pins.pinnedCanonicalPaths();
 
 				// Always run light economy: live prune no longer mutates state after
 				// each tool, so this is the in-turn path for supersede/arg-elision.
-				const light = applyLightContextEconomyAtTurnEnd(nextMessages, toolResults, contextWindow);
+				const light = applyLightContextEconomyAtTurnEnd(nextMessages, toolResults, contextWindow, pinnedPaths);
 				if (light.reclaimed > 0) {
 					nextMessages = light.messages;
 					reclaimed += light.reclaimed;
@@ -1895,7 +1916,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 					thinkingBudgets: this.settingsManager.getThinkingBudgets(),
 				});
 				if (pressure.tripped) {
-					const relief = applyMidTurnPressureRelief(nextMessages, contextWindow);
+					const relief = applyMidTurnPressureRelief(nextMessages, contextWindow, pinnedPaths);
 					if (relief.reclaimed > 0) {
 						nextMessages = relief.messages;
 						reclaimed += relief.reclaimed;
@@ -2997,6 +3018,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 		if (getCurrentPlanManager() === this._plan) {
 			setCurrentPlanManager(undefined);
 		}
+		if (getCurrentPinManager() === this._pins) {
+			setCurrentPinManager(undefined);
+		}
 		if (getCurrentVerificationProbe() === this._verificationProbe) {
 			setCurrentVerificationProbe(undefined);
 		}
@@ -3288,6 +3312,28 @@ export class AgentSession implements CompactionHost, FusionHost {
 		}
 	}
 
+	/** P5 /pin state (the `pin`/`unpin` surfaces and the footer chip read this). */
+	get pins(): PinManager {
+		return this._pins;
+	}
+
+	/**
+	 * Register a UI repaint hook fired after every pin mutation (footer `pin:N`
+	 * chip), mirroring `setTodoChangeListener`. Persistence is wired independently
+	 * in the constructor, so surfaces only own rendering. `undefined` clears it.
+	 */
+	setPinChangeListener(listener: (() => void) | undefined): void {
+		this._pinUiListener = listener;
+	}
+
+	private _persistPins(): void {
+		try {
+			this.sessionManager.appendCustomEntry("pins", this._pins.serialize() ?? null);
+		} catch {
+			// Best-effort; a write failure must not break the session.
+		}
+	}
+
 	private _persistPlan(): void {
 		try {
 			this.sessionManager.appendCustomEntry("plan", this._plan.serialize());
@@ -3306,12 +3352,13 @@ export class AgentSession implements CompactionHost, FusionHost {
 			let latestGoal: GoalState | undefined;
 			let latestTodo: TodoState | undefined;
 			let latestPlan: PlanState | undefined;
+			let latestPins: PinStateSnapshot | undefined;
 			let latestOrchestration: Orchestration | undefined;
 			for (const e of this.sessionManager.getEntries()) {
 				const entry = e as {
 					type?: string;
 					customType?: string;
-					data?: GoalState | TodoState | PlanState | { orchestration?: Orchestration } | null;
+					data?: GoalState | TodoState | PlanState | PinStateSnapshot | { orchestration?: Orchestration } | null;
 				};
 				if (entry.type !== "custom") continue;
 				if (entry.customType === "goal") {
@@ -3320,6 +3367,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 					latestTodo = (entry.data as TodoState | null) ?? undefined;
 				} else if (entry.customType === "plan") {
 					latestPlan = (entry.data as PlanState | null) ?? undefined;
+				} else if (entry.customType === "pins") {
+					latestPins = (entry.data as PinStateSnapshot | null) ?? undefined;
 				} else if (entry.customType === "orchestration") {
 					const data = entry.data as { orchestration?: Orchestration } | null;
 					if (data?.orchestration === "solo" || data?.orchestration === "fusion") {
@@ -3334,6 +3383,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 			}
 			if (latestTodo) this._todo.restore(latestTodo);
 			if (latestPlan) this._plan.restore(latestPlan);
+			if (latestPins) this._pins.restore(latestPins);
 			if (latestOrchestration) {
 				this._orchestration = latestOrchestration;
 				// v1 invariant: fusion rides on plan-mode only. Orchestration is
@@ -3498,6 +3548,23 @@ export class AgentSession implements CompactionHost, FusionHost {
 		return Array.from(unique);
 	}
 
+	/**
+	 * Memoized project check command for the in-turn verification guideline
+	 * (undefined = not yet computed). Static per session: the guideline lives in
+	 * the cacheable prompt prefix, so re-detecting per rebuild would risk
+	 * flapping the prefix if package.json changes mid-session.
+	 */
+	private _inTurnCheckCommandMemo: string | null | undefined;
+
+	private _resolveInTurnCheckCommand(): string | null {
+		const configured = this.settingsManager.getVerificationSettings().command;
+		if (configured) return configured;
+		if (this._inTurnCheckCommandMemo === undefined) {
+			this._inTurnCheckCommandMemo = detectCheckCommand(this._cwd);
+		}
+		return this._inTurnCheckCommandMemo;
+	}
+
 	private _rebuildSystemPrompt(toolNames: string[], reason = "init"): string {
 		const validToolNames = toolNames.filter((name) => this._toolRegistry.has(name));
 		const toolSnippets: Record<string, string> = {};
@@ -3518,6 +3585,19 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// before downstream caller-supplied guidelines so they remain authoritative
 		// on conflict; buildSystemPrompt deduplicates verbatim repeats.
 		promptGuidelines.push(...getEngineeringStyleGuidelines(this.settingsManager.getEngineeringStyle()));
+
+		// In-turn verification (default mode): the model verifies BEFORE its final
+		// reply, so the harness runs nothing after the turn — no post-reply check,
+		// no injected fix turns, no self-review pass (see VerificationSettings.mode).
+		if (this.settingsManager.getVerificationSettings().mode === "in-turn" && validToolNames.includes("bash")) {
+			const checkCmd = this._resolveInTurnCheckCommand();
+			const checkRef = checkCmd
+				? `run the project's check (\`${checkCmd}\`)`
+				: "run the project's check command (look for check/typecheck/lint/test scripts) or the tests covering your change";
+			promptGuidelines.push(
+				`Verify before replying: after modifying code, ${checkRef} and fix what it surfaces BEFORE writing your final answer. Never claim success on an unrun or failing check, and do not background the check and answer while it is still running.`,
+			);
+		}
 
 		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
 		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
@@ -3736,6 +3816,12 @@ export class AgentSession implements CompactionHost, FusionHost {
 			return true;
 		}
 
+		// Arm the idle prompt-cache keepalive (P3) now that background compaction
+		// (if any) has been kicked off. Re-arming is idempotent and does not reset
+		// the per-idle-period ping budget — only onActivity() (a genuinely new
+		// turn, see prompt()) does that. See cache-keepalive.ts.
+		this._cacheKeepalive.scheduleIdle();
+
 		// Bug 4 — orphaned queued message safety net: a steer/follow-up enqueued in the
 		// window between the loop's final drain (agent-loop drainSteering) and the run
 		// settling (isStreaming → false) lands in the agent queues too late for the loop
@@ -3800,6 +3886,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 	 * interrupted. A safety cap bounds runaway loops; hitting it pauses the goal.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		// New activity: cancel any pending cache-keepalive ping and reset its
+		// per-idle-period budget (P3) — the turn itself is the refresh.
+		this._cacheKeepalive.onActivity();
 		// A fresh user/extension prompt clears any prior Esc interrupt so the goal
 		// loop and verification gate are allowed to run again.
 		this._userInterrupted = false;
@@ -3858,20 +3947,27 @@ export class AgentSession implements CompactionHost, FusionHost {
 				}
 			}
 
-			// Background-check guard: if the agent backgrounded a test/check, make sure it
-			// has finished and passed before the turn hands back — never report done or
-			// suggest a commit on a test that is still running (or already failed).
-			await this._awaitPendingChecksBeforeHandoff(options);
+			// Post-reply verification pipeline — legacy `post-turn` mode only. In the
+			// default `in-turn` mode nothing runs after the reply (Claude Code-like):
+			// the model is instructed via system prompt to run the check BEFORE its
+			// final answer, so the harness injects no post-reply commands or fix
+			// turns. See VerificationSettings.mode.
+			if (this.settingsManager.getVerificationSettings().mode === "post-turn") {
+				// Background-check guard: if the agent backgrounded a test/check, make sure it
+				// has finished and passed before the turn hands back — never report done or
+				// suggest a commit on a test that is still running (or already failed).
+				await this._awaitPendingChecksBeforeHandoff(options);
 
-			// Native verification gate: after a code-modifying turn, run the project
-			// check and re-inject failures so the agent self-corrects before "done".
-			await this._runVerificationGate(options);
+				// Native verification gate: after a code-modifying turn, run the project
+				// check and re-inject failures so the agent self-corrects before "done".
+				await this._runVerificationGate(options);
 
-			// Re-drain: the gate's fix turns can background NEW checks; without this
-			// second pass they would outlive the turn unseen and their verdicts would
-			// be lost (or resurface later). Jobs the first drain already gave up on
-			// are excluded via _handledCheckJobIds, so this never re-waits on them.
-			await this._awaitPendingChecksBeforeHandoff(options);
+				// Re-drain: the gate's fix turns can background NEW checks; without this
+				// second pass they would outlive the turn unseen and their verdicts would
+				// be lost (or resurface later). Jobs the first drain already gave up on
+				// are excluded via _handledCheckJobIds, so this never re-waits on them.
+				await this._awaitPendingChecksBeforeHandoff(options);
+			}
 		} finally {
 			// Whatever verification job is STILL running when this prompt hands back
 			// is this turn's leftover — mark it handled so a future unrelated prompt
@@ -4062,7 +4158,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 		let floor = 0;
 		let threshold = 0;
 
-		const prunePlan = planContextPrune(messages, protectTurns);
+		const prunePlan = planContextPrune(messages, protectTurns, this._pins.pinnedCanonicalPaths());
 		if (proactivePruneEnabled) {
 			const floorRaw = Number(process.env.PIT_PROACTIVE_PRUNE_FLOOR);
 			floor = proactivePruneFloor(contextWindow, Number.isFinite(floorRaw) ? floorRaw : undefined);
@@ -4925,6 +5021,13 @@ export class AgentSession implements CompactionHost, FusionHost {
 			});
 			if (planSection) {
 				this.agent.state.systemPrompt = `${this.agent.state.systemPrompt}\n\n${planSection}`;
+			}
+			// P5 /pin: fact pins get guaranteed presence here (never depend on the
+			// window); file pins list for the model's awareness. Post-marker, so the
+			// cached prefix is untouched — same as goal/todo/plan above.
+			const pinSection = this._pins.systemPromptSection();
+			if (pinSection) {
+				this.agent.state.systemPrompt = `${this.agent.state.systemPrompt}\n\n${pinSection}`;
 			}
 
 			// A4 — surface (once) a custom prompt that forfeits the cacheable prefix.

@@ -117,6 +117,35 @@ describe("new command dispatch", () => {
 		expect(clearEditor).toHaveBeenCalledOnce();
 		expect(promptExtensionCommand).toHaveBeenCalledWith("/permission-mode plan");
 	});
+
+	test("bare /pin dispatches with an empty arg (lists pins) and clears the editor", async () => {
+		const clearEditor = vi.fn();
+		const handlePinCommand = vi.fn();
+		const host = spyHost({ clearEditor, handlePinCommand });
+
+		expect(await dispatchSlashCommand(host, "/pin")).toBe(true);
+		expect(clearEditor).toHaveBeenCalledOnce();
+		expect(handlePinCommand).toHaveBeenCalledWith("");
+	});
+
+	test("/pin <text> dispatches with the trimmed argument", async () => {
+		const clearEditor = vi.fn();
+		const handlePinCommand = vi.fn();
+		const host = spyHost({ clearEditor, handlePinCommand });
+
+		expect(await dispatchSlashCommand(host, "/pin   never touch CHANGELOG.md  ")).toBe(true);
+		expect(handlePinCommand).toHaveBeenCalledWith("never touch CHANGELOG.md");
+	});
+
+	test("/unpin <id> dispatches with the trimmed argument", async () => {
+		const clearEditor = vi.fn();
+		const handleUnpinCommand = vi.fn();
+		const host = spyHost({ clearEditor, handleUnpinCommand });
+
+		expect(await dispatchSlashCommand(host, "/unpin  p1  ")).toBe(true);
+		expect(clearEditor).toHaveBeenCalledOnce();
+		expect(handleUnpinCommand).toHaveBeenCalledWith("p1");
+	});
 });
 
 describe("buildGroupedSlashHelp", () => {

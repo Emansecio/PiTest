@@ -85,6 +85,7 @@ export const BUILTIN_TOOL_SIDE_EFFECTS: Readonly<Record<string, ToolSideEffect>>
 	goal_complete: "agent",
 	todo: "none",
 	plan: "none",
+	pin: "none",
 	lsp: "none", // dual-mode: mutating actions classified as write in describeToolAction
 	debug: "exec",
 	chrome_devtools_list_pages: "none",

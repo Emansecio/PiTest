@@ -42,6 +42,7 @@ import type { ExtensionRunner, SessionBeforeCompactResult } from "./extensions/i
 import type { HindsightBank } from "./hindsight/index.js";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCompactSibling, resolveRole } from "./model-resolver.ts";
+import type { PinManager } from "./pins.ts";
 import type { CompactionEntry, SessionEntry, SessionManager } from "./session-manager.js";
 import { getLatestCompactionEntry } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
@@ -206,6 +207,8 @@ export interface CompactionHost {
 	readonly hindsightBank: HindsightBank | undefined;
 	readonly readDedupeStore: ReadDedupeStore | undefined;
 	readonly fileMtimeStore?: FileMtimeStore | undefined;
+	/** P5 /pin state. Optional so partial test-host mocks stay valid; the real session always provides it. */
+	readonly pins?: PinManager;
 	readonly cwd: string;
 	readonly isCompacting: boolean;
 	readonly isStreaming: boolean;
@@ -284,7 +287,7 @@ export function maybePruneStaleToolOutputs(ctx: CompactionController, contextTok
 	const threshold = adaptivePruneThreshold(contextTokens, contextWindow);
 	const protectTurns = pressurePruneProtectTurns(contextTokens, contextWindow);
 	const messages = ctx.host.agent.state.messages;
-	const prunePlan = planContextPrune(messages, protectTurns);
+	const prunePlan = planContextPrune(messages, protectTurns, ctx.host.pins?.pinnedCanonicalPaths());
 	if (!wouldPruneOldToolOutputs(messages, threshold, protectTurns, prunePlan)) return;
 	// Wire-only: do not mutate agent.state.messages. Presend transformContext applies
 	// pruneOldToolOutputs on a clone; JSONL / canonical state stay intact.
@@ -362,6 +365,7 @@ export function measureMidTurnWirePressure(
 export function applyMidTurnPressureRelief(
 	messages: AgentMessage[],
 	contextWindow: number,
+	pinnedPaths?: ReadonlySet<string>,
 ): { messages: AgentMessage[]; reclaimed: number } {
 	if (
 		isTruthyEnvFlag(process.env.PIT_NO_PROACTIVE_PRUNE) ||
@@ -375,7 +379,7 @@ export function applyMidTurnPressureRelief(
 	if (contextTokens <= floor) return { messages, reclaimed: 0 };
 	const threshold = adaptivePruneThreshold(contextTokens, contextWindow);
 	const protectTurns = pressurePruneProtectTurns(contextTokens, contextWindow);
-	const prunePlan = planContextPrune(messages, protectTurns);
+	const prunePlan = planContextPrune(messages, protectTurns, pinnedPaths);
 	if (!wouldPruneOldToolOutputs(messages, threshold, protectTurns, prunePlan)) {
 		return { messages, reclaimed: 0 };
 	}
@@ -535,8 +539,14 @@ export async function executeCompactionPipeline(
 		throw new Error("Compaction cancelled");
 	}
 
+	// P5: carry pinned facts/files across the span the summary folds away. File
+	// pins protect window evidence, not against a full compaction — this footer
+	// (plus the per-turn <pinned> section) is their survival mechanism.
+	const pinFooter = ctx.host.pins?.summaryFooter();
+	const summaryWithPins = pinFooter ? `${summary}\n\n${pinFooter}` : summary;
+
 	const compactionId = ctx.host.sessionManager.appendCompaction(
-		summary,
+		summaryWithPins,
 		firstKeptEntryId,
 		tokensBefore,
 		details,

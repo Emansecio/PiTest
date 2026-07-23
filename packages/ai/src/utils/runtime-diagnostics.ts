@@ -27,6 +27,7 @@ export type DiagnosticLevel = "info" | "warn" | "error";
  */
 export type DiagnosticCategory =
 	| "stream.idle-timeout"
+	| "stream.wall-clock-timeout"
 	| "stream.missing-terminal"
 	| "stream.overthink-guard"
 	| "stream.backpressure"
@@ -88,7 +89,11 @@ export type DiagnosticCategory =
 	// A verification-gate failure was classified by whether its failing files were
 	// edited this turn (cross-file escape). `mechanism` carries the classification,
 	// `count`/`crossFileCount` the attribution counts.
-	| "verification.cross_file_escape";
+	| "verification.cross_file_escape"
+	// A prompt-cache keepalive ping fired while the session was idle (P3):
+	// a minimal max_tokens:1 request against the session's own wire prefix,
+	// meant to renew Anthropic's short cache-retention TTL before it lapses.
+	| "cache.keepalive";
 
 export interface DiagnosticContext {
 	/** Byte size involved (cap hit, payload, buffer depth). */

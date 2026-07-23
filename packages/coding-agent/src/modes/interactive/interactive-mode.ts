@@ -121,6 +121,7 @@ import {
 } from "../../core/openai-compatible-presets.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import { humanModeNotifyLabel } from "../../core/permissions/mode-labels.ts";
+import { PIN_CAP } from "../../core/pins.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
@@ -128,6 +129,7 @@ import { type SessionContext, SessionManager } from "../../core/session-manager.
 import type { ResolvedSkillDiscoverySettings } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS, buildGroupedSlashHelp } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
+import { resolveReadPath } from "../../core/tools/path-utils.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import {
 	type AskOptionsAnswer,
@@ -1678,6 +1680,9 @@ export class InteractiveMode {
 		// waiting for an incidental render (loader tick / tool event). Re-registered
 		// here so a session swap points the listener at the new session's manager.
 		this.session.setTodoChangeListener(() => this.ui.requestRender());
+		// Repaint the footer the instant a pin is added/removed so the `pin:N` chip
+		// is live. Re-registered on session swap.
+		this.session.setPinChangeListener(() => this.ui.requestRender());
 		// Repaint the footer the instant reactive recovery escalates/de-escalates so
 		// the `recovery:<level>` chip is live. Re-registered on session swap.
 		this.session.setRecoveryLevelChangeListener(() => this.ui.requestRender());
@@ -3124,6 +3129,8 @@ export class InteractiveMode {
 			handleTTSRCommand: (args) => this.handleTTSRCommand(args),
 			handleHindsightCommand: (args) => this.handleHindsightCommand(args),
 			handleGoalCommand: (args) => this.handleGoalCommand(args),
+			handlePinCommand: (args) => this.handlePinCommand(args),
+			handleUnpinCommand: (args) => this.handleUnpinCommand(args),
 			showStatus: (line) => this.showStatus(line),
 			getTodoSummaryText: () => this.session.todoSummaryText(),
 			showSettingsSelector: () => this.showSettingsSelector(),
@@ -3264,6 +3271,61 @@ export class InteractiveMode {
 		this.showStatus(`Goal started${budgetLabel}: ${objective}`);
 		this._startGoalSpinner();
 		await this.session.prompt(objective);
+	}
+
+	/** Multi-line human summary for `/pin` with no args (mirrors goal/todo summary text). */
+	private pinSummaryText(): string {
+		const items = this.session.pins.list();
+		if (items.length === 0) return "No pins. `/pin <text>` for a fact, `/pin <path>` for a file.";
+		const lines = [`Pins (${items.length}/${PIN_CAP})`];
+		for (const p of items) {
+			const body = p.kind === "fact" ? p.text : p.displayPath;
+			lines.push(`  #${p.id} ${p.kind} ${body} (${p.createdBy})`);
+		}
+		return lines.join("\n");
+	}
+
+	/**
+	 * `/pin` — no args lists current pins; otherwise pins the argument. A path
+	 * that resolves to an existing file (against the session cwd) becomes a file
+	 * pin; anything else is pinned verbatim as a fact. Always `createdBy: "user"`
+	 * — the user is the one typing the command.
+	 */
+	private handlePinCommand(args: string): void {
+		const trimmed = args.trim();
+		if (trimmed === "") {
+			this.showStatus(this.pinSummaryText());
+			return;
+		}
+		const resolved = resolveReadPath(trimmed, this.session.cwd);
+		let isExistingFile = false;
+		try {
+			isExistingFile = fs.statSync(resolved).isFile();
+		} catch {
+			isExistingFile = false;
+		}
+		try {
+			if (isExistingFile) {
+				const item = this.session.pins.pinFile(resolved, this.session.cwd, "user");
+				this.showStatus(`Pinned #${item.id}: ${item.displayPath}`);
+			} else {
+				const item = this.session.pins.pinFact(trimmed, "user");
+				this.showStatus(`Pinned #${item.id}: ${item.text}`);
+			}
+		} catch (error) {
+			this.showWarning((error as Error).message);
+		}
+	}
+
+	/** `/unpin <id>` — remove a pin by id. Always `requestedBy: "user"`. */
+	private handleUnpinCommand(args: string): void {
+		const id = args.trim();
+		if (!id) {
+			this.showWarning("Usage: /unpin <id>");
+			return;
+		}
+		const ok = this.session.pins.unpin(id, "user");
+		this.showStatus(ok ? `Unpinned #${id}` : `No pin with id ${id}.`);
 	}
 
 	/**

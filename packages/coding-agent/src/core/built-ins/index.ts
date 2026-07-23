@@ -22,9 +22,11 @@ import {
 	type PermissionSettings,
 } from "../permissions/index.ts";
 import { getCurrentTokenGovernor } from "../token-governor.ts";
+import type { ReadDedupeStore } from "../tools/read.ts";
 import { createClarifyNudgeExtension } from "./clarify-nudge-extension.ts";
 import { createCoordinatorExtension } from "./coordinator-extension.ts";
 import { createDestructiveCommandGuardExtension } from "./destructive-command-guard-extension.ts";
+import { createExternalEditSentinelExtension } from "./external-edit-sentinel-extension.ts";
 import { bundleGroundingGuardFactories } from "./grounding-guard-registry.ts";
 import { createHooksExtension } from "./hooks-extension.ts";
 import { createImpactExtension } from "./impact-extension.ts";
@@ -90,6 +92,14 @@ export interface BuiltInExtensionsOptions {
 	registerAbortDetached?: (abortFn: () => void) => void;
 	/** Forwarded to the coordinator: true when subagent memory should be scoped by agent type. */
 	isScopedHindsightEnabled?: () => boolean;
+	/**
+	 * Accessor for the session's read-dedupe store — used by the external-edit
+	 * sentinel to invalidate dedupe entries for files that changed outside the
+	 * session. Resolved lazily (the session doesn't exist yet when extensions are
+	 * bundled); undefined in contexts that never construct one (tests, dedupe
+	 * disabled via PIT_READ_DEDUPE=0).
+	 */
+	getReadDedupeStore?: () => ReadDedupeStore | undefined;
 }
 
 export interface BuiltInExtensionsResult {
@@ -164,6 +174,13 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 		// a no-op automatically when the map has no deps (PIT_NO_REPO_GRAPH).
 		// Model-agnostic, fail-open; opt out PIT_NO_IMPACT_GUARD.
 		createImpactExtension({ cwd: options.cwd }),
+		// External-edit sentinel: registers a (mtime,size) baseline for every
+		// file the session touches, then sweeps it once per turn (before_agent_start)
+		// so a change made outside the session (editor, formatter, another agent)
+		// surfaces proactively instead of only at the moment a stale edit is
+		// attempted. Also invalidates the read-dedupe entry for changed files so
+		// the next read is sent in full. Fail-open; opt out PIT_NO_EXTERNAL_EDIT_SENTINEL.
+		createExternalEditSentinelExtension({ cwd: options.cwd, getReadDedupeStore: options.getReadDedupeStore }),
 		createHooksExtension({ settings: options.hooks, cwd: options.cwd }),
 		createMemoryExtension({ cwd: options.cwd, agentDir: options.agentDir }),
 		createMcpExtension({ settings: options.mcp, cwd: options.cwd, agentDir: options.agentDir }),

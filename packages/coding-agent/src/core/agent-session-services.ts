@@ -13,6 +13,7 @@ import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type Resource
 import { type CreateAgentSessionOptions, type CreateAgentSessionResult, createAgentSession } from "./sdk.ts";
 import type { SessionManager } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
+import type { ReadDedupeStore } from "./tools/read.ts";
 
 /**
  * Non-fatal issues collected while creating services or sessions.
@@ -206,6 +207,9 @@ export async function createAgentSessionServices(
 	const abortDetachedRef: { current?: (abortFn: () => void) => void } = {};
 	const permissionModeChangeRef: { current?: (mode: import("./permissions/types.ts").PermissionMode) => void } = {};
 	const fusionNeedsSetupRef: { current?: () => void } = {};
+	// Resolved lazily, same reason as parentModelRef: the session (and its
+	// ReadDedupeStore) doesn't exist yet when extensions are bundled below.
+	const readDedupeStoreRef: { current?: () => ReadDedupeStore | undefined } = {};
 
 	let builtInFactories: import("./extensions/types.ts").ExtensionFactory[] = [];
 	const permissionSettings = settingsManager.getPermissionSettings();
@@ -240,6 +244,7 @@ export async function createAgentSessionServices(
 			onPermissionModeChange: (mode) => permissionModeChangeRef.current?.(mode),
 			isFusionPanelReady: () => settingsManager.getFusionSettings().panel.length >= 2,
 			onFusionNeedsSetup: () => fusionNeedsSetupRef.current?.(),
+			getReadDedupeStore: () => readDedupeStoreRef.current?.(),
 		});
 		builtInFactories = bundle.factories;
 		permissionChecker = bundle.permissionChecker;
@@ -296,6 +301,7 @@ export async function createAgentSessionServices(
 					meta?: { turns?: number; totalTokens?: number },
 				) => void,
 				registerAbortDetached: (abortFn: () => void) => void,
+				getReadDedupeStore: () => ReadDedupeStore | undefined,
 			) => void;
 		}
 	).__bindBuiltInRefs = (
@@ -308,6 +314,7 @@ export async function createAgentSessionServices(
 		emitSubProgress,
 		emitSubComplete,
 		registerAbortDetached,
+		getReadDedupeStore,
 	) => {
 		parentModelRef.current = getModel;
 		availableToolsRef.current = getTools;
@@ -318,6 +325,7 @@ export async function createAgentSessionServices(
 		subagentProgressRef.current = emitSubProgress;
 		subagentCompleteRef.current = emitSubComplete;
 		abortDetachedRef.current = registerAbortDetached;
+		readDedupeStoreRef.current = getReadDedupeStore;
 	};
 
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
@@ -433,6 +441,7 @@ export async function createAgentSessionFromServices(
 					meta?: { turns?: number; totalTokens?: number },
 				) => void,
 				registerAbortDetached: (abortFn: () => void) => void,
+				getReadDedupeStore: () => ReadDedupeStore | undefined,
 			) => void;
 		}
 	).__bindBuiltInRefs;
@@ -449,6 +458,7 @@ export async function createAgentSessionFromServices(
 			(abortFn) => {
 				result.session._abortDetachedSubagents = abortFn;
 			},
+			() => result.session.readDedupeStore,
 		);
 	}
 

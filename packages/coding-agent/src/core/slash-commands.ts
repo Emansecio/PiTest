@@ -122,6 +122,13 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	},
 	{ name: "todos", description: "Show the current todo list", group: "Session" },
 	{
+		name: "pin",
+		description: "Pin a critical fact or file so it survives compaction — no args lists current pins",
+		group: "Session",
+		argumentHint: "[text or path]",
+	},
+	{ name: "unpin", description: "Remove a pin by id", group: "Session", argumentHint: "<id>" },
+	{
 		name: "plan",
 		description: "Enter plan mode (read-only): research and build a plan, then exit_plan to execute",
 		group: "Session",

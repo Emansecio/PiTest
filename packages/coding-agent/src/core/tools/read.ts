@@ -124,6 +124,22 @@ export class ReadDedupeStore {
 	}
 
 	/**
+	 * Drop every entry (any range) for a single canonical path. Used by the
+	 * external-edit sentinel when a file changed on disk outside the session: the
+	 * next read must go through in full instead of being suppressed against a body
+	 * that no longer reflects what is on disk. Mirrors `pruneExcept`'s inner loop,
+	 * scoped to one path instead of a keep-set.
+	 */
+	invalidatePath(canonicalPath: string): void {
+		for (const key of [...this.seen.keys()]) {
+			if (pathFromDedupeKey(key) !== canonicalPath) continue;
+			const entry = this.seen.get(key);
+			if (entry) this.totalBytes -= entry.bytes;
+			this.seen.delete(key);
+		}
+	}
+
+	/**
 	 * Drop entries whose canonical path is outside `keepCanonicalPaths`, or whose
 	 * path is marked stale by `isStale` (T09). Used after compaction so re-reads of
 	 * summary-anchored, unchanged files still dedupe while orphaned paths free RAM.

@@ -45,6 +45,7 @@ export function applyLiveContextEconomyAfterToolSuccess(
 	toolCall: AgentToolCall,
 	isError: boolean,
 	contextWindow: number,
+	pinnedPaths?: ReadonlySet<string>,
 ): LiveContextEconomyResult {
 	if (isError) {
 		return { messages, reclaimed: 0, supersedeReclaimed: 0, argElisionReclaimed: 0 };
@@ -52,7 +53,7 @@ export function applyLiveContextEconomyAfterToolSuccess(
 
 	const contextTokens = estimateContextTokens(messages).tokens;
 	const protectTurns = pressurePruneProtectTurns(contextTokens, contextWindow);
-	const prunePlan = planContextPrune(messages, protectTurns);
+	const prunePlan = planContextPrune(messages, protectTurns, pinnedPaths);
 	const runSupersede =
 		!isTruthyEnvFlag(process.env.PIT_NO_LIVE_SUPERSEDE) && wouldApplySupersedeOnly(messages, protectTurns, prunePlan);
 	const runArgElision =
@@ -109,6 +110,7 @@ export function applyLightContextEconomyAtTurnEnd(
 	messages: AgentMessage[],
 	toolResults: ToolResultMessage[],
 	contextWindow: number,
+	pinnedPaths?: ReadonlySet<string>,
 ): LiveContextEconomyResult {
 	const empty: LiveContextEconomyResult = {
 		messages,
@@ -119,7 +121,7 @@ export function applyLightContextEconomyAtTurnEnd(
 
 	const contextTokens = estimateContextTokens(messages).tokens;
 	const protectTurns = pressurePruneProtectTurns(contextTokens, contextWindow);
-	const prunePlan = planContextPrune(messages, protectTurns);
+	const prunePlan = planContextPrune(messages, protectTurns, pinnedPaths);
 	const runSupersede =
 		!isTruthyEnvFlag(process.env.PIT_NO_LIVE_SUPERSEDE) && wouldApplySupersedeOnly(messages, protectTurns, prunePlan);
 	const runArgElision =

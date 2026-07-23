@@ -111,6 +111,7 @@ import { createGrepToolDefinition, type GrepToolOptions } from "./grep.ts";
 import { createImpactToolDefinition, type ImpactToolOptions } from "./impact.ts";
 import { createInspectImageToolDefinition, type InspectImageToolOptions } from "./inspect-image.ts";
 import { createLsToolDefinition, type LsToolOptions } from "./ls.ts";
+import { createPinToolDefinition, type PinToolOptions } from "./pin.ts";
 import { createPlanToolDefinition, type PlanToolOptions } from "./plan.ts";
 import * as previewToolModule from "./preview.ts";
 import { createReadToolDefinition, type ReadToolOptions } from "./read.ts";
@@ -465,6 +466,12 @@ const TOOL_REGISTRY = {
 		readOnly: false,
 		coding: "always",
 	},
+	pin: {
+		definitionFactory: createPinToolDefinition,
+		optionsKey: "pin",
+		readOnly: false,
+		coding: "always",
+	},
 	lsp: {
 		definitionFactory: (cwd, opts) => loadLspTool().createLspToolDefinition(cwd, opts),
 		optionsKey: "lsp",
@@ -764,6 +771,7 @@ export interface ToolsOptions {
 	goal_complete?: GoalCompleteToolOptions;
 	todo?: TodoToolOptions;
 	plan?: PlanToolOptions;
+	pin?: PinToolOptions;
 	chromeDevtools?: ChromeDevtoolsToolOptions & { enabled?: boolean };
 	hindsight?: { enabled?: boolean };
 	recallToolOutput?: Record<string, never>;

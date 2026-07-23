@@ -316,6 +316,24 @@ export class FooterComponent implements Component {
 	}
 
 	/**
+	 * Pin count, defensively: mirrors the `getRecoveryLevel` guard above so a
+	 * mock/older `AgentSession` without the `pins` getter (many exist in tests
+	 * predating P5) renders instead of throwing.
+	 */
+	private getPinCount(): number {
+		const pins = this.session.pins;
+		if (!pins || typeof pins.list !== "function") return 0;
+		return pins.list().length;
+	}
+
+	/** Dense `pin:N` chip (P5 `/pin`) — absent entirely while nothing is pinned. */
+	private getPinSegment(): string | null {
+		const n = this.getPinCount();
+		if (n === 0) return null;
+		return `pin:${n}`;
+	}
+
+	/**
 	 * A session is "pristine" while the user has not yet submitted a turn. The
 	 * system prompt + tool schema live in `agent.state.systemPrompt` / tools, NOT
 	 * in `messages`, so `messages` is genuinely empty on a fresh launch even
@@ -423,6 +441,7 @@ export class FooterComponent implements Component {
 		const sessionName = this.session.sessionManager.getSessionName() ?? "";
 		const overthinkGuardCount = this.getOverthinkGuardCount();
 		const recoveryLevel = this.getRecoveryLevel();
+		const pinCount = this.getPinCount();
 		return [
 			width,
 			this.density,
@@ -449,6 +468,7 @@ export class FooterComponent implements Component {
 			this.autoCompactEnabled ? 1 : 0,
 			overthinkGuardCount,
 			recoveryLevel,
+			pinCount,
 			this.hasUserTurn() ? 1 : 0,
 		].join("|");
 	}
@@ -512,6 +532,7 @@ export class FooterComponent implements Component {
 		const mode = this.getPermissionMode();
 		const overthinkGuardCount = this.getOverthinkGuardCount();
 		const recoverySegment = this.getRecoverySegment();
+		const pinSegment = this.getPinSegment();
 		const goalStatus = this.session.goalStatusLine();
 		const fusionSegment = this.getFusionSegment();
 		const extensionStatuses = this.footerData.getExtensionStatuses();
@@ -546,7 +567,9 @@ export class FooterComponent implements Component {
 		const suffixWidth = (thinkingChip?.width ?? 0) + (modeSuffix?.width ?? 0);
 		const identityComposeOptions = {
 			leftColor: (text: string) => text,
-			rightColor: (text: string) => text,
+			// Model id is the bright identity token on the right; thinking chip stays
+			// its own colored protected suffix.
+			rightColor: (text: string) => theme.bold(theme.fg("text", text)),
 			ellipsis: theme.fg("muted", "…"),
 			protectedSuffix: thinkingChip,
 			protectedSuffix2: modeSuffix,
@@ -641,6 +664,9 @@ export class FooterComponent implements Component {
 		}
 		if (recoverySegment) {
 			modeBits.push(theme.fg("warning", recoverySegment));
+		}
+		if (pinSegment) {
+			modeBits.push(theme.fg("accent", pinSegment));
 		}
 
 		// Assemble groups. Intra-group items join with the light ` · `; the two

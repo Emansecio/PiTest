@@ -12,6 +12,8 @@ export interface SlashCommandHost {
 	handleTTSRCommand(args: string): void;
 	handleHindsightCommand(args: string): void | Promise<void>;
 	handleGoalCommand(args: string): void | Promise<void>;
+	handlePinCommand(args: string): void | Promise<void>;
+	handleUnpinCommand(args: string): void | Promise<void>;
 	showStatus(text: string): void;
 	getTodoSummaryText(): string;
 	showSettingsSelector(): void | Promise<void>;
@@ -51,6 +53,8 @@ export const DISPATCHED_SLASH_COMMAND_NAMES = [
 	"hindsight",
 	"goal",
 	"todos",
+	"pin",
+	"unpin",
 	"plan",
 	"settings",
 	"theme",
@@ -149,6 +153,16 @@ export async function dispatchSlashCommand(host: SlashCommandHost, text: string)
 	if (text === "/todos") {
 		host.clearEditor();
 		host.showStatus(host.getTodoSummaryText());
+		return true;
+	}
+	if (text === "/pin" || text.startsWith("/pin ")) {
+		host.clearEditor();
+		await host.handlePinCommand(text === "/pin" ? "" : stripSlashArg(text, "/pin"));
+		return true;
+	}
+	if (text === "/unpin" || text.startsWith("/unpin ")) {
+		host.clearEditor();
+		await host.handleUnpinCommand(text === "/unpin" ? "" : stripSlashArg(text, "/unpin"));
 		return true;
 	}
 	if (text === "/skills" || text.startsWith("/skills ")) {
