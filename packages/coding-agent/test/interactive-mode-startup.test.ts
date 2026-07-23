@@ -1,9 +1,26 @@
-import { Container, Text, type TUI } from "@pit/tui";
+import { Container, type PetColors, Text, type TUI } from "@pit/tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
+import type { StartupScreenData } from "../src/modes/interactive/components/startup-screen.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 
 beforeAll(() => initTheme("dark"));
+
+const PET_COLORS: PetColors = { bg: [12, 14, 18], stroke: [233, 237, 240], eye: [63, 224, 122] };
+const stubData = (): StartupScreenData => ({
+	appName: "pit",
+	version: "0.0.0",
+	tagline: "your coding companion",
+	cwdDisplay: "~/x",
+	model: "m",
+	recentSessions: [],
+	petColors: PET_COLORS,
+	petEnabled: false,
+	// reducedMotion → activate does not register the animation callback, keeping
+	// this a pure lifecycle-plumbing test.
+	reducedMotion: true,
+	rows: 40,
+});
 
 describe("interactive startup lifecycle", () => {
 	test("hides chat while active and fully tears down on dismissal", () => {
@@ -25,6 +42,8 @@ describe("interactive startup lifecycle", () => {
 			} as unknown as TUI,
 			updateEmptyStateHint: vi.fn(),
 			stopStartupAnimation: Reflect.get(InteractiveMode.prototype, "stopStartupAnimation"),
+			buildStartupScreenData: () => stubData(),
+			loadStartupRecentSessions: vi.fn(),
 		};
 		const activate = Reflect.get(InteractiveMode.prototype, "activateStartupScreen") as (
 			this: typeof fakeThis,

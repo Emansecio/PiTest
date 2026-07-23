@@ -8,7 +8,15 @@ import * as path from "node:path";
 import { performance } from "node:perf_hooks";
 import { isKeyRelease, matchesKey } from "./keys.ts";
 import type { Terminal } from "./terminal.ts";
-import { deleteKittyImage, getCapabilities, isImageLine, setCellDimensions } from "./terminal-image.ts";
+import {
+	deleteKittyImage,
+	getCapabilities,
+	isImageLine,
+	isSixelForcedOff,
+	parseSixelDeviceAttributes,
+	setCellDimensions,
+	setSixelSupport,
+} from "./terminal-image.ts";
 import {
 	extractSegments,
 	normalizeTerminalOutput,
@@ -747,6 +755,7 @@ export class TUI extends Container {
 		);
 		this.terminal.hideCursor();
 		this.queryCellSize();
+		this.querySixelSupport();
 		// Resume the ticker for any animation registered before start().
 		this.startAnimationLoop();
 		this.requestRender();
@@ -760,13 +769,26 @@ export class TUI extends Container {
 	}
 
 	private queryCellSize(): void {
-		// Only query if terminal supports images (cell size is only used for image rendering)
-		if (!getCapabilities().images) {
+		// Cell size is used for both image rendering AND mapping the pet sixel to a
+		// cell footprint, so query it whenever images OR sixel are (possibly) live.
+		if (!getCapabilities().images && isSixelForcedOff()) {
 			return;
 		}
 		// Query terminal for cell size in pixels: CSI 16 t
 		// Response format: CSI 6 ; height ; width t
 		this.terminal.write("\x1b[16t");
+	}
+
+	/**
+	 * Probe sixel support with a Primary Device Attributes query (CSI c). The
+	 * reply (`ESC [ ? … ; 4 ; … c`) is parsed in the input handler. Skipped when
+	 * `PIT_NO_SIXEL` already forced the cell fallback — nothing to learn. The
+	 * query is a single non-blocking write; if the terminal never answers we
+	 * simply keep the conservative default (cells).
+	 */
+	private querySixelSupport(): void {
+		if (isSixelForcedOff()) return;
+		this.terminal.write("\x1b[c");
 	}
 
 	/**
@@ -1014,6 +1036,11 @@ export class TUI extends Container {
 			return;
 		}
 
+		// Consume the DA1 (device attributes) sixel probe response.
+		if (this.consumeDeviceAttributesResponse(data)) {
+			return;
+		}
+
 		// Global debug key handler (Shift+Ctrl+D)
 		if (matchesKey(data, "shift+ctrl+d") && this.onDebug) {
 			this.onDebug();
@@ -1061,6 +1088,23 @@ export class TUI extends Container {
 
 		setCellDimensions({ widthPx, heightPx });
 		// Invalidate all components so images re-render with correct dimensions.
+		this.invalidate();
+		this.requestRender();
+		return true;
+	}
+
+	/**
+	 * Parse a DA1 reply and record sixel support. Returns `true` only when `data`
+	 * actually was a DA1 response, so genuine keystrokes fall through untouched.
+	 * On a positive/negative answer the tree is invalidated so a pet that guessed
+	 * "cells" can upgrade to sixel (or vice versa) on the next frame.
+	 */
+	private consumeDeviceAttributesResponse(data: string): boolean {
+		const sixel = parseSixelDeviceAttributes(data);
+		if (sixel === undefined) {
+			return false;
+		}
+		setSixelSupport(sixel);
 		this.invalidate();
 		this.requestRender();
 		return true;

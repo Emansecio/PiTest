@@ -106,6 +106,11 @@ const ThemeJsonSchema = Type.Object({
 		// Card chrome (welcome + selector overlays)
 		cardBg: ColorValueSchema,
 		cardBorder: ColorValueSchema,
+		// Pet mascot (welcome screen). Optional so themes written before the pet
+		// existed keep validating; the welcome falls back to text/success/bg.
+		petStroke: Type.Optional(ColorValueSchema),
+		petEye: Type.Optional(ColorValueSchema),
+		petBg: Type.Optional(ColorValueSchema),
 	}),
 	export: Type.Optional(
 		Type.Object({
@@ -174,7 +179,10 @@ export type ThemeColor =
 	| "gutterDiagnostics"
 	| "gutterUser"
 	| "gutterCustom"
-	| "cardBorder";
+	| "cardBorder"
+	| "petStroke"
+	| "petEye"
+	| "petBg";
 
 export type ThemeBg =
 	| "selectedBg"
@@ -356,6 +364,9 @@ export class Theme {
 	sourceInfo?: SourceInfo;
 	private fgColors: Map<ThemeColor, string>;
 	private bgColors: Map<ThemeBg, string>;
+	// Pre-ANSI source values, kept so callers that need raw RGB (the pet
+	// renderer) can resolve a token to channel values instead of parsing SGR.
+	private fgSource: Map<ThemeColor, string | number>;
 	private mode: ColorMode;
 
 	constructor(
@@ -369,12 +380,37 @@ export class Theme {
 		this.sourceInfo = options.sourceInfo;
 		this.mode = mode;
 		this.fgColors = new Map();
+		this.fgSource = new Map();
 		for (const [key, value] of Object.entries(fgColors) as [ThemeColor, string | number][]) {
 			this.fgColors.set(key, fgAnsi(value, mode));
+			this.fgSource.set(key, value);
 		}
 		this.bgColors = new Map();
 		for (const [key, value] of Object.entries(bgColors) as [ThemeBg, string | number][]) {
 			this.bgColors.set(key, bgAnsi(value, mode));
+		}
+	}
+
+	/** True when the theme defines this foreground token. */
+	hasColor(color: ThemeColor): boolean {
+		return this.fgColors.has(color);
+	}
+
+	/**
+	 * Raw RGB of a foreground token, resolving both hex and 256-index sources.
+	 * Returns `undefined` for absent tokens or the terminal-default (empty) color
+	 * so callers can fall back. Independent of {@link getColorMode}: the pet always
+	 * blends in true RGB even when the terminal is in 256-color mode.
+	 */
+	getRgb(color: ThemeColor): RgbColor | undefined {
+		const src = this.fgSource.get(color);
+		if (src === undefined || src === "") return undefined;
+		const hex = typeof src === "number" ? ansi256ToHex(src) : src;
+		if (typeof hex !== "string" || !hex.startsWith("#")) return undefined;
+		try {
+			return hexToRgb(hex);
+		} catch {
+			return undefined;
 		}
 	}
 

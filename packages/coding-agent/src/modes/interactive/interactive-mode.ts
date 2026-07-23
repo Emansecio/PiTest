@@ -49,6 +49,7 @@ import {
 	type LoaderIndicatorOptions,
 	Markdown,
 	matchesKey,
+	type PetColors,
 	ProcessTerminal,
 	SPINNER_FRAME_MS,
 	Spacer,
@@ -125,7 +126,7 @@ import { PIN_CAP } from "../../core/pins.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
-import { type SessionContext, SessionManager } from "../../core/session-manager.ts";
+import { type SessionContext, type SessionInfo, SessionManager } from "../../core/session-manager.ts";
 import type { ResolvedSkillDiscoverySettings } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS, buildGroupedSlashHelp } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
@@ -140,7 +141,7 @@ import {
 	type UserInputBus,
 } from "../../core/user-input-bus.ts";
 import { type ClipboardImage, readClipboardImage } from "../../utils/clipboard-image.ts";
-import { isOfflineMode, isTruthyEnvFlag } from "../../utils/env-flags.ts";
+import { isOfflineMode, isReducedMotion, isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { prewarmHljs } from "../../utils/syntax-highlight.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
@@ -195,7 +196,7 @@ import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import { reducedMotionLoaderIndicator } from "./components/spinner-ticker.ts";
-import { StartupScreen } from "./components/startup-screen.ts";
+import { type StartupRecentSession, StartupScreen, type StartupScreenData } from "./components/startup-screen.ts";
 import { ThemeSelectorComponent } from "./components/theme-selector.ts";
 import { createTodoOverlay, type TodoOverlay } from "./components/todo-overlay.ts";
 import { workingPhaseLabel } from "./components/tool-activity.ts";
@@ -211,6 +212,7 @@ import { workingPulsePalette } from "./components/working-palette.ts";
 import { formatRuntimeDiagnostics } from "./diagnostics-summary.ts";
 import {
 	buildScopeGroups,
+	buildWorkspaceCwdLabels,
 	formatContextPath,
 	formatDisplayPath,
 	formatExtensionDisplayPath,
@@ -223,6 +225,7 @@ import {
 import { EphemeralStatusController, type EphemeralStatusKind } from "./ephemeral-status.ts";
 import { runGoalDialog } from "./goal-dialog.ts";
 import { dispatchSlashCommand, type SlashCommandHost } from "./interactive-slash-commands.ts";
+import { formatModelDisplayName } from "./model-display-name.ts";
 import {
 	createPendingFollowUpDraftSnapshot,
 	findLatestPendingFollowUpDrafts,
@@ -269,6 +272,22 @@ function mutedBorderRule(): DynamicBorder {
 /** Normalize a caught value into a human-readable message string. */
 function errMsg(e: unknown): string {
 	return e instanceof Error ? e.message : String(e);
+}
+
+/** Compact relative age for a recent-session line (`now`, `5m`, `2h`, `3d`, …).
+ * Mirrors the session picker's format so the two agree. */
+function formatStartupSessionAge(date: Date): string {
+	const diffMs = Date.now() - date.getTime();
+	const mins = Math.floor(diffMs / 60000);
+	const hours = Math.floor(diffMs / 3600000);
+	const days = Math.floor(diffMs / 86400000);
+	if (mins < 1) return "now";
+	if (mins < 60) return `${mins}m`;
+	if (hours < 24) return `${hours}h`;
+	if (days < 7) return `${days}d`;
+	if (days < 30) return `${Math.floor(days / 7)}w`;
+	if (days < 365) return `${Math.floor(days / 30)}mo`;
+	return `${Math.floor(days / 365)}y`;
 }
 
 /** Interface for components that can be expanded/collapsed */
@@ -1613,13 +1632,114 @@ export class InteractiveMode {
 	private activateStartupScreen(): void {
 		this.stopStartupAnimation();
 		this.welcomeActive = true;
-		this.startupScreen = new StartupScreen();
+		const data = this.buildStartupScreenData([]);
+		this.startupScreen = new StartupScreen(data);
 		this.startupContainer.clear();
 		this.startupContainer.addChild(new Spacer(1));
 		this.startupContainer.addChild(this.startupScreen);
 		this.chatVisibilityContainer.clear();
 		this.updateEmptyStateHint();
+		// Reveal + single-blink motion via the shared ticker. Skipped entirely
+		// under reduced motion (the screen renders fully settled). The callback
+		// unsubscribes itself once the screen settles.
+		if (!data.reducedMotion) {
+			this.startupAnimationUnsub = this.ui.addAnimationCallback((now) => {
+				const screen = this.startupScreen;
+				if (!screen) return false;
+				const dirty = screen.tick(now);
+				if (screen.isSettled()) this.stopStartupAnimation();
+				return dirty;
+			});
+		}
+		// Resumable recent sessions load off the boot path; the screen updates
+		// when they arrive (or stays pet+identity+context if none/failed).
+		this.loadStartupRecentSessions();
 		this.ui.requestRender();
+	}
+
+	/** Short brand tagline for the welcome identity line. */
+	private static readonly STARTUP_TAGLINE = "your coding companion";
+
+	/** Assemble the welcome data from the live session, footer provider, and theme. */
+	private buildStartupScreenData(recentSessions: StartupRecentSession[]): StartupScreenData {
+		const state = this.session.state;
+		const labels = buildWorkspaceCwdLabels(
+			this.sessionManager.getCwd(),
+			this.launchCwd,
+			this.footerDataProvider.getRepoDir(),
+		);
+		const branch = this.footerDataProvider.getGitBranch() ?? undefined;
+		const model = formatModelDisplayName(state.model?.id || "no-model");
+
+		let thinking: string | undefined;
+		if (state.model?.reasoning) {
+			const level = state.thinkingLevel;
+			if (level && level !== "off") thinking = `${level[0]!.toUpperCase()}${level.slice(1)}`;
+		}
+
+		const permissionsStatus = this.footerDataProvider.getExtensionStatuses().get("permissions");
+		const mode = permissionsStatus ? (/permissions:\s*(\S+)/.exec(permissionsStatus)?.[1] ?? undefined) : undefined;
+
+		return {
+			appName: APP_NAME,
+			version: this.version,
+			tagline: InteractiveMode.STARTUP_TAGLINE,
+			helpHint: "/help",
+			cwdDisplay: labels.session,
+			branch,
+			model,
+			thinking,
+			mode,
+			recentSessions,
+			petColors: this.resolvePetColors(),
+			petEnabled: !isTruthyEnvFlag(process.env.PIT_NO_PET),
+			reducedMotion: isReducedMotion(),
+			rows: this.ui.terminal.rows,
+		};
+	}
+
+	/** Resolve the pet's stroke/eye/bg to raw RGB, with sane fallbacks so custom
+	 * themes without the optional pet tokens still render a mascot. */
+	private resolvePetColors(): PetColors {
+		const tuple = (c: { r: number; g: number; b: number } | undefined): PetColors["stroke"] | undefined =>
+			c ? [c.r, c.g, c.b] : undefined;
+		const stroke = tuple(theme.getRgb("petStroke")) ?? tuple(theme.getRgb("text")) ?? [230, 230, 235];
+		const eye = tuple(theme.getRgb("petEye")) ??
+			tuple(theme.getRgb("success")) ??
+			tuple(theme.getRgb("accent")) ?? [63, 224, 122];
+		// bg is the anti-alias blend target (≈ the terminal background). Most
+		// terminals running Pit are dark, so the last-resort fallback is near-black.
+		const bg = tuple(theme.getRgb("petBg")) ?? [12, 14, 18];
+		return { stroke, eye, bg };
+	}
+
+	/** Load recent resumable sessions for the current cwd and push them into the
+	 * live welcome screen. Best-effort: any failure leaves the screen unchanged. */
+	private loadStartupRecentSessions(): void {
+		const target = this.startupScreen;
+		if (!target) return;
+		void SessionManager.list(this.sessionManager.getCwd(), this.sessionManager.getSessionDir())
+			.then((sessions) => {
+				if (this.startupScreen !== target || !this.welcomeActive) return;
+				const recent = this.toStartupRecentSessions(sessions);
+				if (recent.length === 0) return;
+				target.setData(this.buildStartupScreenData(recent));
+				this.ui.requestRender();
+			})
+			.catch(() => {});
+	}
+
+	/** Newest-first, current-session-excluded, up to three named recent sessions. */
+	private toStartupRecentSessions(sessions: SessionInfo[]): StartupRecentSession[] {
+		const currentId = this.sessionManager.getSessionId();
+		return sessions
+			.filter((s) => s.id !== currentId && s.messageCount > 0)
+			.sort((a, b) => b.modified.getTime() - a.modified.getTime())
+			.slice(0, 3)
+			.map((s) => ({
+				title: (s.name?.trim() || s.firstMessage.trim() || "(untitled)").replace(/\s+/g, " "),
+				age: formatStartupSessionAge(s.modified),
+			}));
 	}
 
 	private dismissStartupScreen(): void {

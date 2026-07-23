@@ -349,6 +349,18 @@
 				"cardBorder": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Border color for rounded cards (welcome, selector overlays)"
+				},
+				"petStroke": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Optional. Pet mascot head outline (welcome). Falls back to text."
+				},
+				"petEye": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Optional. Pet mascot eye color (welcome). Falls back to success."
+				},
+				"petBg": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Optional. Pet mascot AA blend/background target (welcome). Falls back to a mode default."
 				}
 			},
 			"additionalProperties": false

@@ -72,11 +72,30 @@ export {
 	parseKey,
 	setKittyProtocolActive,
 } from "./keys.ts";
+export { type RenderPetCellsOptions, renderPetCells } from "./pet-cells.ts";
+// Terminal image support
+export {
+	coverage as petCoverageRamp,
+	mixRgb,
+	type PetColors,
+	type PetParams,
+	petCoverage,
+	type Rgb,
+	sdEllipse,
+	sdRoundBox,
+	shadePet,
+} from "./pet-geometry.ts";
+export {
+	type EncodeSixelOptions,
+	encodeSixel,
+	type RenderPetSixelOptions,
+	renderPetSixel,
+	SIXEL_INTRO,
+} from "./sixel.ts";
 // Input buffering for batch splitting
 export { StdinBuffer, type StdinBufferEventMap, type StdinBufferOptions } from "./stdin-buffer.ts";
 // Terminal interface and implementations
 export { ProcessTerminal, type Terminal } from "./terminal.ts";
-// Terminal image support
 export {
 	allocateImageId,
 	type CellDimensions,
@@ -92,16 +111,22 @@ export {
 	getImageDimensions,
 	getJpegDimensions,
 	getPngDimensions,
+	getSixelSupport,
 	getWebpDimensions,
 	hyperlink,
 	type ImageDimensions,
 	type ImageProtocol,
 	type ImageRenderOptions,
 	imageFallback,
+	isSixelForcedOff,
+	isSixelSupportKnown,
+	parseSixelDeviceAttributes,
 	renderImage,
 	resetCapabilitiesCache,
+	resetSixelSupport,
 	setCapabilities,
 	setCellDimensions,
+	setSixelSupport,
 	type TerminalCapabilities,
 } from "./terminal-image.ts";
 export {

@@ -93,7 +93,11 @@
 		"gutterCustom": "lavender",
 
 		"cardBg": "#121817",
-		"cardBorder": "borderMuted"
+		"cardBorder": "borderMuted",
+
+		"petStroke": "#e9edf0",
+		"petEye": "#3fe07a",
+		"petBg": "#0c1110"
 	},
 	"export": {
 		"pageBg": "#0c1110",

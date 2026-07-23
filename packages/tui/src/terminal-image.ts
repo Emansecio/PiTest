@@ -4,6 +4,22 @@ export interface TerminalCapabilities {
 	images: ImageProtocol;
 	trueColor: boolean;
 	hyperlinks: boolean;
+	/**
+	 * Best-effort *env-time* guess at sixel support. Env vars almost never
+	 * confirm sixel positively, so this is usually `false`; the authoritative
+	 * answer comes from the runtime DA1 query (see {@link getSixelSupport}).
+	 * Optional so pre-existing `TerminalCapabilities` literals keep compiling —
+	 * absent is treated as `false`.
+	 */
+	sixel?: boolean;
+}
+
+/** Truthy for "1"/"true"/"yes" (case-insensitive). Local copy so @pit/tui keeps
+ * no dependency on the coding-agent env-flag helpers. */
+function isTruthyEnv(value: string | undefined): boolean {
+	if (!value) return false;
+	const v = value.toLowerCase();
+	return v === "1" || v === "true" || v === "yes";
 }
 
 export interface CellDimensions {
@@ -47,42 +63,46 @@ export function detectCapabilities(): TerminalCapabilities {
 
 	// tmux and screen swallow OSC 8 by default (passthrough is opt-in and wraps
 	// sequences differently). Force hyperlinks off whenever we detect them, even
-	// when the outer terminal would otherwise support OSC 8. Image protocols are
-	// also unreliable under tmux/screen, so leave `images: null` for safety.
+	// when the outer terminal would otherwise support OSC 8. Image protocols and
+	// sixel are also unreliable under tmux/screen, so leave both off for safety.
 	const inTmuxOrScreen = !!process.env.TMUX || term.startsWith("tmux") || term.startsWith("screen");
 	if (inTmuxOrScreen) {
-		return { images: null, trueColor: hasTrueColorHint, hyperlinks: false };
+		return { images: null, trueColor: hasTrueColorHint, hyperlinks: false, sixel: false };
 	}
 
+	// Env can rarely confirm sixel positively; the DA1 runtime query is the real
+	// detector. Only an explicit `PIT_FORCE_SIXEL` opts a session in at env time.
+	const sixel = isTruthyEnv(process.env.PIT_FORCE_SIXEL);
+
 	if (process.env.KITTY_WINDOW_ID || termProgram === "kitty") {
-		return { images: "kitty", trueColor: true, hyperlinks: true };
+		return { images: "kitty", trueColor: true, hyperlinks: true, sixel };
 	}
 
 	if (termProgram === "ghostty" || term.includes("ghostty") || process.env.GHOSTTY_RESOURCES_DIR) {
-		return { images: "kitty", trueColor: true, hyperlinks: true };
+		return { images: "kitty", trueColor: true, hyperlinks: true, sixel };
 	}
 
 	if (process.env.WEZTERM_PANE || termProgram === "wezterm") {
-		return { images: "kitty", trueColor: true, hyperlinks: true };
+		return { images: "kitty", trueColor: true, hyperlinks: true, sixel };
 	}
 
 	if (process.env.ITERM_SESSION_ID || termProgram === "iterm.app") {
-		return { images: "iterm2", trueColor: true, hyperlinks: true };
+		return { images: "iterm2", trueColor: true, hyperlinks: true, sixel };
 	}
 
 	if (termProgram === "vscode") {
-		return { images: null, trueColor: true, hyperlinks: true };
+		return { images: null, trueColor: true, hyperlinks: true, sixel };
 	}
 
 	if (termProgram === "alacritty") {
-		return { images: null, trueColor: true, hyperlinks: true };
+		return { images: null, trueColor: true, hyperlinks: true, sixel };
 	}
 
 	// Unknown terminal: be conservative. OSC 8 is rendered invisibly as "just
 	// text" on terminals that swallow it, which means the URL disappears from
 	// the rendered output. Default to the legacy `text (url)` behavior unless we
 	// have positively identified a hyperlink-capable terminal above.
-	return { images: null, trueColor: hasTrueColorHint || !!process.env.WT_SESSION, hyperlinks: false };
+	return { images: null, trueColor: hasTrueColorHint || !!process.env.WT_SESSION, hyperlinks: false, sixel };
 }
 
 export function getCapabilities(): TerminalCapabilities {
@@ -101,16 +121,74 @@ export function setCapabilities(caps: TerminalCapabilities): void {
 	cachedCapabilities = caps;
 }
 
+// --- Sixel support ----------------------------------------------------------
+// Env detection is weak, so the real answer is a runtime DA1 query. Until that
+// lands, callers see the conservative env guess (usually false → cell fallback);
+// once it resolves, `sixelRuntimeSupport` is authoritative.
+let sixelRuntimeSupport: boolean | undefined;
+
+/** True when `PIT_NO_SIXEL` forces the cell fallback regardless of capability. */
+export function isSixelForcedOff(): boolean {
+	return isTruthyEnv(process.env.PIT_NO_SIXEL);
+}
+
+/**
+ * Whether to emit sixel. Honors the `PIT_NO_SIXEL` kill switch first, then the
+ * runtime DA1 result, then the env-time guess. Never throws — safe to call on
+ * every render.
+ */
+export function getSixelSupport(): boolean {
+	if (isSixelForcedOff()) return false;
+	if (sixelRuntimeSupport !== undefined) return sixelRuntimeSupport;
+	return getCapabilities().sixel === true;
+}
+
+/**
+ * True once we have a *definite* answer (kill switch, resolved DA1 query, or a
+ * positive env guess). Lets the welcome default to cells before the query lands
+ * without committing to "no sixel" prematurely.
+ */
+export function isSixelSupportKnown(): boolean {
+	return isSixelForcedOff() || sixelRuntimeSupport !== undefined || getCapabilities().sixel === true;
+}
+
+/** Record the runtime DA1 result (or a test override). */
+export function setSixelSupport(supported: boolean): void {
+	sixelRuntimeSupport = supported;
+}
+
+/** Clear the runtime DA1 result (tests). */
+export function resetSixelSupport(): void {
+	sixelRuntimeSupport = undefined;
+}
+
+/**
+ * Parse a Primary Device Attributes (DA1) response and report whether the
+ * terminal advertised sixel graphics (attribute `4`).
+ *
+ * DA1 reply shape: `ESC [ ? p1 ; p2 ; … c` (e.g. `ESC[?62;4;6c`). Returns
+ * `undefined` when `data` is not a DA1 response at all, so callers can keep
+ * waiting instead of treating unrelated input as "no sixel".
+ */
+export function parseSixelDeviceAttributes(data: string): boolean | undefined {
+	const match = data.match(/\x1b\[\?([0-9;]+)c/);
+	if (!match) return undefined;
+	return match[1]!.split(";").includes("4");
+}
+
 const KITTY_PREFIX = "\x1b_G";
 const ITERM2_PREFIX = "\x1b]1337;File=";
+// Sixel DCS introducer. The pet sixel line wraps the sequence in cursor
+// save/restore, so the DCS may sit mid-line — matched by the slow path below.
+const SIXEL_PREFIX = "\x1bP";
 
 export function isImageLine(line: string): boolean {
 	// Fast path: sequence at line start (single-row images)
-	if (line.startsWith(KITTY_PREFIX) || line.startsWith(ITERM2_PREFIX)) {
+	if (line.startsWith(KITTY_PREFIX) || line.startsWith(ITERM2_PREFIX) || line.startsWith(SIXEL_PREFIX)) {
 		return true;
 	}
-	// Slow path: sequence elsewhere (multi-row images have cursor-up prefix)
-	return line.includes(KITTY_PREFIX) || line.includes(ITERM2_PREFIX);
+	// Slow path: sequence elsewhere (multi-row images have a cursor-move prefix)
+	return line.includes(KITTY_PREFIX) || line.includes(ITERM2_PREFIX) || line.includes(SIXEL_PREFIX);
 }
 
 /**
