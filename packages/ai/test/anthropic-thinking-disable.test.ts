@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
+import { defaultThinkingAlwaysOn } from "../src/providers/anthropic.js";
 import { streamSimple } from "../src/stream.js";
 import type { Context, Model, SimpleStreamOptions } from "../src/types.js";
 
 interface AnthropicThinkingPayload {
 	thinking?: { type: string; budget_tokens?: number; display?: string };
 	output_config?: { effort?: string };
+	temperature?: number;
 }
 
 function makePayloadCaptureContext(): Context {
@@ -137,6 +139,51 @@ describe("Anthropic thinking disable payload", () => {
 
 		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
 		expect(payload.output_config).toEqual({ effort: "xhigh" });
+	});
+
+	// Fable 5 keeps thinking always on and returns a 400 for `{type: "disabled"}`.
+	// The provider must OMIT the thinking param on the thinking-off path instead.
+	it("omits the thinking param for Claude Fable 5 when thinking is off (never sends disabled)", async () => {
+		const payload = await capturePayload(getModel("anthropic", "claude-fable-5"));
+
+		expect(payload.thinking).toBeUndefined();
+		expect(payload.output_config).toBeUndefined();
+	});
+
+	it("does not send temperature for Claude Fable 5 on the thinking-off path (also 400)", async () => {
+		const payload = await capturePayload(getModel("anthropic", "claude-fable-5"), { temperature: 0 });
+
+		expect(payload.thinking).toBeUndefined();
+		expect(payload.temperature).toBeUndefined();
+	});
+
+	it("uses adaptive thinking + effort for Claude Fable 5 when reasoning is enabled", async () => {
+		const payload = await capturePayload(getModel("anthropic", "claude-fable-5"), { reasoning: "high" });
+
+		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
+		expect(payload.output_config).toEqual({ effort: "high" });
+		expect(payload.thinking).not.toHaveProperty("budget_tokens");
+	});
+
+	it("maps xhigh reasoning to effort=xhigh for Claude Fable 5", async () => {
+		const payload = await capturePayload(getModel("anthropic", "claude-fable-5"), { reasoning: "xhigh" });
+
+		expect(payload.output_config).toEqual({ effort: "xhigh" });
+	});
+});
+
+describe("defaultThinkingAlwaysOn", () => {
+	it("is true for the Fable / Mythos family (they reject thinking:disabled)", () => {
+		expect(defaultThinkingAlwaysOn("claude-fable-5")).toBe(true);
+		expect(defaultThinkingAlwaysOn("claude-mythos-5")).toBe(true);
+		expect(defaultThinkingAlwaysOn("claude-mythos-preview")).toBe(true);
+	});
+
+	it("is false for Opus / Sonnet / Haiku (they accept thinking:disabled)", () => {
+		expect(defaultThinkingAlwaysOn("claude-opus-4-8")).toBe(false);
+		expect(defaultThinkingAlwaysOn("claude-opus-4-7")).toBe(false);
+		expect(defaultThinkingAlwaysOn("claude-sonnet-5")).toBe(false);
+		expect(defaultThinkingAlwaysOn("claude-haiku-4-5")).toBe(false);
 	});
 });
 

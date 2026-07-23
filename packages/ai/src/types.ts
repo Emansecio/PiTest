@@ -474,6 +474,15 @@ export interface AnthropicMessagesCompat {
 	 * bump works without code changes; set explicitly to override the heuristic.
 	 */
 	supportsAdaptiveThinking?: boolean;
+	/**
+	 * Whether the model keeps extended thinking ALWAYS ON and rejects an explicit
+	 * `thinking: {type: "disabled"}` with a 400 (Fable 5 / Mythos 5 and the
+	 * Mythos-class family). For these the provider omits the `thinking` param
+	 * entirely on the thinking-off path (and never sends `temperature`, which they
+	 * also reject). Opus 4.8/4.7 and Sonnet 5 accept `disabled`, so this stays
+	 * false for them. When omitted, derived from the model id by family.
+	 */
+	thinkingAlwaysOn?: boolean;
 }
 
 /**

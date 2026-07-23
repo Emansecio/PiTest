@@ -224,6 +224,7 @@ function getAnthropicCompat(model: Model<"anthropic-messages">): Required<Anthro
 			model.compat?.sendSessionAffinityHeaders ?? !!(isFireworks || isCloudflareAiGatewayAnthropic),
 		supportsCacheControlOnTools: model.compat?.supportsCacheControlOnTools ?? !isFireworks,
 		supportsAdaptiveThinking: model.compat?.supportsAdaptiveThinking ?? defaultSupportsAdaptiveThinking(model.id),
+		thinkingAlwaysOn: model.compat?.thinkingAlwaysOn ?? defaultThinkingAlwaysOn(model.id),
 	};
 }
 
@@ -800,6 +801,18 @@ export function defaultSupportsAdaptiveThinking(modelId: string): boolean {
 }
 
 /**
+ * Heuristic default for {@link AnthropicMessagesCompat.thinkingAlwaysOn}: the
+ * Fable / Mythos family (Mythos-class Claude 5 tier — `claude-fable-5`,
+ * `claude-mythos-5`, `claude-mythos-preview`) keeps thinking always on and
+ * returns a 400 for an explicit `thinking: {type: "disabled"}`. Opus and Sonnet
+ * — including Opus 4.8/4.7 and Sonnet 5 — accept `disabled`, so they stay false.
+ * `\b` treats the id's hyphens as word boundaries (`claude-fable-5`).
+ */
+export function defaultThinkingAlwaysOn(modelId: string): boolean {
+	return /\b(?:fable|mythos)\b/.test(modelId);
+}
+
+/**
  * Map ThinkingLevel to Anthropic effort levels for adaptive thinking.
  * Note: effort "max" is only valid on Opus 4.6, while Opus 4.7 supports "xhigh".
  */
@@ -1028,8 +1041,11 @@ export function buildParams(
 		}
 	}
 
-	// Temperature is incompatible with extended thinking (adaptive or budget-based).
-	if (options?.temperature !== undefined && !options?.thinkingEnabled) {
+	// Temperature is incompatible with extended thinking (adaptive or budget-based),
+	// and with always-on-thinking models (Fable 5 / Mythos 5) even on the
+	// thinking-off path, where thinking still runs server-side and `temperature`
+	// returns a 400.
+	if (options?.temperature !== undefined && !options?.thinkingEnabled && !getAnthropicCompat(model).thinkingAlwaysOn) {
 		params.temperature = options.temperature;
 	}
 
@@ -1073,7 +1089,12 @@ export function buildParams(
 				};
 			}
 		} else if (options?.thinkingEnabled === false) {
-			params.thinking = { type: "disabled" };
+			// Fable 5 / Mythos 5 keep thinking always on and reject an explicit
+			// `{type: "disabled"}` with a 400 — omit the param entirely (thinking
+			// still runs adaptively server-side). Every other model accepts disabled.
+			if (!getAnthropicCompat(model).thinkingAlwaysOn) {
+				params.thinking = { type: "disabled" };
+			}
 		}
 	}
 
