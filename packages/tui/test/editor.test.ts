@@ -65,6 +65,68 @@ describe("Editor placeholder", () => {
 		assert.ok(!plain.includes("Describe a task…"), "placeholder must disappear after typing");
 		assert.ok(plain.includes("h"), "typed character should be visible");
 	});
+
+	it("paints a leading placeholder prefix with borderColor instead of placeholderColor (opt-in)", () => {
+		const borderMarkerTheme: EditorTheme = {
+			...placeholderTheme,
+			borderColor: (s: string) => `<BORDER>${s}</BORDER>`,
+		};
+		const editor = new Editor(createTestTUI(80, 24), borderMarkerTheme, { placeholderPromptCols: 2 });
+		editor.setPlaceholder("❯ Describe a task…");
+		const raw = editor.render(80)[1]!;
+		// The glyph + following space are borderColor; the rest of the hint stays placeholderColor.
+		assert.ok(raw.includes("<BORDER>❯ </BORDER>"), `expected the glyph prefix borderColor'd, got: ${raw}`);
+		assert.ok(raw.includes("<PH>Describe a task…</PH>"), `expected the hint tail placeholderColor'd, got: ${raw}`);
+	});
+
+	it("keeps the whole placeholder in placeholderColor when placeholderPromptCols is unset (default 0)", () => {
+		const borderMarkerTheme: EditorTheme = {
+			...placeholderTheme,
+			borderColor: (s: string) => `<BORDER>${s}</BORDER>`,
+		};
+		const editor = new Editor(createTestTUI(80, 24), borderMarkerTheme);
+		editor.setPlaceholder("❯ Describe a task…");
+		const raw = editor.render(80)[1]!;
+		assert.ok(!raw.includes("<BORDER>"), "no prompt-prefix split without opting in");
+		assert.ok(raw.includes("<PH>❯ Describe a task…</PH>"), `expected the whole hint placeholderColor'd, got: ${raw}`);
+	});
+});
+
+describe("Editor bang-prefix highlight", () => {
+	it("colors a leading `!` shell-passthrough prefix with borderColor when opted in", () => {
+		const borderMarkerTheme: EditorTheme = {
+			...defaultEditorTheme,
+			borderColor: (s: string) => `<BORDER>${s}</BORDER>`,
+		};
+		const editor = new Editor(createTestTUI(80, 24), borderMarkerTheme, { highlightBangPrefix: true });
+		editor.setText("!ls -la");
+		const textLine = editor.render(80)[1]!;
+		assert.ok(textLine.includes("<BORDER>!</BORDER>"), `expected the bang colored, got: ${JSON.stringify(textLine)}`);
+	});
+
+	it("leaves a leading `!` uncolored when highlightBangPrefix is not set (default off)", () => {
+		const borderMarkerTheme: EditorTheme = {
+			...defaultEditorTheme,
+			borderColor: (s: string) => `<BORDER>${s}</BORDER>`,
+		};
+		const editor = new Editor(createTestTUI(80, 24), borderMarkerTheme);
+		editor.setText("!ls -la");
+		const textLine = editor.render(80)[1]!;
+		assert.ok(!textLine.includes("<BORDER>!"), "bang must stay uncolored without opting in");
+	});
+
+	it("does not double-highlight when the line is a /command (commandColor wins)", () => {
+		const mixedTheme: EditorTheme = {
+			...defaultEditorTheme,
+			commandColor: (s: string) => `<CMD>${s}</CMD>`,
+			borderColor: (s: string) => `<BORDER>${s}</BORDER>`,
+		};
+		const editor = new Editor(createTestTUI(80, 24), mixedTheme, { highlightBangPrefix: true });
+		editor.setText("/chrome");
+		const textLine = editor.render(80)[1]!;
+		assert.ok(textLine.includes("<CMD>/chrome</CMD>"), "slash command still colors via commandColor");
+		assert.ok(!textLine.includes("<BORDER>"), "bang highlight must not also fire on a slash command");
+	});
 });
 
 describe("Editor border rule", () => {

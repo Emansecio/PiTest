@@ -51,6 +51,41 @@ describe("WorkGroupComponent", () => {
 		expect(header).not.toContain(" · ");
 	});
 
+	it("leads the collapsed counter with a dot gutter and trails a ✓ once settled", () => {
+		const g = new WorkGroupComponent(fakeTui());
+		g.addCall(nav("read"));
+		g.addCall(bash("npm test"));
+		g.seal();
+		const header = stripAnsi(g.render(120)[0]!);
+		expect(header.startsWith("●")).toBe(true);
+		expect(header.endsWith("✓")).toBe(true);
+	});
+
+	it("keeps the same leading dot for a counted error — only the trailing icon flips to ✗", () => {
+		const success = new WorkGroupComponent(fakeTui());
+		success.addCall(nav("read"));
+		success.seal();
+		const successHeader = stripAnsi(success.render(120)[0]!);
+
+		const failing = new WorkGroupComponent(fakeTui());
+		failing.addCall(
+			makeExec({
+				getActivityFamily: () => "action",
+				getToolName: () => "bash",
+				getArgs: () => ({ command: "npm test" }),
+				getActivityState: () => "error",
+				isAborted: () => false,
+			}),
+		);
+		failing.seal();
+		const failingHeader = stripAnsi(failing.render(120)[0]!);
+
+		expect(successHeader.startsWith("●")).toBe(true);
+		expect(failingHeader.startsWith("●")).toBe(true);
+		expect(successHeader.endsWith("✓")).toBe(true);
+		expect(failingHeader.endsWith("✗")).toBe(true);
+	});
+
 	it("promotes an edit to its own line instead of the counter", () => {
 		const g = new WorkGroupComponent(fakeTui());
 		g.addCall(nav("read"));

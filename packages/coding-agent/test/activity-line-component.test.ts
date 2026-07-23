@@ -40,15 +40,16 @@ function execStub(over: Partial<ToolExecutionComponent>): ToolExecutionComponent
 }
 
 describe("ActivityLineComponent", () => {
-	it("renders a verb-led header with target and diffstat, no gutter", () => {
+	it("renders a dot-gutter header with target/diffstat and a trailing ✓", () => {
 		const c = new ActivityLineComponent(fakeTui());
 		c.setExec(execStub({}));
 		const out = c.render(120).map(stripAnsi);
-		expect(out[0]).toMatch(/^✓ Edited/);
+		expect(out[0]).toMatch(/^● Edited/);
 		expect(out[0]).toContain("Edited");
 		expect(out[0]).toContain("foo.ts");
 		expect(out[0]).toContain("+1");
 		expect(out[0]).toContain("-2");
+		expect(out[0]).toMatch(/✓$/);
 		for (const l of out) expect(l).not.toContain("│");
 	});
 	it("keeps a genuine error header-only until explicitly expanded", () => {
@@ -85,7 +86,7 @@ describe("ActivityLineComponent", () => {
 		expect(out.some((l) => l.includes("error line 25"))).toBe(true);
 		expect(out.some((l) => l.includes("more lines"))).toBe(false);
 	});
-	it("marks an aborted tool with a muted ◦ instead of ✓ or ✗", () => {
+	it("marks an aborted tool with a trailing muted ◦ instead of ✓ or ✗", () => {
 		const c = new ActivityLineComponent(fakeTui());
 		c.setExec(
 			execStub({
@@ -95,7 +96,8 @@ describe("ActivityLineComponent", () => {
 			}),
 		);
 		const header = stripAnsi(c.render(120)[0]!);
-		expect(header.startsWith("◦")).toBe(true);
+		expect(header.startsWith("●")).toBe(true);
+		expect(header.endsWith("◦")).toBe(true);
 		expect(header).not.toContain("✓");
 		expect(header).not.toContain("✗");
 	});
@@ -113,9 +115,10 @@ describe("ActivityLineComponent", () => {
 		c.coalesce(todoStub());
 		c.coalesce(todoStub());
 		const out = c.render(120).map(stripAnsi);
-		expect(out[0]).toMatch(/^✓ Updated todos/);
+		expect(out[0]).toMatch(/^● Updated todos/);
 		expect(out[0]).toContain("Updated todos");
 		expect(out[0]).toContain("×3");
+		expect(out[0]).toMatch(/✓$/);
 	});
 
 	it("renders bash as `Ran <command>` without a type sigil", () => {
@@ -128,8 +131,9 @@ describe("ActivityLineComponent", () => {
 			}),
 		);
 		const out = c.render(120).map(stripAnsi);
-		expect(out[0]).toMatch(/^✓ Ran npm test/);
+		expect(out[0]).toMatch(/^● Ran npm test/);
 		expect(out[0]).toContain("Ran npm test");
+		expect(out[0]).toMatch(/✓$/);
 		expect(out[0]).not.toContain("$");
 	});
 
@@ -145,6 +149,35 @@ describe("ActivityLineComponent", () => {
 		const out = c.render(120).map(stripAnsi);
 		expect(out[0]).toContain("Ran npm run check");
 		expect(out[0]).not.toContain("cd ");
+	});
+
+	it("renders a settled error the same as success on the leading gutter dot — only the trailing icon differs", () => {
+		const success = new ActivityLineComponent(fakeTui());
+		success.setExec(execStub({}));
+		const successHead = success.render(120)[0]!;
+		const successGutter = successHead.slice(0, successHead.indexOf("Edited"));
+
+		const error = new ActivityLineComponent(fakeTui());
+		error.setExec(execStub({ getActivityState: () => "error", isAborted: () => false }));
+		const errorHead = error.render(120)[0]!;
+		const errorGutter = errorHead.slice(0, errorHead.indexOf("Edited"));
+
+		// Same glyph, same styled bytes leading the line — the gutter carries no
+		// outcome information by itself.
+		expect(stripAnsi(successHead)[0]).toBe("●");
+		expect(stripAnsi(errorHead)[0]).toBe("●");
+		expect(successGutter).toBe(errorGutter);
+		// The outcome shows up only at the end of the line.
+		expect(stripAnsi(successHead).endsWith("✓")).toBe(true);
+		expect(stripAnsi(errorHead).endsWith("✗")).toBe(true);
+	});
+
+	it("never shows a trailing outcome icon while pending — only the leading spinner", () => {
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(execStub({ getActivityState: () => "pending" }));
+		const head = stripAnsi(c.render(120)[0]!);
+		expect(head).not.toContain("✓");
+		expect(head).not.toContain("✗");
 	});
 });
 

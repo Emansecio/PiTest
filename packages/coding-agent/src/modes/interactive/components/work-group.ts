@@ -5,7 +5,14 @@ import { type ThemeColor, theme } from "../theme/theme.ts";
 import { ActivityLineComponent } from "./activity-line.ts";
 import { ColorEase } from "./color-ease.ts";
 import { createSpinnerTicker, type SpinnerTicker } from "./spinner-ticker.ts";
-import { actionCoalesceKey, COUNTER_SEP, isEditFamilyTool, nounFor, pluralizeNoun } from "./tool-activity.ts";
+import {
+	actionCoalesceKey,
+	COUNTER_SEP,
+	GUTTER_DOT,
+	isEditFamilyTool,
+	nounFor,
+	pluralizeNoun,
+} from "./tool-activity.ts";
 import type { ToolExecutionComponent } from "./tool-execution.ts";
 
 type GroupState = "pending" | "success" | "error";
@@ -13,6 +20,11 @@ type ExpandMode = "none" | "last" | "phase";
 
 const ICON_SUCCESS = "✓"; // light check (U+2713), 1 cell — consistent with the rest of the UI
 const ICON_ERROR = "✗";
+
+/** Steady color of the settled gutter dot — same token/rationale as
+ * activity-line.ts's GUTTER_DOT_COLOR, so a promoted row and the group's own
+ * counter header read as one visual language. */
+const GUTTER_DOT_COLOR: ThemeColor = "gutterToolSuccess";
 
 /** Action tools promoted to their OWN line inside a WorkGroup instead of folding
  * into the cross-family counter: file mutations (edit/write), delegations (task),
@@ -299,16 +311,23 @@ export class WorkGroupComponent extends Container {
 		return anyError ? "error" : "success";
 	}
 
-	private icon(state: GroupState): string {
+	/** Leading gutter glyph — spinner while any counted call is pending, else a
+	 * steady accent dot (same dot regardless of success/error; the outcome rides
+	 * on {@link trailingIcon}). Sealed phases always snap — they are history, not
+	 * live chrome. */
+	private gutter(state: GroupState): string {
 		if (state === "pending") return theme.fg("gutterToolPending", this.spinnerGlyph ?? SPINNER_FRAMES[0]);
-		const glyph = state === "error" ? ICON_ERROR : ICON_SUCCESS;
-		const steady: ThemeColor = state === "error" ? "gutterToolError" : "gutterToolSuccess";
-		// First half of the live settle ease holds the last spinner frame (crossfade
-		// into ✓/✗). Sealed phases always snap — they are history, not live chrome.
 		if (!this.sealed && this.iconEase.active && this.iconEase.progress < 0.5) {
-			return this.iconEase.colorize(steady, this.lastSpinnerGlyph ?? SPINNER_FRAMES[0]);
+			return this.iconEase.colorize(GUTTER_DOT_COLOR, this.lastSpinnerGlyph ?? SPINNER_FRAMES[0]);
 		}
-		return this.iconEase.colorize(steady, glyph);
+		return this.iconEase.colorize(GUTTER_DOT_COLOR, GUTTER_DOT);
+	}
+
+	/** Trailing outcome glyph for the group's own counter line: empty while
+	 * pending, else `✓`/`✗`. */
+	private trailingIcon(state: GroupState): string {
+		if (state === "pending") return "";
+		return state === "error" ? theme.fg("gutterToolError", ICON_ERROR) : theme.fg("gutterToolSuccess", ICON_SUCCESS);
 	}
 
 	/** Basenames of a small, pure file-read counted set (`config.ts·theme.ts`), or
@@ -405,9 +424,12 @@ export class WorkGroupComponent extends Container {
 	private renderCollapsed(width: number): string[] {
 		const state = this.overallState();
 		const summary = this.collapsedCounts();
+		const gutter = this.gutter(state);
+		const trailing = this.trailingIcon(state);
+		const trailingSuffix = trailing ? ` ${trailing}` : "";
 		const header = summary
-			? truncateToWidth(`${this.icon(state)} ${theme.fg("toolOutput", summary)}`, width)
-			: truncateToWidth(this.icon(state), width);
+			? truncateToWidth(`${gutter} ${theme.fg("toolOutput", summary)}${trailingSuffix}`, width)
+			: truncateToWidth(`${gutter}${trailingSuffix}`, width);
 		const lines = [header];
 		// A genuine error never hides in the count: keep failed promoted rows visible.
 		// Counted failures stay header-only until expand (ctrl+o).
@@ -424,10 +446,13 @@ export class WorkGroupComponent extends Container {
 		const { visible, hidden } = this.visiblePromotedEntries();
 		const summary = this.countedCounts(hidden);
 		if (summary) {
-			const icon = this.icon(this.headerState());
+			const headerState = this.headerState();
+			const gutter = this.gutter(headerState);
+			const trailing = this.trailingIcon(headerState);
+			const trailingSuffix = trailing ? ` ${trailing}` : "";
 			// Live/expanded summary one step above sealed `toolOutput` (same token as
 			// muted in built-ins) so the active phase reads slightly brighter.
-			lines.push(truncateToWidth(`${icon} ${this.countEase.colorize("text", summary)}`, width));
+			lines.push(truncateToWidth(`${gutter} ${this.countEase.colorize("text", summary)}${trailingSuffix}`, width));
 		}
 		for (const entry of visible) {
 			for (const l of entry.line.render(width)) lines.push(l);
@@ -450,12 +475,13 @@ export class WorkGroupComponent extends Container {
 	override render(width: number): string[] {
 		if (this.isEmpty()) return [];
 		const hstate = this.headerState();
-		// Ease the header icon on settle (pending → ✔/✗), mirroring NavGroupComponent.
+		// Ease the header gutter dot on settle (pending → dot), mirroring
+		// NavGroupComponent. Always eases toward the same steady dot color — the
+		// outcome (✓/✗) rides on the trailing icon, not this glyph.
 		if (hstate !== this.prevState) {
 			if (hstate !== "pending") {
 				const from: ThemeColor = this.prevState === "pending" ? "gutterToolPending" : "dim";
-				const to: ThemeColor = hstate === "error" ? "gutterToolError" : "gutterToolSuccess";
-				this.iconEase.begin(from, to);
+				this.iconEase.begin(from, GUTTER_DOT_COLOR);
 			}
 			this.prevState = hstate;
 		}

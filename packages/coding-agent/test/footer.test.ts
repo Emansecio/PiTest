@@ -443,8 +443,10 @@ it("renders a compact model name in the composer identity", () => {
 it("renders the thinking level without a decorative icon on reasoning models", () => {
 	const footer = makeFooter({ thinkingLevel: "high" });
 	const lines = footer.render(80).map(stripAnsi);
-	expect(lines[0]).toContain("test-model • High");
+	// Dense `·` separator (not the airier `•` bullet) across the whole footer.
+	expect(lines[0]).toContain("test-model · High");
 	expect(lines[0]).not.toContain("✦");
+	expect(lines[0]).not.toContain("•");
 });
 
 it("keeps the thinking chip intact on a narrow line, truncating the model id instead", () => {

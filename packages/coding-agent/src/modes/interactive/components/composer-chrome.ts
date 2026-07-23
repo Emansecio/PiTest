@@ -5,36 +5,34 @@ interface ComposerCache {
 	contentLines: string[];
 	lowerLines: string[];
 	footerLines: string[];
-	borderSample: string;
 	gutterActive: boolean;
 	gutterLines: string[];
 	lines: string[];
 }
 
-/** One rounded frame around the existing editor, lower widgets, and footer. */
+/**
+ * Unframed composer: stacks the editor content, optional lower widgets, and the
+ * footer strip flush-left at the full requested width — no boxed border. The mode
+ * signal the border used to carry (bash/plan/accent) now rides on the editor's own
+ * `❯` prompt glyph and leading `!` bang-prefix (see custom-editor/interactive-mode's
+ * `updateEditorBorderColor`), so there is nothing left for this component to color.
+ */
 export class ComposerChrome implements Component {
 	private readonly content: Component;
 	private readonly lowerContent: Component | undefined;
 	private footer: Component;
-	private borderColor: (text: string) => string;
 	private cache: ComposerCache | undefined;
-	// Optional decoration composited to the RIGHT of the input frame (the pet
-	// companion). It only borrows columns from the frame — never from the footer
-	// strip below, which always spans the full width.
+	// Optional decoration composited to the RIGHT of the input (the pet
+	// companion). It only borrows columns from the content — never from the
+	// footer strip below, which always spans the full width.
 	private rightGutter: Component | undefined;
 	private rightGutterFootprint = 0;
 	private rightGutterVisible: ((width: number) => boolean) | undefined;
 
-	constructor(
-		content: Component,
-		footer: Component,
-		lowerContent?: Component,
-		borderColor: (text: string) => string = (text) => text,
-	) {
+	constructor(content: Component, footer: Component, lowerContent?: Component) {
 		this.content = content;
 		this.lowerContent = lowerContent;
 		this.footer = footer;
-		this.borderColor = borderColor;
 	}
 
 	setFooter(footer: Component): void {
@@ -43,16 +41,11 @@ export class ComposerChrome implements Component {
 		this.cache = undefined;
 	}
 
-	setBorderColor(borderColor: (text: string) => string): void {
-		this.borderColor = borderColor;
-		this.cache = undefined;
-	}
-
 	/**
 	 * Attach (or clear, with `component: undefined`) a decoration painted beside
-	 * the input frame. `footprint` is the total columns reserved for it (glyph +
+	 * the input. `footprint` is the total columns reserved for it (glyph +
 	 * breathing gap); `visible` gates it per-frame on the current width. Only the
-	 * frame narrows to make room — the footer keeps the full width.
+	 * content narrows to make room — the footer keeps the full width.
 	 */
 	setRightGutter(component: Component | undefined, footprint = 0, visible?: (width: number) => boolean): void {
 		this.rightGutter = component;
@@ -70,31 +63,21 @@ export class ComposerChrome implements Component {
 	}
 
 	render(width: number): string[] {
-		const framed = width >= 3;
-		// The gutter only ever borrows from a real (framed) input box wide enough
-		// to still leave the editor room after the reservation.
+		// The gutter only ever borrows from content wide enough to still leave the
+		// editor a usable column after the reservation.
 		const gutterActive =
-			framed &&
 			!!this.rightGutter &&
 			this.rightGutterFootprint > 0 &&
-			width - this.rightGutterFootprint >= 3 &&
+			width - this.rightGutterFootprint >= 1 &&
 			(this.rightGutterVisible?.(width) ?? true);
 		const gutterFootprint = gutterActive ? this.rightGutterFootprint : 0;
-		const frameWidth = Math.max(1, width - gutterFootprint);
-		const innerWidth = framed ? frameWidth - 2 : Math.max(1, frameWidth);
+		const contentWidth = Math.max(1, width - gutterFootprint);
 
-		const contentLines = this.content.render(innerWidth);
-		const lowerLines = this.lowerContent?.render(innerWidth) ?? [];
-		// The footer lives OUTSIDE the frame — a plain status strip below the bottom
-		// border, not another boxed row. A 1-col indent (when framed) lines it up
-		// with the framed content rather than the border, so the box reads as a
-		// clean input surface and the metadata sits quietly underneath it. It always
-		// spans the FULL width; the gutter reservation applies only to the frame.
-		const footerIndent = framed ? 1 : 0;
-		const footerWidth = Math.max(1, width - footerIndent);
+		const contentLines = this.content.render(contentWidth);
+		const lowerLines = this.lowerContent?.render(contentWidth) ?? [];
+		const footerWidth = Math.max(1, width);
 		const footerLines = this.footer.render(footerWidth);
 		const gutterLines = gutterActive ? this.rightGutter!.render(gutterFootprint) : [];
-		const borderSample = this.borderColor("x");
 		const cache = this.cache;
 		if (
 			cache &&
@@ -102,63 +85,47 @@ export class ComposerChrome implements Component {
 			cache.contentLines === contentLines &&
 			cache.lowerLines === lowerLines &&
 			cache.footerLines === footerLines &&
-			cache.borderSample === borderSample &&
 			cache.gutterActive === gutterActive &&
 			cache.gutterLines === gutterLines
 		) {
 			return cache.lines;
 		}
 
-		const indent = " ".repeat(footerIndent);
-		const footerStrip = footerLines.map((line) => `${indent}${truncateToWidth(line, footerWidth)}`);
+		const footerStrip = footerLines.map((line) => truncateToWidth(line, footerWidth));
+		// Pad every content/lower row to the full content width — cosmetically
+		// unnecessary alone, but required when the pet gutter rides alongside: rows
+		// of differing length would otherwise shift the gutter's column per row.
+		const padToContentWidth = (line: string): string => {
+			const truncated = truncateToWidth(line, contentWidth);
+			return `${truncated}${" ".repeat(Math.max(0, contentWidth - visibleWidth(truncated)))}`;
+		};
+		let body = [...contentLines, ...lowerLines].map(padToContentWidth);
 
-		if (!framed) {
-			const lines = [...contentLines, ...lowerLines, ...footerStrip].map((line) => truncateToWidth(line, width));
-			this.cache = this.seed(
-				width,
-				contentLines,
-				lowerLines,
-				footerLines,
-				borderSample,
-				gutterActive,
-				gutterLines,
-				lines,
-			);
-			return lines;
+		// With no boxed frame, a single-line (or otherwise short) input no longer
+		// gets 2 free border rows to lend the gutter. Center the real content
+		// within the gutter's row span instead (blank content-width rows above
+		// and below) so a fixed-height decoration like the pet companion still
+		// has room and keeps its old vertical alignment (content on its middle row).
+		if (gutterActive && gutterLines.length > body.length) {
+			const blankRow = " ".repeat(contentWidth);
+			const padCount = gutterLines.length - body.length;
+			const topPad = Math.floor(padCount / 2);
+			const bottomPad = padCount - topPad;
+			body = [...Array(topPad).fill(blankRow), ...body, ...Array(bottomPad).fill(blankRow)];
 		}
 
-		const framedBody = [...contentLines, ...lowerLines];
-		const frameLines = [this.borderColor(`╭${"─".repeat(innerWidth)}╮`)];
-		for (const rawLine of framedBody) {
-			const inner = truncateToWidth(rawLine, innerWidth);
-			const padding = " ".repeat(Math.max(0, innerWidth - visibleWidth(inner)));
-			frameLines.push(`${this.borderColor("│")}${inner}${padding}${this.borderColor("│")}`);
-		}
-		frameLines.push(this.borderColor(`╰${"─".repeat(innerWidth)}╯`));
-
-		// Composite the gutter decoration beside the frame rows, right-aligned within
-		// its reserved footprint (breathing gap lands between the border and the pet).
 		const lines = gutterActive
-			? frameLines.map((frameLine, i) => {
+			? body.map((bodyLine, i) => {
 					const gutter =
 						i < gutterLines.length
 							? this.alignGutter(gutterLines[i]!, gutterFootprint)
 							: " ".repeat(gutterFootprint);
-					return `${frameLine}${gutter}`;
+					return `${bodyLine}${gutter}`;
 				})
-			: frameLines;
+			: body;
 		lines.push(...footerStrip);
 
-		this.cache = this.seed(
-			width,
-			contentLines,
-			lowerLines,
-			footerLines,
-			borderSample,
-			gutterActive,
-			gutterLines,
-			lines,
-		);
+		this.cache = { width, contentLines, lowerLines, footerLines, gutterActive, gutterLines, lines };
 		return lines;
 	}
 
@@ -167,18 +134,5 @@ export class ComposerChrome implements Component {
 		const w = visibleWidth(line);
 		if (w >= footprint) return truncateToWidth(line, footprint);
 		return `${" ".repeat(footprint - w)}${line}`;
-	}
-
-	private seed(
-		width: number,
-		contentLines: string[],
-		lowerLines: string[],
-		footerLines: string[],
-		borderSample: string,
-		gutterActive: boolean,
-		gutterLines: string[],
-		lines: string[],
-	): ComposerCache {
-		return { width, contentLines, lowerLines, footerLines, borderSample, gutterActive, gutterLines, lines };
 	}
 }

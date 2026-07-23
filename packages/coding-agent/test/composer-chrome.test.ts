@@ -15,7 +15,7 @@ function plain(lines: string[]): string[] {
 const PET_COLORS: PetColors = { bg: [10, 11, 14], stroke: [240, 240, 245], eye: [63, 224, 122] };
 
 /** A single-line content stand-in for the editor that records the width it was
- * asked to render at, so we can assert the frame narrows/recovers. */
+ * asked to render at, so we can assert the content narrows/recovers. */
 class WidthProbe implements Component {
 	lastWidth = -1;
 	render(width: number): string[] {
@@ -30,34 +30,28 @@ function hasPetGlyph(lines: string[]): boolean {
 }
 
 describe("ComposerChrome", () => {
-	test("frames the editor and drops the metadata into a strip below the box", () => {
+	test("stacks the editor content and the footer flush-left, no boxed frame", () => {
 		const composer = new ComposerChrome(new Text("message", 0, 0), new Text("workspace        model", 0, 0));
 		const lines = plain(composer.render(30));
 
-		// Frame wraps only the editor; the bottom border closes it off.
-		expect(lines[0]).toMatch(/^╭─+╮$/);
-		expect(lines[1]).toMatch(/^│message\s+│$/);
-		expect(lines[2]).toMatch(/^╰─+╯$/);
-		// Footer sits OUTSIDE the frame, indented one column, not boxed.
-		expect(lines[3]).toMatch(/^ workspace\s+model$/);
-		expect(lines[3]).not.toContain("│");
-		// The framed rows are exactly the requested width; the footer strip is free
+		// No frame glyphs anywhere — the composer is just content + footer.
+		expect(lines.join("\n")).not.toMatch(/[╭╮╰╯│]/);
+		expect(lines[0]).toBe(`message${" ".repeat(30 - "message".length)}`);
+		expect(lines[1]).toBe("workspace        model");
+		// The content row spans the full requested width; the footer strip is free
 		// to be shorter (it's a status line, not a filled row).
-		for (const line of lines.slice(0, 3)) expect(visibleWidth(line)).toBe(30);
-		expect(visibleWidth(lines[3])).toBeLessThanOrEqual(30);
+		expect(visibleWidth(lines[0]!)).toBe(30);
+		expect(visibleWidth(lines[1]!)).toBeLessThanOrEqual(30);
 	});
 
-	test("keeps multiline content boxed and the footer outside at the requested width", () => {
+	test("keeps multiline content and the footer at the requested width", () => {
 		const composer = new ComposerChrome(new Text("first\nsecond", 0, 0), new Text("meta", 0, 0));
 		const lines = plain(composer.render(10));
 
-		// lines: top, first, second, bottom, footer
-		expect(lines[0]).toMatch(/^╭─+╮$/);
-		expect(lines.slice(1, 3).every((line) => line.startsWith("│") && line.endsWith("│"))).toBe(true);
-		expect(lines[3]).toMatch(/^╰─+╯$/);
-		expect(lines[4]).toMatch(/^ meta$/);
-		for (const line of lines.slice(0, 4)) expect(visibleWidth(line)).toBe(10);
-		expect(visibleWidth(lines[4])).toBeLessThanOrEqual(10);
+		// lines: first, second, footer — no top/bottom border rows.
+		expect(lines).toHaveLength(3);
+		expect(lines[2]).toBe("meta");
+		for (const line of lines.slice(0, 2)) expect(visibleWidth(line)).toBe(10);
 	});
 
 	test("replaces footer content without replacing the composer", () => {
@@ -80,48 +74,46 @@ describe("ComposerChrome pet gutter", () => {
 		return { composer, content };
 	}
 
-	test("perches the pet beside the editor and narrows the frame at cols=120", () => {
+	test("perches the pet beside the editor and narrows the content at cols=120", () => {
 		const { composer, content } = build();
 		const raw = composer.render(120);
 		const lines = plain(raw);
-		// The pet renders (half-block glyphs) on the frame rows.
-		expect(hasPetGlyph(lines.slice(0, 3))).toBe(true);
-		// The editor frame gave up exactly the pet footprint: innerWidth = width - footprint - 2 borders.
-		expect(content.lastWidth).toBe(120 - PET_COMPANION_FOOTPRINT - 2);
-		// Every frame row still spans the full terminal width (frame + gutter).
-		for (const line of lines.slice(0, 3)) expect(visibleWidth(line)).toBe(120);
-		// The footer keeps the FULL width — the pet only borrows from the frame.
+		// The pet renders (half-block glyphs) on the content rows.
+		expect(hasPetGlyph(lines.slice(0, -1))).toBe(true);
+		// The content gave up exactly the pet footprint — no border columns reserved.
+		expect(content.lastWidth).toBe(120 - PET_COMPANION_FOOTPRINT);
+		// Every content row still spans the full terminal width (content + gutter).
+		for (const line of lines.slice(0, -1)) expect(visibleWidth(line)).toBe(120);
+		// The footer keeps the FULL width — the pet only borrows from the content.
 		expect(visibleWidth(lines.at(-1)!)).toBeLessThanOrEqual(120);
-		expect(content.lastWidth).toBeLessThan(120 - 2);
 	});
 
 	test("hides the pet and restores full editor width at cols=80", () => {
 		const { composer, content } = build();
 		const lines = plain(composer.render(80));
 		expect(hasPetGlyph(lines)).toBe(false);
-		// Frame reclaims the whole width: innerWidth = 80 - 2 borders.
-		expect(content.lastWidth).toBe(80 - 2);
-		expect(lines[0]).toMatch(/^╭─+╮$/);
-		expect(visibleWidth(lines[0])).toBe(80);
+		// Content reclaims the whole width — no border columns to give back either.
+		expect(content.lastWidth).toBe(80);
+		expect(visibleWidth(lines[0]!)).toBe(80);
 	});
 
 	test("cedes to a modal: the visibility predicate can hide the pet even when wide", () => {
 		let modalOpen = false;
 		const { composer, content } = build((w) => w >= PET_COMPANION_MIN_COLS && !modalOpen);
-		expect(hasPetGlyph(plain(composer.render(120)).slice(0, 3))).toBe(true);
+		expect(hasPetGlyph(plain(composer.render(120)).slice(0, -1))).toBe(true);
 		modalOpen = true;
 		const hidden = plain(composer.render(120));
 		expect(hasPetGlyph(hidden)).toBe(false);
-		// Editor recovers the full frame width while the pet is ceded.
-		expect(content.lastWidth).toBe(120 - 2);
+		// Editor recovers the full content width while the pet is ceded.
+		expect(content.lastWidth).toBe(120);
 	});
 
 	test("clearing the gutter restores the plain composer", () => {
 		const { composer, content } = build();
 		composer.render(120);
-		expect(content.lastWidth).toBe(120 - PET_COMPANION_FOOTPRINT - 2);
+		expect(content.lastWidth).toBe(120 - PET_COMPANION_FOOTPRINT);
 		composer.setRightGutter(undefined);
 		expect(hasPetGlyph(plain(composer.render(120)))).toBe(false);
-		expect(content.lastWidth).toBe(120 - 2);
+		expect(content.lastWidth).toBe(120);
 	});
 });

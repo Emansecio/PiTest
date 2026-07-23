@@ -751,13 +751,21 @@ export class InteractiveMode {
 		setKeybindings(this.keybindings);
 		const editorPaddingX = this.settingsManager.getEditorPaddingX();
 		const autocompleteMaxVisible = this.settingsManager.getAutocompleteMaxVisible();
+		const promptGlyph = "❯ ";
 		this.defaultEditor = new CustomEditor(this.ui, getEditorTheme(), this.keybindings, {
 			paddingX: editorPaddingX,
 			autocompleteMaxVisible,
 			embedded: true,
 			onPasteTruncated: (info) => this._onPasteTruncated(info),
+			// Unframed composer (no boxed border): the mode/permission signal the
+			// border used to carry rides on the `❯` glyph (empty editor) and on a
+			// leading `!` shell-passthrough prefix (typed bash-mode text) instead —
+			// both painted with the same borderColor kept in sync by
+			// updateEditorBorderColor().
+			placeholderPromptCols: visibleWidth(promptGlyph),
+			highlightBangPrefix: true,
 		});
-		this.defaultEditor.setPlaceholder("❯ Describe a task…");
+		this.defaultEditor.setPlaceholder(`${promptGlyph}Describe a task…`);
 		this.defaultEditor.borderColor = (text) => theme.fg("accent", text);
 		this.editor = this.defaultEditor;
 		this.editorContainer = new Container();
@@ -766,9 +774,7 @@ export class InteractiveMode {
 		this.footer = new FooterComponent(this.session, this.footerDataProvider, this.launchCwd, this.ui);
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footer.setDensity(this.settingsManager.getFooterDensity());
-		this.composerChrome = new ComposerChrome(this.editorContainer, this.footer, this.widgetContainerBelow, (text) =>
-			theme.fg("accent", text),
-		);
+		this.composerChrome = new ComposerChrome(this.editorContainer, this.footer, this.widgetContainerBelow);
 
 		// Load hide thinking block setting
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
@@ -5245,8 +5251,10 @@ export class InteractiveMode {
 		} else {
 			borderColor = (text: string) => theme.fg("accent", text);
 		}
+		// Unframed composer: the editor is the only thing left to color — the `❯`
+		// glyph (empty) and a leading `!` bash-prefix (typed) carry the mode signal
+		// that used to ride on the ComposerChrome border.
 		this.editor.borderColor = borderColor;
-		this.composerChrome.setBorderColor(borderColor);
 		this.ui.requestRender();
 	}
 

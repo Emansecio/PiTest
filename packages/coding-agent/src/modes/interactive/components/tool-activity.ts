@@ -138,6 +138,12 @@ export function nounFor(toolName: string): string {
  * constant so every counter (nav group, work group, basename list) stays uniform. */
 export const COUNTER_SEP = "·";
 
+/** Leading gutter glyph for a settled action/work-group row — a steady accent
+ * dot, independent of outcome (success/error/aborted all show the same dot; the
+ * outcome rides on the TRAILING icon instead, see {@link ICON_SUCCESS}-alikes in
+ * activity-line.ts/work-group.ts). Shared so both files render the same glyph. */
+export const GUTTER_DOT = "●";
+
 const CONSONANTS_BEFORE_Y = /[bcdfghjklmnpqrstvwxz]y$/i;
 
 export function pluralizeNoun(noun: string, n: number): string {

@@ -268,6 +268,21 @@ export interface EditorOptions {
 	 * `keptBytes` the length actually inserted.
 	 */
 	onPasteTruncated?: (info: { originalBytes: number; keptBytes: number }) => void;
+	/**
+	 * Visible-column count of a leading placeholder prefix (e.g. a prompt glyph
+	 * like `❯ `) painted with `borderColor` instead of `placeholderColor` — lets a
+	 * consumer carry a state signal (mode/permission color) on the glyph without
+	 * a framed border. Default 0: the whole placeholder uses `placeholderColor`,
+	 * unchanged from historical behavior.
+	 */
+	placeholderPromptCols?: number;
+	/**
+	 * Recolor a leading `!` shell-passthrough prefix (e.g. `!ls`) with
+	 * `borderColor`, mirroring the existing `/command` highlight. Off by default —
+	 * opt-in per consumer so unrelated Editor instances keep rendering a leading
+	 * `!` as plain text.
+	 */
+	highlightBangPrefix?: boolean;
 }
 
 const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
@@ -509,6 +524,8 @@ export class Editor implements Component, Focusable {
 	private closedBottom: boolean = false;
 	private closedFrame: boolean = false;
 	private embedded: boolean = false;
+	private placeholderPromptCols: number = 0;
+	private highlightBangPrefix: boolean = false;
 
 	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}) {
 		this.tui = tui;
@@ -522,6 +539,9 @@ export class Editor implements Component, Focusable {
 		this.closedBottom = options.closedBottom === true;
 		this.closedFrame = options.closedFrame === true;
 		this.embedded = options.embedded === true;
+		const promptCols = options.placeholderPromptCols ?? 0;
+		this.placeholderPromptCols = Number.isFinite(promptCols) ? Math.max(0, Math.floor(promptCols)) : 0;
+		this.highlightBangPrefix = options.highlightBangPrefix === true;
 		this.onPasteTruncated = options.onPasteTruncated;
 	}
 
@@ -770,10 +790,17 @@ export class Editor implements Component, Focusable {
 	 * Each plain run is colored independently, so an embedded reverse-video
 	 * cursor (…\x1b[7m g \x1b[0m…) survives and the color resumes after it.
 	 * Visible width is unchanged — only SGR codes are added — so the upstream
-	 * padding math still holds.
+	 * padding math still holds. The optional `restColorFn` colors everything past
+	 * the prefix instead of leaving it raw (existing call sites omit it, so their
+	 * tail stays exactly as before).
 	 */
-	private paintPrefixVisible(s: string, maxCols: number, colorFn: (t: string) => string): string {
-		if (maxCols <= 0) return s;
+	private paintPrefixVisible(
+		s: string,
+		maxCols: number,
+		colorFn: (t: string) => string,
+		restColorFn?: (t: string) => string,
+	): string {
+		if (maxCols <= 0) return restColorFn ? restColorFn(s) : s;
 		// Segment the whole string once up front instead of re-slicing and
 		// re-segmenting the remainder on every grapheme (that was O(n^2) on the
 		// painted prefix: each iteration re-scanned from i to the end). Grapheme
@@ -811,7 +838,8 @@ export class Editor implements Component, Focusable {
 			segIdx++;
 		}
 		flushRun();
-		return out + s.slice(i);
+		const rest = s.slice(i);
+		return out + (restColorFn && rest ? restColorFn(rest) : rest);
 	}
 
 	render(width: number): string[] {
@@ -921,13 +949,26 @@ export class Editor implements Component, Focusable {
 		// Emit hardware cursor marker only when focused and not showing autocomplete
 		const emitCursorMarker = this.focused && !this.autocompleteState && !this.historySearchList;
 
-		// Slash-command highlight: column width of the leading `/command` token on
-		// the first line. Only when not scrolled — the command always lives at the
-		// buffer start, i.e. the first visible layout line.
+		// Leading-token highlight on the first line (only when not scrolled — the
+		// token always lives at the buffer start, i.e. the first visible layout
+		// line): a `/command` colors with the theme's commandColor; otherwise, when
+		// opted in, a `!` shell-passthrough prefix colors with borderColor (already
+		// tracking the active mode) — the same convention, a different trigger.
 		let commandCols = 0;
-		if (this.theme.commandColor && this.scrollOffset === 0) {
-			const match = /^\/[^\s/]\S*/.exec(this.state.lines[0] ?? "");
-			if (match) commandCols = visibleWidth(match[0]);
+		let commandColorFn: ((t: string) => string) | undefined;
+		if (this.scrollOffset === 0) {
+			const line0 = this.state.lines[0] ?? "";
+			const slashMatch = this.theme.commandColor ? /^\/[^\s/]\S*/.exec(line0) : null;
+			if (slashMatch) {
+				commandCols = visibleWidth(slashMatch[0]);
+				commandColorFn = this.theme.commandColor;
+			} else if (this.highlightBangPrefix) {
+				const bangMatch = /^\s*!/.exec(line0);
+				if (bangMatch) {
+					commandCols = visibleWidth(bangMatch[0]);
+					commandColorFn = this.borderColor;
+				}
+			}
 		}
 
 		for (const [visibleIndex, layoutLine] of visibleLines.entries()) {
@@ -956,7 +997,16 @@ export class Editor implements Component, Focusable {
 				// Reserve 1 col for the cursor so the hint never overflows contentWidth.
 				const hintBudget = Math.max(0, contentWidth - 1);
 				const truncated = hintBudget > 0 ? truncateToWidth(this.placeholder!, hintBudget) : "";
-				displayText = marker + cursor + (truncated ? colorize(truncated) : "");
+				// A leading prompt glyph (e.g. `❯ `) paints with borderColor instead of
+				// the dim hint color, so a mode/permission signal rides on the glyph
+				// without a framed border — opt-in via placeholderPromptCols (default 0
+				// keeps the whole hint in placeholderColor, unchanged).
+				const coloredHint = truncated
+					? this.placeholderPromptCols > 0
+						? this.paintPrefixVisible(truncated, this.placeholderPromptCols, this.borderColor, colorize)
+						: colorize(truncated)
+					: "";
+				displayText = marker + cursor + coloredHint;
 				lineVisibleWidth = 1 + visibleWidth(truncated);
 			} else if (layoutLine.hasCursor && layoutLine.cursorPos !== undefined) {
 				// Add cursor if this line has it
@@ -991,10 +1041,10 @@ export class Editor implements Component, Focusable {
 				}
 			}
 
-			// Colorize the leading slash-command token on the first line (after
-			// cursor injection so the reverse-video cursor stays intact).
-			if (commandCols > 0 && visibleIndex === 0 && this.theme.commandColor) {
-				displayText = this.paintPrefixVisible(displayText, commandCols, this.theme.commandColor);
+			// Colorize the leading slash-command/bang-prefix token on the first line
+			// (after cursor injection so the reverse-video cursor stays intact).
+			if (commandCols > 0 && visibleIndex === 0 && commandColorFn) {
+				displayText = this.paintPrefixVisible(displayText, commandCols, commandColorFn);
 			}
 
 			// Calculate padding based on actual visible width

@@ -11,6 +11,7 @@ import {
 	capDiffPreview,
 	diffStat,
 	EDIT_EXPANDED_MAX_LINES,
+	GUTTER_DOT,
 	isEditFamilyTool,
 	mcpActivityTarget,
 	parseMcpToolName,
@@ -32,9 +33,18 @@ const ICON_SUCCESS = "✓"; // light check (U+2713), renders 1 cell — consiste
 const ICON_ERROR = "✗";
 const ICON_ABORTED = "◦"; // muted — user interrupt is not a failure
 
-/** One action call on its own verb-led line. No gutter — the state icon frames
- * it. The wrapped exec renders only when expanded or on a genuine error. Used as a
- * promoted (edit/write/task/bookkeeping) row inside a WorkGroupComponent. */
+/** Steady color of the settled gutter dot — the existing "success" green, reused
+ * as the row's fixed accent regardless of outcome (outcome moved to the trailing
+ * icon). Reuses the theme's required `gutterToolSuccess` token rather than
+ * `accent` (a different, cyan-branded hue elsewhere in the theme) or a new
+ * optional token that could throw on a custom theme missing it. */
+const GUTTER_DOT_COLOR: ThemeColor = "gutterToolSuccess";
+
+/** One action call on its own verb-led line: a steady accent gutter dot leads
+ * (a live call keeps the existing braille spinner in its place), the verb+target
+ * follow, and a trailing ✓/✗/◦ reports the outcome once settled. The wrapped exec
+ * renders only when expanded or on a genuine error. Used as a promoted
+ * (edit/write/task/bookkeeping) row inside a WorkGroupComponent. */
 export class ActivityLineComponent extends Container {
 	private ui: TUI;
 	private isFrozen: () => boolean;
@@ -200,24 +210,28 @@ export class ActivityLineComponent extends Container {
 		return "gutterToolPending";
 	}
 
-	private icon(state: LineState): string {
-		// All state glyphs (spinner, ✓, ✗, ◦) render a single cell, matching the width
-		// model — so the header's single space shows cleanly and the label never
-		// shifts column when the spinner settles.
+	/**
+	 * Leading gutter glyph: the braille spinner while the call is in flight, then
+	 * a steady accent dot once settled — same dot for success, error, and abort,
+	 * since the outcome itself now rides on {@link trailingIcon} instead. Crossfades
+	 * from the last spinner frame through the first half of the settle ease so the
+	 * spinner eases into the dot instead of snapping (reduced-motion skips the ease).
+	 */
+	private gutter(state: LineState): string {
 		if (state === "pending") return theme.fg(this.pendingIconColor(), this.spinnerGlyph ?? SPINNER_FRAMES[0]);
-		// User abort/interrupt — muted marker, never success-green or error-red.
-		if (this.exec.isAborted()) {
-			return theme.fg("muted", ICON_ABORTED);
-		}
-		const glyph = state === "error" ? ICON_ERROR : ICON_SUCCESS;
-		const steady: ThemeColor = state === "error" ? "gutterToolError" : "gutterToolSuccess";
-		// Crossfade on settle: hold the last spinner frame through the first half of
-		// the color ease, then hand off to ✓/✗ — the glyph eases into the check
-		// instead of snapping. Reduced-motion skips the ease, so this is a no-op there.
 		if (this.iconEase.active && this.iconEase.progress < 0.5) {
-			return this.iconEase.colorize(steady, this.lastSpinnerGlyph ?? SPINNER_FRAMES[0]);
+			return this.iconEase.colorize(GUTTER_DOT_COLOR, this.lastSpinnerGlyph ?? SPINNER_FRAMES[0]);
 		}
-		return this.iconEase.colorize(steady, glyph);
+		return this.iconEase.colorize(GUTTER_DOT_COLOR, GUTTER_DOT);
+	}
+
+	/** Trailing outcome glyph: empty while pending (the gutter spinner already
+	 * says "in flight"), muted `◦` on a user abort/interrupt (never success-green
+	 * or error-red), else `✓`/`✗`. */
+	private trailingIcon(state: LineState): string {
+		if (state === "pending") return "";
+		if (this.exec.isAborted()) return theme.fg("muted", ICON_ABORTED);
+		return state === "error" ? theme.fg("gutterToolError", ICON_ERROR) : theme.fg("gutterToolSuccess", ICON_SUCCESS);
 	}
 
 	/** Verb color by lifecycle: accent while live, muted when collapsed, text when expanded. */
@@ -289,14 +303,15 @@ export class ActivityLineComponent extends Container {
 	override render(width: number): string[] {
 		if (!this.exec) return [];
 		const state = this.state();
-		// Ease the state icon's color on settle: pending → ✔/✗ hands off from the
+		// Ease the gutter dot's color on settle: pending → dot hands off from the
 		// spinner gray; a line that appears already resolved (history, instant tool)
-		// fades in from dim. Snaps without truecolor (see ColorEase).
+		// fades in from dim. Always eases toward the same steady dot color — the
+		// outcome (✓/✗/◦) rides on the trailing icon, not this glyph. Snaps without
+		// truecolor (see ColorEase).
 		if (state !== this.prevState) {
 			if (state !== "pending") {
 				const from: ThemeColor = this.prevState === "pending" ? this.pendingIconColor() : "dim";
-				const to: ThemeColor = state === "error" ? "gutterToolError" : "gutterToolSuccess";
-				this.iconEase.begin(from, to);
+				this.iconEase.begin(from, GUTTER_DOT_COLOR);
 			}
 			this.prevState = state;
 		}
@@ -338,9 +353,11 @@ export class ActivityLineComponent extends Container {
 		// `×N` when identical actions were folded in; muted so it reads as a counter.
 		const countSuffix = this.count > 1 ? ` ${theme.fg("muted", `×${this.count}`)}` : "";
 		const elapsedSuffix = pending ? this.pendingElapsedSuffix() : "";
+		const trailing = this.trailingIcon(state);
+		const trailingSuffix = trailing ? ` ${trailing}` : "";
 		const rawHeader = stripAnsi(target).trim()
-			? `${this.icon(state)} ${styledVerb} ${target}${countSuffix}${elapsedSuffix}`
-			: `${this.icon(state)} ${styledVerb}${countSuffix}${elapsedSuffix}`;
+			? `${this.gutter(state)} ${styledVerb} ${target}${countSuffix}${elapsedSuffix}${trailingSuffix}`
+			: `${this.gutter(state)} ${styledVerb}${countSuffix}${elapsedSuffix}${trailingSuffix}`;
 		const headerText = rawHeader;
 		// Cap the assembled header once so no branch (free-form agent label, MCP tool
 		// name, web_search query, edit path) can overflow the terminal width. ANSI is

@@ -152,9 +152,14 @@ function asKnownThinkingLevel(value: unknown): ThinkingLevel {
  * Footer component that shows pwd, token stats, and context usage.
  *
  * Layout (top to bottom; line 1 is the line closest to the editor):
- *   1. Identity: `cwd (branch) • session` (left, muted)  |  `model • thinking-level` (right, foreground + thinking color)
+ *   1. Identity: `cwd (branch) · session` (left, muted)  |  `model · thinking-level` (right, foreground + thinking color)
  *   2. Metrics: `CTX %·used/window` (left, state-colored) | mode/alarms (right, dim)
  *   3. Optional: extension statuses, single line
+ *
+ * One separator across every line: a dense `·` (never the airier `•` bullet or
+ * a double-spaced gap) — between distinct fields it keeps one space on each
+ * side (`cwd · branch`), between tightly-bound sub-parts of the same cluster it
+ * glues with no space at all (`5 searches·8 commands`, matching tool-activity.ts).
  *
  * Render output is memoized by `buildRenderCacheKey()`; goal spinner glyphs are
  * overlaid outside that cache so the strip is not rebuilt every animation frame.
@@ -489,7 +494,7 @@ export class FooterComponent implements Component {
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
 
 		// --- Identity (line 1) -----------------------------------------------
-		// Left: cwd (branch) • session — `muted` (not dim) so it stays legible
+		// Left: cwd (branch) · session — `muted` (not dim) so it stays legible
 		// without competing with the model name. The cwd is compacted (repo-relative
 		// when inside a git repo, mid-path ellipsis otherwise) so a deep absolute
 		// path never eats the model name on the right.
@@ -503,15 +508,15 @@ export class FooterComponent implements Component {
 			const branchLabel = formatGitBranchWithDiff(branch, diffStats);
 			pwd = `${pwd}${theme.fg("dim", " (")}${branchLabel}${theme.fg("dim", ")")}`;
 		}
-		if (sessionName) pwd = `${pwd}${theme.fg("dim", ` • ${sessionName}`)}`;
+		if (sessionName) pwd = `${pwd}${theme.fg("dim", ` · ${sessionName}`)}`;
 		if (cwdLabels.shellNote) pwd = `${pwd}${theme.fg("dim", ` · ${cwdLabels.shellNote}`)}`;
 
-		// Right: model • thinking-level — the model id is the single bright token
+		// Right: model · thinking-level — the model id is the single bright token
 		// of the line (no provider prefix; the provider lives in /model) and the
 		// thinking level renders as a small colored text chip (`High`).
 		const modelName = formatModelDisplayName(state.model?.id || "no-model");
 
-		// The thinking chip (`• High`) is a PROTECTED suffix: on a narrow terminal
+		// The thinking chip (`· High`) is a PROTECTED suffix: on a narrow terminal
 		// the model id is truncated before the chip is ever touched, so the level
 		// remains readable.
 		const identityRight = modelName;
@@ -523,8 +528,8 @@ export class FooterComponent implements Component {
 				const levelLabel = `${level[0].toUpperCase()}${level.slice(1)}`;
 				const colorize = theme.getThinkingBorderColor(level);
 				thinkingChip = {
-					text: `${theme.fg("muted", " • ")}${colorize(levelLabel)}`,
-					width: visibleWidth(` • ${levelLabel}`),
+					text: `${theme.fg("muted", " · ")}${colorize(levelLabel)}`,
+					width: visibleWidth(` · ${levelLabel}`),
 				};
 			}
 		}
@@ -559,8 +564,8 @@ export class FooterComponent implements Component {
 		let modeSuffix: { text: string; width: number } | undefined;
 		if (collapseLine2 && mode) {
 			modeSuffix = {
-				text: theme.fg("dim", ` • ${mode}`),
-				width: visibleWidth(` • ${mode}`),
+				text: theme.fg("dim", ` · ${mode}`),
+				width: visibleWidth(` · ${mode}`),
 			};
 		}
 
@@ -669,9 +674,10 @@ export class FooterComponent implements Component {
 			modeBits.push(theme.fg("accent", pinSegment));
 		}
 
-		// Assemble groups. Intra-group items join with the light ` · `; the two
-		// semantic groups (usage vs. mode) join with a stronger `  •  ` so the line
-		// reads as two clusters instead of one undifferentiated run.
+		// Assemble groups. Every join is the same dense ` · ` — intra-group items
+		// and the semantic groups (usage vs. mode) alike — one separator vocabulary
+		// across the whole footer instead of a lighter dot for one join and a
+		// heavier double-spaced bullet for the other.
 		const groups: string[] = [];
 		// Calm: skip long fusion: members string (still on identity mode chip when relevant).
 		if (fusionSegment && !calm) groups.push(theme.fg("accent", fusionSegment));
@@ -683,7 +689,7 @@ export class FooterComponent implements Component {
 			const hiddenCount = (fusionSegment ? 1 : 0) + otherStatuses.length;
 			if (hiddenCount > 0) groups.push(theme.fg("dim", `+${hiddenCount}`));
 		}
-		let rightText = groups.join("  •  ");
+		let rightText = groups.join(" · ");
 
 		// #2 — context-pressure signal is COLOR-first: the ctx number already turns
 		// warning/error past the threshold. Add a terse textual nudge only when
