@@ -37,6 +37,12 @@ const stepSchema = Type.Object(
 					"Command that proves this step is done. Runs automatically on step_done (60s timeout); a non-zero exit/timeout blocks completion and returns the failure output instead.",
 			}),
 		),
+		mechanical: Type.Optional(
+			Type.Boolean({
+				description:
+					"Set true only for routine, deterministic work (rote edits, renames, boilerplate) whose `verify` fully proves correctness. When true AND `verify` is present, the harness may run this step on a cheaper model; any anomaly reverts immediately. Leave unset for anything needing judgement.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -163,6 +169,7 @@ function toStepInputs(steps: PlanStepArg[] | undefined): PlanStepInput[] {
 		dependsOn: s.depends_on,
 		producesArtifact: s.produces,
 		verifyCmd: s.verify,
+		mechanical: s.mechanical,
 	}));
 }
 

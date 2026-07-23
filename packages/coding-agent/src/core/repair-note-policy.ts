@@ -24,8 +24,15 @@ const STRONG_NATIVE_PROVIDERS = new Set(["anthropic", "openai-codex"]);
 /** Frontier model ids even when served via weak/open providers (e.g. OpenRouter). */
 const STRONG_MODEL_ID_PATTERN = /claude|gpt-4|gpt-5|gemini|o[1-9]/i;
 
-/** Auto rule: on for weak/open providers and model ids outside the frontier set. */
-export function shouldAutoEmitRepairNotes(model: { provider: string; id?: string }): boolean {
+/**
+ * Weak/open-model classification, shared by every harness feature that scales
+ * itself down for models outside the native frontier set: on for weak/open
+ * providers and model ids, off for the frontier set (see module doc for the
+ * exact rule). Originally the Repair Node's own predicate; also backs the P7
+ * tiered system prompt (`system-prompt.ts`'s `resolvePromptProfile`) — same
+ * classification, different consumer.
+ */
+export function isWeakModelProfile(model: { provider: string; id?: string }): boolean {
 	if (STRONG_NATIVE_PROVIDERS.has(model.provider)) {
 		return false;
 	}
@@ -33,6 +40,11 @@ export function shouldAutoEmitRepairNotes(model: { provider: string; id?: string
 		return false;
 	}
 	return true;
+}
+
+/** Auto rule: on for weak/open providers and model ids outside the frontier set. */
+export function shouldAutoEmitRepairNotes(model: { provider: string; id?: string }): boolean {
+	return isWeakModelProfile(model);
 }
 
 /**

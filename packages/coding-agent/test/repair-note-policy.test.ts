@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { resolveEmitRepairNotes, shouldAutoEmitRepairNotes } from "../src/core/repair-note-policy.ts";
+import {
+	isWeakModelProfile,
+	resolveEmitRepairNotes,
+	shouldAutoEmitRepairNotes,
+} from "../src/core/repair-note-policy.ts";
 
 describe("shouldAutoEmitRepairNotes", () => {
 	it("is OFF for native frontier providers", () => {
@@ -49,6 +53,33 @@ describe("shouldAutoEmitRepairNotes", () => {
 		expect(shouldAutoEmitRepairNotes({ provider: "opencode", id: "CLAUDE-3-opus" })).toBe(false);
 		expect(shouldAutoEmitRepairNotes({ provider: "opencode", id: "GPT-4-TURBO" })).toBe(false);
 		expect(shouldAutoEmitRepairNotes({ provider: "opencode", id: "Gemini-Pro" })).toBe(false);
+	});
+});
+
+describe("isWeakModelProfile (P7 tiered-prompt predicate, extracted from shouldAutoEmitRepairNotes)", () => {
+	const cases: Array<{ provider: string; id?: string }> = [
+		{ provider: "anthropic" },
+		{ provider: "openai-codex" },
+		{ provider: "opencode" },
+		{ provider: "opencode-go", id: "kimi-k2" },
+		{ provider: "opencode", id: "anthropic/claude-3.5-sonnet" },
+		{ provider: "opencode", id: "deepseek/deepseek-chat" },
+		{ provider: "my-custom-deepseek" },
+		{ provider: "opencode", id: "CLAUDE-3-opus" },
+	];
+
+	it("is identical to shouldAutoEmitRepairNotes for every case (pure delegation, same behavior)", () => {
+		for (const model of cases) {
+			expect(isWeakModelProfile(model)).toBe(shouldAutoEmitRepairNotes(model));
+		}
+	});
+
+	it("is OFF for native frontier providers and ON for weak/open providers/ids", () => {
+		expect(isWeakModelProfile({ provider: "anthropic" })).toBe(false);
+		expect(isWeakModelProfile({ provider: "openai-codex" })).toBe(false);
+		expect(isWeakModelProfile({ provider: "opencode" })).toBe(true);
+		expect(isWeakModelProfile({ provider: "opencode", id: "deepseek/deepseek-chat" })).toBe(true);
+		expect(isWeakModelProfile({ provider: "opencode", id: "anthropic/claude-3.5-sonnet" })).toBe(false);
 	});
 });
 

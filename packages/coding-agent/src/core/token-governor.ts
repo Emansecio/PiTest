@@ -12,6 +12,13 @@ export interface TokenBudgetSnapshot {
 	mainTokens: number;
 	subagentTokens: number;
 	fusionTokens: number;
+	/**
+	 * Tokens the main agent spent while the model gearbox (P8b) held the session
+	 * on the `smol` role — a SUBSET view of {@link mainTokens}, so it is
+	 * deliberately NOT added into {@link totalSpent} (that would double-count).
+	 * Session-live and observational: not persisted in the goal spend split.
+	 */
+	gearboxTokens: number;
 	totalSpent: number;
 	budgetLimit?: number;
 	remaining?: number;
@@ -26,6 +33,8 @@ export class TokenBudgetGovernor {
 	private mainTokens = 0;
 	private subagentTokens = 0;
 	private fusionTokens = 0;
+	/** Subset of mainTokens spent while gearbox-downshifted (see snapshot doc). */
+	private gearboxTokens = 0;
 	private budgetLimit: number | undefined;
 	private goalManager: GoalManager | undefined;
 
@@ -37,6 +46,7 @@ export class TokenBudgetGovernor {
 		this.mainTokens = 0;
 		this.subagentTokens = 0;
 		this.fusionTokens = 0;
+		this.gearboxTokens = 0;
 		this.budgetLimit = undefined;
 	}
 
@@ -56,6 +66,9 @@ export class TokenBudgetGovernor {
 			this.subagentTokens = 0;
 			this.fusionTokens = 0;
 		}
+		// gearboxTokens is a session-live subset counter — not persisted, so a reload
+		// starts it fresh rather than reconstructing it from the goal split.
+		this.gearboxTokens = 0;
 		this.budgetLimit = budget;
 	}
 
@@ -77,6 +90,19 @@ export class TokenBudgetGovernor {
 		this.flushToGoal();
 	}
 
+	/**
+	 * Attribute main-agent spend that happened while the model gearbox held the
+	 * `smol` role. Mirrors recordMain/Subagent/Fusion, but this is a SUBSET of the
+	 * main spend already counted by recordMain (the caller records the same delta
+	 * here in addition), so it never enters totalSpent and does not change the goal
+	 * budget — flushToGoal is called only to keep the mirror faithful/idempotent.
+	 */
+	recordGearbox(delta: number): void {
+		if (delta <= 0) return;
+		this.gearboxTokens += Math.round(delta);
+		this.flushToGoal();
+	}
+
 	totalSpent(): number {
 		return this.mainTokens + this.subagentTokens + this.fusionTokens;
 	}
@@ -88,6 +114,7 @@ export class TokenBudgetGovernor {
 			mainTokens: this.mainTokens,
 			subagentTokens: this.subagentTokens,
 			fusionTokens: this.fusionTokens,
+			gearboxTokens: this.gearboxTokens,
 			totalSpent,
 			budgetLimit: this.budgetLimit,
 			remaining,

@@ -31,6 +31,13 @@ export interface PlanStep {
 	dependsOn: string[];
 	producesArtifact?: string;
 	verifyCmd?: string;
+	/**
+	 * Set true by the (strong) planner when the step is routine, deterministic
+	 * mechanical work — the model gearbox (P8b) may downshift to the `smol` role
+	 * for a step that is `mechanical` AND carries a `verifyCmd`. The harness NEVER
+	 * infers this; absence means "not mechanical".
+	 */
+	mechanical?: boolean;
 	status: PlanStepStatus;
 }
 
@@ -41,6 +48,7 @@ export interface PlanStepInput {
 	dependsOn?: string[];
 	producesArtifact?: string;
 	verifyCmd?: string;
+	mechanical?: boolean;
 	status?: PlanStepStatus;
 }
 
@@ -117,6 +125,9 @@ function validateSteps(rawSteps: PlanStepInput[]): PlanStep[] {
 			dependsOn,
 			producesArtifact: raw.producesArtifact?.trim() ? clamp(raw.producesArtifact, ARTIFACT_MAX) : undefined,
 			verifyCmd: raw.verifyCmd?.trim() ? clamp(raw.verifyCmd, VERIFY_MAX) : undefined,
+			// Normalize to a strict `true | undefined` so the flag never persists as
+			// `false`/other truthy junk and equality (sameStep) stays trivial.
+			mechanical: raw.mechanical === true ? true : undefined,
 			status,
 		});
 	}
@@ -330,6 +341,22 @@ export class PlanManager {
 		}
 	}
 
+	/**
+	 * Steps the model may start right now: `pending` with every dependency `done`.
+	 * Mirrors the `Ready now:` derivation in {@link systemPromptSection} but returns
+	 * full (cloned) steps so callers like the model gearbox (P8b) can read
+	 * `mechanical`/`verifyCmd`. Empty when no plan exists, it is archived, or every
+	 * step is done/blocked. Declaration order is preserved.
+	 */
+	readySteps(): PlanStep[] {
+		const v = this.versions[this.versions.length - 1];
+		if (!v) return [];
+		const statusById = new Map(v.steps.map((s) => [s.id, s.status]));
+		return v.steps
+			.filter((s) => s.status === "pending" && s.dependsOn.every((d) => statusById.get(d) === "done"))
+			.map((s) => ({ ...s, dependsOn: [...s.dependsOn] }));
+	}
+
 	/** {done,total} for the current version. */
 	counts(): { done: number; total: number } {
 		const v = this.versions[this.versions.length - 1];
@@ -468,11 +495,14 @@ function renderStepLine(step: PlanStep, statusById?: Map<string, PlanStepStatus>
 	const deps = step.dependsOn.length > 0 ? ` [needs ${step.dependsOn.join(",")}]` : "";
 	const artifact = step.producesArtifact ? ` →${step.producesArtifact}` : "";
 	const verify = step.verifyCmd ? ` ⟨${step.verifyCmd}⟩` : "";
+	// Dense marker echoing the planner's `mechanical` flag back so the executor (and
+	// a reviewer) can see which steps the gearbox is allowed to downshift.
+	const mech = step.mechanical ? " ⚙" : "";
 	const ready =
 		statusById && step.status === "pending" && step.dependsOn.every((d) => statusById.get(d) === "done")
 			? " ← ready"
 			: "";
-	return `  ${STATUS_GLYPH[step.status]} ${step.id}  ${step.intent}${deps}${artifact}${verify}${ready}`;
+	return `  ${STATUS_GLYPH[step.status]} ${step.id}  ${step.intent}${deps}${artifact}${verify}${mech}${ready}`;
 }
 
 function cloneVersion(v: PlanVersion): PlanVersion {
@@ -506,6 +536,7 @@ function sameStep(a: PlanStep, b: PlanStep): boolean {
 		a.intent === b.intent &&
 		a.producesArtifact === b.producesArtifact &&
 		a.verifyCmd === b.verifyCmd &&
+		a.mechanical === b.mechanical &&
 		a.dependsOn.length === b.dependsOn.length &&
 		a.dependsOn.every((d, i) => d === b.dependsOn[i])
 	);

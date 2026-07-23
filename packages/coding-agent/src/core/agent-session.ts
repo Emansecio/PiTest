@@ -228,7 +228,13 @@ import type { SlashCommandInfo } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { MUTATING_TOOL_NAMES } from "./stagnation.ts";
 import { getCurrentSupervisionThermostat } from "./supervision-thermostat.ts";
-import { type BuildSystemPromptOptions, buildSystemPrompt, patchSystemPromptToolSurface } from "./system-prompt.js";
+import {
+	type BuildSystemPromptOptions,
+	buildSystemPrompt,
+	patchSystemPromptToolSurface,
+	resolvePromptProfile,
+	type SystemPromptProfile,
+} from "./system-prompt.js";
 import { DiagnosticsSink, defaultDiagnosticsDir, isTelemetrySinkDisabled } from "./telemetry/diagnostics-sink.ts";
 import { GuardEfficacyCorrelator } from "./telemetry/guard-efficacy.ts";
 import { HintFireTally } from "./telemetry/hint-fire-tally.ts";
@@ -782,6 +788,12 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	// Base system prompt (without extension appends) - used to apply fresh appends each turn
 	private _baseSystemPrompt = "";
 	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
+	// P7 tiered system prompt: the profile is resolved once per model (boot, or
+	// `setModel`) and cached here — `_rebuildSystemPrompt` reads it on every
+	// call but never re-resolves it, so tool/extension/frequent-files rebuilds
+	// never flip the tier out from under an unrelated rebuild. See
+	// `resolvePromptProfile` in system-prompt.ts for why it's keyed to the model.
+	private _promptProfile: SystemPromptProfile = "full";
 
 	// Prompt-cache prefix diagnostics. Only the cache-stable prefix (everything
 	// before SYSTEM_PROMPT_DYNAMIC_MARKER) matters for prompt caching: rewriting
@@ -956,6 +968,14 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		// tool descriptions advertise the scaled budgets. Same convention as the
 		// thermostat above: a later /model switch does not re-scale.
 		configureTruncationCaps({ contextWindow: this.agent.state.model?.contextWindow ?? 0 });
+
+		// P7 tiered system prompt: resolve the boot-time profile from the
+		// boot-time model, same convention as the two blocks above — must run
+		// before _buildRuntime below (it performs the session's first system-
+		// prompt build) so the very first prompt is already tiered correctly.
+		// A later /model switch re-resolves this itself (see setModel) rather
+		// than this field going stale; it never changes on its own otherwise.
+		this._promptProfile = resolvePromptProfile(this.agent.state.model);
 
 		// Band P conventions contract (P5): session-scoped, reached by
 		// failure-summary (extraction) and system-prompt (injection) via the module
@@ -3705,6 +3725,10 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 			// "no hidden tools", so this is behavior-neutral for the single-session
 			// case and only removes the cross-session ambiguity.
 			hiddenToolCount: this._hiddenToolCountSnapshot,
+			// P7 tiered system prompt — resolved once per model (boot / setModel),
+			// never re-resolved here, so unrelated rebuilds (tool-surface,
+			// extensions-reload, frequent-files-index, …) can never flip the tier.
+			profile: this._promptProfile,
 		};
 		const prompt = buildSystemPrompt(this._baseSystemPromptOptions);
 		this._trackPrefixStability(prompt, reason);
@@ -5599,6 +5623,19 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 
 		// Re-clamp thinking level for new model's capabilities
 		this.setThinkingLevel(thinkingLevel);
+
+		// P7 tiered system prompt: the profile is keyed to the model, so it only
+		// ever changes alongside a model switch (never on its own — an unrelated
+		// rebuild reuses `_promptProfile` as-is, see `_rebuildSystemPrompt`). The
+		// provider's prompt cache is keyed by model too, so flipping the tier
+		// here rides the cache-miss this switch already causes rather than
+		// adding one of its own.
+		const nextPromptProfile = resolvePromptProfile(model);
+		if (nextPromptProfile !== this._promptProfile) {
+			this._promptProfile = nextPromptProfile;
+			this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames(), "model-profile");
+			this.agent.state.systemPrompt = this._baseSystemPrompt;
+		}
 
 		await this._emitModelSelect(model, previousModel, "set");
 	}

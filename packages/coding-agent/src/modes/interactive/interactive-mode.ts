@@ -123,6 +123,7 @@ import {
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import { humanModeNotifyLabel } from "../../core/permissions/mode-labels.ts";
 import { PIN_CAP } from "../../core/pins.ts";
+import { getCurrentPlanManager } from "../../core/plan/plan-manager.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
@@ -130,6 +131,8 @@ import { type SessionContext, type SessionInfo, SessionManager } from "../../cor
 import type { ResolvedSkillDiscoverySettings } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS, buildGroupedSlashHelp } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
+import { getCurrentTokenGovernor } from "../../core/token-governor.ts";
+import { consumedTokens } from "../../core/token-usage.ts";
 import { resolveReadPath } from "../../core/tools/path-utils.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import {
@@ -547,6 +550,21 @@ export class InteractiveMode {
 	private activeRole: ModelRole = "default";
 	/** Role active before entering plan mode; restored on exit when still on "plan". */
 	private roleBeforePlan: ModelRole | undefined;
+
+	// --- Model gearbox (P8b) --------------------------------------------------
+	// Reuses the plan-mode swap path (applyModelRole + a roleBeforeX guard). The
+	// planner marks steps `mechanical`; when the plan's next ready step(s) are all
+	// mechanical+verify the gearbox downshifts to the `smol` role, and any anomaly
+	// (verify fail, retry budget exhausted, doom-loop recovery, or an `ask`)
+	// upshifts irrevocably for that step. No-op unless a `smol` role is configured.
+	/** True while the gearbox itself holds the `smol` role (distinct from a manual `/model smol`). */
+	private gearboxActive = false;
+	/** Role active at the moment the gearbox downshifted; restored on upshift when still on "smol". */
+	private roleBeforeGearbox: ModelRole | undefined;
+	/** The ready step id the current downshift is for; poisoned on anomaly. */
+	private gearboxStepId: string | undefined;
+	/** Steps that hit an anomaly while downshifted — never downshifted again ("irrevocable for the step"). */
+	private readonly gearboxPoisonedSteps = new Set<string>();
 
 	// Last search term typed in the /model picker. Restored when the picker is
 	// reopened via the keybinding or a bare `/model` (no arg), so a multi-step
@@ -3791,6 +3809,13 @@ export class InteractiveMode {
 					this.disposeActiveStreamingComponent();
 					break;
 				}
+				// Gearbox accounting: a subset of main spend produced while the session
+				// was held on `smol`. The step_done-calling message settles BEFORE the
+				// downshift (which fires at that plan tool's execution_end), so the strong
+				// model's turn is never mis-attributed.
+				if (event.message.role === "assistant" && this.gearboxActive) {
+					getCurrentTokenGovernor()?.recordGearbox(consumedTokens(event.message.usage));
+				}
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
 					let errorMessage: string | undefined;
@@ -3845,6 +3870,9 @@ export class InteractiveMode {
 				break;
 
 			case "tool_execution_start": {
+				// Gearbox anomaly: the model reached for `ask` — it needs judgement, so
+				// upshift for this step before the next turn runs.
+				if (event.toolName === "ask") this.gearboxForceUpshift("ask");
 				const component = this._ensureToolComponent(event.toolName, event.toolCallId, event.args);
 				component.markExecutionStarted();
 				// Grouped transcript already shows verb+target on activity lines —
@@ -3872,6 +3900,9 @@ export class InteractiveMode {
 			}
 
 			case "tool_execution_end": {
+				// Gearbox: drive downshift/upshift off `plan` ops + fire anomaly upshifts.
+				// Runs regardless of a live tool component so an anomaly is never missed.
+				this.gearboxObserveToolEnd(event.toolName, event.result, event.isError);
 				const component = this.pendingTools.get(event.toolCallId);
 				if (component) {
 					component.updateResult({ ...event.result, isError: event.isError });
@@ -6343,6 +6374,128 @@ export class InteractiveMode {
 		}
 	}
 
+	// --- Model gearbox (P8b) --------------------------------------------------
+
+	/**
+	 * The gearbox is a silent no-op unless a `smol` role is configured AND the
+	 * kill-switch is off. On-by-default when `smol` is present. Read live so a
+	 * mid-session env flip (tests, tuning) takes effect immediately.
+	 */
+	private gearboxEnabled(): boolean {
+		if (isTruthyEnvFlag(process.env.PIT_NO_MODEL_GEARBOX)) return false;
+		return Boolean(this.settingsManager.getModelRoleSettings().modelRoles?.smol);
+	}
+
+	/**
+	 * Re-derive downshift/upshift from the current plan after a successful `plan`
+	 * op. Downshift when the ready set is non-empty and EVERY ready step is
+	 * `mechanical` with a `verifyCmd` and not poisoned (conservative: never descend
+	 * while any judgement work is startable); otherwise upshift. A disabled gearbox
+	 * still restores any live downshift, so flipping the kill-switch never strands
+	 * the session on `smol`.
+	 */
+	private gearboxReevaluate(): void {
+		if (!this.gearboxEnabled()) {
+			this.gearboxUpshift();
+			return;
+		}
+		const ready = getCurrentPlanManager()?.readySteps() ?? [];
+		const wantSmol =
+			ready.length > 0 &&
+			ready.every((s) => s.mechanical === true && Boolean(s.verifyCmd) && !this.gearboxPoisonedSteps.has(s.id));
+		if (wantSmol) {
+			this.gearboxStepId = ready[0]?.id;
+			this.gearboxDownshift();
+		} else {
+			this.gearboxUpshift();
+		}
+	}
+
+	/**
+	 * Immediate, irrevocable upshift for the current step on any anomaly. Poisons
+	 * the step so it never downshifts again, then restores the pre-downshift role.
+	 * A no-op when not currently downshifted.
+	 */
+	private gearboxForceUpshift(reason: string): void {
+		if (!this.gearboxActive) return;
+		if (this.gearboxStepId) this.gearboxPoisonedSteps.add(this.gearboxStepId);
+		this.gearboxUpshift();
+		this.showStatus(`gearbox: upshift (${reason})`);
+	}
+
+	/** Enter the `smol` role via the shared role-swap path. Guarded against re-entry and plan mode. */
+	private gearboxDownshift(): void {
+		if (this.gearboxActive) return;
+		// Never fight plan mode's own role, and never override a role the user is
+		// already sitting on manually (including a manual `/model smol`).
+		if (this.isPlanPermissionMode) return;
+		if (this.activeRole === "smol") return;
+		// Don't descend into a session that is already in doom-loop recovery — it would
+		// upshift again on the very next tool end (thrash + cache-miss). Wait for lean.
+		if (this.getSessionRecoveryLevel() !== "lean") return;
+		this.roleBeforeGearbox = this.activeRole;
+		this.gearboxActive = true;
+		this.footer.setGearboxRole("smol");
+		void this.applyModelRole("smol", { silent: true });
+		this.refreshModelIndicators();
+	}
+
+	/**
+	 * Leave the gearbox downshift. No-clobber: only restores the model when the
+	 * active role is STILL the `smol` the gearbox set — if the user switched roles
+	 * mid-downshift (`activeRole !== "smol"`) we drop our claim without touching
+	 * their choice, mirroring `decideRoleForPermissionMode`'s `activeRole === "plan"`
+	 * guard.
+	 */
+	private gearboxUpshift(): void {
+		if (!this.gearboxActive) return;
+		this.gearboxActive = false;
+		const restoreTo = this.roleBeforeGearbox ?? "default";
+		this.roleBeforeGearbox = undefined;
+		this.gearboxStepId = undefined;
+		this.footer.setGearboxRole(null);
+		if (this.activeRole === "smol") {
+			void this.applyModelRole(restoreTo, { silent: true });
+		}
+		this.refreshModelIndicators();
+	}
+
+	/**
+	 * Observe a finished tool call for the gearbox: drive downshift/upshift off
+	 * `plan` ops and fire the anomaly upshift for retry-budget exhaustion or a
+	 * doom-loop recovery escalation. Called from `tool_execution_end`.
+	 */
+	private gearboxObserveToolEnd(toolName: string, result: unknown, isError: boolean): void {
+		// Doom-loop recovery: `_noteRecoverySignal` raises the session recovery level
+		// off "lean" — the one public surface for those tiers (the footer reads it too).
+		if (this.gearboxActive && this.getSessionRecoveryLevel() !== "lean") {
+			this.gearboxForceUpshift("recovery");
+			return;
+		}
+		// Retry budget exhausted: surfaced only as the Tier-4 hint line appended to
+		// the failing result (tool-retry-budget.ts). Match its stable exhaustion phrase.
+		if (this.gearboxActive && isError && gearboxResultText(result).includes("retry budget exhausted")) {
+			this.gearboxForceUpshift("retry-exhausted");
+			return;
+		}
+		if (toolName !== "plan") return;
+		const op = gearboxPlanOp(result);
+		if (isError) {
+			// A failed `step_done` is a verify failure (or a rejected completion): the
+			// step is not done — upshift for it immediately.
+			if (op === "step_done") this.gearboxForceUpshift("verify-failed");
+			return;
+		}
+		// A brand-new plan clears prior poison (ids may be reused for fresh intents).
+		if (op === "propose") this.gearboxPoisonedSteps.clear();
+		this.gearboxReevaluate();
+	}
+
+	/** Recovery level via the public getter, defensively (older/mock sessions in tests). */
+	private getSessionRecoveryLevel(): string {
+		return typeof this.session.getRecoveryLevel === "function" ? this.session.getRecoveryLevel() : "lean";
+	}
+
 	private async findExactModelMatch(searchTerm: string): Promise<Model<any> | undefined> {
 		const models = await this.getModelCandidates();
 		return findExactModelReferenceMatch(searchTerm, models);
@@ -8232,4 +8385,25 @@ export function sessionHasThinkingOnlyAssistant(messages: ReadonlyArray<unknown>
 		if (hasThinking && !hasText) return true;
 	}
 	return false;
+}
+
+/** The `plan` tool stamps `details.op` on every result; read it defensively for the gearbox. */
+function gearboxPlanOp(result: unknown): string | undefined {
+	if (!result || typeof result !== "object") return undefined;
+	const details = (result as { details?: { op?: unknown } }).details;
+	return typeof details?.op === "string" ? details.op : undefined;
+}
+
+/** Flatten a tool result's text content so the gearbox can scan it for the retry-budget marker. */
+function gearboxResultText(result: unknown): string {
+	if (!result || typeof result !== "object") return "";
+	const content = (result as { content?: unknown }).content;
+	if (!Array.isArray(content)) return "";
+	let text = "";
+	for (const block of content) {
+		if (block && typeof block === "object" && typeof (block as { text?: unknown }).text === "string") {
+			text += (block as { text: string }).text;
+		}
+	}
+	return text;
 }

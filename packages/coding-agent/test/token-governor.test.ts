@@ -51,6 +51,28 @@ describe("TokenBudgetGovernor", () => {
 		expect(goal.get()?.tokensUsed).toBe(3500);
 	});
 
+	it("records gearbox spend as a subset of main — excluded from totalSpent and the persisted split (P8b)", () => {
+		const goal = new GoalManager();
+		const governor = new TokenBudgetGovernor();
+		governor.bindGoal(goal);
+		goal.start("gearbox turn", { tokenBudget: 50_000 });
+		governor.setBudget(50_000);
+		governor.recordMain(4000);
+		governor.recordGearbox(1500); // subset of the 4000 already counted as main
+
+		const snap = governor.snapshot();
+		expect(snap.gearboxTokens).toBe(1500);
+		expect(snap.mainTokens).toBe(4000);
+		// Not double-counted into the budget-driving total…
+		expect(snap.totalSpent).toBe(4000);
+		expect(goal.get()?.tokensUsed).toBe(4000);
+		// …and not persisted into the goal spend split (stays the 3 canonical channels).
+		expect(goal.get()?.tokenSpendSplit).toEqual({ main: 4000, subagent: 0, fusion: 0 });
+
+		governor.reset();
+		expect(governor.snapshot().gearboxTokens).toBe(0);
+	});
+
 	it("persists and restores token spend split on reload", () => {
 		const goal = new GoalManager();
 		const governor = new TokenBudgetGovernor();

@@ -11,9 +11,46 @@ import {
 	formatFrequentFilesForPrompt,
 	formatFrequentFilesIndexForPrompt,
 } from "./frequent-files.ts";
+import { isWeakModelProfile } from "./repair-note-policy.ts";
 import { getCurrentSessionContract } from "./session-contract.ts";
 import { formatSkillsForPrompt, type Skill } from "./skills.ts";
 import { getCurrentToolDiscoveryIndex } from "./tool-discovery.ts";
+
+/**
+ * System-prompt tier (P7 — tiered system prompt for weak models). "full" is
+ * the complete guideline set; "compact" keeps the essential contract
+ * (identity, Platform, Available tools + discovery nudge, edit-vs-write,
+ * run-tests, report-outcomes, docs pointer) integral and condenses the
+ * remaining style/nuance bullets into a few imperative lines. `<project_context>`,
+ * Skills, and `appendSystemPrompt` are untouched by the profile — they are
+ * user content, not harness style guidance.
+ */
+export type SystemPromptProfile = "full" | "compact";
+
+/**
+ * Resolve the system-prompt tier for `model`. `PIT_NO_TIERED_PROMPT` disables
+ * tiering entirely (always "full", the kill-switch always wins).
+ * `PIT_TIERED_PROMPT=full|compact` forces a tier. Otherwise the auto rule
+ * picks "compact" for weak/open models (`isWeakModelProfile` — the same
+ * classification the Repair Node uses) and "full" for native frontier models.
+ *
+ * Callers must only re-resolve this alongside a model switch (boot, or
+ * `AgentSession.setModel`) and never on an unrelated system-prompt rebuild:
+ * the provider's prompt cache is keyed by model, so changing the profile
+ * together with the model rides the cache-miss the switch already causes,
+ * while changing it WITHOUT a model switch would invalidate the cached
+ * prefix for free. See `agent-session.ts`'s `setModel`.
+ */
+export function resolvePromptProfile(model: { provider: string; id?: string }): SystemPromptProfile {
+	if (isTruthyEnvFlag(process.env.PIT_NO_TIERED_PROMPT)) {
+		return "full";
+	}
+	const raw = process.env.PIT_TIERED_PROMPT?.trim().toLowerCase();
+	if (raw === "full" || raw === "compact") {
+		return raw;
+	}
+	return isWeakModelProfile(model) ? "compact" : "full";
+}
 
 /** Render a `<frequent_files_outline>` suffix block (heuristic, boot-computed). */
 export function formatHotFileOutlines(outlines: Array<{ path: string; symbols: string[] }>): string {
@@ -94,6 +131,14 @@ export interface BuildSystemPromptOptions {
 	 * transcript). `undefined` keeps legacy behavior (emit when data exists).
 	 */
 	contextOccupancyPercent?: number;
+	/**
+	 * System-prompt tier (P7). Default `"full"`. `"compact"` keeps the
+	 * essential contract integral and condenses nuance guideline bullets — see
+	 * {@link SystemPromptProfile} and {@link resolvePromptProfile}. Does not
+	 * affect `<project_context>`, Skills, `appendSystemPrompt`, or anything in
+	 * the dynamic suffix (all untouched, in both tiers).
+	 */
+	profile?: SystemPromptProfile;
 }
 
 /** Build the system prompt with tools, guidelines, and context */
@@ -114,6 +159,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		gitState,
 		groundedContext,
 		contextOccupancyPercent,
+		profile,
 	} = options;
 	const promptCwd = cwd.replace(/\\/g, "/");
 	const resolvedHiddenToolCount = hiddenToolCount ?? getCurrentToolDiscoveryIndex()?.listHidden().length ?? 0;
@@ -219,6 +265,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		toolSnippets,
 		promptGuidelines,
 		hiddenToolCount: resolvedHiddenToolCount,
+		profile,
 	});
 
 	const platform = typeof process !== "undefined" ? process.platform : "unknown";
@@ -286,9 +333,21 @@ export function buildToolsAndGuidelinesSection(options: {
 	toolSnippets?: Record<string, string>;
 	promptGuidelines?: string[];
 	hiddenToolCount?: number;
+	/**
+	 * P7 tier. Default `"full"`. `"compact"` drops the style/nuance bullets
+	 * below (professional-user, bash/grep preference, numstat tip, match-style,
+	 * tool-batching, preview-UI, narration, path:line, comments-why,
+	 * premise-wrong, todo-first) in favor of a handful of condensed imperative
+	 * lines, while keeping the essential contract — edit-vs-write, run-tests,
+	 * report-outcomes — verbatim. `promptGuidelines` (tool-provided / engineering-
+	 * style / in-turn-verification guidance) is never condensed: it is
+	 * functional configuration, not style nuance.
+	 */
+	profile?: SystemPromptProfile;
 }): { toolsList: string; guidelines: string; hiddenToolsNudge: string } {
-	const { selectedTools, promptGuidelines } = options;
+	const { selectedTools, promptGuidelines, profile = "full" } = options;
 	const { toolsList, hiddenToolsNudge } = buildToolsListSection(options);
+	const isCompact = profile === "compact";
 
 	const tools = selectedTools || ["read", "bash", "edit", "write"];
 
@@ -302,7 +361,7 @@ export function buildToolsAndGuidelinesSection(options: {
 		guidelinesList.push(guideline);
 	};
 
-	if (tools.includes("todo")) {
+	if (!isCompact && tools.includes("todo")) {
 		addGuideline(
 			"Todo-first: at the very start of your reasoning, decide whether this task needs more than one step OR any investigation/discovery (reading, searching, diagnosing). If so, create a todo (even a single '1. Identify X') BEFORE you act, then keep it current as you go. Skip only for genuinely single-step requests.",
 		);
@@ -315,21 +374,23 @@ export function buildToolsAndGuidelinesSection(options: {
 	const hasRead = tools.includes("read");
 	const hasPreviewTool = tools.includes("preview") || tools.some((name) => name.startsWith("chrome_devtools"));
 
-	addGuideline(
-		"Treat the user as an experienced professional: deliver the requested work directly, avoid unnecessary disclaimers, take routine safe steps without asking, and mention any clearly broken adjacent code you fix.",
-	);
+	if (!isCompact) {
+		addGuideline(
+			"Treat the user as an experienced professional: deliver the requested work directly, avoid unnecessary disclaimers, take routine safe steps without asking, and mention any clearly broken adjacent code you fix.",
+		);
 
-	if (hasBash && !hasGrep && !hasFind && !hasLs) {
-		addGuideline("Use bash for file operations like ls, rg, find");
-	} else if (hasBash && (hasGrep || hasFind || hasLs)) {
-		addGuideline(
-			"Prefer grep/find/ls over bash for file exploration; grep to locate code, then read only the specific files you need.",
-		);
-	}
-	if (hasBash) {
-		addGuideline(
-			"When you only need which files changed and by how much (not the full patch), run `git diff --numstat` (or `--stat`) instead of `git diff` — a fraction of the tokens.",
-		);
+		if (hasBash && !hasGrep && !hasFind && !hasLs) {
+			addGuideline("Use bash for file operations like ls, rg, find");
+		} else if (hasBash && (hasGrep || hasFind || hasLs)) {
+			addGuideline(
+				"Prefer grep/find/ls over bash for file exploration; grep to locate code, then read only the specific files you need.",
+			);
+		}
+		if (hasBash) {
+			addGuideline(
+				"When you only need which files changed and by how much (not the full patch), run `git diff --numstat` (or `--stat`) instead of `git diff` — a fraction of the tokens.",
+			);
+		}
 	}
 
 	for (const guideline of promptGuidelines ?? []) {
@@ -339,16 +400,20 @@ export function buildToolsAndGuidelinesSection(options: {
 		}
 	}
 
-	addGuideline(
-		"Match each file's existing style and reuse project utilities; before using a library, confirm it is already a dependency.",
-	);
-
-	const hasMultipleReadOnlyTools = [hasRead, hasGrep, hasFind, hasLs].filter(Boolean).length >= 2;
-	if (hasMultipleReadOnlyTools) {
+	if (!isCompact) {
 		addGuideline(
-			"Tool batching: emit independent tool calls in the same turn; sequence calls whose arguments depend on earlier results.",
+			"Match each file's existing style and reuse project utilities; before using a library, confirm it is already a dependency.",
 		);
+
+		const hasMultipleReadOnlyTools = [hasRead, hasGrep, hasFind, hasLs].filter(Boolean).length >= 2;
+		if (hasMultipleReadOnlyTools) {
+			addGuideline(
+				"Tool batching: emit independent tool calls in the same turn; sequence calls whose arguments depend on earlier results.",
+			);
+		}
 	}
+
+	// --- Essential contract: identical in both profiles ---
 	if (tools.includes("edit") && tools.includes("write")) {
 		addGuideline(
 			"Use edit for surgical changes to an existing file (multiple edits[] entries in one call). Use write only for new files or full rewrites.",
@@ -359,27 +424,51 @@ export function buildToolsAndGuidelinesSection(options: {
 			"After a non-trivial code change, run the affected test/build/lint (or re-read); report exactly what passed, failed, or was skipped. Verify each step of multi-step work.",
 		);
 	}
-	if ((tools.includes("edit") || tools.includes("write")) && hasPreviewTool) {
+	if (!isCompact && (tools.includes("edit") || tools.includes("write")) && hasPreviewTool) {
 		addGuideline(
 			"After changing rendered UI, open it, smoke-test relevant controls, and check console/network errors; a screenshot alone is not a verified functional UI.",
 		);
 	}
 
 	const narrationEnabled = typeof process !== "undefined" && isTruthyEnvFlag(process.env.PIT_NARRATION);
-	if (narrationEnabled) {
-		addGuideline("Keep terminal responses concise; prefer short lists and avoid wide tables.");
-	} else {
+	if (!isCompact) {
+		if (narrationEnabled) {
+			addGuideline("Keep terminal responses concise; prefer short lists and avoid wide tables.");
+		} else {
+			addGuideline(
+				"Respond only when done or asked a question; no preamble, tool-call narration, or unsolicited summary. Keep terminal output compact; avoid wide tables.",
+			);
+		}
+		addGuideline("Cite code locations as path:line when referencing code.");
+		addGuideline("Add code comments only for non-obvious *why*; never narrate the diff in comments.");
 		addGuideline(
-			"Respond only when done or asked a question; no preamble, tool-call narration, or unsolicited summary. Keep terminal output compact; avoid wide tables.",
+			"If the user's premise is wrong (a false assumption, a bug in their suggested fix, a misread of the code), say so directly and briefly before proceeding — do not silently comply.",
 		);
 	}
-	addGuideline("Cite code locations as path:line when referencing code.");
-	addGuideline("Add code comments only for non-obvious *why*; never narrate the diff in comments.");
-	addGuideline(
-		"If the user's premise is wrong (a false assumption, a bug in their suggested fix, a misread of the code), say so directly and briefly before proceeding — do not silently comply.",
-	);
 	if (!((tools.includes("edit") || tools.includes("write")) && hasBash)) {
 		addGuideline("Report outcomes faithfully; never imply a check passed if it failed, was skipped, or was not run.");
+	}
+
+	// --- Compact tier: the nuance bullets above collapse into a few imperative
+	// lines instead of disappearing outright (weak/open models still need the
+	// behavior, just not the full explanatory prose — see resolvePromptProfile).
+	if (isCompact) {
+		if (tools.includes("todo")) {
+			addGuideline(
+				"Todo-first: create a todo before any multi-step or investigative task and keep it current; skip only for single-step requests.",
+			);
+		}
+		addGuideline(
+			"Treat the user as an experienced professional: act directly on routine steps without asking, match the project's existing style and conventions, and say so directly if their premise is wrong or you find broken adjacent code — do not silently comply or fix without mention.",
+		);
+		addGuideline(
+			"Explore with the least tool needed (grep/find/ls or read before bash), batch independent tool calls in the same turn, and cite code as path:line.",
+		);
+		addGuideline(
+			narrationEnabled
+				? "Keep terminal responses concise; prefer short lists and avoid wide tables. Comment code only for non-obvious why."
+				: "No preamble, tool-call narration, or unsolicited summary — respond only when done or asked a question. Comment code only for non-obvious why.",
+		);
 	}
 
 	return {

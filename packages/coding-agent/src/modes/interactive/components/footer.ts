@@ -171,6 +171,8 @@ export class FooterComponent implements Component {
 	/** Launcher cwd — compared against session cwd for shell/session divergence. */
 	private launchCwd: string;
 	private fusionLiveActive = false;
+	/** Non-null while the model gearbox (P8b) holds a downshifted role (e.g. "smol"). */
+	private gearboxRole: string | null = null;
 	private density: FooterDensity = "calm";
 	private renderCacheKey = "";
 	private renderCacheLines: string[] | null = null;
@@ -227,6 +229,18 @@ export class FooterComponent implements Component {
 	setDensity(density: FooterDensity): void {
 		if (this.density === density) return;
 		this.density = density;
+		this.renderCacheLines = null;
+	}
+
+	/**
+	 * Set (or clear, with null) the gearbox-downshifted role. Drives the dense
+	 * `gear:<role>` chip. Owned by the interactive mode, which flips it on
+	 * downshift/upshift — same setter pattern as {@link setFusionLiveActive}.
+	 */
+	setGearboxRole(role: string | null): void {
+		const next = role?.trim() ? role.trim() : null;
+		if (this.gearboxRole === next) return;
+		this.gearboxRole = next;
 		this.renderCacheLines = null;
 	}
 
@@ -338,6 +352,11 @@ export class FooterComponent implements Component {
 		return `pin:${n}`;
 	}
 
+	/** Dense `gear:<role>` chip (P8b) — present only while the gearbox is downshifted. */
+	private getGearboxSegment(): string | null {
+		return this.gearboxRole ? `gear:${this.gearboxRole}` : null;
+	}
+
 	/**
 	 * A session is "pristine" while the user has not yet submitted a turn. The
 	 * system prompt + tool schema live in `agent.state.systemPrompt` / tools, NOT
@@ -447,6 +466,7 @@ export class FooterComponent implements Component {
 		const overthinkGuardCount = this.getOverthinkGuardCount();
 		const recoveryLevel = this.getRecoveryLevel();
 		const pinCount = this.getPinCount();
+		const gearboxRole = this.gearboxRole ?? "";
 		return [
 			width,
 			this.density,
@@ -474,6 +494,7 @@ export class FooterComponent implements Component {
 			overthinkGuardCount,
 			recoveryLevel,
 			pinCount,
+			gearboxRole,
 			this.hasUserTurn() ? 1 : 0,
 		].join("|");
 	}
@@ -538,6 +559,7 @@ export class FooterComponent implements Component {
 		const overthinkGuardCount = this.getOverthinkGuardCount();
 		const recoverySegment = this.getRecoverySegment();
 		const pinSegment = this.getPinSegment();
+		const gearboxSegment = this.getGearboxSegment();
 		const goalStatus = this.session.goalStatusLine();
 		const fusionSegment = this.getFusionSegment();
 		const extensionStatuses = this.footerData.getExtensionStatuses();
@@ -672,6 +694,9 @@ export class FooterComponent implements Component {
 		}
 		if (pinSegment) {
 			modeBits.push(theme.fg("accent", pinSegment));
+		}
+		if (gearboxSegment) {
+			modeBits.push(theme.fg("accent", gearboxSegment));
 		}
 
 		// Assemble groups. Every join is the same dense ` · ` — intra-group items
