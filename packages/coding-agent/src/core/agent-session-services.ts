@@ -14,6 +14,7 @@ import { type CreateAgentSessionOptions, type CreateAgentSessionResult, createAg
 import type { SessionManager } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import type { ReadDedupeStore } from "./tools/read.ts";
+import type { WarmFileCache } from "./tools/warm-file-cache.ts";
 
 /**
  * Non-fatal issues collected while creating services or sessions.
@@ -210,6 +211,9 @@ export async function createAgentSessionServices(
 	// Resolved lazily, same reason as parentModelRef: the session (and its
 	// ReadDedupeStore) doesn't exist yet when extensions are bundled below.
 	const readDedupeStoreRef: { current?: () => ReadDedupeStore | undefined } = {};
+	// Same lazy-resolution reason as readDedupeStoreRef, for the graph-prefetch
+	// extension's WarmFileCache (P6).
+	const warmFileCacheRef: { current?: () => WarmFileCache | undefined } = {};
 
 	let builtInFactories: import("./extensions/types.ts").ExtensionFactory[] = [];
 	const permissionSettings = settingsManager.getPermissionSettings();
@@ -245,6 +249,7 @@ export async function createAgentSessionServices(
 			isFusionPanelReady: () => settingsManager.getFusionSettings().panel.length >= 2,
 			onFusionNeedsSetup: () => fusionNeedsSetupRef.current?.(),
 			getReadDedupeStore: () => readDedupeStoreRef.current?.(),
+			getWarmFileCache: () => warmFileCacheRef.current?.(),
 		});
 		builtInFactories = bundle.factories;
 		permissionChecker = bundle.permissionChecker;
@@ -302,6 +307,7 @@ export async function createAgentSessionServices(
 				) => void,
 				registerAbortDetached: (abortFn: () => void) => void,
 				getReadDedupeStore: () => ReadDedupeStore | undefined,
+				getWarmFileCache: () => WarmFileCache | undefined,
 			) => void;
 		}
 	).__bindBuiltInRefs = (
@@ -315,6 +321,7 @@ export async function createAgentSessionServices(
 		emitSubComplete,
 		registerAbortDetached,
 		getReadDedupeStore,
+		getWarmFileCache,
 	) => {
 		parentModelRef.current = getModel;
 		availableToolsRef.current = getTools;
@@ -326,6 +333,7 @@ export async function createAgentSessionServices(
 		subagentCompleteRef.current = emitSubComplete;
 		abortDetachedRef.current = registerAbortDetached;
 		readDedupeStoreRef.current = getReadDedupeStore;
+		warmFileCacheRef.current = getWarmFileCache;
 	};
 
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
@@ -442,6 +450,7 @@ export async function createAgentSessionFromServices(
 				) => void,
 				registerAbortDetached: (abortFn: () => void) => void,
 				getReadDedupeStore: () => ReadDedupeStore | undefined,
+				getWarmFileCache: () => WarmFileCache | undefined,
 			) => void;
 		}
 	).__bindBuiltInRefs;
@@ -459,6 +468,7 @@ export async function createAgentSessionFromServices(
 				result.session._abortDetachedSubagents = abortFn;
 			},
 			() => result.session.readDedupeStore,
+			() => result.session.graphPrefetchCache,
 		);
 	}
 

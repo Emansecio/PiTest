@@ -23,10 +23,12 @@ import {
 } from "../permissions/index.ts";
 import { getCurrentTokenGovernor } from "../token-governor.ts";
 import type { ReadDedupeStore } from "../tools/read.ts";
+import type { WarmFileCache } from "../tools/warm-file-cache.ts";
 import { createClarifyNudgeExtension } from "./clarify-nudge-extension.ts";
 import { createCoordinatorExtension } from "./coordinator-extension.ts";
 import { createDestructiveCommandGuardExtension } from "./destructive-command-guard-extension.ts";
 import { createExternalEditSentinelExtension } from "./external-edit-sentinel-extension.ts";
+import { createGraphPrefetchExtension } from "./graph-prefetch-extension.ts";
 import { bundleGroundingGuardFactories } from "./grounding-guard-registry.ts";
 import { createHooksExtension } from "./hooks-extension.ts";
 import { createImpactExtension } from "./impact-extension.ts";
@@ -100,6 +102,14 @@ export interface BuiltInExtensionsOptions {
 	 * disabled via PIT_READ_DEDUPE=0).
 	 */
 	getReadDedupeStore?: () => ReadDedupeStore | undefined;
+	/**
+	 * Accessor for the session's graph-prefetch warm cache — used by the
+	 * graph-prefetch extension to warm neighbors of a just-read file. Resolved
+	 * lazily (the session doesn't exist yet when extensions are bundled);
+	 * undefined in contexts that never construct one (tests, prefetch disabled
+	 * via `PIT_NO_GRAPH_PREFETCH`).
+	 */
+	getWarmFileCache?: () => WarmFileCache | undefined;
 }
 
 export interface BuiltInExtensionsResult {
@@ -181,6 +191,13 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 		// attempted. Also invalidates the read-dedupe entry for changed files so
 		// the next read is sent in full. Fail-open; opt out PIT_NO_EXTERNAL_EDIT_SENTINEL.
 		createExternalEditSentinelExtension({ cwd: options.cwd, getReadDedupeStore: options.getReadDedupeStore }),
+		// Graph prefetch (code-graph P6): post-exec, warms the on-disk content of
+		// a just-read/symbol/find_symbol file's grade-1 graph neighbors into an
+		// in-memory cache (`ReadToolOptions.warmFileCache`) that `read.ts`
+		// consults before its own disk read. Zero tokens — nothing here ever
+		// reaches the model; a warm entry only shortcuts I/O, gated on the live
+		// file stat matching exactly. Fail-open; opt out PIT_NO_GRAPH_PREFETCH.
+		createGraphPrefetchExtension({ cwd: options.cwd, getWarmFileCache: options.getWarmFileCache }),
 		createHooksExtension({ settings: options.hooks, cwd: options.cwd }),
 		createMemoryExtension({ cwd: options.cwd, agentDir: options.agentDir }),
 		createMcpExtension({ settings: options.mcp, cwd: options.cwd, agentDir: options.agentDir }),

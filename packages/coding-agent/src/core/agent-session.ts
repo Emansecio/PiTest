@@ -277,6 +277,7 @@ import { ReadDedupeStore, type ReadToolDetails } from "./tools/read.js";
 import { listDeclarations } from "./tools/symbol.ts";
 import { createToolDefinitionFromAgentTool, wrapToolDefinition } from "./tools/tool-definition-wrapper.js";
 import { configureTruncationCaps } from "./tools/truncate.ts";
+import { WarmFileCache } from "./tools/warm-file-cache.ts";
 import { TurnRiskAccumulator } from "./turn-risk.ts";
 import { TurnSteeringEngine } from "./turn-steering-engine.ts";
 import { resolveNextTurnThinkingLevel } from "./turn-thinking-policy.ts";
@@ -651,6 +652,8 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	readonly permissionChecker: import("./permissions/index.ts").PermissionChecker | undefined;
 	private readonly _readDedupeStore: ReadDedupeStore | undefined;
 	private readonly _fileMtimeStore: FileMtimeStore | undefined;
+	/** Graph-prefetch warm cache (P6) — undefined when PIT_NO_GRAPH_PREFETCH disables it. */
+	private readonly _graphPrefetchCache: WarmFileCache | undefined;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionCommandContextActions?: ExtensionCommandContextActions;
@@ -927,6 +930,12 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 			typeof process !== "undefined" && process.env.PIT_NO_STALE_READ_WARNING === "1"
 				? undefined
 				: new FileMtimeStore();
+		// Graph-prefetch warm cache (P6): the graph-prefetch built-in extension
+		// warms grade-1 neighbors of a just-read file into this cache; read.ts
+		// consults it before its own disk read (mtime+size gated, silent miss).
+		// PIT_NO_GRAPH_PREFETCH=1 disables construction, so both sides degrade to
+		// their pre-P6 behavior with zero plumbing left dangling.
+		this._graphPrefetchCache = isTruthyEnvFlag(process.env.PIT_NO_GRAPH_PREFETCH) ? undefined : new WarmFileCache();
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
 		// The boot-time model decides the supervision thermostat's start level
@@ -1681,6 +1690,11 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 
 	get readDedupeStore(): ReadDedupeStore | undefined {
 		return this._readDedupeStore;
+	}
+
+	/** Graph-prefetch warm cache (P6) — wired to the graph-prefetch built-in extension via `__bindBuiltInRefs`. */
+	get graphPrefetchCache(): WarmFileCache | undefined {
+		return this._graphPrefetchCache;
 	}
 
 	get fileMtimeStore(): FileMtimeStore | undefined {
@@ -6234,6 +6248,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 				embedHashlineAnchors: () => !this._disableHashlineAnchors && this.getActiveToolNames().includes("edit_v2"),
 				readDedupeStore: this._readDedupeStore,
 				mtimeStore: this._fileMtimeStore,
+				warmFileCache: this._graphPrefetchCache,
 				captureRawContent: !isContextComposerDisabled(),
 			},
 			edit: { mtimeStore: this._fileMtimeStore },

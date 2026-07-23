@@ -35,6 +35,7 @@ import {
 import { listDeclarations } from "./symbol.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
+import type { WarmFileCache } from "./warm-file-cache.ts";
 
 /**
  * Aggregate byte budget for the de-dup store. Bounding by total retained bytes
@@ -201,6 +202,30 @@ function buildReadDelta(prevContent: string, newContent: string): string | undef
 	return diff;
 }
 
+/**
+ * Consult the graph-prefetch warm cache before paying for `ops.readFile`'s disk
+ * I/O (P6). A hit requires the LIVE stat — already taken by the caller for its
+ * own purposes, reused here rather than a second syscall — to match the
+ * entry's `(mtimeMs, size)` pair exactly; mtime alone is not a content
+ * identity (same reasoning as the external-edit sentinel's baseline). Any
+ * mismatch, or no cache/stat/mtime at all, is a silent miss: the caller falls
+ * through to its normal `ops.readFile` call, same as if this function didn't
+ * exist. Returns a `Buffer` (not the cached string) so every downstream step
+ * — binary sniff, `.toString("utf-8")` — sees the exact same shape a real
+ * `readFile` would have produced.
+ */
+function tryWarmBuffer(
+	cache: WarmFileCache | undefined,
+	absolutePath: string,
+	stat: { size: number; mtimeMs?: number } | undefined,
+): Buffer | undefined {
+	if (!cache || !stat || stat.mtimeMs === undefined) return undefined;
+	const entry = cache.get(absolutePath);
+	if (!entry) return undefined;
+	if (entry.mtimeMs !== stat.mtimeMs || entry.size !== stat.size) return undefined;
+	return Buffer.from(entry.content, "utf-8");
+}
+
 const readSchema = Type.Object(
 	{
 		path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
@@ -362,6 +387,17 @@ export interface ReadToolOptions {
 	 * When omitted, no stale-read tracking.
 	 */
 	mtimeStore?: FileMtimeStore;
+	/**
+	 * Optional in-memory cache of file content warmed ahead of time by the
+	 * graph-prefetch extension (P6 — neighbors of a recently-read file, one
+	 * grade-1 hop out). Consulted just before `ops.readFile` on the buffered
+	 * text and outline paths, with a hit conditioned on the live stat's
+	 * `(mtimeMs, size)` matching the cached entry exactly; any mismatch (or no
+	 * cache at all) is a silent miss that falls straight through to the normal
+	 * disk read. Never affects the tool's rendered output or token cost either
+	 * way — it only shortcuts the I/O.
+	 */
+	warmFileCache?: WarmFileCache;
 	/**
 	 * Text files larger than this many bytes stream line-by-line instead of
 	 * being fully buffered. Default: 10MB. Mainly overridable for tests.
@@ -687,6 +723,7 @@ export function createReadToolDefinition(
 	const embedHashlineAnchors = options?.embedHashlineAnchors ?? true;
 	const dedupeStore = options?.readDedupeStore;
 	const mtimeStore = options?.mtimeStore;
+	const warmFileCache = options?.warmFileCache;
 	const streamingMinBytes = options?.streamingMinBytes ?? STREAM_READ_MIN_BYTES;
 	const captureRawContent = options?.captureRawContent ?? false;
 	return {
@@ -772,8 +809,9 @@ Common mistakes to avoid:
 				// Same streaming threshold the normal read path uses: outline buffers the
 				// whole file to scan declarations, so a multi-MB minified/generated source
 				// would OOM. Refuse above the cap with an actionable hint instead of crashing.
+				let outlineStat: { size: number; mtimeMs?: number; isDirectory?: () => boolean } | undefined;
 				if (ops.stat) {
-					const outlineStat = await ops.stat(absolutePath);
+					outlineStat = await ops.stat(absolutePath);
 					if (outlineStat.size > streamingMinBytes) {
 						// Observe the size refusal (additive; behavior unchanged).
 						recordDiagnostic({
@@ -786,7 +824,10 @@ Common mistakes to avoid:
 						return { content: [{ type: "text", text } as TextContent], details: undefined };
 					}
 				}
-				const buffer = await ops.readFile(absolutePath);
+				// P6: skip the disk read entirely when the graph-prefetch warm cache
+				// already has this exact (path, mtime, size) resident.
+				const buffer =
+					tryWarmBuffer(warmFileCache, absolutePath, outlineStat) ?? (await ops.readFile(absolutePath));
 				const decls = listDeclarations(buffer.toString("utf-8"), absolutePath);
 				const declLines = decls.map((d) => `${d.name}  L${d.line}-${d.endLine}  [${d.kind}]`);
 				const declBody =
@@ -984,7 +1025,11 @@ Common mistakes to avoid:
 										resolve({ content: [{ type: "text", text: note } as TextContent], details: undefined });
 										return;
 									}
-									const buffer = await ops.readFile(absolutePath);
+									// P6: skip the disk read entirely when the graph-prefetch warm cache
+									// already has this exact (path, mtime, size) resident.
+									const buffer =
+										tryWarmBuffer(warmFileCache, absolutePath, preReadStat) ??
+										(await ops.readFile(absolutePath));
 									const textContent = buffer.toString("utf-8");
 
 									// Binary sniff: a non-image file with NUL bytes or mostly-invalid
