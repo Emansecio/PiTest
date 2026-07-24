@@ -19,7 +19,7 @@
  * (only PreToolUse/UserPromptSubmit actually act on a block).
  */
 
-import type { ExtensionAPI } from "../extensions/types.ts";
+import { type ExtensionAPI, markHandlerSideEffect } from "../extensions/types.ts";
 import type { HookExecutionResult, HooksSettings } from "../hooks/index.ts";
 import { runHookChain, selectHooks } from "../hooks/index.ts";
 
@@ -228,31 +228,43 @@ export function createHooksExtension(options: HooksExtensionOptions) {
 		}
 
 		if (hasPreCompact) {
-			pi.on("session_before_compact", async (event, ctx) => {
-				const matched = selectHooks(settings.PreCompact, "*");
-				if (matched.length === 0) return undefined;
-				const prep = event.preparation;
-				// Only light, derived facts — never the message arrays / fileOps maps.
-				const payload = {
-					event: "PreCompact" as const,
-					cwd: ctx.cwd,
-					tokensBefore: prep.tokensBefore,
-					messagesToSummarize: prep.messagesToSummarize.length,
-					turnPrefixMessages: prep.turnPrefixMessages.length,
-					isSplitTurn: prep.isSplitTurn,
-					hasPreviousSummary: prep.previousSummary !== undefined,
-				};
-				// Prefer the compaction event's own abort signal over the (possibly
-				// undefined) idle ctx.signal so hooks are cancelled with the compaction.
-				const { executions } = await runHookChain(matched, payload, {
-					cwd,
-					signal: event.signal,
-				});
-				logErrors(executions, "PreCompact", ctx, onExecution);
-				// SessionBeforeCompactResult has no additionalContext field — PreCompact
-				// is informative only and never cancels or customizes compaction.
-				return undefined;
-			});
+			// Tagged side-effect: PreCompact only ever returns undefined (both paths
+			// below), so it is an OBSERVER, not a mutator. Untagged it would make
+			// `hasMutatingHandlers("session_before_compact")` true and silently disable
+			// the P2 speculative-compaction precompute for every user who configures a
+			// PreCompact hook — they would pay the LLM summarization on the critical
+			// path instead. Standalone `markHandlerSideEffect` rather than
+			// `pi.markSideEffect` for the same reason the read-guard uses it: built-ins
+			// are also instantiated against the minimal `on()`-only shim in
+			// built-ins/subagent-guards.ts, where the API method does not exist.
+			pi.on(
+				"session_before_compact",
+				markHandlerSideEffect(async (event, ctx) => {
+					const matched = selectHooks(settings.PreCompact, "*");
+					if (matched.length === 0) return undefined;
+					const prep = event.preparation;
+					// Only light, derived facts — never the message arrays / fileOps maps.
+					const payload = {
+						event: "PreCompact" as const,
+						cwd: ctx.cwd,
+						tokensBefore: prep.tokensBefore,
+						messagesToSummarize: prep.messagesToSummarize.length,
+						turnPrefixMessages: prep.turnPrefixMessages.length,
+						isSplitTurn: prep.isSplitTurn,
+						hasPreviousSummary: prep.previousSummary !== undefined,
+					};
+					// Prefer the compaction event's own abort signal over the (possibly
+					// undefined) idle ctx.signal so hooks are cancelled with the compaction.
+					const { executions } = await runHookChain(matched, payload, {
+						cwd,
+						signal: event.signal,
+					});
+					logErrors(executions, "PreCompact", ctx, onExecution);
+					// SessionBeforeCompactResult has no additionalContext field — PreCompact
+					// is informative only and never cancels or customizes compaction.
+					return undefined;
+				}),
+			);
 		}
 	};
 }

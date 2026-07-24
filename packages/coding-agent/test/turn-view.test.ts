@@ -153,9 +153,28 @@ describe("decideFusionMember / decideFusionStage", () => {
 			status: "done",
 			elapsedMs: 4200,
 			timeoutMs: 60_000,
+			idleTimeoutMs: undefined,
 			chars: 900,
 			error: undefined,
 		});
+	});
+
+	// The idle cap — not the wall-clock one — is what actually reaps a stuck
+	// member, and the row renders an `idle Ns / Ts` countdown off it. Dropping the
+	// field here left idleLimit at 0, so that countdown could never paint.
+	test("forwards idleTimeoutMs so the strip can render the idle countdown", () => {
+		const effects = decideFusionMember({
+			type: "fusion_member",
+			index: 0,
+			cli: "codex",
+			model: "gpt",
+			status: "running",
+			elapsedMs: 12_000,
+			timeoutMs: 600_000,
+			idleTimeoutMs: 90_000,
+			chars: 40,
+		});
+		expect(find(effects, "fusion-member")?.member.idleTimeoutMs).toBe(90_000);
 	});
 
 	test("the writer stage arms the hand-off flag; other stages do not", () => {

@@ -12,8 +12,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHooksExtension } from "../src/core/built-ins/hooks-extension.js";
-import type { ExtensionAPI, ExtensionContext } from "../src/core/extensions/types.js";
+import { createExtensionRuntime } from "../src/core/extensions/loader.ts";
+import { ExtensionRunner } from "../src/core/extensions/runner.ts";
+import type { Extension, ExtensionAPI, ExtensionContext } from "../src/core/extensions/types.js";
 import type { HookExecutionResult, HooksSettings } from "../src/core/hooks/index.js";
+import { SessionManager } from "../src/core/session-manager.ts";
+import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 
 const tempFiles: string[] = [];
 
@@ -265,5 +269,59 @@ describe("hooks-extension lifecycle events", () => {
 		);
 		expect(executions).toHaveLength(1);
 		expect(executions[0].timedOut).toBe(true);
+	});
+});
+
+describe("PreCompact is an observer, not a mutator", () => {
+	/** Register the real extension against a real ExtensionRunner, as the bundle does. */
+	function realRunnerWith(settings: HooksSettings): ExtensionRunner {
+		const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+		const shim = {
+			on(event: string, handler: (event: unknown, ctx: unknown) => unknown) {
+				const list = handlers.get(event) ?? [];
+				list.push(handler);
+				handlers.set(event, list);
+			},
+		} as unknown as ExtensionAPI;
+		createHooksExtension({ settings, cwd: process.cwd() })(shim);
+
+		const extension: Extension = {
+			path: "<built-in:hooks>",
+			resolvedPath: "<built-in:hooks>",
+			sourceInfo: createSyntheticSourceInfo("<built-in:hooks>", { source: "built-in" }),
+			handlers: handlers as Extension["handlers"],
+			tools: new Map(),
+			messageRenderers: new Map(),
+			commands: new Map(),
+			flags: new Map(),
+			shortcuts: new Map(),
+		};
+		return new ExtensionRunner(
+			[extension],
+			createExtensionRuntime(),
+			process.cwd(),
+			SessionManager.inMemory(),
+			{} as never, // modelRegistry: never touched by the hooks extension
+		);
+	}
+
+	// The regression: an UNTAGGED session_before_compact handler makes
+	// hasMutatingHandlers() true, which disables the P2 speculative-compaction
+	// precompute entirely — so configuring a PreCompact hook used to silently cost
+	// the LLM summarization on the critical path.
+	it("registers the handler but does not count as a mutating handler", () => {
+		const runner = realRunnerWith({
+			PreCompact: [{ command: "node -e ''" }],
+		} as unknown as HooksSettings);
+
+		expect(runner.hasHandlers("session_before_compact")).toBe(true);
+		expect(runner.hasMutatingHandlers("session_before_compact")).toBe(false);
+	});
+
+	it("installs no session_before_compact listener at all without PreCompact configured", () => {
+		const runner = realRunnerWith({} as HooksSettings);
+
+		expect(runner.hasHandlers("session_before_compact")).toBe(false);
+		expect(runner.hasMutatingHandlers("session_before_compact")).toBe(false);
 	});
 });

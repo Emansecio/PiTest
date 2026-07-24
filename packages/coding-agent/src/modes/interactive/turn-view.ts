@@ -187,8 +187,13 @@ export function decideCompactionStart(
 /**
  * Project a `fusion_member` event onto the strip's row model.
  *
- * NOTE: `idleTimeoutMs` rides on the event but is deliberately NOT copied here —
- * that mirrors the pre-refactor behaviour exactly. See the report/backlog.
+ * `idleTimeoutMs` is load-bearing: the row renders an `idle Ns / Ts` warning
+ * countdown off it (`components/fusion-live.ts`), and the IDLE cap — not the
+ * wall-clock one — is what actually kills a stuck member. The pre-refactor
+ * handler dropped the field, so `idleLimit` was always 0 and that countdown
+ * could never render; a member about to be reaped looked like a member working
+ * normally. The emitter has always set it (`agent-session-fusion.ts`), so this
+ * forwards it rather than deleting a field that both ends already speak.
  */
 export function decideFusionMember(event: EventOf<"fusion_member">): TurnViewEffect[] {
 	const member: FusionLiveMember = {
@@ -198,6 +203,7 @@ export function decideFusionMember(event: EventOf<"fusion_member">): TurnViewEff
 		status: event.status,
 		elapsedMs: event.elapsedMs,
 		timeoutMs: event.timeoutMs,
+		idleTimeoutMs: event.idleTimeoutMs,
 		chars: event.chars,
 		error: event.error,
 	};
