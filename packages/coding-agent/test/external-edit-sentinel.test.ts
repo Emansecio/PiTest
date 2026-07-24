@@ -114,7 +114,7 @@ describe("createExternalEditSentinelExtension", () => {
 		const text = noteText(result);
 		expect(text).toContain("a.ts");
 		expect(text).toContain("b.ts");
-		expect(text).toContain("2 file(s) changed");
+		expect(text).toContain("2 files changed");
 	});
 
 	it("skips ast_edit registration when path resolves to a directory (statFile reports undefined)", async () => {
@@ -149,7 +149,7 @@ describe("createExternalEditSentinelExtension", () => {
 		expect(result).toBeUndefined();
 	});
 
-	it("fires on an external mtime/size change with a dense (+Ns) note and invalidates the dedupe entry", async () => {
+	it("fires on an external mtime/size change with a dense age note and invalidates the dedupe entry", async () => {
 		const { table, statFile, key } = makeStatTable();
 		table.set(key("foo.ts"), { mtimeMs: 1000, size: 10 });
 		const { store, invalidated } = makeFakeDedupeStore();
@@ -162,9 +162,7 @@ describe("createExternalEditSentinelExtension", () => {
 
 		const result = await fireBeforeAgentStart();
 		const text = noteText(result);
-		expect(text).toBe(
-			"1 file(s) changed outside the session since last read: foo.ts (+42s). Re-read before editing.",
-		);
+		expect(text).toBe("1 file changed outside the session: foo.ts (42s ago). Re-read before editing.");
 		expect(result?.message?.display).toBe(true);
 		expect(result?.message?.customType).toBe("pi.external-edit-sentinel");
 		expect(invalidated).toHaveLength(1);
@@ -180,9 +178,7 @@ describe("createExternalEditSentinelExtension", () => {
 		table.delete(key("foo.ts")); // statFile now returns undefined — deleted
 
 		const first = await fireBeforeAgentStart();
-		expect(noteText(first)).toBe(
-			"1 file(s) changed outside the session since last read: foo.ts (removed). Re-read before editing.",
-		);
+		expect(noteText(first)).toBe("1 file changed outside the session: foo.ts (removed). Re-read before editing.");
 		expect(invalidated).toEqual([expect.any(String)]);
 
 		// Second sweep: the path was dropped from the registry on report, so it is
@@ -202,10 +198,10 @@ describe("createExternalEditSentinelExtension", () => {
 
 		const result = await fireBeforeAgentStart();
 		const text = noteText(result);
-		expect(text).toContain("10 file(s) changed");
+		expect(text).toContain("10 files changed");
 		expect(text).toContain("+2 more");
-		// Exactly 8 individual "(+Ns)" markers should be listed.
-		expect(text?.match(/\(\+\d+s\)/g)).toHaveLength(8);
+		// Exactly 8 individual age markers should be listed.
+		expect(text?.match(/\(\d+[smhd] ago\)/g)).toHaveLength(8);
 	});
 
 	it("updates the baseline after reporting so the same drift is not re-alerted", async () => {

@@ -114,12 +114,26 @@ interface DriftFinding {
 	note: string;
 }
 
+/**
+ * How long ago the drift happened, at one significant unit. `+563s` is a number
+ * the reader has to divide; `9m ago` is one they can act on.
+ */
+function formatAge(seconds: number): string {
+	if (seconds < 60) return `${seconds}s ago`;
+	if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+	if (seconds < 86_400) return `${Math.round(seconds / 3600)}h ago`;
+	return `${Math.round(seconds / 86_400)}d ago`;
+}
+
 function formatSweepNote(findings: readonly DriftFinding[]): string {
 	const shown = findings.slice(0, NOTE_DISPLAY_CAP);
 	const remaining = findings.length - shown.length;
 	const tail = remaining > 0 ? `, +${remaining} more` : "";
 	const list = shown.map((f) => f.note).join(", ");
-	return `${findings.length} file(s) changed outside the session since last read: ${list}${tail}. Re-read before editing.`;
+	// Renders as one quiet `◦` line in the TUI, and is the same sentence the model
+	// reads — so it stays short, singular/plural correct, and ends in the action.
+	const subject = findings.length === 1 ? "1 file changed" : `${findings.length} files changed`;
+	return `${subject} outside the session: ${list}${tail}. Re-read before editing.`;
 }
 
 export function createExternalEditSentinelExtension(options: ExternalEditSentinelOptions) {
@@ -187,7 +201,7 @@ export function createExternalEditSentinelExtension(options: ExternalEditSentine
 						}
 						if (stat.mtimeMs === entry.mtimeMs && stat.size === entry.size) continue;
 						const ageSeconds = Math.max(0, Math.round((now - stat.mtimeMs) / 1000));
-						findings.push({ note: `${entry.displayPath} (+${ageSeconds}s)` });
+						findings.push({ note: `${entry.displayPath} (${formatAge(ageSeconds)})` });
 						// Update the baseline to the observed values so this same drift is
 						// never reported again on a later sweep.
 						remember(key, { ...entry, mtimeMs: stat.mtimeMs, size: stat.size });

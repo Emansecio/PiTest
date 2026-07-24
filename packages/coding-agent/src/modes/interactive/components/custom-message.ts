@@ -37,6 +37,14 @@ const MCP_NOTICE_CUSTOM_TYPE = "mcp.notice";
 const PERMISSION_BLOCKED_CUSTOM_TYPE = "pit.permission-blocked";
 
 /**
+ * External-edit sentinel: a file changed on disk outside the session (the user's
+ * editor, a formatter, a second agent). It is an advisory aside — one warning
+ * `◦` line, same idiom as the MCP notice — not the loud default card, which put
+ * the raw `[pi.external-edit-sentinel]` id on screen as a bold header.
+ */
+const EXTERNAL_EDIT_SENTINEL_CUSTOM_TYPE = "pi.external-edit-sentinel";
+
+/**
  * Doom-loop tier-2 pause and tier-3 recovery steers are user-visible (`display:
  * true`) but the steer body is long XML-ish guidance for the model. Render a
  * single muted `◦` timeline line (tool + count) — no purple box, no
@@ -274,6 +282,14 @@ export class CustomMessageComponent extends Container {
 		// width-truncated, no box/header/spacer.
 		if (this.message.customType === MCP_NOTICE_CUSTOM_TYPE) {
 			const component = new TruncatedText(theme.fg("muted", `◦ ${this.extractText()}`));
+			this.customComponent = component;
+			this.addChild(component);
+			return;
+		}
+
+		// External-edit sentinel: advisory aside, one warning `◦` line.
+		if (this.message.customType === EXTERNAL_EDIT_SENTINEL_CUSTOM_TYPE) {
+			const component = new TruncatedText(theme.fg("warning", `◦ ${this.extractText()}`));
 			this.customComponent = component;
 			this.addChild(component);
 			return;

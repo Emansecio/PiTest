@@ -92,7 +92,7 @@
 		"gutterBash": "gold",
 		"gutterDiagnostics": "gold",
 		"gutterUser": "accentGreenDim",
-		"gutterCustom": "lavender",
+		"gutterCustom": "muted",
 
 		"cardBg": "#121817",
 		"cardBorder": "borderMuted",

@@ -118,7 +118,7 @@ describe("MessageShell — label", () => {
 
 		// Layout: [spacer, gutter + label + content, gutter + content].
 		expect(out[0]).toBe("");
-		expect(out[1]).toBe(`${SHELL_GUTTER_CHAR} [compaction]  body line one`);
+		expect(out[1]).toBe(`${SHELL_GUTTER_CHAR} [compaction] body line one`);
 		expect(out[2]).toBe(`${SHELL_GUTTER_CHAR} body line two`);
 
 		// Bold ANSI on the label.
@@ -147,7 +147,7 @@ describe("MessageShell — label", () => {
 		expect(stripAnsi(shell.render(20)[1])).toBe(`${SHELL_GUTTER_CHAR} body`);
 
 		shell.setLabel("[skill]");
-		expect(stripAnsi(shell.render(20)[1])).toBe(`${SHELL_GUTTER_CHAR} [skill]  body`);
+		expect(stripAnsi(shell.render(20)[1])).toBe(`${SHELL_GUTTER_CHAR} [skill] body`);
 	});
 });
 
@@ -228,14 +228,14 @@ describe("MessageShell — shellDisabled (renderShell:'self' opt-out)", () => {
 		shell.addChild(new Canned(["body"]));
 
 		const framed = shell.render(40).map(stripAnsi);
-		expect(framed[1]).toBe(`${SHELL_GUTTER_CHAR} [live]  body`);
+		expect(framed[1]).toBe(`${SHELL_GUTTER_CHAR} [live] body`);
 
 		shell.setShellDisabled(true);
 		const passthrough = shell.render(40).map(stripAnsi);
 		expect(passthrough).toEqual(["body"]);
 
 		shell.setShellDisabled(false);
-		expect(shell.render(40).map(stripAnsi)[1]).toBe(`${SHELL_GUTTER_CHAR} [live]  body`);
+		expect(shell.render(40).map(stripAnsi)[1]).toBe(`${SHELL_GUTTER_CHAR} [live] body`);
 	});
 });
 
@@ -297,7 +297,7 @@ describe("MessageShell — render memoization", () => {
 		shell.setLabel("[new]");
 		const labeled = shell.render(40);
 		expect(labeled).not.toBe(base);
-		expect(stripAnsi(labeled[1])).toBe(`${SHELL_GUTTER_CHAR} [new]  body`);
+		expect(stripAnsi(labeled[1])).toBe(`${SHELL_GUTTER_CHAR} [new] body`);
 
 		shell.setGutterColor(GREEN);
 		const recolored = shell.render(40);
@@ -315,7 +315,7 @@ describe("MessageShell — render memoization", () => {
 		shell.setShellDisabled(true);
 		expect(shell.render(40).map(stripAnsi)).toEqual(["body"]);
 		shell.setShellDisabled(false);
-		expect(shell.render(40).map(stripAnsi)).toEqual(["", `${SHELL_GUTTER_CHAR} [new]  body`]);
+		expect(shell.render(40).map(stripAnsi)).toEqual(["", `${SHELL_GUTTER_CHAR} [new] body`]);
 	});
 
 	it("invalidate() drops the memo and reassembles byte-identically", () => {

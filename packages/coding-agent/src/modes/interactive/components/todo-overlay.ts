@@ -8,6 +8,8 @@ import { performance } from "node:perf_hooks";
 import { type Component, truncateToWidth, visibleWidth } from "@pit/tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import type { TodoItem } from "../../../core/todo/todo-manager.ts";
+import { isReducedMotion } from "../../../utils/env-flags.ts";
+import { getRgb, lerpRgb, rgbFg } from "../theme/color-interpolation.ts";
 import { theme } from "../theme/theme.ts";
 import { resolveGaugeGlyphs } from "./gauge-glyphs.ts";
 import { spinnerGlyphAt } from "./spinner-ticker.ts";
@@ -49,13 +51,63 @@ function sortTodosForDisplay(items: TodoItem[]): TodoItem[] {
 	return [...items].sort((a, b) => rank(a.status) - rank(b.status));
 }
 
-function renderProgressBar(done: number, total: number, width: number): string {
+/** Full breath cycle of the progress bar's leading edge. Slow on purpose. */
+const PULSE_PERIOD_MS = 2200;
+/**
+ * How far the leading cell dims at the bottom of its breath, as a blend toward
+ * the bar's own empty color. Deliberately shallow — the eye should catch motion
+ * without the cell ever reading as "off".
+ */
+const PULSE_DEPTH = 0.45;
+
+/**
+ * Brightness of the leading (most recently filled) cell at `clockMs`, as a blend
+ * factor from the settled `success` color toward `dim`. A raised cosine, so it
+ * eases at both ends instead of ticking linearly.
+ */
+function pulseBlendAt(clockMs: number): number {
+	if (isReducedMotion()) return 0;
+	const phase = (clockMs % PULSE_PERIOD_MS) / PULSE_PERIOD_MS;
+	return ((1 - Math.cos(phase * 2 * Math.PI)) / 2) * PULSE_DEPTH;
+}
+
+/**
+ * The bar, with its LEADING cell breathing while work is still in flight.
+ *
+ * Only the frontier pulses — not the whole filled run. A bar where every cell
+ * breathes is decoration; a bar where the last completed cell breathes says
+ * "this is the edge, and it is still moving". It settles to a steady bar the
+ * moment the list completes (nothing is advancing any more) and is frozen flat
+ * under reduced motion.
+ *
+ * The overlay owns no animation callback: it repaints on the turn's own render
+ * ticks, so the breath runs exactly while the agent is working and holds still
+ * when it is idle. That is the intended reading — the pulse IS the "in flight"
+ * signal, so a motionless bar between turns is correct, not a dropped frame.
+ *
+ * Needs truecolor to blend; on a 256-color terminal `getRgb` finds no RGB and
+ * the edge falls back to the flat `success` cell (steady bar, no blink).
+ */
+function renderProgressBar(done: number, total: number, width: number, clockMs: number): string {
 	if (total <= 1) return "";
 	const { filled: GAUGE_FILLED, empty: GAUGE_EMPTY } = resolveGaugeGlyphs();
 	const barWidth = Math.min(PROGRESS_BAR_WIDTH, Math.max(4, width - CONNECTOR_WIDTH - 8));
 	const filled = Math.round((done / total) * barWidth);
 	const empty = barWidth - filled;
-	const filledPart = theme.fg("success", GAUGE_FILLED.repeat(filled));
+
+	const inFlight = done < total && filled > 0;
+	let filledPart: string;
+	if (inFlight) {
+		const settled = GAUGE_FILLED.repeat(filled - 1);
+		const from = getRgb(theme, "success");
+		const to = getRgb(theme, "dim");
+		const edge =
+			from && to ? rgbFg(lerpRgb(from, to, pulseBlendAt(clockMs)))(GAUGE_FILLED) : theme.fg("success", GAUGE_FILLED);
+		filledPart = `${theme.fg("success", settled)}${edge}`;
+	} else {
+		filledPart = theme.fg("success", GAUGE_FILLED.repeat(filled));
+	}
+
 	const emptyPart = theme.fg("dim", GAUGE_EMPTY.repeat(empty));
 	const pct = Math.round((done / total) * 100);
 	const label = `${done}/${total} · ${pct}%`;
@@ -82,6 +134,12 @@ interface TodoOverlayRenderCache {
 	dataKey: string;
 	width: number;
 	header: string[];
+	/**
+	 * Progress-bar inputs rather than the baked line: its leading cell breathes,
+	 * so it has to be re-rendered per frame like the spinner rows. Absent when
+	 * the list is too short for a bar.
+	 */
+	progress?: { done: number; total: number };
 	rows: TodoOverlayRow[];
 	footer?: string;
 }
@@ -90,8 +148,17 @@ function truncateSubject(subject: string, budget: number): string {
 	return fitWidth(subject, Math.max(4, budget));
 }
 
-function materializeTodoOverlayCache(cache: TodoOverlayRenderCache, spinner: string, width: number): string[] {
+function materializeTodoOverlayCache(
+	cache: TodoOverlayRenderCache,
+	spinner: string,
+	width: number,
+	clockMs: number,
+): string[] {
 	const lines = [...cache.header];
+	if (cache.progress) {
+		const bar = renderProgressBar(cache.progress.done, cache.progress.total, width, clockMs);
+		if (bar) lines.push(fitWidth(`${theme.fg("dim", "├─ ")}${bar}`, width));
+	}
 	for (const row of cache.rows) {
 		if (row.kind === "static") {
 			lines.push(row.line);
@@ -126,10 +193,10 @@ function buildTodoOverlayCache(
 	const headerText = `${theme.fg("accent", "●")} ${theme.bold("Tasks")} ${theme.fg("dim", "—")} ${theme.fg("muted", `${data.done}/${data.total}`)}`;
 	header.push(fitWidth(headerText, width));
 
-	const progress = renderProgressBar(data.done, data.total, width);
-	if (progress) {
-		header.push(fitWidth(`${theme.fg("dim", "├─ ")}${progress}`, width));
-	}
+	// The bar itself is materialized per frame (its leading cell pulses); only the
+	// inputs are cached. `renderProgressBar` returns "" for a 1-item list, so mirror
+	// that here to decide whether the row exists at all.
+	const hasProgress = renderProgressBar(data.done, data.total, width, 0).length > 0;
 
 	const { rows: displayRows, hiddenCompleted } = cappedDisplayRows(sorted);
 	const rows: TodoOverlayRow[] = [];
@@ -144,7 +211,14 @@ function buildTodoOverlayCache(
 	});
 
 	const footer = hiddenCompleted > 0 ? theme.fg("dim", `└─ … ${hiddenCompleted} done hidden`) : undefined;
-	return { dataKey, width, header, rows, footer };
+	return {
+		dataKey,
+		width,
+		header,
+		progress: hasProgress ? { done: data.done, total: data.total } : undefined,
+		rows,
+		footer,
+	};
 }
 
 function renderRow(item: TodoItem, spinner: string, width: number): string {
@@ -182,6 +256,9 @@ export function renderTodoOverlay(
 	width: number,
 	spinner: string,
 	completeAgeMs?: number,
+	/** Animation clock for the progress bar's breathing leading cell. Defaults to
+	 * 0 so existing callers/tests get the settled (top-of-breath) frame. */
+	clockMs = 0,
 ): string[] {
 	if (data.items.length === 0) return [];
 	if (data.done === data.total && (completeAgeMs === undefined || completeAgeMs > TODO_COMPLETE_LINGER_MS)) {
@@ -189,7 +266,7 @@ export function renderTodoOverlay(
 	}
 	const sorted = sortTodosForDisplay(data.items);
 	const dataKey = todoOverlayDataKey(data, sorted);
-	return materializeTodoOverlayCache(buildTodoOverlayCache(data, width, dataKey, sorted), spinner, width);
+	return materializeTodoOverlayCache(buildTodoOverlayCache(data, width, dataKey, sorted), spinner, width, clockMs);
 }
 
 class TodoOverlayComponent implements Component {
@@ -237,7 +314,7 @@ class TodoOverlayComponent implements Component {
 		if (this.renderCache?.dataKey !== dataKey || this.renderCache.width !== width) {
 			this.renderCache = buildTodoOverlayCache(data, width, dataKey, sorted);
 		}
-		return ["", ...materializeTodoOverlayCache(this.renderCache, spinner, width)];
+		return ["", ...materializeTodoOverlayCache(this.renderCache, spinner, width, this.clock())];
 	}
 }
 

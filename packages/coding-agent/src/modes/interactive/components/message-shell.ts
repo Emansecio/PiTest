@@ -255,7 +255,10 @@ export class MessageShell extends Container {
 			return line;
 		}
 		const labelText = `${BOLD_OPEN}${this.label}${BOLD_CLOSE}`;
-		return `${this.gutterColor(labelText)}  ${line}`;
+		// One space, not two: the label already ends in a word boundary and the
+		// gutter already separates the block from the transcript. The double gap read
+		// as a column that never lines up with anything.
+		return `${this.gutterColor(labelText)} ${line}`;
 	}
 
 	private renderFramed(width: number, childLines: string[]): string[] {
