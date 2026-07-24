@@ -24,12 +24,12 @@
  */
 
 import type { Agent } from "@pit/agent-core";
-import type { CacheRetention, Context, Model } from "@pit/ai";
-import { completeSimple, recordDiagnostic, resolveCacheRetention } from "@pit/ai";
+import type { CacheRetention, Model } from "@pit/ai";
+import { completeSimple, recordDiagnostic } from "@pit/ai";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import type { CompactionController } from "./agent-session-compaction.ts";
 import type { ContextUsage } from "./extensions/index.js";
-import { compactToolsForProviderContext } from "./tool-wire-schema.ts";
+import { buildWireContext, effectiveWireRetention } from "./wire-context.ts";
 
 /** Delay before each keepalive ping while idle under SHORT (~5min TTL) retention: ~4m30s. */
 export const CACHE_KEEPALIVE_INTERVAL_MS = 270_000;
@@ -204,8 +204,8 @@ export interface CacheKeepaliveHost {
 	readonly compaction: CompactionController;
 	readonly model: Model<any> | undefined;
 	readonly isStreaming: boolean;
-	/** True while a Fusion turn (panel/judge/writer) is in flight — the session is busy even though isStreaming is false. Optional so narrow test hosts stay valid. */
-	readonly isFusing?: boolean;
+	/** True while a Fusion turn (panel/judge/writer) is in flight — the session is busy even though isStreaming is false. */
+	readonly isFusing: boolean;
 	getContextUsage(): ContextUsage | undefined;
 	getCompactionRequestAuth(model: Model<any>): Promise<{ apiKey?: string; headers?: Record<string, string> }>;
 	/** The RAW per-session cache-retention option (undefined = provider default); resolved env-first before use. */
@@ -213,33 +213,12 @@ export interface CacheKeepaliveHost {
 }
 
 /**
- * Whether `model` uses Anthropic's short (default, ~5min) cache retention —
- * the case this feature targets. Mirrors the default in
- * packages/ai/src/providers/anthropic.ts's getAnthropicCompat()
- * (`supportsLongCacheRetention ?? !isFireworks`): callers only ever reach
- * this after confirming `model.provider === "anthropic"`, so `isFireworks` is
- * always false here and the default collapses to `true` — long retention is
- * only ruled out when a compat override explicitly says so.
- */
-export function modelHasShortCacheRetention(model: Model<any>): boolean {
-	return model.compat?.supportsLongCacheRetention === false;
-}
-
-/**
- * The retention the prefix will ACTUALLY get on the wire for this host, which
- * decides the ping cadence. Mirrors anthropic.ts getCacheControl: resolve
- * env-first (`PIT_CACHE_RETENTION` > session option > "long" default), then
- * demote "long" to "short" when the model lacks long-retention support (its
- * cache_control ships without the 1h ttl, so the real TTL is only ~5min).
- * Returns "none" for any non-Anthropic model — the keepalive never runs there.
+ * The retention this host's prefix will ACTUALLY get on the wire, which decides
+ * the ping cadence. Host-shaped adapter over {@link effectiveWireRetention}
+ * (core/wire-context.ts), which owns the resolution.
  */
 export function effectiveKeepaliveRetention(host: CacheKeepaliveHost): CacheRetention {
-	const model = host.model;
-	if (!model || model.provider !== "anthropic") return "none";
-	const resolved = resolveCacheRetention(host.getSessionCacheRetention(), "long");
-	if (resolved === "none") return "none";
-	if (resolved === "long" && !modelHasShortCacheRetention(model)) return "long";
-	return "short";
+	return effectiveWireRetention(host.model, host.getSessionCacheRetention());
 }
 
 export function createGatesForHost(host: CacheKeepaliveHost): CacheKeepaliveGates {
@@ -251,7 +230,7 @@ export function createGatesForHost(host: CacheKeepaliveHost): CacheKeepaliveGate
 		// Fusion turns run outside the agent loop (isStreaming stays false while the
 		// panel/judge/writer work), so "idle" must exclude them too — a ping mid-fusion
 		// is harmless but pointless spend.
-		isIdle: () => !host.isStreaming && !(host.isFusing ?? false),
+		isIdle: () => !host.isStreaming && !host.isFusing,
 		hasLargeEnoughPrefix: () => {
 			const wireTokens = host.getContextUsage()?.wireTokens;
 			return typeof wireTokens === "number" && wireTokens >= CACHE_KEEPALIVE_MIN_WIRE_TOKENS;
@@ -264,36 +243,14 @@ export function createGatesForHost(host: CacheKeepaliveHost): CacheKeepaliveGate
 	};
 }
 
-/**
- * Build the ping context as close as possible to what the real send path
- * would ship: same system prompt, same message-prefix (via the agent's own
- * `convertToLlm`), and — when the lazy-tool-schema economy is on, as it is by
- * default — the same compacted tool surface `_installWireToolEconomyHook`
- * applies to every real request (`compactToolsForProviderContext` memoizes on
- * the `tools` array reference, so this returns the exact same object a real
- * turn would send whenever `agent.state.tools` hasn't changed). The call is
- * discarded: nothing here touches session state or the transcript. Divergence
- * in the message tail (e.g. a live-prune transform a real send would also
- * apply) is acceptable — prompt-cache breakpoints only need the PREFIX to
- * match byte-for-byte, not the tail.
- */
-async function buildPingContext(host: CacheKeepaliveHost): Promise<Context> {
-	const messages = await host.agent.convertToLlm(host.agent.state.messages);
-	const context: Context = {
-		systemPrompt: host.agent.state.systemPrompt,
-		messages,
-		tools: host.agent.state.tools,
-	};
-	if (isTruthyEnvFlag(process.env.PIT_NO_LAZY_TOOL_SCHEMAS)) return context;
-	return compactToolsForProviderContext(context);
-}
-
 async function pingHost(host: CacheKeepaliveHost): Promise<boolean> {
 	const model = host.model;
 	if (!model) return false;
 	const retention = effectiveKeepaliveRetention(host);
 	try {
-		const context = await buildPingContext(host);
+		// The ping must ride the session's own cacheable prefix — that is the whole
+		// point — so it uses the shared assembly in core/wire-context.ts.
+		const context = await buildWireContext(host.agent);
 		const { apiKey, headers } = await host.getCompactionRequestAuth(model);
 		const response = await completeSimple(model, context, { maxTokens: 1, apiKey, headers });
 		if (response.stopReason === "error") {

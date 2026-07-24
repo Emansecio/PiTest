@@ -1,9 +1,15 @@
 // suggestClosest from @pit/ai is the REAL fuzzy matcher used in production.
 // Using the real one (not a stub) makes the candidate thresholds load-bearing.
-import { resolve as resolvePath } from "node:path";
-import { suggestClosest } from "@pit/ai";
-import { describe, expect, it } from "vitest";
-import { reconstructEditedRegion } from "../src/core/built-ins/import-grounding-extension.ts";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve as resolvePath } from "node:path";
+import { getRuntimeDiagnostics, resetRuntimeDiagnostics, suggestClosest } from "@pit/ai";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+	createImportGroundingExtension,
+	reconstructEditedRegion,
+} from "../src/core/built-ins/import-grounding-extension.ts";
+import type { ExtensionAPI } from "../src/core/extensions/types.ts";
 import {
 	groundImports,
 	IMPORT_GROUNDING_DEFAULTS,
@@ -758,5 +764,147 @@ describe("groundImports — BARE package grounding (PV3-bare)", () => {
 			makeBareDeps(["@scope/pkg", "typescript"]),
 		);
 		expect(decision).toEqual({ action: "allow" });
+	});
+});
+
+/**
+ * The `tool_call` adapter itself (previously untested — only the pure module and
+ * `reconstructEditedRegion` were). Runs against a REAL temp project so the fs +
+ * manifest wiring is load-bearing.
+ */
+describe("import-grounding extension — adapter wiring", () => {
+	let cwd: string;
+
+	type Handler = (event: {
+		toolName: string;
+		toolCallId: string;
+		input: Record<string, unknown>;
+	}) => Promise<unknown> | unknown;
+
+	function makeGuard(dir: string) {
+		const handlers: Handler[] = [];
+		const api = {
+			on(event: string, handler: Handler) {
+				if (event === "tool_call") handlers.push(handler);
+			},
+		} as unknown as ExtensionAPI;
+		createImportGroundingExtension({ cwd: dir })(api);
+		return async (toolName: string, input: Record<string, unknown>, toolCallId = "i1") => {
+			let result: unknown;
+			for (const handler of handlers) {
+				const r = await handler({ toolName, toolCallId, input });
+				if (r !== undefined && result === undefined) result = r;
+			}
+			return result as { block?: boolean; reason?: string } | undefined;
+		};
+	}
+
+	const diagnostics = () => getRuntimeDiagnostics().recent.filter((e) => e.category === "guard.import-grounding");
+
+	beforeEach(() => {
+		cwd = mkdtempSync(join(tmpdir(), "pit-import-ground-ext-"));
+		mkdirSync(join(cwd, "src"), { recursive: true });
+		writeFileSync(join(cwd, "package.json"), JSON.stringify({ name: "fixture", dependencies: { lodash: "^4" } }));
+		writeFileSync(join(cwd, "src", "util.ts"), "export function helper() {}\n");
+		resetRuntimeDiagnostics();
+	});
+
+	afterEach(() => {
+		process.env.PIT_NO_IMPORT_GROUNDING = "";
+		rmSync(cwd, { recursive: true, force: true });
+	});
+
+	it("blocks a write whose relative import does not resolve, with the close sibling", async () => {
+		const fire = makeGuard(cwd);
+		const blocked = await fire("write", {
+			path: join(cwd, "src", "main.ts"),
+			content: 'import { helper } from "./utl";\n',
+		});
+		expect(blocked?.block).toBe(true);
+		expect(blocked?.reason).toContain("./utl");
+		expect(blocked?.reason).toContain("Did you mean: ./util");
+	});
+
+	it("allows a write whose relative import resolves on disk", async () => {
+		const fire = makeGuard(cwd);
+		const decision = await fire("write", {
+			path: join(cwd, "src", "main.ts"),
+			content: 'import { helper } from "./util.ts";\n',
+		});
+		expect(decision).toBeUndefined();
+	});
+
+	it("tags the diagnostic per KIND: import-path with note path:write", async () => {
+		const fire = makeGuard(cwd);
+		await fire("write", { path: join(cwd, "src", "main.ts"), content: 'import { helper } from "./utl";\n' }, "w1");
+		const events = diagnostics();
+		expect(events).toHaveLength(1);
+		expect(events[0]?.context).toEqual({
+			note: "path:write",
+			outcome: "blocked",
+			ruleId: "import-path",
+			toolName: "write",
+			toolCallId: "w1",
+		});
+	});
+
+	it("tags a BARE package typo as import-bare (per-kind ruleId, not the guard default)", async () => {
+		const fire = makeGuard(cwd);
+		const blocked = await fire("write", {
+			path: join(cwd, "src", "main.ts"),
+			content: 'import x from "lodash-es";\n',
+		});
+		expect(blocked?.block).toBe(true);
+		expect(diagnostics()[0]?.context).toMatchObject({ ruleId: "import-bare", note: "bare:write" });
+	});
+
+	it("blocks once, then lets the identical re-issue run (fire-once override)", async () => {
+		const fire = makeGuard(cwd);
+		const args = { path: join(cwd, "src", "main.ts"), content: 'import { helper } from "./utl";\n' };
+		expect((await fire("write", args, "w1"))?.block).toBe(true);
+		expect(await fire("write", args, "w2")).toBeUndefined();
+		expect(diagnostics().map((e) => e.context?.outcome)).toEqual(["blocked", "overridden"]);
+	});
+
+	it("grounds an EDIT through the reconstructed region (newText without the import keyword)", async () => {
+		writeFileSync(join(cwd, "src", "main.ts"), 'import { helper } from "./util.ts";\n');
+		const fire = makeGuard(cwd);
+		const blocked = await fire("edit", {
+			path: join(cwd, "src", "main.ts"),
+			edits: [{ oldText: "./util.ts", newText: "./utl" }],
+		});
+		expect(blocked?.block).toBe(true);
+		expect(blocked?.reason).toContain("./utl");
+		expect(diagnostics()[0]?.context).toMatchObject({ note: "path:edit", ruleId: "import-path" });
+	});
+
+	it("ignores non-TS/JS targets (no import forms to resolve)", async () => {
+		const fire = makeGuard(cwd);
+		expect(
+			await fire("write", { path: join(cwd, "README.md"), content: 'import x from "./utl";\n' }),
+		).toBeUndefined();
+	});
+
+	it("ignores tools other than write/edit, and a call with no path arg", async () => {
+		const fire = makeGuard(cwd);
+		expect(await fire("read", { path: join(cwd, "src", "main.ts") })).toBeUndefined();
+		expect(await fire("bash", { command: 'echo "./utl"' })).toBeUndefined();
+		expect(await fire("write", { content: 'import x from "./utl";\n' })).toBeUndefined();
+	});
+
+	it("allows a write with no content (nothing to scan)", async () => {
+		const fire = makeGuard(cwd);
+		expect(await fire("write", { path: join(cwd, "src", "main.ts"), content: "" })).toBeUndefined();
+	});
+
+	it("goes silent under PIT_NO_IMPORT_GROUNDING", async () => {
+		const fire = makeGuard(cwd);
+		process.env.PIT_NO_IMPORT_GROUNDING = "1";
+		const decision = await fire("write", {
+			path: join(cwd, "src", "main.ts"),
+			content: 'import { helper } from "./utl";\n',
+		});
+		expect(decision).toBeUndefined();
+		expect(diagnostics()).toHaveLength(0);
 	});
 });

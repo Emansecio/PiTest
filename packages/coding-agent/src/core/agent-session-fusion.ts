@@ -31,7 +31,7 @@ import type { SessionManager } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
 import type { SpawnBudgetDecision } from "./token-governor.ts";
 import { consumedTokens } from "./token-usage.ts";
-import { compactToolsForProviderContext } from "./tool-wire-schema.ts";
+import { buildWireContext } from "./wire-context.ts";
 
 /** Stable session surface fusion reads; implemented by AgentSession. */
 export interface FusionHost {
@@ -234,29 +234,28 @@ function shouldReuseWriterPrefix(host: FusionHost, writerModel: Model<any>): boo
 }
 
 /**
- * Assemble the prefix-reuse writer context: the session's system prompt + tools +
- * full (wire-converted) history, plus one trailing user block with the panel/judge/
- * verify material. Assembly mirrors cache-keepalive.ts's buildPingContext (system +
- * convertToLlm(messages) + compacted tools) — replicated locally on purpose while
- * that file's consolidation is in flight; do NOT reach into cache-keepalive.ts.
+ * Assemble the prefix-reuse writer context: the session's wire prefix (system
+ * prompt + tools + full converted history, from core/wire-context.ts — the same
+ * assembly the cache-keepalive ping and cache-aware compaction ride) shaped by one
+ * trailing user block carrying the panel/judge/verify material. The shaping runs
+ * BEFORE the lazy-tool-schema step so the tools block stays byte-identical (by
+ * reference) to the session's cached prefix and cache-hits.
  */
-async function buildWriterContextForSession(
+function buildWriterContextForSession(
 	host: FusionHost,
 	results: PanelResult[],
 	analysis: JudgeAnalysis,
 	verification: VerificationReport | undefined,
 ): Promise<Context> {
-	const messages = await host.agent.convertToLlm(host.agent.state.messages);
-	const context = buildWriterPrefixReuseContext(results, analysis, verification, {
-		systemPrompt: host.agent.state.systemPrompt,
-		messages,
-		tools: host.agent.state.tools,
-	});
-	// Same lazy-tool-schema economy the real send path applies (gated by
-	// PIT_NO_LAZY_TOOL_SCHEMAS) so the tools block stays byte-identical to the
-	// session's cached prefix and cache-hits.
-	if (isTruthyEnvFlag(process.env.PIT_NO_LAZY_TOOL_SCHEMAS)) return context;
-	return compactToolsForProviderContext(context);
+	return buildWireContext(host.agent, (prefix) =>
+		buildWriterPrefixReuseContext(results, analysis, verification, {
+			systemPrompt: prefix.systemPrompt,
+			messages: prefix.messages,
+			// By reference: compactToolsForProviderContext memoizes on this array, so the
+			// writer ships the very tools object a real turn does (cache identity).
+			tools: prefix.tools,
+		}),
+	);
 }
 
 export async function fusionVerify(

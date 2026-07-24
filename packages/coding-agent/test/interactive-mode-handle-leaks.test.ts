@@ -11,6 +11,7 @@ vi.mock("../src/modes/interactive/theme/theme.ts", async (importOriginal) => {
 
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import { initTheme, stopThemeWatcher } from "../src/modes/interactive/theme/theme.js";
+import { createInteractiveHarness } from "./interactive-harness.ts";
 
 type HandleAskRequestThis = {
 	pendingAskRequest: AskOptionsRequest | undefined;
@@ -66,55 +67,17 @@ describe("Leak 1: ask auto-answer timer is unref'd", () => {
 	});
 });
 
-type StopThis = {
-	unregisterSignalHandlers: () => void;
-	setTerminalProgress: (on: boolean) => void;
-	clearInterruptWatchdog: () => void;
-	_themePreviewInvalidateTimer: ReturnType<typeof setTimeout> | undefined;
-	ephemeralStatus: { dispose: () => void };
-	stopStartupAnimation: () => void;
-	petCompanionUnsub: (() => void) | undefined;
-	composerChrome: { setPerch: (component: undefined) => void };
-	petCompanion: unknown;
-	loadingAnimation: { stop: () => void } | undefined;
-	clearExtensionTerminalInputListeners: () => void;
-	footer: { dispose: () => void };
-	footerDataProvider: { dispose: () => void };
-	unsubscribe: (() => void) | undefined;
-	diagnosticsUnsubscribe: (() => void) | undefined;
-	isInitialized: boolean;
-};
-
-function callStop(context: StopThis): void {
-	(InteractiveMode.prototype as unknown as { stop: (this: StopThis) => void }).stop.call(context);
-}
-
 describe("Leak 2: interactive stop() closes the theme watcher", () => {
 	afterEach(() => {
 		vi.mocked(stopThemeWatcher).mockClear();
 	});
 
+	// Was a `stop.call(fakeThis)` against a hand-rolled 17-key object; now the real
+	// instance, built headless on a VirtualTerminal, runs the real teardown.
 	test("stop() calls stopThemeWatcher() on the normal teardown path", () => {
-		const context: StopThis = {
-			unregisterSignalHandlers: vi.fn(),
-			setTerminalProgress: vi.fn(),
-			clearInterruptWatchdog: vi.fn(),
-			_themePreviewInvalidateTimer: undefined,
-			ephemeralStatus: { dispose: vi.fn() },
-			stopStartupAnimation: vi.fn(),
-			petCompanionUnsub: undefined,
-			composerChrome: { setPerch: vi.fn() },
-			petCompanion: undefined,
-			loadingAnimation: undefined,
-			clearExtensionTerminalInputListeners: vi.fn(),
-			footer: { dispose: vi.fn() },
-			footerDataProvider: { dispose: vi.fn() },
-			unsubscribe: undefined,
-			diagnosticsUnsubscribe: undefined,
-			isInitialized: false,
-		};
+		const harness = createInteractiveHarness();
 
-		callStop(context);
+		harness.dispose();
 
 		expect(stopThemeWatcher).toHaveBeenCalledTimes(1);
 	});

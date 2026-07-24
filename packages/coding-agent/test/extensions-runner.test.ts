@@ -842,6 +842,73 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("hasMutatingHandlers", () => {
+		/**
+		 * Observer (side-effect tagged) vs mutator (untagged). Consumed by the
+		 * speculative-compaction precompute: an observer must NOT disable it, a
+		 * mutator must.
+		 */
+		it("ignores side-effect-tagged handlers but still reports them to hasHandlers", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("session_before_compact", pi.markSideEffect(() => undefined));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "observer.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			expect(runner.hasHandlers("session_before_compact")).toBe(true);
+			expect(runner.hasMutatingHandlers("session_before_compact")).toBe(false);
+			// Unrelated event: false on both.
+			expect(runner.hasMutatingHandlers("session_before_fork")).toBe(false);
+		});
+
+		it("returns true when an untagged handler shares the event with a tagged one", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("session_before_compact", pi.markSideEffect(() => undefined));
+					pi.on("session_before_compact", () => ({ cancel: true }));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "mixed.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			expect(runner.hasMutatingHandlers("session_before_compact")).toBe(true);
+		});
+
+		it("memoizes the answer and invalidateCaches() clears it", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("session_before_compact", pi.markSideEffect(() => undefined));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "observer.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			expect(runner.hasMutatingHandlers("session_before_compact")).toBe(false);
+
+			// A late mutator arrives (post-load api.on()). The memoized `false` must
+			// survive until the caches are invalidated — and must NOT survive it, or
+			// a precomputed summary could be applied over a handler that never ran.
+			const handlers = result.extensions[0].handlers;
+			handlers.set("session_before_compact", [
+				...(handlers.get("session_before_compact") ?? []),
+				async () => ({ cancel: true }),
+			]);
+			expect(runner.hasMutatingHandlers("session_before_compact")).toBe(false); // cached
+
+			runner.invalidateCaches();
+			expect(runner.hasMutatingHandlers("session_before_compact")).toBe(true);
+			expect(runner.hasHandlers("session_before_compact")).toBe(true);
+		});
+	});
+
 	describe("before_agent_start timeout", () => {
 		it("skips handler that exceeds timeout and emits error", async () => {
 			vi.stubEnv("PIT_EXTENSION_HOOK_TIMEOUT_MS", "200");

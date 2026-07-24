@@ -4,12 +4,11 @@
 
 import { statSync } from "node:fs";
 import type { Agent, AgentMessage, ThinkingLevel } from "@pit/agent-core";
-import type { AssistantMessage, CacheRetention, Context, Model } from "@pit/ai";
-import { isContextOverflow, recordDiagnostic, resolveCacheRetention, streamSimple } from "@pit/ai";
+import type { AssistantMessage, CacheRetention, Model } from "@pit/ai";
+import { isContextOverflow, recordDiagnostic, streamSimple } from "@pit/ai";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import type { AgentSessionEvent } from "./agent-session-events.ts";
 import { formatNoModelSelectedMessage } from "./auth-guidance.ts";
-import { modelHasShortCacheRetention } from "./cache-keepalive.ts";
 import {
 	adaptivePruneThreshold,
 	type CompactionSettings,
@@ -48,10 +47,10 @@ import type { PinManager } from "./pins.ts";
 import type { CompactionEntry, SessionEntry, SessionManager } from "./session-manager.js";
 import { getLatestCompactionEntry } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
-import { compactToolsForProviderContext } from "./tool-wire-schema.ts";
 import type { FileMtimeStore } from "./tools/file-mtime-store.ts";
 import { canonicalPathKey, resolveReadPath } from "./tools/path-utils.ts";
 import type { ReadDedupeStore } from "./tools/read.js";
+import { buildWireContext, effectiveWireRetention } from "./wire-context.ts";
 
 /**
  * Whether `runAutoCompaction` should pay a second LLM summarization pass after
@@ -543,24 +542,6 @@ const CACHE_AWARE_SHORT_MAX_AGE_MS = 240_000;
 const CACHE_AWARE_LONG_MAX_AGE_MS = 3_300_000;
 
 /**
- * Effective wire cache retention for the host's session model. Replicated from
- * {@link effectiveKeepaliveRetention} (core/cache-keepalive.ts) — that helper
- * types its host as CacheKeepaliveHost, which CompactionHost does not widen to;
- * the resolution is four lines, so we mirror it here (keep in sync) rather than
- * thread a second host shape. Resolve env-first (PIT_CACHE_RETENTION > session
- * option > "long"), then demote "long" to "short" when the model lacks
- * long-retention support. "none" for any non-Anthropic model.
- */
-function effectiveRetentionForCompaction(host: CompactionHost): CacheRetention {
-	const model = host.model;
-	if (!model || model.provider !== "anthropic") return "none";
-	const resolved = resolveCacheRetention(host.getSessionCacheRetention?.(), "long");
-	if (resolved === "none") return "none";
-	if (resolved === "long" && !modelHasShortCacheRetention(model)) return "long";
-	return "short";
-}
-
-/**
  * Assemble the {@link CacheAwareGeneration} for a compaction, or `undefined`
  * when any gate fails (→ the summarizer takes the always-correct text/sibling
  * path). Gates:
@@ -592,7 +573,10 @@ export function buildCacheAwareGeneration(
 	if (model.provider !== "anthropic") return undefined;
 	if (!host.getContextUsage || !host.getSessionCacheRetention) return undefined;
 
-	const retention = effectiveRetentionForCompaction(host);
+	// Resolved from the SESSION model (host.model), not `session.model` — this is the
+	// retention the live prefix already sits under. Shared with the cache-keepalive
+	// cadence via core/wire-context.ts.
+	const retention = effectiveWireRetention(host.model, host.getSessionCacheRetention());
 	if (retention === "none") return undefined;
 
 	const messages = host.agent.state.messages;
@@ -618,23 +602,9 @@ export function buildCacheAwareGeneration(
 		// ~all of these tokens (CACHE_AWARE_MIN_FOLD_COVERAGE).
 		liveMessageTokens: sumMessageTokens(messages),
 		retention,
-		buildContext: async (): Promise<Context> => {
-			// Replicated from buildPingContext (core/cache-keepalive.ts) and
-			// buildWriterContextForSession (agent-session-fusion.ts): assemble the EXACT
-			// prefix the real send path ships so Anthropic's cache serves it — same
-			// system prompt, same convertToLlm message prefix, same lazy-compacted tool
-			// surface (compactToolsForProviderContext memoizes on the tools ref, so it
-			// returns the very object a real turn sends). NOT imported to avoid editing
-			// those modules; keep in sync.
-			const llmMessages = await host.agent.convertToLlm(host.agent.state.messages);
-			const context: Context = {
-				systemPrompt: host.agent.state.systemPrompt,
-				messages: llmMessages,
-				tools: host.agent.state.tools,
-			};
-			if (isTruthyEnvFlag(process.env.PIT_NO_LAZY_TOOL_SCHEMAS)) return context;
-			return compactToolsForProviderContext(context);
-		},
+		// The EXACT prefix the real send path ships, so Anthropic's cache serves it
+		// instead of re-writing the head. Owned by core/wire-context.ts.
+		buildContext: () => buildWireContext(host.agent),
 	};
 }
 
@@ -739,9 +709,19 @@ export async function startSpeculativeCompaction(
 	settings: CompactionSettings,
 	tokensAtPrecompute: number,
 ): Promise<void> {
-	// Extensions that intercept compaction keep the current flow intact — the
-	// precompute never emits session_before_compact speculatively (conservative).
-	if (ctx.host.extensionRunner.hasHandlers("session_before_compact")) return;
+	// Re-checked here (not only in maybeStartSpeculativeCompaction) so the
+	// kill-switch holds for every entry point into the precompute.
+	if (isTruthyEnvFlag(process.env.PIT_NO_SPECULATIVE_COMPACTION)) return;
+	// Only a MUTATING session_before_compact handler blocks the precompute: it can
+	// return {cancel} or a replacement {compaction}, and the precompute cannot emit
+	// the event speculatively (the emit has visible side effects and the event's
+	// preparation would be the wrong one), so precomputing under it would produce a
+	// summary the extension never got to veto. Handlers tagged side-effect-only
+	// (`pi.markSideEffect` / `markHandlerSideEffect`) are pure observers — e.g. the
+	// built-in read-guard, which ships in EVERY bundle. Gating on `hasHandlers`
+	// here is what made this whole path dead code in every real session; they are
+	// emitted at apply time instead (see executeCompactionPipeline).
+	if (ctx.host.extensionRunner.hasMutatingHandlers("session_before_compact")) return;
 	const model = ctx.host.model;
 	if (!model) return;
 
@@ -904,9 +884,21 @@ export async function executeCompactionPipeline(
 		/** Thinking level for the summarization call; defaults to the session's. */
 		thinkingLevel?: ThinkingLevel;
 		/**
-		 * P2 — a pre-computed summary to apply APPLY-ONLY (skips both the
-		 * `session_before_compact` emit and the `compact()` LLM call). Enters at the
-		 * same seam as an extension-supplied compaction, but with `fromExtension=false`.
+		 * P2 — a pre-computed summary to apply APPLY-ONLY (skips the `compact()` LLM
+		 * call). Enters at the same seam as an extension-supplied compaction, but with
+		 * `fromExtension=false`.
+		 *
+		 * It does NOT skip the `session_before_compact` emit: observers (side-effect
+		 * tagged handlers) must run on every compaction. Concretely, the built-in
+		 * read-guard migrates its read set to stat snapshots there; a compaction that
+		 * applies silently leaves the guard believing every folded file is still
+		 * verbatim in context, which SILENTLY DISABLES its post-compaction protections
+		 * (verbatim-oldText matching for `edit`, drift detection and the one-time
+		 * overwrite warning for `write`) exactly when the model has only a lossy
+		 * summary to edit from. If a MUTATING handler is registered by the time we
+		 * apply (registered after the precompute started, say), the precomputed summary
+		 * is DISCARDED and the normal flow runs — it was produced without that
+		 * handler's say, so it can never be applied.
 		 */
 		precomputed?: CompactionResult;
 		/** Cache-aware generation context — routes summary generation through the
@@ -917,11 +909,34 @@ export async function executeCompactionPipeline(
 ): Promise<CompactionResult> {
 	const { preparation, pathEntries, model, apiKey, headers, abortSignal, customInstructions, precomputed } = options;
 	const thinkingLevel = options.thinkingLevel ?? ctx.host.thinkingLevel;
-	let extensionCompaction: CompactionResult | undefined = precomputed;
+	const runner = ctx.host.extensionRunner;
+
+	// A precomputed summary was generated WITHOUT emitting session_before_compact.
+	// That is only sound while every registered handler is an observer. If a
+	// mutating handler exists at apply time (e.g. an extension loaded after the
+	// precompute started), drop the precompute: it would apply a summary the
+	// handler never had the chance to cancel or replace.
+	let applied: CompactionResult | undefined = precomputed;
+	if (applied && runner.hasMutatingHandlers("session_before_compact")) {
+		applied = undefined;
+		recordDiagnostic({
+			category: "compaction.speculative",
+			level: "info",
+			source: "agent-session.executeCompactionPipeline",
+			context: { note: "discard=mutating-handler" },
+		});
+	}
+
+	let extensionCompaction: CompactionResult | undefined = applied;
 	let fromExtension = false;
 
-	if (!precomputed && ctx.host.extensionRunner.hasHandlers("session_before_compact")) {
-		const result = (await ctx.host.extensionRunner.emit({
+	// Emitted on EVERY path — including the apply-only one — so observers do their
+	// bookkeeping at the same logical moment as before (after the summary exists,
+	// before it is appended to the session). Skipping it for a precomputed summary
+	// would leave the read-guard's read set unmigrated, silently disabling its
+	// post-compaction checks on files the summary just folded away.
+	if (runner.hasHandlers("session_before_compact")) {
+		const result = (await runner.emit({
 			type: "session_before_compact",
 			preparation,
 			branchEntries: pathEntries,
@@ -933,6 +948,8 @@ export async function executeCompactionPipeline(
 			throw new Error("Compaction cancelled");
 		}
 
+		// Unreachable while a precompute is being applied (a handler that returns a
+		// compaction is by definition mutating, so `applied` was cleared above).
 		if (result?.compaction) {
 			extensionCompaction = result.compaction;
 			fromExtension = true;

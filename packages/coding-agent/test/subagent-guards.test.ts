@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+	bundleGroundingGuardChain,
 	bundleGroundingGuardFactories,
+	subagentGroundingGuardChain,
 	subagentGroundingGuardFactories,
 } from "../src/core/built-ins/grounding-guard-registry.ts";
 import { areSubagentGuardsDisabled, createSubagentGuardChain } from "../src/core/built-ins/subagent-guards.ts";
@@ -99,10 +101,48 @@ describe("subagent guard chain", () => {
 		expect(second).toBeUndefined();
 	});
 
-	it("exposes eight subagent-propagated guard factories in fixed order", () => {
+	it("exposes the subagent-propagated guard chain in a fixed, NAMED order", () => {
+		// Registration order is behavior (the first guard that blocks short-circuits
+		// the cascade), so assert the names — a swapped pair must fail here, not
+		// silently change which guard reports first.
+		expect(subagentGroundingGuardChain("/tmp").map((slot) => slot.name)).toEqual([
+			"read-guard",
+			"edit-precondition",
+			"grounding-guard",
+			"import-grounding",
+			"erasable-syntax-precondition",
+			"path-grounding",
+			"pattern-grounding",
+			"bash-grounding",
+		]);
 		expect(subagentGroundingGuardFactories("/tmp")).toHaveLength(8);
-		const withLearned = bundleGroundingGuardFactories("/tmp", [() => {}]);
-		expect(withLearned).toHaveLength(9);
+	});
+
+	it("splices the parent-only inserts between edit-precondition and grounding-guard", () => {
+		expect(bundleGroundingGuardChain("/tmp", [() => {}, () => {}]).map((slot) => slot.name)).toEqual([
+			"read-guard",
+			"edit-precondition",
+			"parent-insert",
+			"parent-insert",
+			"grounding-guard",
+			"import-grounding",
+			"erasable-syntax-precondition",
+			"path-grounding",
+			"pattern-grounding",
+			"bash-grounding",
+		]);
+		expect(bundleGroundingGuardFactories("/tmp", [() => {}])).toHaveLength(9);
+	});
+
+	it("keeps the factory list byte-aligned with the named chain", () => {
+		const insert = () => {};
+		const chain = bundleGroundingGuardChain("/tmp", [insert]);
+		const factories = bundleGroundingGuardFactories("/tmp", [insert]);
+		expect(factories).toHaveLength(chain.length);
+		// The insert is the only factory identity shared across both calls; assert it
+		// lands at the same index in each.
+		expect(factories.indexOf(insert)).toBe(chain.findIndex((slot) => slot.factory === insert));
+		expect(factories.indexOf(insert)).toBe(2);
 	});
 
 	it("parses the PIT_NO_SUBAGENT_GUARDS opt-out", () => {

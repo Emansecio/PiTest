@@ -32,6 +32,12 @@
  * match the file VERBATIM — the model only carried a lossy summary of the file
  * across compaction, so a fuzzy/indent match there risks corrupting the middle.
  *
+ * Why this is NOT built on the shared `createGuard` seam: its fire-once set is
+ * keyed by absolute PATH (not by `(tool, args)`) and is cleared by events the
+ * seam knows nothing about — a fresh `read` of the file, the model's own
+ * successful write/edit, and compaction. Only the diagnostic emission is shared
+ * (`recordGuardOutcome`); the five block kinds and their state stay here.
+ *
  * The shared `extractPathArg` accepts the same aliases `prepareWithPathAliases`
  * will later normalize (path, file_path, filepath, filename, file). The read-guard
  * runs on the `tool_call` event — BEFORE prepareArguments — so it must accept
@@ -42,10 +48,11 @@
 import { createHash } from "node:crypto";
 import { closeSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { basename, isAbsolute, relative, resolve } from "node:path";
-import { recordDiagnostic } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
+import { markHandlerSideEffect } from "../extensions/types.ts";
 import { extractEditOldTexts, extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
 import { canonicalPathKey } from "../tools/path-utils.ts";
+import { recordGuardOutcome } from "./grounding-fire-once.ts";
 
 interface FileStamp {
 	mtimeMs: number;
@@ -247,17 +254,14 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 							readStamp != null && current !== undefined && stampContentDiffers(abs, current, readStamp);
 						if (drifted && !firedWriteWarnings.has(abs)) {
 							firedWriteWarnings.add(abs);
-							recordDiagnostic({
+							recordGuardOutcome({
 								category: "guard.read",
-								level: "info",
 								source: "read-guard-extension.intraSessionDrift",
-								context: {
-									path,
-									outcome: "blocked",
-									ruleId: "write-drift-clobber",
-									toolName: event.toolName,
-									toolCallId: event.toolCallId,
-								},
+								outcome: "blocked",
+								ruleId: "write-drift-clobber",
+								toolName: event.toolName,
+								toolCallId: event.toolCallId,
+								context: { path },
 							});
 							return {
 								block: true,
@@ -271,17 +275,14 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 						// to a read, undrifted file never entered firedWriteWarnings, so
 						// this stays silent in the common case.)
 						if (firedWriteWarnings.has(abs)) {
-							recordDiagnostic({
+							recordGuardOutcome({
 								category: "guard.read",
-								level: "info",
 								source: "read-guard-extension.writeWarnOverridden",
-								context: {
-									path,
-									outcome: "overridden",
-									ruleId: "write-drift-clobber",
-									toolName: event.toolName,
-									toolCallId: event.toolCallId,
-								},
+								outcome: "overridden",
+								ruleId: "write-drift-clobber",
+								toolName: event.toolName,
+								toolCallId: event.toolCallId,
+								context: { path },
 							});
 						}
 					}
@@ -308,17 +309,14 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 								const fileContent = readFileContentSafe(abs);
 								if (fileContent !== undefined && oldTexts.some((t) => !fileContent.includes(t))) {
 									postCompactStamps.delete(abs);
-									recordDiagnostic({
+									recordGuardOutcome({
 										category: "guard.read",
-										level: "info",
 										source: "read-guard-extension.postCompactEditMismatch",
-										context: {
-											path,
-											outcome: "blocked",
-											ruleId: "postcompact-edit-mismatch",
-											toolName: event.toolName,
-											toolCallId: event.toolCallId,
-										},
+										outcome: "blocked",
+										ruleId: "postcompact-edit-mismatch",
+										toolName: event.toolName,
+										toolCallId: event.toolCallId,
+										context: { path },
 									});
 									return {
 										block: true,
@@ -334,17 +332,14 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 							// risk than an edit (which is anchored by oldText). Warn ONCE: a
 							// re-issue means the overwrite is intended and runs.
 							firedWriteWarnings.add(abs);
-							recordDiagnostic({
+							recordGuardOutcome({
 								category: "guard.read",
-								level: "info",
 								source: "read-guard-extension.postCompactWriteWarn",
-								context: {
-									path,
-									outcome: "blocked",
-									ruleId: "postcompact-write-overwrite",
-									toolName: event.toolName,
-									toolCallId: event.toolCallId,
-								},
+								outcome: "blocked",
+								ruleId: "postcompact-write-overwrite",
+								toolName: event.toolName,
+								toolCallId: event.toolCallId,
+								context: { path },
 							});
 							return {
 								block: true,
@@ -357,17 +352,14 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 						// measurable vs the postCompactWriteWarn blocks above. (Stays
 						// silent for an edit, or a write that was never warned.)
 						if (event.toolName === "write" && firedWriteWarnings.has(abs)) {
-							recordDiagnostic({
+							recordGuardOutcome({
 								category: "guard.read",
-								level: "info",
 								source: "read-guard-extension.writeWarnOverridden",
-								context: {
-									path,
-									outcome: "overridden",
-									ruleId: "postcompact-write-overwrite",
-									toolName: event.toolName,
-									toolCallId: event.toolCallId,
-								},
+								outcome: "overridden",
+								ruleId: "postcompact-write-overwrite",
+								toolName: event.toolName,
+								toolCallId: event.toolCallId,
+								context: { path },
 							});
 						}
 						return undefined;
@@ -375,17 +367,14 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 					// Drifted (or stat failed) — consume the stale stamp so the
 					// model can't accidentally retry and slip through.
 					postCompactStamps.delete(abs);
-					recordDiagnostic({
+					recordGuardOutcome({
 						category: "guard.read",
-						level: "info",
 						source: "read-guard-extension.stampDrifted",
-						context: {
-							path,
-							outcome: "blocked",
-							ruleId: "stamp-drifted",
-							toolName: event.toolName,
-							toolCallId: event.toolCallId,
-						},
+						outcome: "blocked",
+						ruleId: "stamp-drifted",
+						toolName: event.toolName,
+						toolCallId: event.toolCallId,
+						context: { path },
 					});
 					return {
 						block: true,
@@ -393,17 +382,14 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 					};
 				}
 
-				recordDiagnostic({
+				recordGuardOutcome({
 					category: "guard.read",
-					level: "info",
 					source: "read-guard-extension.neverRead",
-					context: {
-						path,
-						outcome: "blocked",
-						ruleId: "edit-never-read",
-						toolName: event.toolName,
-						toolCallId: event.toolCallId,
-					},
+					outcome: "blocked",
+					ruleId: "edit-never-read",
+					toolName: event.toolName,
+					toolCallId: event.toolCallId,
+					context: { path },
 				});
 				return {
 					block: true,
@@ -455,30 +441,48 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 		// still trust the snapshot it carried into context. Hashing is deferred
 		// to setImmediate so compact doesn't block the event loop on N full-file
 		// SHA-256 passes; stampContentDiffers falls back to mtime+size until ready.
-		pi.on("session_before_compact", () => {
-			const pendingHash: Array<{ abs: string; stamp: FileStamp }> = [];
-			for (const abs of readFiles.keys()) {
-				const stamp = stampFile(abs);
-				if (stamp) {
-					postCompactStamps.set(abs, stamp);
-					if (stamp.hash === undefined) pendingHash.push({ abs, stamp });
-				}
-				// If stat fails (file deleted/permissions), we drop the entry —
-				// the model will have to re-read, which is correct.
-			}
-			readFiles.clear();
-			if (pendingHash.length > 0) {
-				setImmediate(() => {
-					for (const { abs, stamp } of pendingHash) {
-						if (postCompactStamps.get(abs) !== stamp) continue;
-						try {
-							ensureHash(abs, stamp);
-						} catch {
-							// Best-effort; drift compare stays stats-only without a hash.
-						}
+		//
+		// Tagged side-effect-only: this handler mutates only its OWN state and
+		// always returns undefined — it never cancels the compaction nor supplies a
+		// summary. That tag is load-bearing, not cosmetic: an UNTAGGED
+		// session_before_compact handler makes `hasMutatingHandlers()` true, which
+		// disables the speculative compaction precompute entirely (the precompute
+		// cannot emit the event, so a handler that could replace/cancel the summary
+		// must not be bypassed). Because this guard ships in every bundle, leaving
+		// it untagged made the precompute dead code in every real session. The
+		// bookkeeping below still runs on every compaction — including one served
+		// from a precomputed summary — because the apply path always emits the
+		// event (see executeCompactionPipeline).
+		pi.on(
+			"session_before_compact",
+			markHandlerSideEffect(() => {
+				const pendingHash: Array<{ abs: string; stamp: FileStamp }> = [];
+				for (const abs of readFiles.keys()) {
+					const stamp = stampFile(abs);
+					if (stamp) {
+						postCompactStamps.set(abs, stamp);
+						if (stamp.hash === undefined) pendingHash.push({ abs, stamp });
 					}
-				});
-			}
-		});
+					// If stat fails (file deleted/permissions), we drop the entry —
+					// the model will have to re-read, which is correct.
+				}
+				readFiles.clear();
+				if (pendingHash.length > 0) {
+					setImmediate(() => {
+						for (const { abs, stamp } of pendingHash) {
+							if (postCompactStamps.get(abs) !== stamp) continue;
+							try {
+								ensureHash(abs, stamp);
+							} catch {
+								// Best-effort; drift compare stays stats-only without a hash.
+							}
+						}
+					});
+				}
+				// Explicit: nothing is returned to the compaction pipeline. Keep it that
+				// way — a non-undefined return here would violate the side-effect tag.
+				return undefined;
+			}),
+		);
 	};
 }

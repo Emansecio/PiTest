@@ -14,21 +14,20 @@
 
 import type { ExtensionAPI } from "../extensions/index.js";
 import { groundPattern, isPatternGroundingDisabled } from "../pattern-grounding.ts";
-import { createFireOnceBlockGuard } from "./grounding-fire-once.ts";
+import { createGuard } from "./grounding-fire-once.ts";
 
 export function createPatternGroundingExtension(): (pi: ExtensionAPI) => void {
-	return createFireOnceBlockGuard({
+	return createGuard({
 		category: "guard.pattern-grounding",
 		source: "pattern-grounding-extension",
 		ruleId: "malformed-pattern",
+		disabled: isPatternGroundingDisabled,
+		appliesTo: (toolName) => toolName === "grep" || toolName === "find",
 		decide(event) {
-			if (isPatternGroundingDisabled()) return undefined;
-			if (event.toolName !== "grep" && event.toolName !== "find") return undefined;
-
 			const input = event.input as Record<string, unknown>;
 			const decision = groundPattern({ toolName: event.toolName, args: input });
 			if (decision.action === "block") {
-				return { block: true, reason: decision.message };
+				return { action: "block", reason: decision.message };
 			}
 			return undefined;
 		},

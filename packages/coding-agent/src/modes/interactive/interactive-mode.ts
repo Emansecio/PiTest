@@ -37,6 +37,7 @@ import type {
 	OverlayHandle,
 	OverlayOptions,
 	SlashCommand,
+	Terminal,
 } from "@pit/tui";
 import {
 	Cheatsheet,
@@ -84,7 +85,7 @@ import {
 } from "../../core/file-snapshots.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { detectCliAsync } from "../../core/fusion/cli-runner.ts";
-import { formatElapsed, parseTokenBudget } from "../../core/goal/goal-manager.ts";
+import { parseTokenBudget } from "../../core/goal/goal-manager.ts";
 import { sliceSafe, truncateWithEllipsis } from "../../utils/surrogate.ts";
 
 /**
@@ -179,7 +180,7 @@ import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent } from "./components/footer.ts";
-import { FusionLiveComponent, type FusionLiveMember } from "./components/fusion-live.ts";
+import { FusionLiveComponent } from "./components/fusion-live.ts";
 import { FusionSetupComponent } from "./components/fusion-setup.ts";
 import { createGoalOverlay, type GoalOverlay } from "./components/goal-overlay.ts";
 import {
@@ -205,7 +206,6 @@ import { reducedMotionLoaderIndicator } from "./components/spinner-ticker.ts";
 import { type StartupRecentSession, StartupScreen, type StartupScreenData } from "./components/startup-screen.ts";
 import { ThemeSelectorComponent } from "./components/theme-selector.ts";
 import { createTodoOverlay, type TodoOverlay } from "./components/todo-overlay.ts";
-import { workingPhaseLabel } from "./components/tool-activity.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TtsrSteerMessageComponent } from "./components/ttsr-steer-message.ts";
@@ -238,7 +238,6 @@ import {
 	mergePendingFollowUpsIntoDraft,
 	PENDING_FOLLOW_UP_DRAFT_TYPE,
 } from "./pending-follow-up-drafts.ts";
-import { classifyRetryReason } from "./retry-reason.ts";
 import {
 	applySkillsDoctorFix,
 	formatSkillsDoctorBrief,
@@ -265,6 +264,25 @@ import {
 } from "./theme/theme.ts";
 import { deriveThinkingTail } from "./thinking-preview.ts";
 import { buildTurnDoneSnapshot, shouldRenderTurnDone } from "./turn-done-format.ts";
+import { decideGearboxToolEnd, sessionHasThinkingOnlyAssistant } from "./turn-policy.ts";
+import {
+	decideAgentStart,
+	decideAutoRetryEnd,
+	decideAutoRetryStart,
+	decideCompactionStart,
+	decideFallbackWarning,
+	decideFusionMember,
+	decideFusionStage,
+	decidePendingCheck,
+	decideSubagentComplete,
+	decideSubagentProgress,
+	decideSubagentStart,
+	decideToolExecutionStart,
+	decideVerification,
+	retryLoaderMessage,
+	type StatusTone,
+	type TurnViewEffect,
+} from "./turn-view.ts";
 
 /**
  * A structural rule for the chat transcript (e.g. hotkeys framing).
@@ -416,6 +434,37 @@ export interface InteractiveModeOptions {
 	initialMessages?: string[];
 	/** Force verbose startup (overrides quietStartup setting) */
 	verbose?: boolean;
+	/**
+	 * Terminal backend for the TUI. Defaults to `new ProcessTerminal()` (the real
+	 * stdin/stdout pair). Tests inject `@pit/tui`'s `VirtualTerminal` so the whole
+	 * mode can be constructed and driven headless.
+	 */
+	terminal?: Terminal;
+	/**
+	 * Fully-built TUI. Wins over `terminal` when both are given. Only useful to a
+	 * host that already owns a TUI instance (tests, embedders); production leaves
+	 * it undefined.
+	 */
+	ui?: TUI;
+	/**
+	 * Install the constructed `KeybindingsManager` as the process-wide keybinding
+	 * source (`setKeybindings`). Defaults to true — production behaviour. Tests
+	 * that construct several modes (or that pre-installed their own bindings) pass
+	 * false so the last constructor doesn't silently win.
+	 */
+	installGlobalKeybindings?: boolean;
+	/**
+	 * Initialize the global theme from settings. Defaults to true. When false the
+	 * caller is responsible for having called `initTheme()` already — used by tests
+	 * to keep a deterministic palette and to avoid re-entering theme setup.
+	 */
+	initializeTheme?: boolean;
+	/**
+	 * Watch the active custom theme file for edits (hot reload). Defaults to true.
+	 * Only has an effect for custom (non built-in) themes, which are the only ones
+	 * that open an `fs.watch` handle. Tests pass false so no watcher can leak.
+	 */
+	themeWatcher?: boolean;
 }
 
 export class InteractiveMode {
@@ -770,7 +819,8 @@ export class InteractiveMode {
 			void this.handleFusionCommand();
 		});
 		this.version = VERSION;
-		this.ui = new TUI(new ProcessTerminal(), this.settingsManager.getShowHardwareCursor());
+		this.ui =
+			options.ui ?? new TUI(options.terminal ?? new ProcessTerminal(), this.settingsManager.getShowHardwareCursor());
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.headerContainer = new Container();
 		this.chatContainer = new VirtualizedContainer();
@@ -788,7 +838,11 @@ export class InteractiveMode {
 		this.widgetContainerBelow = new Container();
 		this.sendNowChooserContainer = new Container();
 		this.keybindings = KeybindingsManager.create();
-		setKeybindings(this.keybindings);
+		// Process-global side effect: opt-outable so a headless test can build the
+		// mode without clobbering the bindings another fixture installed.
+		if (options.installGlobalKeybindings !== false) {
+			setKeybindings(this.keybindings);
+		}
 		const editorPaddingX = this.settingsManager.getEditorPaddingX();
 		const autocompleteMaxVisible = this.settingsManager.getAutocompleteMaxVisible();
 		const promptGlyph = "❯ ";
@@ -832,7 +886,11 @@ export class InteractiveMode {
 
 		// Register themes from resource loader and initialize
 		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
-		initTheme(this.settingsManager.getTheme(), true);
+		// The watcher only opens an fs.watch handle for custom themes; both flags
+		// default to production behaviour and exist so a headless test leaks nothing.
+		if (options.initializeTheme !== false) {
+			initTheme(this.settingsManager.getTheme(), options.themeWatcher !== false);
+		}
 	}
 
 	private getBuiltInCommandConflictDiagnostics(extensionRunner: ExtensionRunner): ResourceDiagnostic[] {
@@ -3762,6 +3820,153 @@ export class InteractiveMode {
 		});
 	}
 
+	/** Theme painter for a `TurnViewEffect` status tone. */
+	private statusTonePainter(tone: StatusTone): (text: string) => string {
+		switch (tone) {
+			case "muted":
+				return (text) => theme.fg("muted", text);
+			case "success":
+				return (text) => theme.fg("success", text);
+			case "warning":
+				return (text) => theme.fg("warning", text);
+			case "dim":
+				return (text) => theme.fg("dim", text);
+		}
+	}
+
+	/** Rebuild the working loader in the status band (callers decide when). */
+	private rebuildWorkingLoader(): void {
+		this.clearStatusContainer();
+		this.loadingAnimation = this.createWorkingLoader();
+		this.statusContainer.addChild(this.loadingAnimation);
+		this.syncActivitySpinnersFrozen();
+	}
+
+	/**
+	 * Apply the descriptors produced by `./turn-view.ts`. This is the only place
+	 * that knows which widget/field each decision lands on; the decisions
+	 * themselves are pure and unit-tested without a terminal.
+	 */
+	private applyTurnViewEffects(effects: readonly TurnViewEffect[]): void {
+		for (const effect of effects) {
+			switch (effect.kind) {
+				case "terminal-progress":
+					this.setTerminalProgress(effect.active);
+					break;
+				case "ensure-working-loader":
+					this.rebuildWorkingLoader();
+					break;
+				case "stop-working-loader":
+					this.stopWorkingLoader();
+					break;
+				case "working-phase":
+					this.setWorkingPhase(effect.text);
+					break;
+				case "refresh-loader-suffix":
+					this.refreshLoaderTrailingSuffix();
+					break;
+				case "pet-mood":
+					this.petCompanion?.setMood(effect.mood);
+					break;
+				case "gearbox-upshift":
+					this.gearboxForceUpshift(effect.reason);
+					break;
+				case "status":
+					this.showStatus(effect.text, this.statusTonePainter(effect.tone));
+					break;
+				case "error":
+					this.showError(effect.text);
+					break;
+				case "chat-warning-line":
+					this.chatContainer.addChild(new Spacer(1));
+					this.chatContainer.addChild(new Text(theme.fg("warning", effect.text), 1, 0));
+					break;
+				case "tool-component-start": {
+					const component = this._ensureToolComponent(effect.toolName, effect.toolCallId, effect.args);
+					component.markExecutionStarted();
+					break;
+				}
+				case "bind-compaction-escape":
+					this.autoCompactionEscapeHandler = this.defaultEditor.onEscape;
+					this.defaultEditor.onEscape = () => {
+						this.session.abortCompaction();
+					};
+					break;
+				case "compaction-loader":
+					this.clearStatusContainer();
+					this.autoCompactionLoader = new Loader(
+						this.ui,
+						workingPulsePalette(),
+						(text) => theme.fg("muted", text),
+						effect.label,
+						reducedMotionLoaderIndicator(),
+					);
+					this.statusContainer.addChild(this.autoCompactionLoader);
+					break;
+				case "bind-retry-escape":
+					this.retryEscapeHandler = this.defaultEditor.onEscape;
+					this.defaultEditor.onEscape = () => {
+						this.session.abortRetry();
+					};
+					break;
+				case "retry-loader": {
+					this.clearStatusContainer();
+					this.retryCountdown?.dispose();
+					const descriptor = { attempt: effect.attempt, maxAttempts: effect.maxAttempts, reason: effect.reason };
+					const message = (seconds: number) => retryLoaderMessage(descriptor, seconds, keyText("app.interrupt"));
+					this.retryLoader = new Loader(
+						this.ui,
+						(spinner) => theme.fg("warning", spinner),
+						(text) => theme.fg("muted", text),
+						message(Math.ceil(effect.delayMs / 1000)),
+						reducedMotionLoaderIndicator(),
+					);
+					this.retryCountdown = new CountdownTimer(
+						effect.delayMs,
+						this.ui,
+						(seconds) => {
+							this.retryLoader?.setMessage(message(seconds));
+						},
+						() => {
+							this.retryCountdown = undefined;
+						},
+					);
+					this.statusContainer.addChild(this.retryLoader);
+					break;
+				}
+				case "cleanup-retry-ui":
+					this._cleanupRetryUI();
+					break;
+				case "fusion-ensure":
+					this.ensureFusionLive();
+					break;
+				case "fusion-member":
+					// upsertMember already calls ui.requestRender() internally.
+					this.fusionLive?.upsertMember(effect.member);
+					break;
+				case "fusion-synth":
+					this.fusionLive?.setSynth(effect.synthId);
+					break;
+				case "fusion-stage":
+					this.fusionLive?.setStage(effect.stage);
+					break;
+				case "fusion-writer-handoff":
+					// Keep the Fusion strip with a compact synthesizing header so the
+					// hand-off stays in-context (no swap to a generic loader).
+					this._fusionWriterLoaderActive = true;
+					break;
+				case "render":
+					this.ui.requestRender();
+					break;
+			}
+		}
+	}
+
+	/** State snapshot the working-loader decisions in `./turn-view.ts` read. */
+	private workingLoaderState(): { workingVisible: boolean; hasWorkingLoader: boolean } {
+		return { workingVisible: this.workingVisible, hasWorkingLoader: !!this.loadingAnimation };
+	}
+
 	private async handleEvent(event: AgentSessionEvent): Promise<void> {
 		if (!this.isInitialized) {
 			await this.init();
@@ -3787,21 +3992,11 @@ export class InteractiveMode {
 				this.turnAssistantComponents = [];
 				this.turnOutputTokens = 0;
 				this.streamingAttached = false;
-				this.setTerminalProgress(true);
-				this._cleanupRetryUI();
+				this.petTurnErrored = false;
 				// Reuse the loader created at submit (gap-morto) so the elapsed clock
 				// starts at Enter without a reset/flicker; build one only if missing
 				// (e.g. a continuation turn after a prior loader was cleared).
-				if (this.workingVisible && !this.loadingAnimation) {
-					this.clearStatusContainer();
-					this.loadingAnimation = this.createWorkingLoader();
-					this.statusContainer.addChild(this.loadingAnimation);
-					this.syncActivitySpinnersFrozen();
-				}
-				this.setWorkingPhase("Thinking…");
-				this.petTurnErrored = false;
-				this.petCompanion?.setMood("thinking");
-				this.ui.requestRender();
+				this.applyTurnViewEffects(decideAgentStart(this.workingLoaderState()));
 				break;
 
 			case "queue_update":
@@ -3820,22 +4015,9 @@ export class InteractiveMode {
 				this.refreshModelIndicators();
 				break;
 
-			case "fusion_member": {
-				this.ensureFusionLive();
-				const member: FusionLiveMember = {
-					index: event.index,
-					cli: event.cli,
-					model: event.model,
-					status: event.status,
-					elapsedMs: event.elapsedMs,
-					timeoutMs: event.timeoutMs,
-					chars: event.chars,
-					error: event.error,
-				};
-				// upsertMember already calls ui.requestRender() internally.
-				this.fusionLive?.upsertMember(member);
+			case "fusion_member":
+				this.applyTurnViewEffects(decideFusionMember(event));
 				break;
-			}
 
 			case "fusion_member_activity":
 				// recordActivity already calls ui.requestRender() internally.
@@ -3848,23 +4030,7 @@ export class InteractiveMode {
 				break;
 
 			case "fusion_stage":
-				if (event.stage === "writer") {
-					// Keep the Fusion strip with a compact synthesizing header so the
-					// hand-off stays in-context (no swap to a generic loader).
-					this.ensureFusionLive();
-					this.fusionLive?.setSynth(event.synthId);
-					this.fusionLive?.setStage("writer");
-					this._fusionWriterLoaderActive = true;
-					this.ui.requestRender();
-				} else {
-					this.ensureFusionLive();
-					// setSynth/setStage early-return when the value is unchanged, so on a
-					// freshly created strip (default stage "brief", synthId "") neither
-					// may render — keep an explicit render to guarantee the create-time paint.
-					this.fusionLive?.setSynth(event.synthId);
-					this.fusionLive?.setStage(event.stage);
-					this.ui.requestRender();
-				}
+				this.applyTurnViewEffects(decideFusionStage(event));
 				break;
 
 			case "message_start":
@@ -4049,26 +4215,11 @@ export class InteractiveMode {
 				this.ui.requestRender();
 				break;
 
-			case "tool_execution_start": {
-				// Gearbox anomaly: the model reached for `ask` — it needs judgement, so
-				// upshift for this step before the next turn runs.
-				if (event.toolName === "ask") this.gearboxForceUpshift("ask");
-				const component = this._ensureToolComponent(event.toolName, event.toolCallId, event.args);
-				component.markExecutionStarted();
-				// Grouped transcript already shows verb+target on activity lines —
-				// keep the loader neutral so the same action isn't mirrored twice.
-				if (this.settingsManager.getToolActivity() === "grouped") {
-					this.setWorkingPhase("Working…");
-				} else {
-					this.setWorkingPhase(workingPhaseLabel(event.toolName, event.args as Record<string, unknown>, true));
-				}
-				// Esc changes meaning while tools are cancellable — swap the loader
-				// hint at the boundary, not on the next stream tick.
-				this.refreshLoaderTrailingSuffix();
-				this.petCompanion?.setMood("working");
-				this.ui.requestRender();
+			case "tool_execution_start":
+				this.applyTurnViewEffects(
+					decideToolExecutionStart(event, { toolActivity: this.settingsManager.getToolActivity() }),
+				);
 				break;
-			}
 
 			case "tool_execution_update": {
 				const component = this.pendingTools.get(event.toolCallId);
@@ -4164,30 +4315,9 @@ export class InteractiveMode {
 				this.settleWorkingLoaderAfterPrompt();
 				break;
 
-			case "compaction_start": {
-				this.setTerminalProgress(true);
-				// Keep editor active; submissions are queued during compaction.
-				this.autoCompactionEscapeHandler = this.defaultEditor.onEscape;
-				this.defaultEditor.onEscape = () => {
-					this.session.abortCompaction();
-				};
-				this.clearStatusContainer();
-				const cancelHint = `(${keyText("app.interrupt")} to cancel)`;
-				const label =
-					event.reason === "manual"
-						? `Compacting context… ${cancelHint}`
-						: `${event.reason === "overflow" ? "Context overflow detected, " : ""}Auto-compacting… ${cancelHint}`;
-				this.autoCompactionLoader = new Loader(
-					this.ui,
-					workingPulsePalette(),
-					(text) => theme.fg("muted", text),
-					label,
-					reducedMotionLoaderIndicator(),
-				);
-				this.statusContainer.addChild(this.autoCompactionLoader);
-				this.ui.requestRender();
+			case "compaction_start":
+				this.applyTurnViewEffects(decideCompactionStart(event, { interruptKey: keyText("app.interrupt") }));
 				break;
-			}
 
 			case "compaction_end": {
 				this.setTerminalProgress(false);
@@ -4290,156 +4420,37 @@ export class InteractiveMode {
 				break;
 			}
 
-			case "verification": {
-				this.setTerminalProgress(event.phase === "running");
-				if (event.phase === "running") {
-					const label =
-						event.attempt > 1
-							? `Verifying (${event.command}) — attempt ${event.attempt}…`
-							: `Verifying (${event.command})…`;
-					// Bridge the post-turn gap like Fusion's "Synthesizing…" path: keep the
-					// working loader alive with an accurate phase so the UI doesn't look
-					// frozen on "Thinking…" while npm test / tsc runs.
-					if (this.workingVisible && !this.loadingAnimation) {
-						this.clearStatusContainer();
-						this.loadingAnimation = this.createWorkingLoader();
-						this.statusContainer.addChild(this.loadingAnimation);
-						this.syncActivitySpinnersFrozen();
-					}
-					this.setWorkingPhase(label);
-				} else if (event.phase === "passed") {
-					this.setWorkingPhase(`✓ Verified — ${event.command} passed`);
-				} else if (event.phase === "timeout") {
-					// Inconclusive, not red: don't show the scary "still failing" error.
-					this.stopWorkingLoader();
-					this.showStatus(
-						`⚠ ${event.command} timed out — result unknown (not treated as failure); auto-check off for this session`,
-						(text) => theme.fg("warning", text),
-					);
-				} else if (event.willRetry) {
-					this.setWorkingPhase(`✗ ${event.command} failed (exit ${event.exitCode ?? "?"}) — fixing…`);
-				} else {
-					this.stopWorkingLoader();
-					this.showError(
-						`✗ ${event.command} still failing after ${event.maxAttempts} fix attempt(s) — reported unverified.`,
-					);
-				}
-				this.ui.requestRender();
+			case "verification":
+				this.applyTurnViewEffects(decideVerification(event, this.workingLoaderState()));
 				break;
-			}
 
-			case "pending_check": {
-				this.setTerminalProgress(event.phase === "waiting");
-				if (event.phase === "waiting") {
-					const elapsed = event.elapsedMs !== undefined ? ` (${formatElapsed(event.elapsedMs)})` : "";
-					this.showStatus(`Waiting for ${event.command}…${elapsed}`);
-					if (this.workingVisible && !this.loadingAnimation) {
-						this.clearStatusContainer();
-						this.loadingAnimation = this.createWorkingLoader();
-						this.statusContainer.addChild(this.loadingAnimation);
-						this.syncActivitySpinnersFrozen();
-					}
-				} else if (event.phase === "passed") {
-					this.showStatus(`✓ ${event.command} passed`, (text) => theme.fg("success", text));
-				} else if (event.phase === "timeout") {
-					this.showStatus(`⚠ ${event.command} still running after wait`, (text) => theme.fg("warning", text));
-				} else {
-					this.showStatus(`✗ ${event.command} failed (exit ${event.exitCode ?? "?"})`, (text) =>
-						theme.fg("warning", text),
-					);
-				}
-				this.ui.requestRender();
+			case "pending_check":
+				this.applyTurnViewEffects(decidePendingCheck(event, this.workingLoaderState()));
 				break;
-			}
 
 			case "subagent_start":
-				this.showStatus(`◐ subagent '${event.handle}' started`, (text) => theme.fg("muted", text));
+				this.applyTurnViewEffects(decideSubagentStart(event));
 				break;
 
-			case "subagent_progress": {
-				const tool = event.lastTool ? ` · ${event.lastTool}` : "";
-				this.showStatus(`◐ subagent '${event.handle}' · turn ${event.turn}${tool}`, (text) =>
-					theme.fg("muted", text),
-				);
+			case "subagent_progress":
+				this.applyTurnViewEffects(decideSubagentProgress(event));
 				break;
-			}
 
-			case "subagent_complete": {
-				const meta: string[] = [];
-				if (event.turns !== undefined) meta.push(`${event.turns} turns`);
-				if (event.totalTokens !== undefined) meta.push(`${event.totalTokens.toLocaleString()} tok`);
-				const suffix = meta.length > 0 ? ` · ${meta.join(" · ")}` : "";
-				this.showStatus(
-					event.status === "done"
-						? `✓ subagent '${event.handle}' finished${suffix}`
-						: `✗ subagent '${event.handle}' failed${suffix}`,
-					event.status === "done" ? (text) => theme.fg("success", text) : (text) => theme.fg("warning", text),
-				);
+			case "subagent_complete":
+				this.applyTurnViewEffects(decideSubagentComplete(event));
 				break;
-			}
 
-			case "auto_retry_start": {
-				// Set up escape to abort retry
-				this.retryEscapeHandler = this.defaultEditor.onEscape;
-				this.defaultEditor.onEscape = () => {
-					this.session.abortRetry();
-				};
-				// Show retry indicator
-				this.clearStatusContainer();
-				this.retryCountdown?.dispose();
-				// Surface WHY we're retrying (rate-limit / overload / network / …) so the
-				// paused countdown isn't an opaque "is it stuck or just busy?". The reason
-				// rides on the event; an unclassifiable error keeps the wording unchanged.
-				const retryReason = classifyRetryReason(event.errorMessage);
-				const retryPrefix = retryReason ? `${retryReason} — ` : "";
-				const retryMessage = (seconds: number) =>
-					`${retryPrefix}Retrying (${event.attempt}/${event.maxAttempts}) in ${seconds}s… (${keyText("app.interrupt")} to cancel)`;
-				this.retryLoader = new Loader(
-					this.ui,
-					(spinner) => theme.fg("warning", spinner),
-					(text) => theme.fg("muted", text),
-					retryMessage(Math.ceil(event.delayMs / 1000)),
-					reducedMotionLoaderIndicator(),
-				);
-				this.retryCountdown = new CountdownTimer(
-					event.delayMs,
-					this.ui,
-					(seconds) => {
-						this.retryLoader?.setMessage(retryMessage(seconds));
-					},
-					() => {
-						this.retryCountdown = undefined;
-					},
-				);
-				this.statusContainer.addChild(this.retryLoader);
-				this.ui.requestRender();
+			case "auto_retry_start":
+				this.applyTurnViewEffects(decideAutoRetryStart(event));
 				break;
-			}
 
-			case "auto_retry_end": {
-				this._cleanupRetryUI();
-				if (!event.success) {
-					if (event.cancelled) {
-						// The user asked for this — muted status with normal TTL, not
-						// sticky error red (mirrors "Compaction cancelled").
-						this.showStatus("Retry cancelled");
-					} else {
-						const noun = event.attempt === 1 ? "attempt" : "attempts";
-						this.showError(`Retry failed after ${event.attempt} ${noun}: ${event.finalError || "Unknown error"}`);
-					}
-				}
-				this.ui.requestRender();
+			case "auto_retry_end":
+				this.applyTurnViewEffects(decideAutoRetryEnd(event));
 				break;
-			}
 
-			case "fallback_warning": {
-				this.chatContainer.addChild(new Spacer(1));
-				this.chatContainer.addChild(
-					new Text(theme.fg("warning", `[fallback] ${event.from} -> ${event.to}: ${event.reason}`), 1, 0),
-				);
-				this.ui.requestRender();
+			case "fallback_warning":
+				this.applyTurnViewEffects(decideFallbackWarning(event));
 				break;
-			}
 		}
 	}
 
@@ -6677,29 +6688,27 @@ export class InteractiveMode {
 	 * doom-loop recovery escalation. Called from `tool_execution_end`.
 	 */
 	private gearboxObserveToolEnd(toolName: string, result: unknown, isError: boolean): void {
-		// Doom-loop recovery: `_noteRecoverySignal` raises the session recovery level
-		// off "lean" — the one public surface for those tiers (the footer reads it too).
-		if (this.gearboxActive && this.getSessionRecoveryLevel() !== "lean") {
-			this.gearboxForceUpshift("recovery");
-			return;
+		const decision = decideGearboxToolEnd({
+			gearboxActive: this.gearboxActive,
+			recoveryLevel: this.getSessionRecoveryLevel(),
+			toolName,
+			result,
+			isError,
+		});
+		switch (decision.action) {
+			case "upshift":
+				this.gearboxForceUpshift(decision.reason);
+				return;
+			case "clear-poison":
+				this.gearboxPoisonedSteps.clear();
+				this.gearboxReevaluate();
+				return;
+			case "reevaluate":
+				this.gearboxReevaluate();
+				return;
+			case "none":
+				return;
 		}
-		// Retry budget exhausted: surfaced only as the Tier-4 hint line appended to
-		// the failing result (tool-retry-budget.ts). Match its stable exhaustion phrase.
-		if (this.gearboxActive && isError && gearboxResultText(result).includes("retry budget exhausted")) {
-			this.gearboxForceUpshift("retry-exhausted");
-			return;
-		}
-		if (toolName !== "plan") return;
-		const op = gearboxPlanOp(result);
-		if (isError) {
-			// A failed `step_done` is a verify failure (or a rejected completion): the
-			// step is not done — upshift for it immediately.
-			if (op === "step_done") this.gearboxForceUpshift("verify-failed");
-			return;
-		}
-		// A brand-new plan clears prior poison (ids may be reused for fresh intents).
-		if (op === "propose") this.gearboxPoisonedSteps.clear();
-		this.gearboxReevaluate();
 	}
 
 	/** Recovery level via the public getter, defensively (older/mock sessions in tests). */
@@ -8572,49 +8581,6 @@ Customize: \`${keybindingsPath}\` — \`/reload\` to apply.
 	}
 }
 
-/**
- * True when any assistant message has thinking content but no text — toggling
- * hide-thinking in grouped mode changes whether that message gets a bubble.
- */
-export function sessionHasThinkingOnlyAssistant(messages: ReadonlyArray<unknown>): boolean {
-	for (const raw of messages) {
-		if (!raw || typeof raw !== "object") continue;
-		const message = raw as { role?: string; content?: unknown };
-		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
-		let hasText = false;
-		let hasThinking = false;
-		for (const block of message.content) {
-			if (!block || typeof block !== "object") continue;
-			const c = block as { type?: string; text?: string; thinking?: string };
-			if (c.type === "text" && typeof c.text === "string" && c.text.trim().length > 0) {
-				hasText = true;
-			}
-			if (c.type === "thinking" && typeof c.thinking === "string" && c.thinking.trim().length > 0) {
-				hasThinking = true;
-			}
-		}
-		if (hasThinking && !hasText) return true;
-	}
-	return false;
-}
-
-/** The `plan` tool stamps `details.op` on every result; read it defensively for the gearbox. */
-function gearboxPlanOp(result: unknown): string | undefined {
-	if (!result || typeof result !== "object") return undefined;
-	const details = (result as { details?: { op?: unknown } }).details;
-	return typeof details?.op === "string" ? details.op : undefined;
-}
-
-/** Flatten a tool result's text content so the gearbox can scan it for the retry-budget marker. */
-function gearboxResultText(result: unknown): string {
-	if (!result || typeof result !== "object") return "";
-	const content = (result as { content?: unknown }).content;
-	if (!Array.isArray(content)) return "";
-	let text = "";
-	for (const block of content) {
-		if (block && typeof block === "object" && typeof (block as { text?: unknown }).text === "string") {
-			text += (block as { text: string }).text;
-		}
-	}
-	return text;
-}
+// Moved to ./turn-policy.ts (pure, unit-tested there). Re-exported so existing
+// importers of this module keep resolving.
+export { sessionHasThinkingOnlyAssistant } from "./turn-policy.ts";

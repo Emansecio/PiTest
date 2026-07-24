@@ -11,7 +11,6 @@ import {
 	type CacheKeepaliveTimer,
 	createGatesForHost,
 	effectiveKeepaliveRetention,
-	modelHasShortCacheRetention,
 } from "../src/core/cache-keepalive.js";
 
 /** Yields to the real macrotask queue so any pending microtasks (the class's internal `await`s) settle before assertions. */
@@ -245,23 +244,8 @@ describe("CacheKeepalive", () => {
 	});
 });
 
-describe("modelHasShortCacheRetention", () => {
-	const baseModel = { id: "claude-test", provider: "anthropic" } as unknown as Model<any>;
-
-	it("is false (long retention, the default) when compat is unset", () => {
-		expect(modelHasShortCacheRetention(baseModel)).toBe(false);
-	});
-
-	it("is false when compat explicitly enables long retention", () => {
-		const model = { ...baseModel, compat: { supportsLongCacheRetention: true } } as unknown as Model<any>;
-		expect(modelHasShortCacheRetention(model)).toBe(false);
-	});
-
-	it("is true only when compat explicitly disables long retention", () => {
-		const model = { ...baseModel, compat: { supportsLongCacheRetention: false } } as unknown as Model<any>;
-		expect(modelHasShortCacheRetention(model)).toBe(true);
-	});
-});
+// modelHasShortCacheRetention now lives in core/wire-context.ts (shared with
+// cache-aware compaction); its unit tests moved to test/wire-context.test.ts.
 
 describe("CacheKeepalive — long-retention cadence", () => {
 	it("arms the long interval and pings through the long-retention cap", async () => {
@@ -326,7 +310,7 @@ function fakeHost(opts: {
 		compaction: { backgroundCompactionPromise: undefined } as never,
 		model: opts.model,
 		isStreaming: false,
-		isFusing: opts.isFusing,
+		isFusing: opts.isFusing ?? false,
 		getContextUsage: () => ({ wireTokens: 999_999 }) as never,
 		getCompactionRequestAuth: async () => ({}),
 		getSessionCacheRetention: () => opts.sessionRetention,
@@ -417,7 +401,7 @@ describe("createGatesForHost cadence mapping", () => {
 	it("treats an in-flight Fusion turn as busy — isIdle() false while isFusing", () => {
 		const busy = createGatesForHost(fakeHost({ model: fakeModel("anthropic"), isFusing: true }));
 		expect(busy.isIdle()).toBe(false);
-		// Hosts that don't expose isFusing (narrow mocks) stay idle-eligible as before.
+		// Not fusing (and not streaming) → idle-eligible.
 		const idle = createGatesForHost(fakeHost({ model: fakeModel("anthropic") }));
 		expect(idle.isIdle()).toBe(true);
 	});

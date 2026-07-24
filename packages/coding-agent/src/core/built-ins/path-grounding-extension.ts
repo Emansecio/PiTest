@@ -22,7 +22,7 @@ import type { ExtensionAPI } from "../extensions/index.js";
 import { groundPath, isPathGroundingDisabled, PATH_GROUNDING_DEFAULTS } from "../path-grounding.ts";
 import { extractPathArg } from "../tools/argument-prep.ts";
 import { expandPath, resolveReadPath, sameCanonicalName, URL_SCHEME_RE } from "../tools/path-utils.ts";
-import { createFireOnceBlockGuard } from "./grounding-fire-once.ts";
+import { createGuard } from "./grounding-fire-once.ts";
 
 /** Default TTL for sync path/dir existence caches (ms). */
 export const PATH_GROUNDING_FS_CACHE_TTL_MS = 2000;
@@ -76,14 +76,13 @@ export function createPathGroundingFsCache(
 
 export function createPathGroundingExtension(options: { cwd: string }): (pi: ExtensionAPI) => void {
 	const fsCache = createPathGroundingFsCache();
-	return createFireOnceBlockGuard({
+	return createGuard({
 		category: "guard.path-grounding",
 		source: "path-grounding-extension",
 		ruleId: "path-enoent",
+		disabled: isPathGroundingDisabled,
+		appliesTo: (toolName) => toolName === "read" || toolName === "edit",
 		decide(event) {
-			if (isPathGroundingDisabled()) return undefined;
-			if (event.toolName !== "read" && event.toolName !== "edit") return undefined;
-
 			const input = event.input as Record<string, unknown>;
 			const path = extractPathArg(input);
 			if (path === undefined) return undefined;
@@ -107,7 +106,7 @@ export function createPathGroundingExtension(options: { cwd: string }): (pi: Ext
 			);
 
 			if (decision.action === "block") {
-				return { block: true, reason: decision.message };
+				return { action: "block", reason: decision.message };
 			}
 			return undefined;
 		},

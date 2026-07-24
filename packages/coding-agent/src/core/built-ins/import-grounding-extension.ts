@@ -23,23 +23,22 @@
  * will REJECT, so the guard skips it (fail-open) rather than validate the wrong
  * region; a replaceAll edit reconstructs EVERY occurrence.
  *
- * Session state: a fire-once set so an insistent model re-issuing the identical
- * blocked call runs it (the guard advises, never wedges). The whole handler is
- * wrapped in try/catch as defense-in-depth (emitToolCall already isolates
- * per-handler throws) so a guard bug never hard-blocks — fail-open is
- * load-bearing. Opt out with PIT_NO_IMPORT_GROUNDING.
+ * Session state: a lazily-built set of the project's known package names. The
+ * fire-once escape, the blocked/overridden diagnostics and the fail-open
+ * try/catch all come from the shared `createGuard` seam. Opt out with
+ * PIT_NO_IMPORT_GROUNDING.
  */
 
 import { existsSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { recordDiagnostic, suggestClosest, suggestClosestN } from "@pit/ai";
+import { suggestClosest, suggestClosestN } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { groundImports, IMPORT_GROUNDING_DEFAULTS, isImportGroundingDisabled } from "../import-grounding.ts";
 import { createMtimeParseCache } from "../mtime-cache.ts";
 import { findTsconfigPathsForFile } from "../project-config-context.ts";
 import { coerceJsonArrayField, extractEdits, extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
 import { countSubstring } from "../tools/edit-diff.ts";
-import { stableToolCallKey } from "./grounding-fire-once.ts";
+import { createGuard, type GuardDecision } from "./grounding-fire-once.ts";
 
 /** Aliases the write tool accepts for the content body (WRITE_KEY_ALIASES in write.ts). */
 const CONTENT_KEYS = ["content", "text", "body", "data"] as const;
@@ -245,105 +244,78 @@ function extractContent(toolName: string, input: Record<string, unknown>, target
 	);
 }
 
-export function createImportGroundingExtension(options: { cwd: string }) {
-	return (pi: ExtensionAPI) => {
-		const fired = new Set<string>();
-		// Lazily computed once per session (first write/edit), then cached. Reading the
-		// monorepo's manifests is best-effort; any failure yields an empty set, which
-		// only makes the bare pass block LESS (fail-open).
-		let knownPackagesCache: Set<string> | undefined;
-		const knownPackages = (): Set<string> => {
-			if (knownPackagesCache === undefined) {
-				try {
-					knownPackagesCache = collectKnownPackages(options.cwd);
-				} catch {
-					knownPackagesCache = new Set();
-				}
-			}
-			return knownPackagesCache;
-		};
-
-		pi.on("tool_call", async (event) => {
+export function createImportGroundingExtension(options: { cwd: string }): (pi: ExtensionAPI) => void {
+	// Lazily computed once per session (first write/edit), then cached. Reading the
+	// monorepo's manifests is best-effort; any failure yields an empty set, which
+	// only makes the bare pass block LESS (fail-open).
+	let knownPackagesCache: Set<string> | undefined;
+	const knownPackages = (): Set<string> => {
+		if (knownPackagesCache === undefined) {
 			try {
-				if (isImportGroundingDisabled()) return undefined;
-				if (event.toolName !== "write" && event.toolName !== "edit") return undefined;
-
-				const input = event.input as Record<string, unknown>;
-				const path = extractPathArg(input);
-				if (path === undefined) return undefined;
-
-				// Only TS/JS targets carry the import forms we resolve.
-				if (!/\.(?:[cm]?[jt]sx?)$/i.test(path)) return undefined;
-
-				const targetFile = resolveToolPath(path, options.cwd);
-				const content = extractContent(event.toolName, input, targetFile);
-				if (content === undefined || content.length === 0) return undefined;
-				const decision = groundImports(
-					{ targetFile, content },
-					{
-						fileExists: (absPath) => existsSync(absPath),
-						listDir: (absDir) => readdirSync(absDir),
-						fuzzy: suggestClosest,
-						fuzzyN: suggestClosestN,
-						maxDistance: IMPORT_GROUNDING_DEFAULTS.maxDistance,
-						prefixMinOverlap: IMPORT_GROUNDING_DEFAULTS.prefixMinOverlap,
-						// Wires the named-export validation pass: read a resolved module's
-						// source so a `import { nope } from "./mod"` of a non-existent member
-						// is caught one round-trip before type-check.
-						readFile: readFileSafe,
-						// Wires the BARE-package pass: an import of a package not in the
-						// project's deps (nor a Node builtin) that typos a known one is
-						// blocked. Workspace package names are included so internal imports
-						// (@pit/*) are never false-blocked.
-						knownPackages,
-						// Wires the ALIAS pass: an `@/x` / `~/x` import that the project's
-						// tsconfig `paths` map but that doesn't resolve on disk (and typos a
-						// real sibling) is blocked. Walk-up + extends + JSONC live in
-						// project-config-context; undefined (no governing paths) -> ALLOW.
-						readTsconfigPaths: findTsconfigPathsForFile,
-					},
-				);
-
-				if (decision.action === "block") {
-					const key = stableToolCallKey(event.toolName, input);
-					// `note` carries the block KIND (path vs export) + the tool so the
-					// acceptance rate can be read per-kind from the diagnostics buffer.
-					const note = `${decision.kind}:${event.toolName}`;
-					// Stable per-kind rule id (path/export/bare/alias) so per-check efficacy
-					// is measurable downstream, not just the guard as a whole.
-					const ruleId = `import-${decision.kind}`;
-					if (fired.has(key)) {
-						// The model is OVERRIDING the fire-once advisory by re-issuing the
-						// identical call — record the acceptance so override-rate is
-						// measurable against the blocks below.
-						recordDiagnostic({
-							category: "guard.import-grounding",
-							level: "info",
-							source: "import-grounding-extension",
-							context: {
-								note,
-								outcome: "overridden",
-								ruleId,
-								toolName: event.toolName,
-								toolCallId: event.toolCallId,
-							},
-						});
-						return undefined; // already advised once -> let it run
-					}
-					fired.add(key);
-					recordDiagnostic({
-						category: "guard.import-grounding",
-						level: "info",
-						source: "import-grounding-extension",
-						context: { note, outcome: "blocked", ruleId, toolName: event.toolName, toolCallId: event.toolCallId },
-					});
-					return { block: true, reason: decision.message };
-				}
-				return undefined;
+				knownPackagesCache = collectKnownPackages(options.cwd);
 			} catch {
-				// Defense-in-depth: emitToolCall already isolates per-handler throws.
-				return undefined;
+				knownPackagesCache = new Set();
 			}
-		});
+		}
+		return knownPackagesCache;
 	};
+
+	return createGuard({
+		category: "guard.import-grounding",
+		source: "import-grounding-extension",
+		// Never used: every block below carries its own per-kind id. Kept as the
+		// spec-level fallback the seam requires.
+		ruleId: "import-path",
+		disabled: isImportGroundingDisabled,
+		appliesTo: (toolName) => toolName === "write" || toolName === "edit",
+		async decide(event): Promise<GuardDecision | undefined> {
+			const input = event.input as Record<string, unknown>;
+			const path = extractPathArg(input);
+			if (path === undefined) return undefined;
+
+			// Only TS/JS targets carry the import forms we resolve.
+			if (!/\.(?:[cm]?[jt]sx?)$/i.test(path)) return undefined;
+
+			const targetFile = resolveToolPath(path, options.cwd);
+			const content = extractContent(event.toolName, input, targetFile);
+			if (content === undefined || content.length === 0) return undefined;
+			const decision = groundImports(
+				{ targetFile, content },
+				{
+					fileExists: (absPath) => existsSync(absPath),
+					listDir: (absDir) => readdirSync(absDir),
+					fuzzy: suggestClosest,
+					fuzzyN: suggestClosestN,
+					maxDistance: IMPORT_GROUNDING_DEFAULTS.maxDistance,
+					prefixMinOverlap: IMPORT_GROUNDING_DEFAULTS.prefixMinOverlap,
+					// Wires the named-export validation pass: read a resolved module's
+					// source so a `import { nope } from "./mod"` of a non-existent member
+					// is caught one round-trip before type-check.
+					readFile: readFileSafe,
+					// Wires the BARE-package pass: an import of a package not in the
+					// project's deps (nor a Node builtin) that typos a known one is
+					// blocked. Workspace package names are included so internal imports
+					// (@pit/*) are never false-blocked.
+					knownPackages,
+					// Wires the ALIAS pass: an `@/x` / `~/x` import that the project's
+					// tsconfig `paths` map but that doesn't resolve on disk (and typos a
+					// real sibling) is blocked. Walk-up + extends + JSONC live in
+					// project-config-context; undefined (no governing paths) -> ALLOW.
+					readTsconfigPaths: findTsconfigPathsForFile,
+				},
+			);
+
+			if (decision.action !== "block") return undefined;
+			return {
+				action: "block",
+				reason: decision.message,
+				// `note` carries the block KIND (path vs export) + the tool so the
+				// acceptance rate can be read per-kind from the diagnostics buffer.
+				note: `${decision.kind}:${event.toolName}`,
+				// Stable per-kind rule id (path/export/bare/alias) so per-check efficacy
+				// is measurable downstream, not just the guard as a whole.
+				ruleId: `import-${decision.kind}`,
+			};
+		},
+	});
 }

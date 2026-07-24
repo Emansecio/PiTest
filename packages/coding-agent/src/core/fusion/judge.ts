@@ -104,8 +104,8 @@ const WRITER_INLINE_INSTRUCTION =
  * (host.agent.convertToLlm(state.messages)); it ALREADY ends with the current turn's
  * user request, so the trailing message references it ("the user's request above")
  * instead of restating the task. Prefix assembly (system + convertToLlm(messages) +
- * compacted tools) mirrors cache-keepalive.ts's buildPingContext; the tool-compaction
- * step lives at the call site. Panel-material formatting is duplicated from
+ * compacted tools) is owned by core/wire-context.ts's buildWireContext; this function
+ * runs as its shaper, so the tool-compaction step happens after it returns. Panel-material formatting is duplicated from
  * buildWriterContext on purpose — that function must stay byte-identical for the
  * legacy fallback.
  */

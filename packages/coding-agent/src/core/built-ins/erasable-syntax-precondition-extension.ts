@@ -17,13 +17,12 @@
  * PIT_NO_ERASABLE_PREFLIGHT.
  */
 
-import { recordDiagnostic } from "@pit/ai";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { detectNestedTernary, detectNonErasableSyntax, type NonErasableFinding } from "../erasable-syntax-grounding.ts";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { projectEnforcesErasableSyntax, projectEnforcesNoNestedTernary } from "../project-config-context.ts";
 import { extractEdits, extractPathArg } from "../tools/argument-prep.ts";
-import { stableToolCallKey } from "./grounding-fire-once.ts";
+import { createGuard, type GuardDecision } from "./grounding-fire-once.ts";
 
 /** Aliases the write tool accepts for the content body (WRITE_KEY_ALIASES in write.ts). */
 const CONTENT_KEYS = ["content", "text", "body", "data"] as const;
@@ -45,89 +44,62 @@ function extractNewContent(toolName: string, input: Record<string, unknown>): st
 	return edits.map((e) => e.newText).join("\n");
 }
 
-export function createErasableSyntaxPreconditionExtension(options: { cwd: string }) {
-	return (pi: ExtensionAPI) => {
-		const fired = new Set<string>();
-		// Resolve each gate once per session (reading the configs is best-effort).
-		let erasableGate: boolean | undefined;
-		let ternaryGate: boolean | undefined;
-		const erasableEnforced = (): boolean => {
-			if (erasableGate === undefined) {
-				try {
-					erasableGate = projectEnforcesErasableSyntax(options.cwd);
-				} catch {
-					erasableGate = false;
-				}
-			}
-			return erasableGate;
-		};
-		const ternaryEnforced = (): boolean => {
-			if (ternaryGate === undefined) {
-				try {
-					ternaryGate = projectEnforcesNoNestedTernary(options.cwd);
-				} catch {
-					ternaryGate = false;
-				}
-			}
-			return ternaryGate;
-		};
-
-		pi.on("tool_call", async (event) => {
+export function createErasableSyntaxPreconditionExtension(options: { cwd: string }): (pi: ExtensionAPI) => void {
+	// Resolve each gate once per session (reading the configs is best-effort).
+	let erasableGate: boolean | undefined;
+	let ternaryGate: boolean | undefined;
+	const erasableEnforced = (): boolean => {
+		if (erasableGate === undefined) {
 			try {
-				if (isTruthyEnvFlag(process.env.PIT_NO_ERASABLE_PREFLIGHT)) return undefined;
-				if (event.toolName !== "write" && event.toolName !== "edit") return undefined;
+				erasableGate = projectEnforcesErasableSyntax(options.cwd);
+			} catch {
+				erasableGate = false;
+			}
+		}
+		return erasableGate;
+	};
+	const ternaryEnforced = (): boolean => {
+		if (ternaryGate === undefined) {
+			try {
+				ternaryGate = projectEnforcesNoNestedTernary(options.cwd);
+			} catch {
+				ternaryGate = false;
+			}
+		}
+		return ternaryGate;
+	};
 
-				const input = event.input as Record<string, unknown>;
-				const path = extractPathArg(input);
-				if (path === undefined || !TS_PATH_RE.test(path)) return undefined;
-				const wantErasable = erasableEnforced();
-				const wantTernary = ternaryEnforced();
-				if (!wantErasable && !wantTernary) return undefined;
+	return createGuard({
+		category: "guard.erasable-syntax",
+		source: "erasable-syntax-precondition-extension",
+		// Never used: every block below carries the construct it found as its id.
+		// Kept as the spec-level fallback the seam requires.
+		ruleId: "non-erasable-syntax",
+		disabled: () => isTruthyEnvFlag(process.env.PIT_NO_ERASABLE_PREFLIGHT),
+		appliesTo: (toolName) => toolName === "write" || toolName === "edit",
+		async decide(event): Promise<GuardDecision | undefined> {
+			const input = event.input as Record<string, unknown>;
+			const path = extractPathArg(input);
+			if (path === undefined || !TS_PATH_RE.test(path)) return undefined;
+			const wantErasable = erasableEnforced();
+			const wantTernary = ternaryEnforced();
+			if (!wantErasable && !wantTernary) return undefined;
 
-				const content = extractNewContent(event.toolName, input);
-				if (content === undefined || content.length === 0) return undefined;
+			const content = extractNewContent(event.toolName, input);
+			if (content === undefined || content.length === 0) return undefined;
 
-				let finding: NonErasableFinding | undefined = wantErasable ? detectNonErasableSyntax(content) : undefined;
-				if (!finding && wantTernary) finding = detectNestedTernary(content);
-				if (!finding) return undefined;
+			let finding: NonErasableFinding | undefined = wantErasable ? detectNonErasableSyntax(content) : undefined;
+			if (!finding && wantTernary) finding = detectNestedTernary(content);
+			if (!finding) return undefined;
 
-				const key = stableToolCallKey(event.toolName, input);
-				const note = `${finding.construct}:${event.toolName}`;
+			return {
+				action: "block",
+				reason: `TS preflight (no write attempted): ${finding.hint}`,
+				note: `${finding.construct}:${event.toolName}`,
 				// The specific construct (enum/namespace/parameter-property/nested-ternary)
 				// is a stable, lowercase-kebab check id — key per-construct efficacy on it.
-				const ruleId = finding.construct;
-				if (fired.has(key)) {
-					// Model is OVERRIDING the fire-once advisory by re-issuing the identical
-					// call — record acceptance so override-rate is measurable, then let it run.
-					recordDiagnostic({
-						category: "guard.erasable-syntax",
-						level: "info",
-						source: "erasable-syntax-precondition-extension",
-						context: {
-							note,
-							outcome: "overridden",
-							ruleId,
-							toolName: event.toolName,
-							toolCallId: event.toolCallId,
-						},
-					});
-					return undefined;
-				}
-				fired.add(key);
-				recordDiagnostic({
-					category: "guard.erasable-syntax",
-					level: "info",
-					source: "erasable-syntax-precondition-extension",
-					context: { note, outcome: "blocked", ruleId, toolName: event.toolName, toolCallId: event.toolCallId },
-				});
-				return {
-					block: true,
-					reason: `TS preflight (no write attempted): ${finding.hint}`,
-				};
-			} catch {
-				// Defense-in-depth: emitToolCall already isolates per-handler throws.
-				return undefined;
-			}
-		});
-	};
+				ruleId: finding.construct,
+			};
+		},
+	});
 }

@@ -21,7 +21,7 @@ import { groundBashScript, isBashGroundingDisabled } from "../bash-grounding.ts"
 import type { ExtensionAPI } from "../extensions/index.js";
 import { MUTATING_TOOL_NAMES } from "../stagnation.ts";
 import { extractPathArg } from "../tools/argument-prep.ts";
-import { createFireOnceBlockGuard } from "./grounding-fire-once.ts";
+import { createGuard } from "./grounding-fire-once.ts";
 
 /** Read the `scripts` keys from the cwd's package.json. Any error -> [] (fail-open). */
 function readScriptsOf(cwd: string): string[] {
@@ -43,21 +43,20 @@ export function createBashGroundingExtension(options: { cwd: string }): (pi: Ext
 		return scriptsCache;
 	};
 
-	const guard = createFireOnceBlockGuard({
+	const guard = createGuard({
 		category: "guard.bash-grounding",
 		source: "bash-grounding-extension",
 		ruleId: "script-not-found",
+		disabled: isBashGroundingDisabled,
+		appliesTo: (toolName) => toolName === "bash",
 		decide(event) {
-			if (isBashGroundingDisabled()) return undefined;
-			if (event.toolName !== "bash") return undefined;
-
 			const input = event.input as Record<string, unknown>;
 			const command = input.command;
 			if (typeof command !== "string") return undefined;
 
 			const decision = groundBashScript({ command }, { readScripts, fuzzy: suggestClosest });
 			if (decision.action === "block") {
-				return { block: true, reason: decision.message };
+				return { action: "block", reason: decision.message };
 			}
 			return undefined;
 		},

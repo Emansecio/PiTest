@@ -58,6 +58,7 @@ import type {
 	UserBashEvent,
 	UserBashEventResult,
 } from "./types.ts";
+import { HANDLER_SIDE_EFFECT_TAG } from "./types.ts";
 
 // Extension shortcuts compete with canonical keybinding ids from keybindings.json.
 // Only editor-global shortcuts are reserved here. Picker-specific bindings are not.
@@ -84,10 +85,14 @@ const RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS = [
 /**
  * Property key marking a handler as side-effect-only (return value ignored,
  * payload never mutated). Read by emitBeforeProviderRequest to dispatch
- * matching handlers in parallel; written by `pi.markSideEffect()` and by
- * loader's PIT_SIDE_EFFECT_EXTENSIONS env-driven tagger.
+ * matching handlers in parallel and by {@link ExtensionRunner.hasMutatingHandlers};
+ * written by `pi.markSideEffect()`, `markHandlerSideEffect()` and by loader's
+ * PIT_SIDE_EFFECT_EXTENSIONS env-driven tagger.
+ *
+ * Defined in ./types.ts (so built-ins can tag without importing the runner) and
+ * re-exported here for the existing import sites.
  */
-export const HANDLER_SIDE_EFFECT_TAG = "__piSideEffect" as const;
+export { HANDLER_SIDE_EFFECT_TAG };
 /** Tag for before_agent_start handlers that only inject messages (parallel-safe). */
 export const HANDLER_MESSAGE_INJECTOR_TAG = "__piMessageInjector" as const;
 
@@ -510,8 +515,12 @@ export class ExtensionRunner {
 		this._cachedContextPartition = undefined;
 		// Hot cache of "does any extension handle event X". Omitting it here let a
 		// handler registered via a late api.on() stay invisible after an earlier
-		// emit cached `false` for that event.
+		// emit cached `false` for that event. Its mutating-only sibling must be
+		// cleared at exactly the same points, or a late-registered mutator would
+		// stay invisible to hasMutatingHandlers() (→ a precomputed result applied
+		// without ever consulting it).
 		this._handlerExistsCache.clear();
+		this._mutatingHandlerExistsCache.clear();
 	}
 
 	/** Get a tool definition by name. Returns undefined if not found. */
@@ -636,6 +645,7 @@ export class ExtensionRunner {
 	}
 
 	private _handlerExistsCache = new Map<string, boolean>();
+	private _mutatingHandlerExistsCache = new Map<string, boolean>();
 
 	hasHandlers(eventType: string): boolean {
 		const cached = this._handlerExistsCache.get(eventType);
@@ -649,6 +659,42 @@ export class ExtensionRunner {
 			}
 		}
 		this._handlerExistsCache.set(eventType, found);
+		return found;
+	}
+
+	/**
+	 * Like {@link hasHandlers}, but counts only handlers that can CHANGE the
+	 * outcome of the event — i.e. those NOT tagged side-effect-only via
+	 * `pi.markSideEffect()` / `markHandlerSideEffect()`.
+	 *
+	 * The distinction matters wherever the host wants to precompute the result of
+	 * an event-gated operation: a tagged (observer) handler only does its own
+	 * bookkeeping when the event is emitted, so it cannot invalidate a precomputed
+	 * result — it just has to be emitted at apply time. An untagged (mutating)
+	 * handler can return `{cancel}` / a replacement payload, so precomputing
+	 * WITHOUT emitting the event would produce the wrong answer. First consumer:
+	 * `session_before_compact` and the speculative compaction precompute.
+	 *
+	 * Memoized on the same lifecycle as `_handlerExistsCache` (both cleared in
+	 * {@link invalidateCaches}).
+	 */
+	hasMutatingHandlers(eventType: string): boolean {
+		const cached = this._mutatingHandlerExistsCache.get(eventType);
+		if (cached !== undefined) return cached;
+		let found = false;
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get(eventType);
+			if (!handlers || handlers.length === 0) continue;
+			if (
+				handlers.some(
+					(handler) => (handler as unknown as Record<string, unknown>)[HANDLER_SIDE_EFFECT_TAG] !== true,
+				)
+			) {
+				found = true;
+				break;
+			}
+		}
+		this._mutatingHandlerExistsCache.set(eventType, found);
 		return found;
 	}
 

@@ -16,24 +16,23 @@
 
 import { groundDestructiveCommand, isDestructiveCommandGuardDisabled } from "../destructive-command-guard.ts";
 import type { ExtensionAPI } from "../extensions/index.js";
-import { createFireOnceBlockGuard } from "./grounding-fire-once.ts";
+import { createGuard } from "./grounding-fire-once.ts";
 
 export function createDestructiveCommandGuardExtension(): (pi: ExtensionAPI) => void {
-	return createFireOnceBlockGuard({
+	return createGuard({
 		category: "guard.destructive-command",
 		source: "destructive-command-guard-extension",
 		ruleId: "destructive-command",
+		disabled: isDestructiveCommandGuardDisabled,
+		appliesTo: (toolName) => toolName === "bash",
 		decide(event) {
-			if (isDestructiveCommandGuardDisabled()) return undefined;
-			if (event.toolName !== "bash") return undefined;
-
 			const input = event.input as Record<string, unknown>;
 			const command = input.command;
 			if (typeof command !== "string") return undefined;
 
 			const decision = groundDestructiveCommand({ command });
 			if (decision.action === "block") {
-				return { block: true, reason: decision.message };
+				return { action: "block", reason: decision.message };
 			}
 			return undefined;
 		},

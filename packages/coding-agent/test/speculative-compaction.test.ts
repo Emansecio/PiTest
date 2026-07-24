@@ -7,8 +7,18 @@
  * network call — the same shape compaction.test.ts uses). PIT_NO_STRUCTURAL_COMPACTION
  * forces the always-LLM path so the streamFn call-count is a meaningful proxy for
  * "the LLM summarization ran".
+ *
+ * The default harness models the configuration that ACTUALLY SHIPS: a
+ * `session_before_compact` OBSERVER is registered (the built-in read-guard is in
+ * every bundle) and no mutator. Tests that need a mutator opt in explicitly. The
+ * previous default — "no handlers at all" — never occurs in a real session, and
+ * hiding behind it is what let the precompute be dead code in production while
+ * this suite stayed green.
  */
 
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentMessage } from "@pit/agent-core";
 import type { Api, Model, Usage } from "@pit/ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,6 +27,7 @@ import {
 	type CompactionHost,
 	clearSpeculativeCompaction,
 	consumeSpeculativeCompaction,
+	executeCompactionPipeline,
 	maybeStartSpeculativeCompaction,
 	runAutoCompaction,
 	SPECULATIVE_COMPACT_RATIO,
@@ -24,8 +35,13 @@ import {
 	shouldPrecomputeSpeculativeCompaction,
 	startSpeculativeCompaction,
 } from "../src/core/agent-session-compaction.ts";
+import { createReadGuardExtension } from "../src/core/built-ins/read-guard-extension.ts";
 import { type CompactionSettings, computeDynamicReserve } from "../src/core/compaction/index.ts";
+import { createExtensionRuntime } from "../src/core/extensions/loader.ts";
+import { ExtensionRunner } from "../src/core/extensions/runner.ts";
+import type { Extension, ExtensionAPI, SessionBeforeCompactResult } from "../src/core/extensions/types.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 
 const MODEL: Model<"anthropic-messages"> = {
 	id: "claude-opus-4-8",
@@ -81,11 +97,24 @@ interface Harness {
 	entryIds: string[];
 	streamCalls: () => number;
 	events: Array<{ type: string }>;
-	setHasHandlers: (fn: (name: string) => boolean) => void;
+	/** Every event the host's extension runner was asked to emit, in order. */
+	emitted: Array<{ type: string }>;
+	/**
+	 * Register a MUTATING `session_before_compact` handler (one that can cancel or
+	 * replace the summary). Default harness has only an observer.
+	 */
+	setMutatingBeforeCompact: (result?: SessionBeforeCompactResult) => void;
+	/** Remove every `session_before_compact` handler (no observer, no mutator). */
+	clearBeforeCompactHandlers: () => void;
+}
+
+interface HarnessOptions {
+	/** Swap in a real ExtensionRunner instead of the mock (integration tests). */
+	extensionRunner?: ExtensionRunner;
 }
 
 /** Build a controller whose host has a real seeded SessionManager + fake streamFn. */
-function makeHarness(): Harness {
+function makeHarness(options: HarnessOptions = {}): Harness {
 	const sessionManager = SessionManager.inMemory();
 	const entryIds: string[] = [];
 	// Seed three real user/assistant turns with enough prose to summarize.
@@ -113,7 +142,20 @@ function makeHarness(): Harness {
 	}) as never;
 
 	const events: Array<{ type: string }> = [];
-	let hasHandlers: (name: string) => boolean = () => false;
+	const emitted: Array<{ type: string }> = [];
+	// Ships-by-default shape: the read-guard observer is registered, nothing mutating.
+	let hasObserver = true;
+	let mutatingResult: SessionBeforeCompactResult | undefined;
+	let hasMutator = false;
+	const mockRunner = {
+		hasHandlers: (name: string) => name === "session_before_compact" && (hasObserver || hasMutator),
+		hasMutatingHandlers: (name: string) => name === "session_before_compact" && hasMutator,
+		emit: async (event: { type: string }) => {
+			emitted.push(event);
+			if (event.type === "session_before_compact" && hasMutator) return mutatingResult;
+			return undefined;
+		},
+	};
 
 	const agentState = { messages };
 	const host = {
@@ -127,10 +169,7 @@ function makeHarness(): Harness {
 			getModelRoleSettings: () => ({ modelRoles: {} }),
 			getThinkingBudgets: () => undefined,
 		},
-		extensionRunner: {
-			hasHandlers: (name: string) => hasHandlers(name),
-			emit: async () => undefined,
-		},
+		extensionRunner: options.extensionRunner ?? mockRunner,
 		modelRegistry: {
 			getAll: () => [MODEL] as Model<Api>[],
 			getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "k", headers: {} }),
@@ -156,8 +195,14 @@ function makeHarness(): Harness {
 		entryIds,
 		streamCalls: () => streamCalls,
 		events,
-		setHasHandlers: (fn) => {
-			hasHandlers = fn;
+		emitted,
+		setMutatingBeforeCompact: (result) => {
+			hasMutator = true;
+			mutatingResult = result;
+		},
+		clearBeforeCompactHandlers: () => {
+			hasObserver = false;
+			hasMutator = false;
 		},
 	};
 }
@@ -331,10 +376,44 @@ describe("startSpeculativeCompaction", () => {
 		expect(h.ctx.speculative?.anchorLatestCompactionId).toBeUndefined();
 	});
 
-	it("skips (no precompute) when a session_before_compact handler is registered", async () => {
+	it("RUNS with the shipped bundle shape: a session_before_compact OBSERVER present", async () => {
 		const h = makeHarness();
-		h.setHasHandlers((name) => name === "session_before_compact");
+		// Exactly what every real session looks like: read-guard registered.
+		expect(h.ctx.host.extensionRunner.hasHandlers("session_before_compact")).toBe(true);
+		expect(h.ctx.host.extensionRunner.hasMutatingHandlers("session_before_compact")).toBe(false);
+
 		await startSpeculativeCompaction(h.ctx, SETTINGS, hardThreshold() * SPECULATIVE_COMPACT_RATIO + 5_000);
+
+		expect(h.ctx.speculative?.result?.summary).toContain("fake speculative summary");
+		// The precompute itself must NOT emit the event (it has no authority to run
+		// observers on a summary that may never be applied).
+		expect(h.emitted).toHaveLength(0);
+	});
+
+	it("skips (no precompute) when a MUTATING session_before_compact handler is registered", async () => {
+		const h = makeHarness();
+		h.setMutatingBeforeCompact();
+		await startSpeculativeCompaction(h.ctx, SETTINGS, hardThreshold() * SPECULATIVE_COMPACT_RATIO + 5_000);
+		expect(h.ctx.speculative).toBeUndefined();
+		expect(h.streamCalls()).toBe(0);
+	});
+
+	it("skips (no precompute) when the kill-switch is set", async () => {
+		vi.stubEnv("PIT_NO_SPECULATIVE_COMPACTION", "1");
+		const h = makeHarness();
+		await startSpeculativeCompaction(h.ctx, SETTINGS, hardThreshold() * SPECULATIVE_COMPACT_RATIO + 5_000);
+		expect(h.ctx.speculative).toBeUndefined();
+		expect(h.streamCalls()).toBe(0);
+	});
+
+	it("honours a truthy (non-'1') kill-switch value", async () => {
+		vi.stubEnv("PIT_NO_SPECULATIVE_COMPACTION", "true");
+		const h = makeHarness();
+		maybeStartSpeculativeCompaction(h.ctx, {
+			pressure: hardThreshold() * SPECULATIVE_COMPACT_RATIO + 5_000,
+			contextWindow: MODEL.contextWindow,
+			settings: SETTINGS,
+		});
 		expect(h.ctx.speculative).toBeUndefined();
 		expect(h.streamCalls()).toBe(0);
 	});
@@ -370,6 +449,86 @@ describe("runAutoCompaction consuming a speculative result", () => {
 		expect((compactions[0] as { summary: string }).summary).toContain("fake speculative summary");
 		// Slot cleared after apply.
 		expect(h.ctx.speculative).toBeUndefined();
+	});
+
+	it("EMITS session_before_compact when applying a precomputed summary (read-guard must not regress)", async () => {
+		const h = makeHarness();
+		await precompute(h);
+		expect(h.emitted).toHaveLength(0); // precompute stayed silent
+		const callsAfterPrecompute = h.streamCalls();
+
+		await runAutoCompaction(h.ctx, "threshold", false);
+
+		// Apply-only (no second LLM call) AND the observers still got their event.
+		expect(h.streamCalls()).toBe(callsAfterPrecompute);
+		expect(h.emitted.filter((e) => e.type === "session_before_compact")).toHaveLength(1);
+		// Order: the before-event precedes session_compact (i.e. it ran before the
+		// summary was appended to the session).
+		const types = h.emitted.map((e) => e.type);
+		expect(types.indexOf("session_before_compact")).toBeLessThan(types.indexOf("session_compact"));
+	});
+
+	it("discards the precompute and runs the normal flow when a mutator appears before apply", async () => {
+		const h = makeHarness();
+		await precompute(h);
+		const callsAfterPrecompute = h.streamCalls();
+
+		// An extension with a mutating handler shows up after the precompute started.
+		h.setMutatingBeforeCompact();
+
+		await runAutoCompaction(h.ctx, "threshold", false);
+
+		// The precomputed summary was NOT applied — a fresh LLM compaction ran and
+		// the mutator was consulted.
+		expect(h.streamCalls()).toBeGreaterThan(callsAfterPrecompute);
+		expect(h.emitted.filter((e) => e.type === "session_before_compact")).toHaveLength(1);
+		expect(h.ctx.speculative).toBeUndefined();
+	});
+
+	it("emits nothing when no session_before_compact handler is registered at all", async () => {
+		const h = makeHarness();
+		h.clearBeforeCompactHandlers();
+		await precompute(h);
+		const callsAfterPrecompute = h.streamCalls();
+
+		await executeCompactionPipeline(h.ctx, {
+			preparation: {
+				firstKeptEntryId: h.entryIds[0],
+				messagesToSummarize: [],
+				turnPrefixMessages: [],
+				isSplitTurn: false,
+				tokensBefore: 100,
+			} as never,
+			pathEntries: h.sessionManager.getBranch(),
+			model: MODEL,
+			apiKey: "k",
+			headers: {},
+			abortSignal: new AbortController().signal,
+			precomputed: consumeSpeculativeCompaction(h.ctx, undefined),
+		});
+
+		expect(h.streamCalls()).toBe(callsAfterPrecompute); // apply-only
+		expect(h.emitted.filter((e) => e.type === "session_before_compact")).toHaveLength(0);
+	});
+
+	it("lets a mutator REPLACE the summary even when a precompute was waiting", async () => {
+		const h = makeHarness();
+		await precompute(h);
+		h.setMutatingBeforeCompact({
+			compaction: {
+				summary: "extension-authored summary",
+				firstKeptEntryId: h.entryIds[0],
+				tokensBefore: 100,
+				details: {},
+			},
+		});
+
+		await runAutoCompaction(h.ctx, "threshold", false);
+
+		const compactions = h.sessionManager.getEntries().filter((e) => e.type === "compaction");
+		expect(compactions).toHaveLength(1);
+		expect((compactions[0] as { summary: string }).summary).toContain("extension-authored summary");
+		expect((compactions[0] as { summary: string }).summary).not.toContain("fake speculative summary");
 	});
 
 	it("invalidates (real LLM compaction) when a compaction was applied between X and Y", async () => {
@@ -479,5 +638,131 @@ describe("clearSpeculativeCompaction", () => {
 		const h = makeHarness();
 		expect(() => clearSpeculativeCompaction(h.ctx)).not.toThrow();
 		expect(h.ctx.speculative).toBeUndefined();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Bundle-shape integration: the REAL read-guard extension over the REAL
+// ExtensionRunner. No API key, no network — the fake streamFn still stands in
+// for the summarizer. This is the test that would have caught the original bug:
+// the precompute must run with the guard chain that actually ships, and applying
+// a precomputed summary must still emit session_before_compact so the guard
+// migrates its read set (otherwise every post-compaction edit is blocked).
+// ---------------------------------------------------------------------------
+
+describe("speculative compaction with the real read-guard extension", () => {
+	beforeEach(() => {
+		vi.stubEnv("PIT_NO_STRUCTURAL_COMPACTION", "1");
+	});
+
+	const tmpDirs: string[] = [];
+	afterEach(() => {
+		while (tmpDirs.length > 0) {
+			const dir = tmpDirs.pop();
+			if (!dir) continue;
+			try {
+				rmSync(dir, { recursive: true, force: true });
+			} catch {
+				/* ignore Windows handle race */
+			}
+		}
+	});
+
+	/** A real ExtensionRunner holding the real read-guard extension. */
+	function makeRealRunner(cwd: string): ExtensionRunner {
+		const handlers = new Map<string, Array<(event: any, ctx: any) => any>>();
+		const shim = {
+			on(event: string, handler: (event: any, ctx: any) => any) {
+				const list = handlers.get(event) ?? [];
+				list.push(handler);
+				handlers.set(event, list);
+			},
+		} as unknown as ExtensionAPI;
+		createReadGuardExtension({ cwd })(shim);
+
+		const extension: Extension = {
+			path: "<built-in:read-guard>",
+			resolvedPath: "<built-in:read-guard>",
+			sourceInfo: createSyntheticSourceInfo("<built-in:read-guard>", { source: "built-in" }),
+			handlers: handlers as Extension["handlers"],
+			tools: new Map(),
+			messageRenderers: new Map(),
+			commands: new Map(),
+			flags: new Map(),
+			shortcuts: new Map(),
+		};
+
+		return new ExtensionRunner(
+			[extension],
+			createExtensionRuntime(),
+			cwd,
+			SessionManager.inMemory(),
+			{} as never, // modelRegistry: never touched by the read-guard
+		);
+	}
+
+	function makeCwd(): string {
+		const dir = mkdtempSync(join(tmpdir(), "pit-spec-compact-"));
+		tmpDirs.push(dir);
+		return dir;
+	}
+
+	it("classifies the shipped read-guard handler as an observer, not a mutator", () => {
+		const runner = makeRealRunner(makeCwd());
+		expect(runner.hasHandlers("session_before_compact")).toBe(true);
+		expect(runner.hasMutatingHandlers("session_before_compact")).toBe(false);
+	});
+
+	it("precomputes with the real guard registered, and the apply path still migrates its read set", async () => {
+		const cwd = makeCwd();
+		const runner = makeRealRunner(cwd);
+		const h = makeHarness({ extensionRunner: runner });
+
+		const file = join(cwd, "sample.ts");
+		writeFileSync(file, "export const value = 1;\n");
+		// The model reads the file BEFORE compaction: the guard tracks it in `readFiles`.
+		await runner.emitToolCall({ toolName: "read", input: { path: file } } as never);
+
+		// 1. The precompute actually runs (this was dead code before the fix).
+		await startSpeculativeCompaction(h.ctx, SETTINGS, hardThreshold() * SPECULATIVE_COMPACT_RATIO + 5_000);
+		expect(h.ctx.speculative?.result?.summary).toContain("fake speculative summary");
+		const callsAfterPrecompute = h.streamCalls();
+
+		// 2. Applying it is apply-only (no second LLM call) …
+		await runAutoCompaction(h.ctx, "threshold", false);
+		expect(h.streamCalls()).toBe(callsAfterPrecompute);
+		expect(h.sessionManager.getEntries().filter((e) => e.type === "compaction")).toHaveLength(1);
+
+		// 3. … and the guard was still told to migrate `readFiles` → stat snapshots,
+		// which puts it in POST-COMPACT mode for this file. Proof: an edit whose
+		// oldText does not match the file verbatim is now blocked (the model only
+		// carried a lossy summary across the fold). Before the fix the apply path
+		// skipped the emit, `readFiles` still held the path, and this edit sailed
+		// through unchecked.
+		const stale = await runner.emitToolCall({
+			toolName: "edit",
+			input: { path: file, oldText: "export const value = 999;", newText: "nope" },
+		} as never);
+		expect(stale?.block).toBe(true);
+		expect(String(stale?.reason)).toContain("post-compact mismatch");
+	});
+
+	it("still allows a verbatim-anchored edit after the precomputed summary is applied", async () => {
+		const cwd = makeCwd();
+		const runner = makeRealRunner(cwd);
+		const h = makeHarness({ extensionRunner: runner });
+
+		const file = join(cwd, "sample.ts");
+		writeFileSync(file, "export const value = 1;\n");
+		await runner.emitToolCall({ toolName: "read", input: { path: file } } as never);
+
+		await startSpeculativeCompaction(h.ctx, SETTINGS, hardThreshold() * SPECULATIVE_COMPACT_RATIO + 5_000);
+		await runAutoCompaction(h.ctx, "threshold", false);
+
+		const ok = await runner.emitToolCall({
+			toolName: "edit",
+			input: { path: file, oldText: "export const value = 1;", newText: "export const value = 2;" },
+		} as never);
+		expect(ok?.block).toBeUndefined();
 	});
 });

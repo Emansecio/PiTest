@@ -548,6 +548,37 @@ export function defineTool<TParams extends TSchema, TDetails = unknown, TState =
 }
 
 // ============================================================================
+// Handler tagging
+// ============================================================================
+
+/**
+ * Property key marking a handler as side-effect-only (return value ignored,
+ * payload never mutated). Written by `pi.markSideEffect()`, by loader's
+ * PIT_SIDE_EFFECT_EXTENSIONS env-driven tagger, and by
+ * {@link markHandlerSideEffect}; read by the runner (parallel dispatch for
+ * `before_provider_request` / `before_agent_start`, and
+ * `hasMutatingHandlers()`).
+ *
+ * Lives here (not in runner.ts) so a built-in extension can tag its own handler
+ * without importing the whole runner module. Re-exported from runner.ts for the
+ * existing import sites.
+ */
+export const HANDLER_SIDE_EFFECT_TAG = "__piSideEffect" as const;
+
+/**
+ * Standalone form of `pi.markSideEffect()` — tags a handler as side-effect-only.
+ *
+ * Built-in extensions must use THIS instead of `pi.markSideEffect(...)`: they are
+ * also instantiated against minimal `ExtensionAPI` shims (the subagent guard
+ * chain in `built-ins/subagent-guards.ts`) that implement `on()` and nothing
+ * else, so calling the API method would throw at registration time.
+ */
+export function markHandlerSideEffect<F extends (...args: any[]) => any>(handler: F): F {
+	(handler as unknown as Record<string, unknown>)[HANDLER_SIDE_EFFECT_TAG] = true;
+	return handler;
+}
+
+// ============================================================================
 // Resource Events
 // ============================================================================
 
