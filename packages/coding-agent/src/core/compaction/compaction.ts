@@ -116,6 +116,14 @@ export interface CompactionResult<T = unknown> {
 	summary: string;
 	firstKeptEntryId: string;
 	tokensBefore: number;
+	/**
+	 * Live context size once the summary replaced the folded span — the OTHER half
+	 * of the only number that says whether a compaction did its job. Runtime-only
+	 * (deliberately NOT persisted on the CompactionEntry, which would be a session
+	 * file-format change): a freshly-run compaction reports the delta, and a
+	 * transcript reloaded from disk degrades to the tokensBefore-only headline.
+	 */
+	tokensAfter?: number;
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
 	details?: T;
 }
@@ -451,6 +459,35 @@ export function effectiveKeepRecentTokens(configured: number, contextWindow?: nu
 		return configured;
 	}
 	return Math.max(configured, Math.floor(contextWindow * 0.1));
+}
+
+/**
+ * Fraction of the LIVE context a manual `/compact` keeps verbatim.
+ *
+ * {@link effectiveKeepRecentTokens} scales the keep-recent budget with the
+ * WINDOW (10% of it above 200k), which is right for auto-compaction: that fires
+ * near the hard threshold, so on a 1M window it keeps ~100k out of ~900k — a 90%
+ * fold. But the floor is FLAT, so the same 100k against a session that is merely
+ * 111k reclaims 8%, and against 194k reclaims 48% (measured). A manual compaction
+ * is an explicit "reclaim now" issued at whatever pressure the user happens to be
+ * at, so its budget has to scale with CURRENT USAGE instead — 25% keeps the fold
+ * at ~75% across every session size. Never exceeds the window-scaled value (a
+ * manual compaction is never gentler than the automatic one) and never drops
+ * below {@link ADAPTIVE_KEEP_MIN_FLOOR}.
+ */
+export const MANUAL_COMPACT_KEEP_FRACTION = 0.25;
+
+/**
+ * Keep-recent budget for a MANUAL compaction. See
+ * {@link MANUAL_COMPACT_KEEP_FRACTION}. Falls back to the window-scaled value
+ * when the live size is unknown or non-positive, so a caller that cannot measure
+ * gets exactly today's behaviour.
+ */
+export function manualKeepRecentTokens(configured: number, contextWindow?: number, liveTokens?: number): number {
+	const windowScaled = effectiveKeepRecentTokens(configured, contextWindow);
+	if (!liveTokens || liveTokens <= 0) return windowScaled;
+	const usageScaled = Math.floor(liveTokens * MANUAL_COMPACT_KEEP_FRACTION);
+	return Math.min(windowScaled, Math.max(ADAPTIVE_KEEP_MIN_FLOOR, usageScaled));
 }
 
 /** Legacy flat floor for the assumed summary + structural frame a compaction inserts. */

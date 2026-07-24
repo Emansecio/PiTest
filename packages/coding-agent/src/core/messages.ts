@@ -64,6 +64,12 @@ export interface CompactionSummaryMessage {
 	role: "compactionSummary";
 	summary: string;
 	tokensBefore: number;
+	/**
+	 * Context size after the fold. Present only for a compaction that just ran in
+	 * this session (it is not persisted on the CompactionEntry), so a reloaded
+	 * transcript renders the tokensBefore-only headline.
+	 */
+	tokensAfter?: number;
 	timestamp: number;
 }
 
@@ -111,11 +117,13 @@ export function createCompactionSummaryMessage(
 	summary: string,
 	tokensBefore: number,
 	timestamp: string,
+	tokensAfter?: number,
 ): CompactionSummaryMessage {
 	return {
 		role: "compactionSummary",
 		summary: summary,
 		tokensBefore,
+		tokensAfter,
 		timestamp: new Date(timestamp).getTime(),
 	};
 }

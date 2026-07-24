@@ -37,27 +37,39 @@ export class CompactionSummaryMessageComponent extends MessageShell {
 		this.updateDisplay();
 	}
 
+	/**
+	 * The headline. With `tokensAfter` known (a compaction that just ran) it reports
+	 * the DELTA — `195,467 → 113,204 tokens (-42%)` — because the before-value alone
+	 * cannot distinguish a fold that reclaimed 80% from one that reclaimed 8%: both
+	 * printed the identical "Compacted from N tokens". Without it (transcript
+	 * reloaded from disk, where the after-value is not persisted) it degrades to the
+	 * original wording.
+	 */
+	private headline(): string {
+		const before = this.message.tokensBefore;
+		const after = this.message.tokensAfter;
+		if (after === undefined || before <= 0) {
+			return `Compacted from ${before.toLocaleString()} tokens`;
+		}
+		const pct = Math.round(((before - after) / before) * 100);
+		return `Compacted ${before.toLocaleString()} → ${after.toLocaleString()} tokens (-${pct}%)`;
+	}
+
 	private updateDisplay(): void {
 		this.clear();
 
-		const tokenStr = this.message.tokensBefore.toLocaleString();
+		const tokenStr = this.headline();
 
 		if (this.expanded) {
 			// Expanded: bold "Compacted from N tokens" headline + the model's
 			// summary as markdown. Default fg (no per-block tint) so the
 			// summary reads like body text rather than competing with the
 			// shell color.
-			const header = `**Compacted from ${tokenStr} tokens**\n\n`;
+			const header = `**${tokenStr}**\n\n`;
 			this.addChild(new Markdown(header + this.message.summary, 0, 0, this.markdownTheme));
 		} else {
 			// Collapsed: single line summary + dim expand-hint.
-			this.addChild(
-				new Text(
-					`Compacted from ${tokenStr} tokens ${theme.fg("dim", `(${keyText("app.tools.expand")} to expand)`)}`,
-					0,
-					0,
-				),
-			);
+			this.addChild(new Text(`${tokenStr} ${theme.fg("dim", `(${keyText("app.tools.expand")} to expand)`)}`, 0, 0));
 		}
 	}
 }

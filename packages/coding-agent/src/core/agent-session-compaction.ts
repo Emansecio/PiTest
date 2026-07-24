@@ -34,6 +34,7 @@ import {
 	compact,
 	computeDynamicReserve,
 	estimateContextTokens,
+	manualKeepRecentTokens,
 	prepareCompaction,
 	proactivePruneFloor,
 	shouldCompact,
@@ -997,6 +998,9 @@ export async function executeCompactionPipeline(
 	);
 	const sessionContext = ctx.host.sessionManager.buildSessionContext();
 	ctx.host.agent.state.messages = sessionContext.messages;
+	// Measured AFTER the swap, off the same estimator the footer's CTX gauge uses,
+	// so the reported delta matches what the user is about to see there.
+	const tokensAfter = estimateContextTokens(sessionContext.messages).tokens;
 
 	// P2: a compaction was just applied (real or precomputed) — any speculative
 	// slot is now stale (its anchor no longer matches). Abort/drop it.
@@ -1026,7 +1030,7 @@ export async function executeCompactionPipeline(
 
 	pruneReadDedupeAfterCompaction(ctx, details);
 
-	return { summary, firstKeptEntryId, tokensBefore, details };
+	return { summary, firstKeptEntryId, tokensBefore, tokensAfter, details };
 }
 
 /**
@@ -1089,12 +1093,19 @@ export async function compactSession(
 		const pathEntries = ctx.host.sessionManager.getBranch();
 		const settings = ctx.host.settingsManager.getCompactionSettings();
 
+		// A manual /compact is an explicit "reclaim now", issued at whatever pressure
+		// the user happens to be at — so the keep-recent budget scales with the LIVE
+		// context, not with the window. Without this the flat window-scaled floor
+		// (~100k on a 1M model) reclaims 8% of a 111k session. Auto-compaction is
+		// untouched: it keeps the window-scaled budget it was designed around.
+		const liveTokens = estimateContextTokens(ctx.host.agent.state.messages).tokens;
 		const preparation = prepareCompaction(
 			pathEntries,
 			settings,
 			ctx.host.model?.contextWindow,
 			false,
-			estimateContextTokens(ctx.host.agent.state.messages).tokens,
+			liveTokens,
+			manualKeepRecentTokens(settings.keepRecentTokens, ctx.host.model?.contextWindow, liveTokens),
 		);
 		if (!preparation) {
 			const lastEntry = pathEntries[pathEntries.length - 1];
