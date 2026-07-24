@@ -530,7 +530,15 @@ describe("AgentSessionRuntime characterization", () => {
 		// under full-suite parallel load on Windows (passes in ~2s isolated).
 	}, 90_000);
 
-	it("restores model and thinking state from the destination session", async () => {
+	// Precedence on any boot path, session switch included: the GLOBAL last-used
+	// model wins, and the destination session's own model history is only a
+	// fallback for when that default is gone or lost its auth (see the comment
+	// above the resolution in core/sdk.ts). Switching sessions therefore keeps you
+	// on the model you last picked — opening an old session never silently moves
+	// you to whatever it happened to be running, which would be a cost surprise.
+	// This test used to assert the opposite and had been red since before
+	// 0fa05266b; it was contradicting a deliberate decision, not catching a bug.
+	it("keeps the global last-used model when switching to a session that used another", async () => {
 		const { runtime, faux, tempDir } = await createRuntimeForTest(() => {}, {
 			bootstrapModel: false,
 			bootstrapThinkingLevel: false,
@@ -600,9 +608,14 @@ describe("AgentSessionRuntime characterization", () => {
 		await otherRuntime.session.prompt("hello");
 		const targetSessionFile = otherRuntime.session.sessionFile!;
 
+		// Sanity: the destination session really did record faux-2, so the assertion
+		// below is about PRECEDENCE, not about the model history being empty.
+		const targetBranch = otherRuntime.session.sessionManager.getBranch();
+		expect(targetBranch.some((entry) => entry.type === "model_change" && entry.modelId === "faux-2")).toBe(true);
+
 		await runtime.switchSession(targetSessionFile);
 
-		expect(runtime.session.model?.id).toBe("faux-2");
-		expect(runtime.session.thinkingLevel).toBe("off");
+		// Global default (faux-1, authed) wins over the session's own faux-2.
+		expect(runtime.session.model?.id).toBe("faux-1");
 	});
 });
