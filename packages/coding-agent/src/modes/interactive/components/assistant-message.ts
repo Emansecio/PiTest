@@ -431,15 +431,19 @@ export class AssistantMessageComponent extends Container {
 			const glyph = this.deliverableEase ? this.deliverableEase.colorize("accent", "●") : theme.fg("accent", "●");
 			for (let i = 0; i < lines.length; i++) {
 				if (visibleWidth(stripAnsi(lines[i])) > 0) {
-					// The assistant Markdown renders with paddingX=1 (a raw leading space);
-					// the glyph ABSORBS that space so the marked line's text starts at
-					// col 2 — the same column as the user gutter's `❯ ` — instead of
-					// drifting one column right of it.
-					const bare = lines[i].startsWith(" ") ? lines[i].slice(1) : lines[i];
+					// The assistant Markdown renders with paddingX=PROSE_PADDING_X (raw
+					// leading spaces); the glyph + its own space ABSORB exactly that many
+					// so the marked line's text stays on col 2 — the same column as the
+					// user gutter's `❯ ` and the activity rows' `● ` — instead of drifting
+					// right of them.
+					const bare = lines[i].slice(
+						Math.min(AssistantMessageComponent.PROSE_PADDING_X, lines[i].length - lines[i].trimStart().length),
+					);
 					lines[i] = `${glyph} ${bare}`;
-					// Prepending "● " adds up to 2 cols without re-truncating (1 when the
-					// absorbed padding gives a col back). With readingColumns=0 the prose
-					// already fills the full width, so the marked line can spill past
+					// "● " costs 2 cols and the absorbed padding gives 2 back, so a
+					// fully-padded line is width-neutral. A line whose padding was already
+					// trimmed upstream can still gain up to 2 cols. With readingColumns=0
+					// the prose already fills the full width, so the marked line can spill past
 					// width. Downstream clampLineToWidth would catch it (and truncate to
 					// the same `truncateToWidth(line, width, "…")`), but under
 					// PIT_RENDER_ASSERT it throws instead. Re-truncate here to the
@@ -586,9 +590,10 @@ export class AssistantMessageComponent extends Container {
 		const hasVisibleContent = lastVisibleIndex !== -1;
 		let sawLiveThinking = false;
 
-		if (hasVisibleContent) {
-			this.contentContainer.addChild(new Spacer(1));
-		}
+		// No leading blank line: WorkGroup already emits none (see the spacing
+		// invariant in test/activity-spacing.test.ts), so a prose block that follows
+		// an activity stack used to open with an orphan gap. A turn that interleaves
+		// narration and tool work paid one of these per fragment.
 
 		// Render content in order. Reuse the persistent Markdown for
 		// block index `i` when it is still the same kind ("text"/"thinking"); call
@@ -715,13 +720,18 @@ export class AssistantMessageComponent extends Container {
 				// Aborting is a routine, user-initiated action — render it muted so
 				// error red stays reserved for real failures (turn-done already
 				// treats the two stop reasons as distinct).
-				this.contentContainer.addChild(new Text(theme.fg("muted", `◦ ${abortMessage}`), 1, 0));
+				// paddingX=0: the `◦` rides the gutter column like the activity rows' `●`
+				// and the quiet custom-message lines, so its text lands on col 2 too.
+				this.contentContainer.addChild(new Text(theme.fg("muted", `◦ ${abortMessage}`), 0, 0));
 			} else if (message.stopReason === "error") {
 				const errorMsg = message.errorMessage || "Unknown error";
 				if (hasVisibleContent) {
 					this.contentContainer.addChild(new Spacer(1));
 				}
-				this.contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), 1, 0));
+				// No glyph here, so it pays the prose padding to reach the same col 2.
+				this.contentContainer.addChild(
+					new Text(theme.fg("error", `Error: ${errorMsg}`), AssistantMessageComponent.PROSE_PADDING_X, 0),
+				);
 			}
 		}
 
@@ -938,17 +948,27 @@ export class AssistantMessageComponent extends Container {
 		this.ui?.requestRender();
 	}
 
+	/**
+	 * Prose blocks render at paddingX=2 so their text edge lands on the SAME
+	 * column as every other turn row: the user gutter (`❯ `), the activity rows
+	 * (`● `), and the marked deliverable (whose glyph absorbs this padding — see
+	 * the decoration in `render`). At paddingX=1 narration sat one column left of
+	 * all of them, which read as a ragged edge down the whole turn.
+	 */
+	private static readonly PROSE_PADDING_X = 2;
+
 	private makeProseMarkdown(text: string): Markdown {
+		const pad = AssistantMessageComponent.PROSE_PADDING_X;
 		return this.isNarration
 			? new Markdown(
 					text,
-					1,
+					pad,
 					0,
 					this.markdownTheme,
 					{ color: (t: string) => theme.fg("muted", t) },
 					this.readingColumns,
 				)
-			: new Markdown(text, 1, 0, this.markdownTheme, undefined, this.readingColumns);
+			: new Markdown(text, pad, 0, this.markdownTheme, undefined, this.readingColumns);
 	}
 
 	/** Drive the hidden "Thinking…" label's dim⇄normal oscillation. No-op if

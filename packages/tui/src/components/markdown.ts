@@ -439,7 +439,14 @@ export class Markdown implements Component {
 			// served at the wrong width. When no cap applies (proseMaxColumns=0 or a
 			// wide block) effWidth === width, keeping that path byte-identical.
 			const capProse = this.proseMaxColumns > 0 && !isWideBlock(token.type);
-			const effContentWidth = capProse ? Math.min(contentWidth, this.proseMaxColumns) : contentWidth;
+			// The cap is the READING MEASURE of the rendered line, left margin
+			// included — not of the text alone. Charging the left padding against it
+			// keeps the measure stable when a caller changes paddingX (prose used to
+			// render `proseMaxColumns + paddingX` columns wide, so a 120-col cap at
+			// paddingX=1 actually drew 121). Right margin is trailing whitespace and
+			// does not count. Floor at 1 so an absurd padding can't zero the content.
+			const capContentWidth = Math.max(1, this.proseMaxColumns - this.paddingX);
+			const effContentWidth = capProse ? Math.min(contentWidth, capContentWidth) : contentWidth;
 			const effWidth = capProse ? effContentWidth + this.paddingX * 2 : width;
 			const cacheKey = this.getTokenCacheKey(token, effWidth, nextTokenType, deferCodeHighlight);
 			let tokenLines = prevTokenCache?.get(cacheKey) ?? nextTokenCache.get(cacheKey);

@@ -2148,8 +2148,14 @@ export class InteractiveMode {
 		return this.turnOutputTokens + (this.streamingMessage?.usage?.output ?? 0);
 	}
 
-	/** Dim separator between working-loader meta chips (elapsed is separate). */
-	private static readonly LOADER_META_SEP = " ·";
+	/**
+	 * Dim separator between working-loader meta chips (elapsed is separate).
+	 * Tight `·` with no flanking spaces — the same convention as the activity
+	 * counter's COUNTER_SEP (components/tool-activity.ts). The loader line used to
+	 * mix `" ·"` here with an inline `" · "` inside the interrupt hint, which read
+	 * as a broken edge: `9m14s ·escape stop/cancel · ctrl+c interrupt ·↑11.8k`.
+	 */
+	private static readonly LOADER_META_SEP = "·";
 
 	/** Lazily computed, memoized `·<key> to interrupt` suffix fragment. See
 	 * `cachedLoaderInterruptSuffix` for why this is worth memoizing. */
@@ -2162,7 +2168,7 @@ export class InteractiveMode {
 			if (this.cachedLoaderInterruptToolsSuffix === null) {
 				this.cachedLoaderInterruptToolsSuffix = theme.fg(
 					"dim",
-					`${InteractiveMode.LOADER_META_SEP}${keyText("app.interrupt")} stop/cancel · ctrl+c interrupt`,
+					`${InteractiveMode.LOADER_META_SEP}${keyText("app.interrupt")} stop/cancel${InteractiveMode.LOADER_META_SEP}ctrl+c interrupt`,
 				);
 			}
 			return this.cachedLoaderInterruptToolsSuffix;
