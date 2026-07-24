@@ -43,6 +43,12 @@ export class CustomEditor extends Editor {
 
 		// Escape/interrupt - only if autocomplete is NOT active
 		if (this.keybindings.matches(data, "app.interrupt")) {
+			// An active selection is cleared first: Esc collapses the selection and is
+			// consumed, so it never reaches the app's onEscape (interrupt/abort).
+			if (this.hasActiveSelection()) {
+				this.clearSelection();
+				return;
+			}
 			if (!this.isShowingAutocomplete()) {
 				// Use dynamic onEscape if set, otherwise registered handler
 				const handler = this.onEscape ?? this.actionHandlers.get("app.interrupt");

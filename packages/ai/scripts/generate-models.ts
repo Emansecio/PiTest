@@ -184,6 +184,12 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (model.id.includes("opus-4-8") || model.id.includes("opus-4.8")) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh" });
 	}
+	// Opus 5 exposes the full effort ladder (low → max); upstream catalogs omit
+	// the opt-in map, so without it the selector would stop at "high".
+	// `(?![.-]?\d)` keeps this from matching a future opus-5.x id by accident.
+	if (/opus-5(?![.-]?\d)/.test(model.id)) {
+		mergeThinkingLevelMap(model, { xhigh: "xhigh", max: "max" });
+	}
 	// Fable 5 supports adaptive effort through xhigh (same wire value as Opus 4.7+).
 	// Upstream catalogs omit the opt-in map; without it the selector stops at high.
 	// off/minimal stay nulled — Fable's usable range is low → xhigh.
@@ -1017,6 +1023,29 @@ async function generateModels() {
 		});
 	}
 
+	// Add missing Claude Opus 5 (successor to Opus 4.8; same price/limits).
+	// Thinking is on by default server-side and the full effort ladder (low → max)
+	// is available; applyThinkingLevelMetadata below stamps the xhigh/max map.
+	if (!allModels.some(m => m.provider === "anthropic" && m.id === "claude-opus-5")) {
+		allModels.push({
+			id: "claude-opus-5",
+			name: "Claude Opus 5",
+			api: "anthropic-messages",
+			baseUrl: "https://api.anthropic.com",
+			provider: "anthropic",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: {
+				input: 5,
+				output: 25,
+				cacheRead: 0.5,
+				cacheWrite: 6.25,
+			},
+			contextWindow: 1000000,
+			maxTokens: 128000,
+		});
+	}
+
 	// Add missing Claude Sonnet 4.6
 	if (!allModels.some(m => m.provider === "anthropic" && m.id === "claude-sonnet-4-6")) {
 		allModels.push({
@@ -1531,14 +1560,18 @@ async function generateModels() {
 		"anthropic::claude-opus-4-5-20251101",
 		"anthropic::claude-opus-4-6",
 		"anthropic::claude-opus-4-7",
+		"anthropic::claude-opus-4-8",
 		"anthropic::claude-sonnet-4-5",
 		"anthropic::claude-sonnet-4-5-20250929",
 		"anthropic::claude-sonnet-4-6",
 		"anthropic::claude-haiku-4-5-20251001",
 		// De-dupe: drop the opencode-proxied copies of models that exist natively
-		// under anthropic / openai-codex (keep the native entry).
+		// under anthropic / openai-codex (keep the native entry). `claude-opus-4-8`
+		// is also retired here — Opus 5 replaces it, so no provider should surface
+		// the older Opus in the picker.
 		"opencode::claude-fable-5",
 		"opencode::claude-opus-4-8",
+		"opencode-go::claude-opus-4-8",
 		"opencode::claude-sonnet-5",
 		"opencode::gpt-5.5",
 		// De-dupe: opencode-go keeps only models opencode doesn't already offer;

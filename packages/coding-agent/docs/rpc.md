@@ -1114,7 +1114,7 @@ Emitted during fusion orchestration turns (`orchestration: "fusion"` in `get_sta
   "type": "fusion_member",
   "index": 0,
   "cli": "claude",
-  "model": "claude-opus-4-8",
+  "model": "claude-opus-5",
   "status": "running",
   "elapsedMs": 4200,
   "timeoutMs": 120000,

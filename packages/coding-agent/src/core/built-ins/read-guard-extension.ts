@@ -1,9 +1,18 @@
 /**
  * Built-in read-guard extension.
  *
- * Blocks `edit`, `edit_v2`, and `write` tool calls on files that have not been read in the
- * current session. Prevents the model from generating diffs against
+ * Blocks `edit`, `edit_v2`, `write`, and `ast_edit` tool calls on files that have not been
+ * read in the current session. Prevents the model from generating diffs against
  * hallucinated file content.
+ *
+ * `ast_edit` is covered only in its single-FILE, disk-mutating form: its `path` is
+ * optional and may name a directory (a structural rewrite across a glob) or be
+ * omitted (default cwd) — those span many files with no single "read this first"
+ * anchor, so the guard fails open for them (same directory skip the
+ * external-edit-sentinel uses). Its `dry_run` (proposals only) and `preview`
+ * (staged to the preview queue, applied later via `resolve`) modes never write
+ * here, so they are exempt too. A single-file default-mode `ast_edit` behaves like
+ * `edit` (surgical, no full-file overwrite → no write-drift/overwrite warning).
  *
  * New files (that don't exist on disk) are exempt — the model can create them
  * without a prior read.
@@ -185,8 +194,23 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 				return undefined;
 			}
 
-			if (event.toolName === "edit" || event.toolName === "edit_v2" || event.toolName === "write") {
+			if (
+				event.toolName === "edit" ||
+				event.toolName === "edit_v2" ||
+				event.toolName === "write" ||
+				event.toolName === "ast_edit"
+			) {
+				// ast_edit only mutates disk in its DEFAULT mode: `dry_run` returns
+				// proposals and `preview` stages to the preview queue (applied later via
+				// `resolve`, not through a fresh ast_edit tool_call). Neither writes here,
+				// so requiring a prior read would be pure false friction.
+				if (event.toolName === "ast_edit") {
+					const input = event.input as Record<string, unknown>;
+					if (input.dry_run === true || input.preview === true) return undefined;
+				}
+
 				const path = extractPathArg(event.input as Record<string, unknown>);
+				// ast_edit default target is cwd (multi-file) — no single-file anchor to ground on.
 				if (path === undefined) return undefined;
 
 				const abs = canonicalPathKey(resolveToolPath(path, options.cwd));
@@ -196,7 +220,12 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 				// a throw (ENOENT or any error) means the file does not exist
 				// on disk, matching the old `!existsSync(abs)` allow branch.
 				try {
-					statSync(abs);
+					const st = statSync(abs);
+					// ast_edit's `path` may name a DIRECTORY (a structural rewrite across a
+					// glob), which spans many files with no single "read this first" anchor.
+					// The read-guard is a single-file grounding mechanism, so fail open on a
+					// directory target — mirroring the external-edit-sentinel's directory skip.
+					if (event.toolName === "ast_edit" && st.isDirectory()) return undefined;
 				} catch {
 					return undefined;
 				}
@@ -392,7 +421,14 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 		// untracked (its first edit still requires the normal read), preserving the
 		// existing new-file contract.
 		pi.on("tool_result", (event) => {
-			if (event.toolName !== "write" && event.toolName !== "edit" && event.toolName !== "edit_v2") return undefined;
+			if (
+				event.toolName !== "write" &&
+				event.toolName !== "edit" &&
+				event.toolName !== "edit_v2" &&
+				event.toolName !== "ast_edit"
+			) {
+				return undefined;
+			}
 			if (event.isError) return undefined;
 			const path = extractPathArg(event.input as Record<string, unknown>);
 			if (path === undefined) return undefined;

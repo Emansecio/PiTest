@@ -85,7 +85,7 @@ import {
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { detectCliAsync } from "../../core/fusion/cli-runner.ts";
 import { formatElapsed, parseTokenBudget } from "../../core/goal/goal-manager.ts";
-import { sliceSafe } from "../../utils/surrogate.ts";
+import { sliceSafe, truncateWithEllipsis } from "../../utils/surrogate.ts";
 
 /**
  * Detect an inline `/chrome` token anywhere in the message (start, middle, or
@@ -144,6 +144,7 @@ import {
 	setCurrentUserInputBus,
 	type UserInputBus,
 } from "../../core/user-input-bus.ts";
+import { copyToClipboard } from "../../utils/clipboard.ts";
 import { type ClipboardImage, readClipboardImage } from "../../utils/clipboard-image.ts";
 import { isOfflineMode, isReducedMotion, isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
@@ -522,6 +523,16 @@ export class InteractiveMode {
 	private interruptWatchdogTimer: ReturnType<typeof setTimeout> | undefined = undefined;
 	/** Turn-done line deferred until post-turn gates finish (`prompt_end`). */
 	private deferredTurnDone: ReturnType<typeof buildTurnDoneSnapshot> | null = null;
+	// Synchronous "a fresh turn-start submit is in flight" latch. `session.isStreaming`
+	// only flips true deep inside agent.run(), several awaits after prompt() is called,
+	// so two rapid Enters can BOTH pass the isStreaming/isFusing busy-check before the
+	// first turn is observably streaming. The second then calls session.prompt() with no
+	// streamingBehavior, which throws "Agent is already processing" — and the editor
+	// already cleared its buffer in submitValue(), so the user's text is lost. This latch
+	// is set synchronously before the normal-submission await and closes that race: a
+	// second submit sees it and routes through the same busy path (Send-now chooser /
+	// followUp) that re-seats the text instead of dropping it.
+	private submitStarting = false;
 	private anthropicSubscriptionWarningShown = false;
 
 	// Ephemeral status above the editor (statusContainer). Not part of the transcript.
@@ -786,6 +797,17 @@ export class InteractiveMode {
 			autocompleteMaxVisible,
 			embedded: true,
 			onPasteTruncated: (info) => this._onPasteTruncated(info),
+			// Copy the mouse selection to the clipboard (alt+c). Layering: the editor
+			// hands us the text; we own the clipboard helper. Fire-and-forget — a
+			// clipboard failure shouldn't wedge the keystroke; the status line is the
+			// only feedback.
+			copySelection: (text) => {
+				void copyToClipboard(text);
+				const summary = text.replace(/\s+/g, " ").trim();
+				const preview = truncateWithEllipsis(summary, 32);
+				const chars = text.length;
+				this.showStatus(`copied·${chars} char${chars === 1 ? "" : "s"}${preview ? `·${preview}` : ""}`);
+			},
 			// Unframed composer (no boxed border): the mode/permission signal the
 			// border used to carry rides on the `❯` glyph (empty editor) and on a
 			// leading `!` shell-passthrough prefix (typed bash-mode text) instead —
@@ -1888,6 +1910,12 @@ export class InteractiveMode {
 		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 		this.ui.setShowHardwareCursor(this.settingsManager.getShowHardwareCursor());
+		// Apply the mouse-tracking intent. This runs after ui.start() (via
+		// rebindCurrentSession), so the terminal is already live and setMouseEnabled
+		// flips the physical SGR 1002/1006 tracking immediately; before start() the
+		// intent alone would suffice (start() emits the enable). Re-applied on session
+		// swap, which is idempotent.
+		this.ui.setMouseEnabled(this.settingsManager.getMouseEnabled());
 		this.defaultEditor.setCursorBlink(this.settingsManager.getCursorBlink());
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		const editorPaddingX = this.settingsManager.getEditorPaddingX();
@@ -2195,6 +2223,9 @@ export class InteractiveMode {
 			(text) => theme.fg("muted", text),
 			this.getWorkingLoaderMessage(),
 			reducedMotionLoaderIndicator(this.workingIndicatorOptions),
+			// paddingX 0: align the working label at column 0 with the transcript
+			// gutters (❯ / ● / │) instead of the default 1-column indent.
+			0,
 		);
 		// A1: paint the phase label with the shared heartbeat shimmer. shimmerColorAt
 		// self-fallbacks to a flat muted painter under no-truecolor / reduced motion.
@@ -3318,8 +3349,11 @@ export class InteractiveMode {
 			// Ordinary Enter during active work queues a later follow-up turn. A Fusion
 			// turn runs outside agent.run() (isStreaming stays false for 10–600s), so
 			// treat isFusing as busy too — otherwise this Enter falls through to a normal
-			// submission that starts a second, concurrent Fusion turn.
-			if (this.session.isStreaming || this.session.isFusing) {
+			// submission that starts a second, concurrent Fusion turn. `submitStarting`
+			// covers the startup window before isStreaming flips, so a rapid double-Enter
+			// routes the second message here (re-seated, not lost) instead of racing into
+			// a concurrent prompt() that throws "already processing".
+			if (this.session.isStreaming || this.session.isFusing || this.submitStarting) {
 				// Native on-by-default: instead of silently queuing, offer
 				// [Send now] [Queue] [Cancel]. The editor cleared its own text in
 				// submitValue() before this handler ran, so the chooser re-seats `text`
@@ -3359,11 +3393,17 @@ export class InteractiveMode {
 			if (this.onInputCallback) {
 				this.onInputCallback(text);
 			}
+			// Latch synchronously BEFORE the first await so a rapid second Enter (which can
+			// only run once we yield here) observes the in-flight turn even though
+			// session.isStreaming has not flipped yet. Cleared once prompt() settles.
+			this.submitStarting = true;
 			try {
 				await this.session.prompt(text);
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 				this.showError(errorMessage);
+			} finally {
+				this.submitStarting = false;
 			}
 		};
 	}
@@ -3410,6 +3450,7 @@ export class InteractiveMode {
 			handleGoalCommand: (args) => this.handleGoalCommand(args),
 			handlePinCommand: (args) => this.handlePinCommand(args),
 			handleUnpinCommand: (args) => this.handleUnpinCommand(args),
+			toggleMouse: () => this.toggleMouse(),
 			showStatus: (line) => this.showStatus(line),
 			getTodoSummaryText: () => this.session.todoSummaryText(),
 			showSettingsSelector: () => this.showSettingsSelector(),
@@ -3443,6 +3484,26 @@ export class InteractiveMode {
 
 	private async _dispatchSlashCommand(text: string): Promise<boolean> {
 		return dispatchSlashCommand(this._slashCommandHost(), text);
+	}
+
+	/**
+	 * `/mouse` — flip TUI mouse tracking on/off at runtime. Persists the intent and
+	 * pushes it to the live TUI so click-to-position takes effect immediately. When
+	 * `PIT_NO_MOUSE` is set, getMouseEnabled() is pinned to false, so a toggle can
+	 * never actually turn tracking on — report that the kill-switch owns the state
+	 * instead of pretending it flipped.
+	 */
+	private toggleMouse(): void {
+		if (isTruthyEnvFlag(process.env.PIT_NO_MOUSE)) {
+			this.showStatus("mouse off·PIT_NO_MOUSE ativo (kill-switch)");
+			return;
+		}
+		const next = !this.settingsManager.getMouseEnabled();
+		this.settingsManager.setMouseEnabled(next);
+		this.ui.setMouseEnabled(next);
+		this.showStatus(
+			next ? "mouse on·clique posiciona·shift+arrasto p/ seleção nativa" : "mouse off·seleção nativa direta",
+		);
 	}
 
 	/**
@@ -3925,6 +3986,24 @@ export class InteractiveMode {
 						this.streamingMessage.errorMessage = errorMessage;
 					}
 					this.streamingComponent.updateContent(this.streamingMessage);
+
+					// Grouped mode defers attaching an assistant block until it has visible
+					// prose, so a thinking-only message (Esc during "Thinking…", before any
+					// text) is never attached. On abort/error with no tool calls, the
+					// component's own "◦ Operation aborted" notice is the ONLY per-message
+					// feedback — with tool calls the tool rows carry it instead — so attach
+					// the block now or the abort would settle invisibly. No-op in legacy mode
+					// (already attached at message_start) and when visible content exists.
+					if (
+						!this.streamingAttached &&
+						(this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") &&
+						!this.streamingMessage.content.some((c) => c.type === "toolCall")
+					) {
+						this.activityStacker.divide();
+						this.streamingComponent.setStreamVisible(true);
+						this.chatContainer.addChild(this.streamingComponent);
+						this.streamingAttached = true;
+					}
 
 					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
 						// Only a genuine error drives the pet's error mood; a user abort is an
@@ -6063,34 +6142,52 @@ export class InteractiveMode {
 		};
 
 		const displayMode = req.displayMode ?? "inline";
-		if (displayMode === "overlay") {
-			let handle: OverlayHandle | undefined;
-			const hooks = {
-				onToggleVisibility: () => handle?.setHidden(!handle.isHidden()),
-				onRequestRender: () => this.ui.requestRender(),
-			};
-			void this.showExtensionCustom<void>(
-				(_tui, _theme, _kb, done) => {
-					close = () => done(undefined);
-					const { component } = createAskPicker(req, resolveFromUser, hooks);
-					return component;
-				},
-				{
-					overlay: true,
-					overlayOptions: { width: "60%", anchor: "center" },
-					onHandle: (h) => {
-						handle = h;
-					},
-				},
-			);
-		} else {
-			this.showSelector((done) => {
-				close = done;
-				const { component, focus } = createAskPicker(req, resolveFromUser, {
+		// Wiring the picker holds the pause (releaseAskWait) and marks the ask pending.
+		// If the UI construction fails, resolveOnce is the single teardown that releases
+		// the pause, un-poisons pendingAskRequest, and answers the bus so the ask tool
+		// never hangs — without it, a failure here would freeze the clock and wedge the
+		// turn. resolveOnce is idempotent, so calling it here is a no-op once the picker
+		// resolves normally.
+		const failWiring = (error: unknown): void => {
+			resolveOnce(computeAutoAnswer(req));
+			this.showError(`Failed to show prompt: ${errMsg(error)}`);
+		};
+		try {
+			if (displayMode === "overlay") {
+				let handle: OverlayHandle | undefined;
+				const hooks = {
+					onToggleVisibility: () => handle?.setHidden(!handle.isHidden()),
 					onRequestRender: () => this.ui.requestRender(),
+				};
+				// showExtensionCustom is async: a factory throw surfaces as a rejected
+				// promise, not a synchronous throw, so the try/catch below cannot see it —
+				// route it through the same teardown via .catch.
+				void this.showExtensionCustom<void>(
+					(_tui, _theme, _kb, done) => {
+						close = () => done(undefined);
+						const { component } = createAskPicker(req, resolveFromUser, hooks);
+						return component;
+					},
+					{
+						overlay: true,
+						overlayOptions: { width: "60%", anchor: "center" },
+						onHandle: (h) => {
+							handle = h;
+						},
+					},
+				).catch(failWiring);
+			} else {
+				this.showSelector((done) => {
+					close = done;
+					const { component, focus } = createAskPicker(req, resolveFromUser, {
+						onRequestRender: () => this.ui.requestRender(),
+					});
+					return { component, focus };
 				});
-				return { component, focus };
-			});
+			}
+		} catch (error) {
+			failWiring(error);
+			return;
 		}
 
 		if (typeof req.timeout === "number" && req.timeout > 0) {
@@ -6126,11 +6223,21 @@ export class InteractiveMode {
 			this.editorContainer.addChild(this.editor);
 			this.ui.setFocus(this.editor);
 		};
-		const { component, focus } = create(done);
-		this.editorContainer.clear();
-		this.editorContainer.addChild(component);
-		this.ui.setFocus(focus);
-		this.ui.requestRender();
+		// The pause is released only via `done` (the selector's confirm/cancel/esc). If the
+		// factory throws while constructing the component, `done` is never wired up and the
+		// clock would freeze forever at "Waiting for you…". Release on that path too;
+		// releaseWait is idempotent, so this never double-decrements.
+		let wired = false;
+		try {
+			const { component, focus } = create(done);
+			this.editorContainer.clear();
+			this.editorContainer.addChild(component);
+			this.ui.setFocus(focus);
+			this.ui.requestRender();
+			wired = true;
+		} finally {
+			if (!wired) releaseWait();
+		}
 	}
 
 	private showSettingsSelector(): void {

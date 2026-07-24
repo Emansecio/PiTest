@@ -6,7 +6,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
-import { isKeyRelease, matchesKey } from "./keys.ts";
+import { isKeyRelease, isMouseSequence, type MouseEvent, matchesKey, parseMouse } from "./keys.ts";
 import type { Terminal } from "./terminal.ts";
 import {
 	deleteKittyImage,
@@ -213,6 +213,46 @@ export function isFocusable(component: Component | null): component is Component
 	return component !== null && "focused" in component;
 }
 
+/** Which child of a {@link MouseHitContainer} owns a given local row. */
+export interface MouseHitTarget {
+	/** The live child component that renders `localRow`. */
+	child: Component;
+	/** The child's first row within this container's local row space (0-based). */
+	childStart: number;
+}
+
+/**
+ * A container that can resolve one of its local rows to the child that rendered
+ * it, without exposing its raw line-offset caches. Implemented by Container,
+ * VirtualizedContainer, and ComposerChrome so the mouse walker (TUI.hitTest) can
+ * descend the LIVE component tree — re-resolved every event, never a cached
+ * reference — from the root down to a {@link MouseTarget}.
+ */
+export interface MouseHitContainer {
+	/** Row → child mapping for the last rendered frame; null if the row is empty
+	 * or the offset cache is stale (child list changed since the last render). */
+	hitTestChild(localRow: number): MouseHitTarget | null;
+}
+
+/**
+ * A leaf that consumes a decoded mouse event addressed to one of its rows.
+ * `localRow`/`localCol` are already translated into this target's own 0-based
+ * coordinate space by the walker. Returns true if the event was acted upon.
+ */
+export interface MouseTarget {
+	onMouse(ev: MouseEvent, localRow: number, localCol: number): boolean;
+}
+
+/** Duck-typed guard: does this component route rows to children? */
+function isMouseHitContainer(component: Component): component is Component & MouseHitContainer {
+	return typeof (component as Partial<MouseHitContainer>).hitTestChild === "function";
+}
+
+/** Duck-typed guard: does this component consume mouse events directly? */
+function isMouseTarget(component: Component): component is Component & MouseTarget {
+	return typeof (component as Partial<MouseTarget>).onMouse === "function";
+}
+
 /**
  * Cursor position marker - APC (Application Program Command) sequence.
  * This is a zero-width escape sequence that terminals ignore.
@@ -329,7 +369,7 @@ export interface OverlayHandle {
 /**
  * Container - a component that contains other components
  */
-export class Container implements Component {
+export class Container implements Component, MouseHitContainer {
 	children: Component[] = [];
 
 	// Memoized flatten of the children's rendered lines. Rebuilding the merged
@@ -445,6 +485,47 @@ export class Container implements Component {
 		this.flattenCacheChildOffsets = offsets;
 		return lines;
 	}
+
+	/**
+	 * Map a local row (0-based, into this container's last flattened output) to the
+	 * child that rendered it. Uses the per-child offsets memoized by render();
+	 * child i spans `[offsets[i], offsets[i+1] ?? flattenCacheLines.length)`.
+	 *
+	 * The offsets are only meaningful when they were computed against the CURRENT
+	 * child list, so this refuses (returns null) unless
+	 * `flattenCacheChildOutputs.length === children.length` — i.e. a child was
+	 * added/removed since the last render, or nothing has rendered yet. A row
+	 * outside the flattened range also returns null. Empty (zero-height) children
+	 * are never selected: the binary search lands on the rightmost child whose
+	 * start offset is <= localRow, which is always the content child at a shared
+	 * offset (an empty child shares its neighbor's offset and can never be the
+	 * rightmost one <= localRow).
+	 */
+	hitTestChild(localRow: number): MouseHitTarget | null {
+		const children = this.children;
+		const offsets = this.flattenCacheChildOffsets;
+		if (this.flattenCacheChildOutputs.length !== children.length || offsets.length !== children.length) {
+			return null;
+		}
+		if (localRow < 0 || localRow >= this.flattenCacheLines.length) return null;
+		let lo = 0;
+		let hi = children.length - 1;
+		let found = -1;
+		while (lo <= hi) {
+			const mid = (lo + hi) >>> 1;
+			if (offsets[mid]! <= localRow) {
+				found = mid;
+				lo = mid + 1;
+			} else {
+				hi = mid - 1;
+			}
+		}
+		if (found === -1) return null;
+		const start = offsets[found]!;
+		const end = found + 1 < offsets.length ? offsets[found + 1]! : this.flattenCacheLines.length;
+		if (localRow < start || localRow >= end) return null;
+		return { child: children[found]!, childStart: start };
+	}
 }
 
 /**
@@ -453,10 +534,6 @@ export class Container implements Component {
 export class TUI extends Container {
 	public terminal: Terminal;
 	private previousLines: string[] = [];
-	/** Alternating scratch buffers for CURSOR_MARKER stripping (avoids O(N) alloc + keeps previousLines intact). */
-	private cursorStripScratchA: string[] = [];
-	private cursorStripScratchB: string[] = [];
-	private cursorStripUseA = true;
 	private previousKittyImageIds = new Set<number>();
 	private previousWidth = 0;
 	private previousHeight = 0;
@@ -519,20 +596,24 @@ export class TUI extends Container {
 	// output lets the steady-state loop reuse a line's reset value with a pointer
 	// compare + index lookup instead of hashing the full string for the Map. The
 	// produced output bytes are identical to recomputing via the Map; only the
-	// per-line cost of the O(N) walk drops. Both arrays are replaced wholesale
-	// each call so they can never drift from the array we return.
-	private resetInputCache: string[] = [];
+	// per-line cost of the O(N) walk drops. The output array is replaced wholesale
+	// each call so it can never drift from the array we return; the input array is
+	// a single buffer updated in place (see below).
+	//
+	// resetInputCache is written ONLY by applyLineResets and never escapes this
+	// class — no caller, no diff, no `previousLines` alias ever holds it. That makes
+	// it safe to update in place: the stable prefix [0, firstDirty) was just proven
+	// element-wise equal to this frame's input by the scan, so re-copying it would
+	// write the values it already holds. Only the output half needs a second buffer.
+	private readonly resetInputCache: string[] = [];
 	private resetOutputCache: string[] = [];
-	// Double-buffer pool backing resetInputCache/resetOutputCache. Rebuilding
-	// nextInput/nextOutput used to allocate two N-length arrays on every frame
-	// where at least one line changed; instead we keep two (input, output) pairs
-	// and alternate between them, resizing (`.length =`) rather than allocating.
-	// nextInput never escapes this class, so its slot is always safe to reuse.
-	// nextOutput *is* returned and becomes `this.previousLines` — see the guard
-	// in applyLineResets before either slot is reused.
-	private resetBufferInputA: string[] = [];
+	// Double-buffer pool backing resetOutputCache. Rebuilding nextOutput used to
+	// allocate an N-length array on every frame where at least one line changed;
+	// instead we keep two slots and alternate between them, resizing (`.length =`)
+	// rather than allocating. nextOutput *is* returned and becomes
+	// `this.previousLines` — see the guard in applyLineResets before either slot is
+	// reused.
 	private resetBufferOutputA: string[] = [];
-	private resetBufferInputB: string[] = [];
 	private resetBufferOutputB: string[] = [];
 	private resetBufferUseA = true;
 	private diffScanCountForTest = 0;
@@ -569,6 +650,20 @@ export class TUI extends Container {
 	}[] = [];
 	/** Cached overlay entry whose component === focusedComponent. Kept in sync by setFocus(). */
 	private focusedOverlay: (typeof this.overlayStack)[number] | null = null;
+
+	// --- Mouse tracking (SGR) state machine ---
+	// Session intent: whether the app asked for mouse tracking at all (set via
+	// setMouseEnabled, wired by the coding-agent). resumeMouse() only ever re-arms
+	// physical tracking while this holds, so a wheel auto-suspend can never resume
+	// tracking the app did not want.
+	private mouseSessionEnabled = false;
+	// True while a wheel gesture turned tracking physically OFF (see consumeMouse).
+	// The next non-mouse keypress — or the idle safety timer — resumes it. The TUI
+	// is inline (no alt-screen), so the emulator scrolls the transcript natively on
+	// the same wheel gesture; we get out of its way for the rest of the scroll.
+	private mouseSuspended = false;
+	private mouseIdleResumeTimer: ReturnType<typeof setTimeout> | undefined;
+	private static readonly MOUSE_IDLE_RESUME_MS = 500;
 
 	constructor(terminal: Terminal, showHardwareCursor?: boolean) {
 		super();
@@ -822,6 +917,7 @@ export class TUI extends Container {
 			clearTimeout(this.renderFaultClearTimer);
 			this.renderFaultClearTimer = undefined;
 		}
+		this.clearMouseIdleTimer();
 		// Move cursor to the end of the content to prevent overwriting/artifacts on exit.
 		// Guard the reposition writes: a synchronous EPIPE on a half-dead pipe here must
 		// not skip the cursor/raw-mode restoration below.
@@ -1051,6 +1147,19 @@ export class TUI extends Container {
 			return;
 		}
 
+		// Mouse routing (before the focused dispatch). Any real keypress resumes
+		// tracking that a prior wheel gesture suspended; then decode-and-route SGR
+		// mouse reports. Placed after the response consumers (a mouse sequence never
+		// matches those) and ahead of focused dispatch so a click can retarget focus.
+		if (this.mouseSuspended && !isMouseSequence(data)) {
+			this.resumeMouse();
+		}
+		const mouseEvent = parseMouse(data);
+		if (mouseEvent) {
+			this.consumeMouse(mouseEvent);
+			return;
+		}
+
 		// Global debug key handler (Shift+Ctrl+D)
 		if (matchesKey(data, "shift+ctrl+d") && this.onDebug) {
 			this.onDebug();
@@ -1080,6 +1189,145 @@ export class TUI extends Container {
 			}
 			this.focusedComponent.handleInput(data);
 			this.requestInputRender();
+		}
+	}
+
+	/**
+	 * Declare whether this session wants mouse tracking (the runtime /mouse toggle
+	 * intent, wired by the coding-agent). Delegates the physical enable/disable to
+	 * the terminal's intent setter and remembers the intent so wheel auto-suspend
+	 * can only ever resume tracking the app actually asked for. An explicit intent
+	 * change also voids any in-flight wheel suspension — the setter above already
+	 * put the physical tracking state where it belongs.
+	 */
+	setMouseEnabled(enabled: boolean): void {
+		this.mouseSessionEnabled = enabled;
+		this.terminal.setMouseEnabled?.(enabled);
+		this.clearMouseIdleTimer();
+		this.mouseSuspended = false;
+	}
+
+	/**
+	 * Route one decoded mouse event. Wheel reports auto-suspend tracking (the
+	 * emulator owns scrollback on an inline TUI). Press/drag/release hit-test the
+	 * live component tree and dispatch to the target under the cursor; a capturing
+	 * modal swallows them (overlay-rect routing is a later phase).
+	 */
+	private consumeMouse(ev: MouseEvent): void {
+		if (ev.type === "wheel") {
+			this.autoSuspendMouse();
+			return;
+		}
+		// A capturing modal owns the screen; routing clicks into overlay rects is a
+		// later phase. Swallow press/drag/release so they neither move an invisible
+		// editor cursor nor steal focus from the modal.
+		if (this.hasCapturingOverlay()) return;
+		const hit = this.hitTest(ev.x, ev.y);
+		if (!hit || !hit.target.onMouse(ev, hit.localRow, hit.localCol)) {
+			// An unclaimed PRESS (transcript, blank area) means the user wants the
+			// terminal's own selection there — same escape hatch as the wheel:
+			// suspend tracking so the NEXT drag selects natively; any keypress (or
+			// the idle timer) re-arms. Only presses suspend — an unclaimed drag/
+			// release tail from a claimed gesture must not kill tracking mid-turn.
+			if (ev.type === "press") this.autoSuspendMouse();
+			return;
+		}
+		// Handled: focus the clicked target (if focusable) and repaint on the same
+		// fast path keystrokes use.
+		if (isFocusable(hit.target) && this.focusedComponent !== hit.target) {
+			this.setFocus(hit.target);
+		}
+		this.requestInputRender();
+	}
+
+	/**
+	 * Resolve a 1-based terminal cell (x=column, y=row) to the deepest MouseTarget
+	 * under it, translating coordinates into that target's own 0-based space.
+	 * Descends the LIVE tree each call (never a cached reference) so a dialog that
+	 * replaced the editor this frame still routes correctly. Returns null when the
+	 * cell is empty, outside content, or lands on a non-target row.
+	 */
+	private hitTest(
+		x: number,
+		y: number,
+	): { target: Component & MouseTarget; localRow: number; localCol: number } | null {
+		// Parity with extractCursorPosition: the visible viewport is the bottom
+		// `rows` lines of the last committed frame. Resolve against previousLines
+		// (the frame the click was reported against), NOT previousViewportTop, which
+		// the diff path nudges for cursor tracking.
+		const viewportTop = Math.max(0, this.previousLines.length - this.terminal.rows);
+		let localRow = viewportTop + (y - 1);
+		const localCol = x - 1;
+		if (localRow < 0 || localCol < 0) return null;
+		// The root is the TUI itself (a MouseHitContainer via Container). Resolve its
+		// child first, then walk down — every node below the root is a plain
+		// Component, so the descent never has to type `this` as Component.
+		let hit = this.hitTestChild(localRow);
+		if (!hit) return null;
+		localRow -= hit.childStart;
+		let node: Component = hit.child;
+		// Bounded descent: each step lands on a target or moves strictly deeper. The
+		// tree depth is tiny; the cap only guards against a pathological cycle.
+		for (let depth = 0; depth < 64; depth++) {
+			if (isMouseTarget(node)) {
+				return { target: node, localRow, localCol };
+			}
+			if (!isMouseHitContainer(node)) return null;
+			hit = node.hitTestChild(localRow);
+			if (!hit) return null;
+			localRow -= hit.childStart;
+			node = hit.child;
+		}
+		return null;
+	}
+
+	/**
+	 * First wheel tick of a scroll gesture: turn tracking OFF directly (physical
+	 * state, bypassing the intent setter) so the emulator owns the scrollback for
+	 * the rest of the gesture. Idempotent within a gesture — a second wheel report
+	 * does not re-write the disable. Every tick refreshes the idle safety timer.
+	 */
+	private autoSuspendMouse(): void {
+		if (!this.mouseSuspended) {
+			this.terminal.disableMouse?.();
+			this.mouseSuspended = true;
+		}
+		this.armMouseIdleResume();
+	}
+
+	/**
+	 * Re-arm tracking after a wheel suspension. Only ever called OFF the wheel path
+	 * (a non-mouse keypress, or the idle timer) — never while handling a mouse
+	 * event — so a scroll gesture is never interrupted mid-flight. A no-op unless
+	 * the session actually wants mouse on, so /mouse-off (or PIT_NO_MOUSE) never
+	 * silently re-enables tracking.
+	 */
+	private resumeMouse(): void {
+		this.clearMouseIdleTimer();
+		if (!this.mouseSuspended) return;
+		if (!this.mouseSessionEnabled) return;
+		this.terminal.enableMouse?.();
+		this.mouseSuspended = false;
+	}
+
+	/**
+	 * Safety net: if no keypress arrives to resume tracking, re-arm it after a
+	 * short idle so the mouse is not left dead after a lone scroll. Unref'd so it
+	 * never keeps the process alive; cancelled/reset on every new wheel tick.
+	 */
+	private armMouseIdleResume(): void {
+		this.clearMouseIdleTimer();
+		this.mouseIdleResumeTimer = setTimeout(() => {
+			this.mouseIdleResumeTimer = undefined;
+			this.resumeMouse();
+		}, TUI.MOUSE_IDLE_RESUME_MS);
+		(this.mouseIdleResumeTimer as { unref?: () => void }).unref?.();
+	}
+
+	private clearMouseIdleTimer(): void {
+		if (this.mouseIdleResumeTimer) {
+			clearTimeout(this.mouseIdleResumeTimer);
+			this.mouseIdleResumeTimer = undefined;
 		}
 	}
 
@@ -1343,7 +1591,18 @@ export class TUI extends Container {
 	private static readonly WIDTH_CACHE_MIN = 4096;
 	private static readonly WIDTH_CACHE_HARD_MAX = 1 << 16;
 
-	private applyLineResets(lines: string[]): string[] {
+	/**
+	 * @param lines - Pre-reset frame. Read-only: may be a Container's memoized
+	 *   flatten array, so it is never written to.
+	 * @param strippedRow - Index whose effective content is `strippedLine` rather
+	 *   than `lines[strippedRow]`, or -1 for none. This is the out-of-band
+	 *   CURSOR_MARKER strip handed over by extractCursorPosition: the one line the
+	 *   frame changes is applied here, while building the output buffer this method
+	 *   already allocates, instead of materialising a full marker-stripped copy of
+	 *   the transcript upstream (see extractCursorPosition).
+	 * @param strippedLine - Replacement content for `strippedRow`.
+	 */
+	private applyLineResets(lines: string[], strippedRow = -1, strippedLine = ""): string[] {
 		const reset = TUI.SEGMENT_RESET;
 		const cache = this.resetCache;
 		// Scale the cap with the current frame. In-order re-insertion each frame
@@ -1352,26 +1611,32 @@ export class TUI extends Container {
 		// per-frame string recompute. 2× headroom absorbs the few lines that
 		// actually change per frame; the hard max bounds memory.
 		const cap = Math.min(TUI.RESET_CACHE_HARD_MAX, Math.max(TUI.RESET_CACHE_MIN, lines.length * 2));
-		const prevInput = this.resetInputCache;
+		// Single in-place input buffer: it is both last frame's input (the key for
+		// the pointer compare below) and this frame's, since every index we do not
+		// prove stable is rewritten before the method returns. See the field comment
+		// for why in-place is safe here but not for the output half.
+		const inputCache = this.resetInputCache;
 		const prevOutput = this.resetOutputCache;
 		let firstDirty = 0;
-		if (prevInput.length === lines.length && prevOutput.length === lines.length) {
-			while (firstDirty < lines.length && lines[firstDirty] === prevInput[firstDirty]) {
+		if (inputCache.length === lines.length && prevOutput.length === lines.length) {
+			while (firstDirty < lines.length) {
+				// Effective input at `strippedRow` is the marker-stripped line, not the
+				// raw one; comparing the raw line here would cap firstDirty at the
+				// cursor row every frame and give up the all-stable early return.
+				const line = firstDirty === strippedRow ? strippedLine : lines[firstDirty];
+				if (line !== inputCache[firstDirty]) break;
 				firstDirty++;
 			}
 			if (firstDirty === lines.length) {
+				// Whole frame stable, inputCache included (element-wise equal to the
+				// effective input we just walked) — nothing to write back.
 				this.resetFirstDirty = firstDirty;
 				return prevOutput;
 			}
 		}
-		// Rebuilt this frame so it can't drift from the array returned. Holds the
-		// pre-reset input (key for the pointer compare) and its post-reset output
-		// at each index, for next frame's reference fast path.
-		//
-		// Double-buffer pool: alternate between two (input, output) pairs across
-		// frames instead of allocating two fresh N-length arrays every time a line
-		// changed. nextInput never leaves this method, so its slot is always safe
-		// to reuse. nextOutput *is* returned and gets committed as `this.previousLines`
+		// Double-buffer pool for the OUTPUT only: alternate between two slots across
+		// frames instead of allocating a fresh N-length array every time a line
+		// changed. nextOutput *is* returned and gets committed as `this.previousLines`
 		// at the end of a successful frame (see doRender) — but if a *later* step in
 		// this same frame throws, doRender's outer try/catch means previousLines is
 		// never committed even though resetOutputCache (and this pool) already moved
@@ -1382,47 +1647,55 @@ export class TUI extends Container {
 		// buffer is currently aliased (by previousLines, or by this frame's own
 		// prevOutput, which the loop below is still reading via prevOutput[i]) — the
 		// pool self-heals next frame once the stale alias is gone.
+		//
+		// `inputCache` needs none of this: it never escapes the method, so it is both
+		// the "previous" and the "next" input and is updated in place below. A failed
+		// frame leaves it describing that frame's input paired index-for-index with
+		// resetOutputCache — self-consistent regardless of whether previousLines was
+		// committed, which is all the fast path reads it for.
 		const useBufferA = this.resetBufferUseA;
 		this.resetBufferUseA = !useBufferA;
-		let nextInput = useBufferA ? this.resetBufferInputA : this.resetBufferInputB;
 		let nextOutput = useBufferA ? this.resetBufferOutputA : this.resetBufferOutputB;
 		if (nextOutput === this.previousLines || nextOutput === prevOutput) {
-			nextInput = new Array<string>(lines.length);
 			nextOutput = new Array<string>(lines.length);
 		} else {
-			nextInput.length = lines.length;
 			nextOutput.length = lines.length;
 		}
+		// A length change means the scan above never ran (firstDirty === 0), so every
+		// slot is rewritten below and this resize can only add holes / drop entries
+		// past the new end.
+		inputCache.length = lines.length;
 		// Stable prefix: copy reset outputs from last frame (pointer-identical lines).
+		// inputCache needs no prefix copy — the scan just proved it already holds
+		// exactly these values.
 		for (let i = 0; i < firstDirty; i++) {
-			nextInput[i] = lines[i]!;
 			nextOutput[i] = prevOutput[i]!;
 		}
-		// Read-only over `lines`, write into `nextOutput` (which is returned). Not
-		// mutating the input matters: the input may be a Container's memoized
-		// flatten array (see Container.render) — mutating it in place would corrupt
-		// that cache (double-applied resets, broken reference fast-path) on the
-		// next frame.
+		// Read-only over `lines`, write into `nextOutput` (which is returned) and
+		// `inputCache`. Not mutating the input matters: `lines` may be a Container's
+		// memoized flatten array (see Container.render) — mutating it in place would
+		// corrupt that cache (double-applied resets, broken reference fast-path) on
+		// the next frame. Every index reads inputCache[i] before overwriting it, so
+		// the in-place update never clobbers a value this loop still needs.
 		for (let i = firstDirty; i < lines.length; i++) {
-			const line = lines[i]!;
+			const line = i === strippedRow ? strippedLine : lines[i]!;
 			// Same string object as this index last frame → reuse its reset output
 			// verbatim (pointer compare, no full-string hash). Byte-identical to the
 			// Map path, including the isImageLine "leave untouched" case where the
 			// stored output equals the input.
-			if (line === prevInput[i] && i < prevOutput.length) {
+			if (line === inputCache[i] && i < prevOutput.length) {
 				const out = prevOutput[i]!;
-				nextInput[i] = line;
 				nextOutput[i] = out;
 				continue;
 			}
 			if (isImageLine(line)) {
-				nextInput[i] = line;
+				inputCache[i] = line;
 				nextOutput[i] = line;
 				continue;
 			}
 			const cached = cache.get(line);
 			if (cached !== undefined) {
-				nextInput[i] = line;
+				inputCache[i] = line;
 				nextOutput[i] = cached;
 				continue;
 			}
@@ -1433,20 +1706,17 @@ export class TUI extends Container {
 				if (oldest !== undefined) cache.delete(oldest);
 			}
 			cache.set(line, normalized);
-			nextInput[i] = line;
+			inputCache[i] = line;
 			nextOutput[i] = normalized;
 		}
 		// Store back into whichever slot was chosen (even if the guard above forced
 		// a fresh allocation this frame, replacing the stale aliased buffer heals
 		// the pool for the next frame).
 		if (useBufferA) {
-			this.resetBufferInputA = nextInput;
 			this.resetBufferOutputA = nextOutput;
 		} else {
-			this.resetBufferInputB = nextInput;
 			this.resetBufferOutputB = nextOutput;
 		}
-		this.resetInputCache = nextInput;
 		this.resetOutputCache = nextOutput;
 		this.resetFirstDirty = firstDirty;
 		return nextOutput;
@@ -1594,16 +1864,30 @@ export class TUI extends Container {
 
 	/**
 	 * Find and extract cursor position from rendered lines.
-	 * Searches for CURSOR_MARKER, calculates its position, and strips it from the output.
+	 * Searches for CURSOR_MARKER, calculates its position, and reports the
+	 * marker-stripped replacement for the single line that carries it.
 	 * Only scans the bottom terminal height lines (visible viewport).
-	 * @param lines - Rendered lines to search
+	 *
+	 * Deliberately does NOT hand back a stripped copy of the frame. The marker is
+	 * present on essentially every frame the editor is focused, and it always sits
+	 * on one line inside the bottom viewport — materialising a full-length copy for
+	 * a one-line edit cost an O(total lines) pass per frame on a 20k+ line session.
+	 * The strip travels out-of-band as (row, replacement) instead and is applied by
+	 * applyLineResets while it fills the output buffer it already builds, so the
+	 * bytes downstream sees are unchanged. `lines` itself is never written to — it
+	 * may be a Container's memoized flatten array (see Container.render) — and no
+	 * scratch buffer is kept, so nothing can alias `previousLines` while the
+	 * differential path still needs it.
+	 *
+	 * @param lines - Rendered lines to search (read-only)
 	 * @param height - Terminal height (visible viewport size)
-	 * @returns Cursor position { row, col } or null if no marker found
+	 * @returns Cursor position { row, col } or null if no marker found, plus the
+	 *   strip to apply: `strippedRow` -1 means "no marker, nothing to replace".
 	 */
 	private extractCursorPosition(
 		lines: string[],
 		height: number,
-	): { pos: { row: number; col: number } | null; lines: string[] } {
+	): { pos: { row: number; col: number } | null; strippedRow: number; strippedLine: string } {
 		// Only scan the bottom `height` lines (visible viewport)
 		const viewportTop = Math.max(0, lines.length - height);
 		for (let row = lines.length - 1; row >= viewportTop; row--) {
@@ -1613,25 +1897,14 @@ export class TUI extends Container {
 				// Calculate visual column (width of text before marker)
 				const beforeMarker = line.slice(0, markerIndex);
 				const col = visibleWidth(beforeMarker);
-
-				// Strip marker into a scratch copy rather than mutating in place: `lines`
-				// may be a Container's memoized flatten array (see Container.render).
-				// Alternate two scratch buffers so we never overwrite `previousLines`
-				// while the differential path still needs it.
-				const scratch = this.cursorStripUseA ? this.cursorStripScratchA : this.cursorStripScratchB;
-				this.cursorStripUseA = !this.cursorStripUseA;
-				if (scratch.length !== lines.length) {
-					scratch.length = lines.length;
-				}
-				for (let i = 0; i < lines.length; i++) {
-					scratch[i] = lines[i]!;
-				}
-				scratch[row] = line.slice(0, markerIndex) + line.slice(markerIndex + CURSOR_MARKER.length);
-
-				return { pos: { row, col }, lines: scratch };
+				return {
+					pos: { row, col },
+					strippedRow: row,
+					strippedLine: beforeMarker + line.slice(markerIndex + CURSOR_MARKER.length),
+				};
 			}
 		}
-		return { pos: null, lines };
+		return { pos: null, strippedRow: -1, strippedLine: "" };
 	}
 
 	/** Absolute path of the render-overflow diagnostic file. */
@@ -1835,14 +2108,14 @@ export class TUI extends Container {
 			newLines = this.compositeOverlays(newLines, width, height);
 		}
 
-		// Extract cursor position before applying line resets (marker must be found first).
-		// Returns a marker-stripped copy when a marker is present so the source array
-		// (possibly a Container flatten cache) is never mutated in place.
+		// Extract cursor position before applying line resets (marker must be found
+		// first). The marker strip rides along out-of-band as (row, replacement) and
+		// is applied inside applyLineResets, so the source array (possibly a
+		// Container flatten cache) is never mutated and no full-length copy is made.
 		const cursor = this.extractCursorPosition(newLines, height);
 		const cursorPos = cursor.pos;
-		newLines = cursor.lines;
 
-		newLines = this.applyLineResets(newLines);
+		newLines = this.applyLineResets(newLines, cursor.strippedRow, cursor.strippedLine);
 
 		// Helper to repaint every line. clearMode selects how much is wiped first:
 		//   "none"   → no clear (first render onto an assumed-clean screen)

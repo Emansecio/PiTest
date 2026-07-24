@@ -1,13 +1,18 @@
 /**
  * Cache keepalive (P3 — docs/proposals/2026-07-22-propostas-fronteira.md).
  *
- * Anthropic's default prompt-cache retention expires ~5 minutes after the last
- * read. While the session sits idle waiting for the user, that TTL lapses and
- * the next turn re-writes the whole cacheable prefix (system prompt + tools +
- * message history) at ~1.25x the base input price instead of re-reading it at
- * ~0.1x. A `max_tokens: 1` ping against the SAME prefix costs a fraction of
- * that rewrite and renews the TTL, so this keeps pinging on a short interval
- * while the session is genuinely idle.
+ * Anthropic's prompt-cache retention expires after its TTL lapses following the
+ * last read — ~5 minutes for the default "short" retention, 1 hour for "long"
+ * (1h TTL, the main interactive session's default; see anthropic.ts
+ * getCacheControl). While the session sits idle waiting for the user, that TTL
+ * lapses and the next turn re-writes the whole cacheable prefix (system prompt
+ * + tools + message history) instead of re-reading it at ~0.1x — at ~1.25x the
+ * base input price on a short-retention prefix, ~2.0x on a long one. A
+ * `max_tokens: 1` ping against the SAME prefix costs a fraction of that rewrite
+ * and renews the TTL, so this keeps pinging while the session is genuinely idle.
+ * The effective wire retention (env `PIT_CACHE_RETENTION` > session option >
+ * "long" default, then clamped to short when the model lacks long-retention
+ * support) picks the cadence: short → ~4m30 interval, long → ~55min interval.
  *
  * Kill-switch: `PIT_NO_CACHE_KEEPALIVE`.
  *
@@ -19,23 +24,38 @@
  */
 
 import type { Agent } from "@pit/agent-core";
-import type { Context, Model } from "@pit/ai";
-import { completeSimple, recordDiagnostic } from "@pit/ai";
+import type { CacheRetention, Context, Model } from "@pit/ai";
+import { completeSimple, recordDiagnostic, resolveCacheRetention } from "@pit/ai";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import type { CompactionController } from "./agent-session-compaction.ts";
 import type { ContextUsage } from "./extensions/index.js";
 import { compactToolsForProviderContext } from "./tool-wire-schema.ts";
 
-/** Delay before the first (and every subsequent) keepalive ping while idle: ~4m30s. */
+/** Delay before each keepalive ping while idle under SHORT (~5min TTL) retention: ~4m30s. */
 export const CACHE_KEEPALIVE_INTERVAL_MS = 270_000;
 
 /**
- * Max pings fired per idle period. Two pings from a single idle-start covers
- * ~9 minutes of scheduled activity; the second ping's TTL renewal extends
- * live coverage to ~13-14 minutes total before the session gives up and waits
- * for the next real turn.
+ * Max pings fired per idle period under SHORT retention. Two pings from a single
+ * idle-start covers ~9 minutes of scheduled activity; the second ping's TTL
+ * renewal extends live coverage to ~13-14 minutes total before the session
+ * gives up and waits for the next real turn.
  */
 export const CACHE_KEEPALIVE_MAX_PINGS = 2;
+
+/**
+ * Delay before each keepalive ping while idle under LONG (1h TTL) retention:
+ * ~55min. Fires just inside the 1h window so each read renews the TTL before it
+ * lapses. One ping (a cache-read, ~0.1x input) is far cheaper than re-writing a
+ * long-retention prefix (~2.0x input), so pinging pays off across a wide margin.
+ */
+export const CACHE_KEEPALIVE_LONG_INTERVAL_MS = 3_300_000;
+
+/**
+ * Max pings fired per idle period under LONG retention. Two ~55min pings reach
+ * ~110min from idle-start, and the second ping's 1h TTL renewal keeps the prefix
+ * live to ~170min (~2h50) before the session gives up and waits for a real turn.
+ */
+export const CACHE_KEEPALIVE_LONG_MAX_PINGS = 2;
 
 /** Minimum wire prefix (system prompt + tools + messages) worth keeping alive. */
 export const CACHE_KEEPALIVE_MIN_WIRE_TOKENS = 15_000;
@@ -63,7 +83,7 @@ export interface CacheKeepaliveTimer {
 export interface CacheKeepaliveGates {
 	/** False when PIT_NO_CACHE_KEEPALIVE is set. */
 	isEnabled(): boolean;
-	/** True only for an Anthropic model whose cache retention is the short (default ~5min) kind. */
+	/** True for an Anthropic model whose effective wire retention is not "none" (short and long both qualify — retention only selects cadence, not eligibility). */
 	isEligibleModel(): boolean;
 	/** True when the session is not currently streaming a response. */
 	isIdle(): boolean;
@@ -71,6 +91,10 @@ export interface CacheKeepaliveGates {
 	hasLargeEnoughPrefix(): boolean;
 	/** True when a background/precomputed compaction is in flight and about to change the window. */
 	isCompactionInFlight(): boolean;
+	/** Idle delay before the next ping — short vs long effective retention pick different cadences; re-read fresh at each (re)schedule. */
+	intervalMs(): number;
+	/** Per-idle-period ping cap for the current effective retention; re-read fresh at each (re)schedule. */
+	maxPings(): number;
 }
 
 export interface CacheKeepaliveDeps {
@@ -114,12 +138,16 @@ export class CacheKeepalive {
 	scheduleIdle(): void {
 		if (this.pinging) return;
 		if (!this.deps.gates.isEnabled()) return;
-		if (this.pingCount >= CACHE_KEEPALIVE_MAX_PINGS) return;
+		// Cap and interval are read fresh here (not captured at construction): the
+		// effective retention — and thus the cadence — can flip during the idle
+		// wait as the model or PIT_CACHE_RETENTION changes, and every reschedule
+		// (including fire()'s own) routes through here.
+		if (this.pingCount >= this.deps.gates.maxPings()) return;
 		this.clearTimer();
 		this.timerHandle = this.deps.timer.setTimer(() => {
 			this.timerHandle = undefined;
 			void this.fire();
-		}, CACHE_KEEPALIVE_INTERVAL_MS);
+		}, this.deps.gates.intervalMs());
 	}
 
 	/** Cancel any pending timer and reset the per-idle-period ping budget. Call at the start of every new user-initiated turn. */
@@ -176,8 +204,12 @@ export interface CacheKeepaliveHost {
 	readonly compaction: CompactionController;
 	readonly model: Model<any> | undefined;
 	readonly isStreaming: boolean;
+	/** True while a Fusion turn (panel/judge/writer) is in flight — the session is busy even though isStreaming is false. Optional so narrow test hosts stay valid. */
+	readonly isFusing?: boolean;
 	getContextUsage(): ContextUsage | undefined;
 	getCompactionRequestAuth(model: Model<any>): Promise<{ apiKey?: string; headers?: Record<string, string> }>;
+	/** The RAW per-session cache-retention option (undefined = provider default); resolved env-first before use. */
+	getSessionCacheRetention(): CacheRetention | undefined;
 }
 
 /**
@@ -193,20 +225,42 @@ export function modelHasShortCacheRetention(model: Model<any>): boolean {
 	return model.compat?.supportsLongCacheRetention === false;
 }
 
-function createGatesForHost(host: CacheKeepaliveHost): CacheKeepaliveGates {
+/**
+ * The retention the prefix will ACTUALLY get on the wire for this host, which
+ * decides the ping cadence. Mirrors anthropic.ts getCacheControl: resolve
+ * env-first (`PIT_CACHE_RETENTION` > session option > "long" default), then
+ * demote "long" to "short" when the model lacks long-retention support (its
+ * cache_control ships without the 1h ttl, so the real TTL is only ~5min).
+ * Returns "none" for any non-Anthropic model — the keepalive never runs there.
+ */
+export function effectiveKeepaliveRetention(host: CacheKeepaliveHost): CacheRetention {
+	const model = host.model;
+	if (!model || model.provider !== "anthropic") return "none";
+	const resolved = resolveCacheRetention(host.getSessionCacheRetention(), "long");
+	if (resolved === "none") return "none";
+	if (resolved === "long" && !modelHasShortCacheRetention(model)) return "long";
+	return "short";
+}
+
+export function createGatesForHost(host: CacheKeepaliveHost): CacheKeepaliveGates {
 	return {
 		isEnabled: () => !isTruthyEnvFlag(process.env.PIT_NO_CACHE_KEEPALIVE),
-		isEligibleModel: () => {
-			const model = host.model;
-			if (!model || model.provider !== "anthropic") return false;
-			return modelHasShortCacheRetention(model);
-		},
-		isIdle: () => !host.isStreaming,
+		// Both short and long effective retention are eligible; only "none"
+		// (non-Anthropic, or PIT_CACHE_RETENTION=none) opts out entirely.
+		isEligibleModel: () => effectiveKeepaliveRetention(host) !== "none",
+		// Fusion turns run outside the agent loop (isStreaming stays false while the
+		// panel/judge/writer work), so "idle" must exclude them too — a ping mid-fusion
+		// is harmless but pointless spend.
+		isIdle: () => !host.isStreaming && !(host.isFusing ?? false),
 		hasLargeEnoughPrefix: () => {
 			const wireTokens = host.getContextUsage()?.wireTokens;
 			return typeof wireTokens === "number" && wireTokens >= CACHE_KEEPALIVE_MIN_WIRE_TOKENS;
 		},
 		isCompactionInFlight: () => host.compaction.backgroundCompactionPromise !== undefined,
+		intervalMs: () =>
+			effectiveKeepaliveRetention(host) === "long" ? CACHE_KEEPALIVE_LONG_INTERVAL_MS : CACHE_KEEPALIVE_INTERVAL_MS,
+		maxPings: () =>
+			effectiveKeepaliveRetention(host) === "long" ? CACHE_KEEPALIVE_LONG_MAX_PINGS : CACHE_KEEPALIVE_MAX_PINGS,
 	};
 }
 
@@ -237,6 +291,7 @@ async function buildPingContext(host: CacheKeepaliveHost): Promise<Context> {
 async function pingHost(host: CacheKeepaliveHost): Promise<boolean> {
 	const model = host.model;
 	if (!model) return false;
+	const retention = effectiveKeepaliveRetention(host);
 	try {
 		const context = await buildPingContext(host);
 		const { apiKey, headers } = await host.getCompactionRequestAuth(model);
@@ -246,7 +301,9 @@ async function pingHost(host: CacheKeepaliveHost): Promise<boolean> {
 				category: "cache.keepalive",
 				level: "warn",
 				source: "cache-keepalive.ping",
-				context: { note: `failed model=${model.id} ${(response.errorMessage ?? "").slice(0, 150)}`.trim() },
+				context: {
+					note: `failed model=${model.id} retention=${retention} ${(response.errorMessage ?? "").slice(0, 150)}`.trim(),
+				},
 			});
 			return false;
 		}
@@ -254,7 +311,7 @@ async function pingHost(host: CacheKeepaliveHost): Promise<boolean> {
 			category: "cache.keepalive",
 			level: "info",
 			source: "cache-keepalive.ping",
-			context: { note: `ok model=${model.id}` },
+			context: { note: `ok model=${model.id} retention=${retention}` },
 		});
 		return true;
 	} catch (error) {
@@ -264,7 +321,7 @@ async function pingHost(host: CacheKeepaliveHost): Promise<boolean> {
 			category: "cache.keepalive",
 			level: "warn",
 			source: "cache-keepalive.ping",
-			context: { note: `threw model=${model.id} ${note}`.slice(0, 200) },
+			context: { note: `threw model=${model.id} retention=${retention} ${note}`.slice(0, 200) },
 		});
 		return false;
 	}

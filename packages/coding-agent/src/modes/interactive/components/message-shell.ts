@@ -65,6 +65,14 @@ export interface MessageShellOptions {
 	 */
 	gutterChar?: string;
 	/**
+	 * Gutter glyph for continuation lines (every rendered line after the first).
+	 * Defaults to `gutterChar` — right for a running bar like `│`, wrong for a
+	 * pointer like `❯`, which repeated on every wrapped line reads as a column
+	 * of arrows. The user role passes `" "` so only the first line carries the
+	 * prompt tick and continuations stay indented to the same text column.
+	 */
+	gutterContinuationChar?: string;
+	/**
 	 * Optional label rendered on the first content line, in bold, in the same
 	 * color as the gutter. Bracket your own label if you want brackets in the
 	 * output (`"[compaction]"` produces `[compaction]`). Kept short.
@@ -112,6 +120,7 @@ const identityColor = (text: string): string => text;
 export class MessageShell extends Container {
 	private gutterColor: (text: string) => string;
 	private gutterChar: string;
+	private gutterContinuationChar: string;
 	private frameColor: (text: string) => string;
 	private label: string | undefined;
 	private shellDisabled: boolean;
@@ -139,6 +148,7 @@ export class MessageShell extends Container {
 		super();
 		this.gutterColor = options.gutterColor ?? identityColor;
 		this.gutterChar = options.gutterChar ?? SHELL_GUTTER_CHAR;
+		this.gutterContinuationChar = options.gutterContinuationChar ?? this.gutterChar;
 		this.frameColor = options.frameColor ?? options.gutterColor ?? identityColor;
 		this.label = options.label;
 		this.shellDisabled = options.shellDisabled ?? false;
@@ -281,6 +291,15 @@ export class MessageShell extends Container {
 	private renderGuttered(width: number, childLines: string[]): string[] {
 		const barGutter = this.gutterColor(this.gutterChar);
 		const headGutter = this.gutterSpinner !== undefined ? this.gutterColor(this.gutterSpinner) : barGutter;
+		// Continuation lines may carry a different glyph (user role: `" "` so the
+		// `❯` tick marks only the first line). A blank continuation skips the color
+		// wrap — no point styling a bare space.
+		const contGutter =
+			this.gutterContinuationChar === this.gutterChar
+				? barGutter
+				: this.gutterContinuationChar.trim() === ""
+					? this.gutterContinuationChar
+					: this.gutterColor(this.gutterContinuationChar);
 		const result: string[] = [];
 
 		if (!this.noLeadingGap) {
@@ -293,7 +312,7 @@ export class MessageShell extends Container {
 			if (hasLabel) {
 				line = this.applyLabel(line);
 			}
-			let assembled = `${i === 0 ? headGutter : barGutter} ${line}`;
+			let assembled = `${i === 0 ? headGutter : contGutter} ${line}`;
 			if (hasLabel && visibleWidth(assembled) > width) {
 				assembled = assembled.replace(/ +$/, "");
 				if (visibleWidth(assembled) > width) {

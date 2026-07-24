@@ -40,14 +40,14 @@ export const MODELS = {
 			contextWindow: 200000,
 			maxTokens: 64000,
 		} satisfies Model<"anthropic-messages">,
-		"claude-opus-4-8": {
-			id: "claude-opus-4-8",
-			name: "Claude Opus 4.8",
+		"claude-opus-5": {
+			id: "claude-opus-5",
+			name: "Claude Opus 5",
 			api: "anthropic-messages",
 			provider: "anthropic",
 			baseUrl: "https://api.anthropic.com",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh"},
+			thinkingLevelMap: {"xhigh":"xhigh","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 5,

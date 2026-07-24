@@ -28,6 +28,7 @@ import { AuthStorage } from "../src/core/auth-storage.js";
 import { SubagentRegistry } from "../src/core/coordinator/registry.js";
 import {
 	DEFAULT_MAX_TURNS,
+	deriveSubagentCacheKey,
 	evaluateSubagentToolPermission,
 	isTransportRetryableError,
 	type SpawnSubagentDependencies,
@@ -547,6 +548,99 @@ describe("spawnSubagent (faux model)", () => {
 		expect(isTransportRetryableError("aborted: timeout after 100ms")).toBe(false);
 		expect(isTransportRetryableError("aborted: turn cap (2) reached")).toBe(false);
 		expect(isTransportRetryableError("provider returned error: 502")).toBe(true);
+	});
+
+	// ---- prompt_cache_key shard affinity (deps.parentSessionId → Agent.sessionId) ----
+	// The Agent forwards sessionId into the stream options (agent-loop spreads the
+	// loop config), which the faux provider surfaces as `options.sessionId`.
+
+	it("derives the subagent prompt_cache_key from parentSessionId + agentTypeLabel", async () => {
+		const rig = newRig();
+		rig.deps.parentSessionId = "sess-ABC";
+		let seen: string | undefined;
+		rig.faux.setResponses([
+			(_context: Context, options) => {
+				seen = options?.sessionId;
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await spawnSubagent(rig.deps, { prompt: "p", taskName: "ck-typed", agentTypeLabel: "review" });
+		expect(seen).toBe("sess-ABC:sub:review");
+	});
+
+	it("defaults the cache-key label to 'task' for an untyped spawn", async () => {
+		const rig = newRig();
+		rig.deps.parentSessionId = "sess-XYZ";
+		let seen: string | undefined;
+		rig.faux.setResponses([
+			(_context: Context, options) => {
+				seen = options?.sessionId;
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await spawnSubagent(rig.deps, { prompt: "p", taskName: "ck-default" });
+		expect(seen).toBe("sess-XYZ:sub:task");
+	});
+
+	it("sends no cache key when the deps carry no parentSessionId (legacy behavior)", async () => {
+		const rig = newRig();
+		// rig.deps.parentSessionId intentionally unset.
+		let seen: string | undefined = "SENTINEL";
+		rig.faux.setResponses([
+			(_context: Context, options) => {
+				seen = options?.sessionId;
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await spawnSubagent(rig.deps, { prompt: "p", taskName: "ck-none", agentTypeLabel: "review" });
+		expect(seen).toBeUndefined();
+	});
+
+	it("PIT_NO_SUBAGENT_CACHE_KEY disables the derived key even with a parentSessionId", async () => {
+		const rig = newRig();
+		rig.deps.parentSessionId = "sess-ABC";
+		const prev = process.env.PIT_NO_SUBAGENT_CACHE_KEY;
+		process.env.PIT_NO_SUBAGENT_CACHE_KEY = "1";
+		try {
+			let seen: string | undefined = "SENTINEL";
+			rig.faux.setResponses([
+				(_context: Context, options) => {
+					seen = options?.sessionId;
+					return fauxAssistantMessage("done");
+				},
+			]);
+			await spawnSubagent(rig.deps, { prompt: "p", taskName: "ck-off", agentTypeLabel: "review" });
+			expect(seen).toBeUndefined();
+		} finally {
+			if (prev === undefined) delete process.env.PIT_NO_SUBAGENT_CACHE_KEY;
+			else process.env.PIT_NO_SUBAGENT_CACHE_KEY = prev;
+		}
+	});
+});
+
+describe("deriveSubagentCacheKey", () => {
+	it("builds parentSessionId + ':sub:' + label", () => {
+		expect(deriveSubagentCacheKey("sess-1", "review")).toBe("sess-1:sub:review");
+	});
+
+	it("defaults an absent or blank label to 'task'", () => {
+		expect(deriveSubagentCacheKey("sess-1", undefined)).toBe("sess-1:sub:task");
+		expect(deriveSubagentCacheKey("sess-1", "   ")).toBe("sess-1:sub:task");
+	});
+
+	it("same parent + same label produces an identical (shareable) key", () => {
+		expect(deriveSubagentCacheKey("s", "explore")).toBe(deriveSubagentCacheKey("s", "explore"));
+	});
+
+	it("truncates the parent so the type suffix survives within the 64-char clamp", () => {
+		const key = deriveSubagentCacheKey("p".repeat(200), "reviewer");
+		expect(Array.from(key).length).toBeLessThanOrEqual(64);
+		expect(key.endsWith(":sub:reviewer")).toBe(true);
+	});
+
+	it("keeps distinct-type keys distinct even when the parent is truncated", () => {
+		const longParent = "x".repeat(200);
+		expect(deriveSubagentCacheKey(longParent, "aaa")).not.toBe(deriveSubagentCacheKey(longParent, "bbb"));
 	});
 });
 

@@ -20,12 +20,12 @@ const LABEL: Record<AgentId, string> = {
 	opencode: "opencode",
 };
 const INVOCATION: Record<AgentId, { model: string; cmd: string }> = {
-	pit: { model: "claude-opus-4-8", cmd: "pit --mode json --no-session --model <m>" },
+	pit: { model: "claude-opus-5", cmd: "pit --mode json --no-session --model <m>" },
 	cc: { model: "opus", cmd: "claude -p --output-format stream-json --verbose --permission-mode bypassPermissions" },
 	codex: { model: "gpt-5.5", cmd: "codex exec --json --dangerously-bypass-approvals-and-sandbox -C <dir>" },
-	droid: { model: "claude-opus-4-8", cmd: "droid exec -o json --skip-permissions-unsafe --auto high -m <m> --cwd <dir>" },
+	droid: { model: "claude-opus-5", cmd: "droid exec -o json --skip-permissions-unsafe --auto high -m <m> --cwd <dir>" },
 	opencode: {
-		model: "anthropic/claude-opus-4-1",
+		model: "anthropic/claude-opus-5",
 		cmd: "opencode run --format json --dangerously-skip-permissions -m <m> --dir <dir>",
 	},
 };

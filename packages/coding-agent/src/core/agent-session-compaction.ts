@@ -4,11 +4,12 @@
 
 import { statSync } from "node:fs";
 import type { Agent, AgentMessage, ThinkingLevel } from "@pit/agent-core";
-import type { AssistantMessage, Model } from "@pit/ai";
-import { isContextOverflow, recordDiagnostic, streamSimple } from "@pit/ai";
+import type { AssistantMessage, CacheRetention, Context, Model } from "@pit/ai";
+import { isContextOverflow, recordDiagnostic, resolveCacheRetention, streamSimple } from "@pit/ai";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import type { AgentSessionEvent } from "./agent-session-events.ts";
 import { formatNoModelSelectedMessage } from "./auth-guidance.ts";
+import { modelHasShortCacheRetention } from "./cache-keepalive.ts";
 import {
 	adaptivePruneThreshold,
 	type CompactionSettings,
@@ -27,6 +28,7 @@ import {
 } from "./compaction/compaction.ts";
 import {
 	adaptiveKeepRecentTokens,
+	type CacheAwareGeneration,
 	type CompactionPreparation,
 	type CompactionResult,
 	calculateContextTokens,
@@ -38,7 +40,7 @@ import {
 	shouldCompact,
 	sumMessageTokens,
 } from "./compaction/index.ts";
-import type { ExtensionRunner, SessionBeforeCompactResult } from "./extensions/index.js";
+import type { ContextUsage, ExtensionRunner, SessionBeforeCompactResult } from "./extensions/index.js";
 import type { HindsightBank } from "./hindsight/index.js";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCompactSibling, resolveRole } from "./model-resolver.ts";
@@ -46,6 +48,7 @@ import type { PinManager } from "./pins.ts";
 import type { CompactionEntry, SessionEntry, SessionManager } from "./session-manager.js";
 import { getLatestCompactionEntry } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
+import { compactToolsForProviderContext } from "./tool-wire-schema.ts";
 import type { FileMtimeStore } from "./tools/file-mtime-store.ts";
 import { canonicalPathKey, resolveReadPath } from "./tools/path-utils.ts";
 import type { ReadDedupeStore } from "./tools/read.js";
@@ -217,6 +220,17 @@ export interface CompactionHost {
 	disconnectFromAgent(): void;
 	reconnectToAgent(): void;
 	abort(): Promise<void>;
+	/**
+	 * Current context usage (wire tokens etc.). Feeds cache-aware compaction's
+	 * arithmetic. Optional so partial test-host mocks stay valid; the real
+	 * AgentSession (which also implements CacheKeepaliveHost) always provides it.
+	 */
+	getContextUsage?(): ContextUsage | undefined;
+	/**
+	 * RAW per-session cache-retention option (undefined = provider default),
+	 * resolved env-first before use. Optional for the same reason as above.
+	 */
+	getSessionCacheRetention?(): CacheRetention | undefined;
 }
 
 /** Wire prefix surface (system prompt + tool schemas) captured at presend time. */
@@ -514,6 +528,117 @@ export async function resolveCompactModel(
 }
 
 // ============================================================================
+// Cache-aware compaction (route the summary generation through the session's
+// hot prompt-cache prefix when the arithmetic favors it — see
+// core/compaction/cache-aware.ts for the routing model).
+// ============================================================================
+
+/**
+ * Age past which a hot prefix is treated as cold, per effective retention. A
+ * safety margin under the real TTL so we never bet on a read that just lapsed:
+ * SHORT is ~5min TTL (renew ~60s early), LONG is 1h (renew ~5min early). Mirrors
+ * the keepalive cadence intent in core/cache-keepalive.ts.
+ */
+const CACHE_AWARE_SHORT_MAX_AGE_MS = 240_000;
+const CACHE_AWARE_LONG_MAX_AGE_MS = 3_300_000;
+
+/**
+ * Effective wire cache retention for the host's session model. Replicated from
+ * {@link effectiveKeepaliveRetention} (core/cache-keepalive.ts) — that helper
+ * types its host as CacheKeepaliveHost, which CompactionHost does not widen to;
+ * the resolution is four lines, so we mirror it here (keep in sync) rather than
+ * thread a second host shape. Resolve env-first (PIT_CACHE_RETENTION > session
+ * option > "long"), then demote "long" to "short" when the model lacks
+ * long-retention support. "none" for any non-Anthropic model.
+ */
+function effectiveRetentionForCompaction(host: CompactionHost): CacheRetention {
+	const model = host.model;
+	if (!model || model.provider !== "anthropic") return "none";
+	const resolved = resolveCacheRetention(host.getSessionCacheRetention?.(), "long");
+	if (resolved === "none") return "none";
+	if (resolved === "long" && !modelHasShortCacheRetention(model)) return "long";
+	return "short";
+}
+
+/**
+ * Assemble the {@link CacheAwareGeneration} for a compaction, or `undefined`
+ * when any gate fails (→ the summarizer takes the always-correct text/sibling
+ * path). Gates:
+ *   - kill-switch `PIT_NO_CACHE_AWARE_COMPACTION` absent;
+ *   - session model is Anthropic (only provider with the read-at-0.1x prefix cache);
+ *   - host exposes the keepalive infra (real AgentSession does; test mocks may not);
+ *   - effective retention is not "none";
+ *   - PREFIX HOT: the window ends in an assistant turn (so the summarization
+ *     instruction can ride a fresh trailing user message without breaking role
+ *     alternation), that turn is within the retention TTL (minus margin), and it
+ *     demonstrably read from cache last time (usage.cacheRead > 0 — the same
+ *     signal computeCacheStats reports for the final turn).
+ * The cost decision itself (sibling vs cache-read) is made downstream in
+ * generateSummary; this only decides ELIGIBILITY and packages the session
+ * prefix. `session` carries the SESSION model + its auth (already fetched by the
+ * caller before resolveCompactModel), which the cache-read route calls.
+ */
+export function buildCacheAwareGeneration(
+	ctx: CompactionController,
+	session: {
+		model: Model<any>;
+		apiKey: string | undefined;
+		headers: Record<string, string> | undefined;
+	},
+): CacheAwareGeneration | undefined {
+	if (isTruthyEnvFlag(process.env.PIT_NO_CACHE_AWARE_COMPACTION)) return undefined;
+	const host = ctx.host;
+	const model = session.model;
+	if (model.provider !== "anthropic") return undefined;
+	if (!host.getContextUsage || !host.getSessionCacheRetention) return undefined;
+
+	const retention = effectiveRetentionForCompaction(host);
+	if (retention === "none") return undefined;
+
+	const messages = host.agent.state.messages;
+	const last = messages[messages.length - 1];
+	if (!last || last.role !== "assistant") return undefined;
+	const lastAssistant = last as AssistantMessage;
+	const ageMs = Date.now() - (lastAssistant.timestamp ?? 0);
+	const maxAgeMs = retention === "long" ? CACHE_AWARE_LONG_MAX_AGE_MS : CACHE_AWARE_SHORT_MAX_AGE_MS;
+	if (ageMs > maxAgeMs) return undefined;
+	if ((lastAssistant.usage?.cacheRead ?? 0) <= 0) return undefined;
+
+	const wireTokens = host.getContextUsage()?.wireTokens;
+	if (typeof wireTokens !== "number" || wireTokens <= 0) return undefined;
+
+	return {
+		sessionModel: model,
+		sessionApiKey: session.apiKey,
+		sessionHeaders: session.headers,
+		warm: true,
+		prefixWireTokens: wireTokens,
+		// Fold-coverage guard input: the cache-read summary scopes to the whole live
+		// window, so generateSummary only takes the route when the fold set covers
+		// ~all of these tokens (CACHE_AWARE_MIN_FOLD_COVERAGE).
+		liveMessageTokens: sumMessageTokens(messages),
+		retention,
+		buildContext: async (): Promise<Context> => {
+			// Replicated from buildPingContext (core/cache-keepalive.ts) and
+			// buildWriterContextForSession (agent-session-fusion.ts): assemble the EXACT
+			// prefix the real send path ships so Anthropic's cache serves it — same
+			// system prompt, same convertToLlm message prefix, same lazy-compacted tool
+			// surface (compactToolsForProviderContext memoizes on the tools ref, so it
+			// returns the very object a real turn sends). NOT imported to avoid editing
+			// those modules; keep in sync.
+			const llmMessages = await host.agent.convertToLlm(host.agent.state.messages);
+			const context: Context = {
+				systemPrompt: host.agent.state.systemPrompt,
+				messages: llmMessages,
+				tools: host.agent.state.tools,
+			};
+			if (isTruthyEnvFlag(process.env.PIT_NO_LAZY_TOOL_SCHEMAS)) return context;
+			return compactToolsForProviderContext(context);
+		},
+	};
+}
+
+// ============================================================================
 // P2 — speculative compaction (mid-turn precompute + apply-only consumption)
 // ============================================================================
 
@@ -665,6 +790,9 @@ export async function startSpeculativeCompaction(
 			}
 
 			const compactModel = await resolveCompactModel(ctx, model, { apiKey, headers }, ctx.host.thinkingLevel);
+			// Session model + auth (not the sibling) — the cache-read route reuses the
+			// session's own hot prefix. undefined when any warmth/eligibility gate fails.
+			const cacheAware = buildCacheAwareGeneration(ctx, { model, apiKey, headers });
 			const result = await compact(
 				preparation,
 				compactModel.model,
@@ -674,6 +802,7 @@ export async function startSpeculativeCompaction(
 				abort.signal,
 				compactModel.thinkingLevel,
 				ctx.host.agent.streamFn,
+				cacheAware,
 			);
 			if (abort.signal.aborted || ctx.speculative !== slot) return;
 			slot.result = result;
@@ -780,6 +909,10 @@ export async function executeCompactionPipeline(
 		 * same seam as an extension-supplied compaction, but with `fromExtension=false`.
 		 */
 		precomputed?: CompactionResult;
+		/** Cache-aware generation context — routes summary generation through the
+		 * session's hot prefix when the arithmetic favors it. Ignored when a
+		 * precomputed/extension summary short-circuits the `compact()` call. */
+		cacheAware?: CacheAwareGeneration;
 	},
 ): Promise<CompactionResult> {
 	const { preparation, pathEntries, model, apiKey, headers, abortSignal, customInstructions, precomputed } = options;
@@ -823,6 +956,7 @@ export async function executeCompactionPipeline(
 			abortSignal,
 			thinkingLevel,
 			ctx.host.agent.streamFn,
+			options.cacheAware,
 		);
 		({ summary, firstKeptEntryId, tokensBefore, details } = result);
 	}
@@ -961,6 +1095,9 @@ export async function compactSession(
 		// Route the summarization call to the `compact` role when configured;
 		// fail open to the session model otherwise. Thresholds stay on the session model.
 		const compactModel = await resolveCompactModel(ctx, ctx.host.model, { apiKey, headers }, ctx.host.thinkingLevel);
+		// apiKey/headers here are the SESSION model's auth (fetched above) — the
+		// cache-read route calls the session model, not the resolved sibling.
+		const cacheAware = buildCacheAwareGeneration(ctx, { model: ctx.host.model, apiKey, headers });
 
 		const compactionResult = await executeCompactionPipeline(ctx, {
 			preparation,
@@ -971,6 +1108,7 @@ export async function compactSession(
 			abortSignal: compactionAbort.signal,
 			customInstructions,
 			thinkingLevel: compactModel.thinkingLevel,
+			cacheAware,
 		});
 
 		ctx.host.emit({
@@ -1333,6 +1471,9 @@ export async function runAutoCompaction(
 		// fail open to the session model otherwise. Thresholds above stay on the
 		// session model (`ctx.host.model`).
 		const compactModel = await resolveCompactModel(ctx, ctx.host.model, { apiKey, headers }, ctx.host.thinkingLevel);
+		// Session model + auth for the cache-read route (undefined when cold or a
+		// precomputed summary already consumed the slot — cacheAware is unused then).
+		const cacheAware = buildCacheAwareGeneration(ctx, { model: ctx.host.model, apiKey, headers });
 
 		const result = await executeCompactionPipeline(ctx, {
 			preparation,
@@ -1343,6 +1484,7 @@ export async function runAutoCompaction(
 			abortSignal: autoAbort.signal,
 			thinkingLevel: compactModel.thinkingLevel,
 			precomputed,
+			cacheAware,
 		});
 
 		ctx.host.emit({ type: "compaction_end", reason, result, aborted: false, willRetry });

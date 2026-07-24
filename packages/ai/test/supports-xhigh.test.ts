@@ -3,16 +3,13 @@ import { getModel, getSupportedThinkingLevels } from "../src/models.js";
 import { openrouterModel } from "./helpers/pruned-fixtures.js";
 
 describe("getSupportedThinkingLevels", () => {
-	it("includes xhigh for Anthropic Opus 4.6 on anthropic-messages API", () => {
-		const model = getModel("anthropic", "claude-opus-4-8");
+	it("includes xhigh and max for Anthropic Opus 5 on anthropic-messages API", () => {
+		const model = getModel("anthropic", "claude-opus-5");
 		expect(model).toBeDefined();
-		expect(getSupportedThinkingLevels(model!)).toContain("xhigh");
-	});
-
-	it("includes xhigh for Anthropic Opus 4.7 on anthropic-messages API", () => {
-		const model = getModel("anthropic", "claude-opus-4-8");
-		expect(model).toBeDefined();
-		expect(getSupportedThinkingLevels(model!)).toContain("xhigh");
+		const levels = getSupportedThinkingLevels(model!);
+		expect(levels).toContain("xhigh");
+		expect(levels).toContain("max");
+		expect(levels.at(-1)).toBe("max");
 	});
 
 	it("includes xhigh for Anthropic Fable 5 on anthropic-messages API", () => {

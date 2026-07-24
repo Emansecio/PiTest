@@ -482,7 +482,14 @@ export function convertResponsesTools(
 	toolNameGuard: ToolNameGuard = NOOP_TOOL_NAME_GUARD,
 ): OpenAITool[] {
 	const strict = options?.strict === undefined ? false : options.strict;
-	return tools.map((tool) => ({
+	// Emit tools in canonical name-sorted order — parity with the anthropic and
+	// openai-completions routes. OpenAI's implicit prefix cache is keyed by the
+	// serialization order, so passing tools in the caller's (activation-order,
+	// non-deterministic) order would silently invalidate the cache whenever that
+	// order shifts between requests. The guard remap is name-keyed, so sorting the
+	// output only reorders it — each tool still maps to its own wire name.
+	const sortedTools = [...tools].sort((a, b) => a.name.localeCompare(b.name));
+	return sortedTools.map((tool) => ({
 		type: "function",
 		name: toolNameGuard.toWire(tool.name),
 		description: tool.description,
@@ -508,257 +515,369 @@ export async function processResponsesStream<TApi extends Api>(
 	const blockIndex = () => blocks.length - 1;
 	let sawTerminalEvent = false;
 
-	for await (const event of openaiStream) {
-		if (event.type === "response.created") {
-			output.responseId = event.response.id;
-		} else if (event.type === "response.output_item.added") {
-			const item = event.item;
-			if (item.type === "reasoning") {
-				currentItem = item;
-				currentBlock = { type: "thinking", thinking: "" };
-				output.content.push(currentBlock);
-				stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
-			} else if (item.type === "message") {
-				currentItem = item;
-				currentBlock = { type: "text", text: "" };
-				output.content.push(currentBlock);
-				stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
-			} else if (item.type === "function_call") {
-				currentItem = item;
-				currentBlock = {
-					type: "toolCall",
-					id: `${item.call_id}|${item.id}`,
-					name: item.name,
-					arguments: {},
-					partialJson: item.arguments || "",
-				};
-				output.content.push(currentBlock);
-				stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
-			}
-		} else if (event.type === "response.reasoning_summary_part.added") {
-			if (currentItem && currentItem.type === "reasoning") {
-				currentItem.summary = currentItem.summary || [];
-				currentItem.summary.push(event.part);
-			}
-		} else if (event.type === "response.reasoning_summary_text.delta") {
-			if (currentItem?.type === "reasoning" && currentBlock?.type === "thinking") {
-				currentItem.summary = currentItem.summary || [];
-				const lastPart = currentItem.summary[currentItem.summary.length - 1];
-				if (lastPart) {
-					currentBlock.thinking += event.delta;
-					lastPart.text += event.delta;
-					stream.push({
-						type: "thinking_delta",
-						contentIndex: blockIndex(),
-						delta: event.delta,
-						partial: output,
-					});
-				}
-			}
-		} else if (event.type === "response.reasoning_summary_part.done") {
-			if (currentItem?.type === "reasoning" && currentBlock?.type === "thinking") {
-				currentItem.summary = currentItem.summary || [];
-				const lastPart = currentItem.summary[currentItem.summary.length - 1];
-				if (lastPart) {
-					currentBlock.thinking += "\n\n";
-					lastPart.text += "\n\n";
-					stream.push({
-						type: "thinking_delta",
-						contentIndex: blockIndex(),
-						delta: "\n\n",
-						partial: output,
-					});
-				}
-			}
-		} else if (event.type === "response.reasoning_text.delta") {
-			if (currentItem?.type === "reasoning" && currentBlock?.type === "thinking") {
-				currentBlock.thinking += event.delta;
-				stream.push({
-					type: "thinking_delta",
-					contentIndex: blockIndex(),
-					delta: event.delta,
-					partial: output,
-				});
-			}
-		} else if (event.type === "response.content_part.added") {
-			if (currentItem?.type === "message") {
-				currentItem.content = currentItem.content || [];
-				// Filter out ReasoningText, only accept output_text and refusal
-				if (event.part.type === "output_text" || event.part.type === "refusal") {
-					currentItem.content.push(event.part);
-				}
-			}
-		} else if (event.type === "response.output_text.delta") {
-			if (currentItem?.type === "message" && currentBlock?.type === "text") {
-				if (!currentItem.content || currentItem.content.length === 0) {
-					continue;
-				}
-				const lastPart = currentItem.content[currentItem.content.length - 1];
-				if (lastPart?.type === "output_text") {
-					currentBlock.text += event.delta;
-					lastPart.text += event.delta;
-					stream.push({
-						type: "text_delta",
-						contentIndex: blockIndex(),
-						delta: event.delta,
-						partial: output,
-					});
-				}
-			}
-		} else if (event.type === "response.refusal.delta") {
-			if (currentItem?.type === "message" && currentBlock?.type === "text") {
-				if (!currentItem.content || currentItem.content.length === 0) {
-					continue;
-				}
-				const lastPart = currentItem.content[currentItem.content.length - 1];
-				if (lastPart?.type === "refusal") {
-					currentBlock.text += event.delta;
-					lastPart.refusal += event.delta;
-					stream.push({
-						type: "text_delta",
-						contentIndex: blockIndex(),
-						delta: event.delta,
-						partial: output,
-					});
-				}
-			}
-		} else if (event.type === "response.function_call_arguments.delta") {
-			if (currentItem?.type === "function_call" && currentBlock?.type === "toolCall") {
-				// Accumulate only — finalize once on response.function_call_arguments.done.
-				// Per-delta parseStreamingJson over growing string is O(N²).
-				currentBlock.partialJson += event.delta;
-				stream.push({
-					type: "toolcall_delta",
-					contentIndex: blockIndex(),
-					delta: event.delta,
-					partial: output,
-				});
-			}
-		} else if (event.type === "response.function_call_arguments.done") {
-			if (currentItem?.type === "function_call" && currentBlock?.type === "toolCall") {
-				const previousPartialJson = currentBlock.partialJson;
-				currentBlock.partialJson = event.arguments;
-				currentBlock.arguments = parseStreamingJson(currentBlock.partialJson);
+	// Tool-call blocks keyed by their Responses `item_id`. The wire keys every
+	// `function_call_arguments.{delta,done}` event by `item_id`, and the stream
+	// contract allows a second function_call to be `added` before the first one's
+	// `done` (parallel_tool_calls: true, which Codex sends). Keying by item_id
+	// routes each call's argument deltas to its own block instead of the single
+	// most-recent one, so interleaved parallel calls don't cross-contaminate.
+	const toolCallBlocks = new Map<string, ToolCall & { partialJson: string }>();
+	// Resolve the block an argument event belongs to: strict item_id demux when
+	// the wire supplies one, else fall back to the current open tool block for
+	// streams that omit item_id (field-stripped proxies / single-call fixtures).
+	const resolveToolCallBlock = (itemId: string | undefined): (ToolCall & { partialJson: string }) | null => {
+		if (itemId !== undefined) return toolCallBlocks.get(itemId) ?? null;
+		return currentBlock?.type === "toolCall" ? currentBlock : null;
+	};
 
-				if (event.arguments.startsWith(previousPartialJson)) {
-					const delta = event.arguments.slice(previousPartialJson.length);
-					if (delta.length > 0) {
+	/**
+	 * Finalize an OPEN tool-call block — one still carrying the `partialJson`
+	 * scratch buffer. Parses the accumulated arguments, flags a corrupt/truncated
+	 * parse for validation.ts (`_streamingParseError` drives the "arguments were
+	 * corrupted during streaming" hint), drops the scratch so replay only carries
+	 * parsed arguments, and restores the caller's original tool name from the
+	 * sanitized wire name. Shared by `output_item.done` (the normal path) and the
+	 * H10 terminal drain below so the two can never diverge.
+	 *
+	 * `wireArguments` is the item's own `arguments` string, used only as a
+	 * fallback when the block accumulated nothing.
+	 */
+	const finalizeToolCallBlock = (block: ToolCall & { partialJson?: string }, wireArguments?: string): void => {
+		const source = block.partialJson ? block.partialJson : wireArguments || "{}";
+		const finalized = finalizeStreamingJson(source);
+		block.arguments = finalized.value;
+		if (finalized.parseError && source.length > 2) {
+			(block as any)._streamingParseError = true;
+		}
+		delete block.partialJson;
+		// Restore the caller's original tool name from the sanitized wire name.
+		const guard = options?.toolNameGuard;
+		if (guard?.active) {
+			block.name = guard.fromWire(block.name);
+		}
+	};
+
+	/**
+	 * H10 — finalize tool-call blocks the wire left open at a terminal event.
+	 *
+	 * When the model hits `max_output_tokens` mid-arguments the response
+	 * terminates (status `incomplete`) after `output_item.added` + a run of
+	 * `function_call_arguments.delta`, with NO `function_call_arguments.done` and
+	 * NO `output_item.done` for the call in flight. The normal finalization at
+	 * `output_item.done` therefore never runs, and without this drain the block
+	 * would ship `arguments: {}` — every accumulated delta silently discarded —
+	 * plus a leftover `partialJson` scratch field that leaks into the persisted
+	 * transcript and re-serializes on replay.
+	 *
+	 * Scans `output.content` rather than `toolCallBlocks` so keyless streams
+	 * (item_id omitted; never registered in the map) are drained too. Dedup is
+	 * structural: a block only qualifies while it still owns `partialJson`, and
+	 * finalizeToolCallBlock deletes it — so an already-finalized call can never
+	 * be drained twice, and can never get a second `toolcall_end`.
+	 */
+	const finalizeOpenToolCalls = (): void => {
+		for (let i = 0; i < output.content.length; i++) {
+			const block = output.content[i];
+			if (block?.type !== "toolCall") continue;
+			const open = block as ToolCall & { partialJson?: string };
+			if (!("partialJson" in open)) continue;
+			finalizeToolCallBlock(open);
+			// Emit the `toolcall_end` the harness is still waiting on. It already saw
+			// `toolcall_start` + deltas for this block, so leaving the call open would
+			// desync the stream from the final message — the same invariant H9 (below)
+			// enforces from the other direction. Duplication is impossible (see above).
+			stream.push({ type: "toolcall_end", contentIndex: i, toolCall: open, partial: output });
+		}
+		toolCallBlocks.clear();
+		if (currentBlock?.type === "toolCall") currentBlock = null;
+	};
+
+	try {
+		for await (const event of openaiStream) {
+			if (event.type === "response.created") {
+				output.responseId = event.response.id;
+			} else if (event.type === "response.output_item.added") {
+				const item = event.item;
+				if (item.type === "reasoning") {
+					currentItem = item;
+					currentBlock = { type: "thinking", thinking: "" };
+					output.content.push(currentBlock);
+					stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
+				} else if (item.type === "message") {
+					currentItem = item;
+					currentBlock = { type: "text", text: "" };
+					output.content.push(currentBlock);
+					stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
+				} else if (item.type === "function_call") {
+					currentItem = item;
+					currentBlock = {
+						type: "toolCall",
+						id: `${item.call_id}|${item.id}`,
+						name: item.name,
+						arguments: {},
+						partialJson: item.arguments || "",
+					};
+					output.content.push(currentBlock);
+					if (item.id) toolCallBlocks.set(item.id, currentBlock);
+					stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
+				}
+			} else if (event.type === "response.reasoning_summary_part.added") {
+				if (currentItem && currentItem.type === "reasoning") {
+					currentItem.summary = currentItem.summary || [];
+					currentItem.summary.push(event.part);
+				}
+			} else if (event.type === "response.reasoning_summary_text.delta") {
+				if (currentItem?.type === "reasoning" && currentBlock?.type === "thinking") {
+					currentItem.summary = currentItem.summary || [];
+					const lastPart = currentItem.summary[currentItem.summary.length - 1];
+					if (lastPart) {
+						currentBlock.thinking += event.delta;
+						lastPart.text += event.delta;
 						stream.push({
-							type: "toolcall_delta",
+							type: "thinking_delta",
 							contentIndex: blockIndex(),
-							delta,
+							delta: event.delta,
 							partial: output,
 						});
 					}
 				}
-			}
-		} else if (event.type === "response.output_item.done") {
-			const item = event.item;
-
-			if (item.type === "reasoning" && currentBlock?.type === "thinking") {
-				const summaryText = item.summary?.map((s) => s.text).join("\n\n") || "";
-				const contentText = item.content?.map((c) => c.text).join("\n\n") || "";
-				currentBlock.thinking = summaryText || contentText || currentBlock.thinking;
-				currentBlock.thinkingSignature = JSON.stringify(item);
-				stream.push({
-					type: "thinking_end",
-					contentIndex: blockIndex(),
-					content: currentBlock.thinking,
-					partial: output,
-				});
-				currentBlock = null;
-			} else if (item.type === "message" && currentBlock?.type === "text") {
-				currentBlock.text = (item.content ?? [])
-					.map((c) => (c.type === "output_text" ? c.text : c.refusal))
-					.join("");
-				currentBlock.textSignature = encodeTextSignatureV1(item.id, item.phase ?? undefined);
-				stream.push({
-					type: "text_end",
-					contentIndex: blockIndex(),
-					content: currentBlock.text,
-					partial: output,
-				});
-				currentBlock = null;
-			} else if (item.type === "function_call") {
-				const finalizeSource =
-					currentBlock?.type === "toolCall" && currentBlock.partialJson
-						? currentBlock.partialJson
-						: item.arguments || "{}";
-				const finalized = finalizeStreamingJson(finalizeSource);
-				const args = finalized.value;
-				const guard = options?.toolNameGuard;
-
-				let toolCall: ToolCall;
-				if (currentBlock?.type === "toolCall") {
-					// Finalize in-place and strip the scratch buffer so replay only
-					// carries parsed arguments.
-					currentBlock.arguments = args;
-					if (finalized.parseError && finalizeSource.length > 2) {
-						(currentBlock as any)._streamingParseError = true;
+			} else if (event.type === "response.reasoning_summary_part.done") {
+				if (currentItem?.type === "reasoning" && currentBlock?.type === "thinking") {
+					currentItem.summary = currentItem.summary || [];
+					const lastPart = currentItem.summary[currentItem.summary.length - 1];
+					if (lastPart) {
+						currentBlock.thinking += "\n\n";
+						lastPart.text += "\n\n";
+						stream.push({
+							type: "thinking_delta",
+							contentIndex: blockIndex(),
+							delta: "\n\n",
+							partial: output,
+						});
 					}
-					delete (currentBlock as { partialJson?: string }).partialJson;
-					// Restore the caller's original tool name from the sanitized wire name.
-					if (guard?.active) {
-						currentBlock.name = guard.fromWire(currentBlock.name);
+				}
+			} else if (event.type === "response.reasoning_text.delta") {
+				if (currentItem?.type === "reasoning" && currentBlock?.type === "thinking") {
+					currentBlock.thinking += event.delta;
+					stream.push({
+						type: "thinking_delta",
+						contentIndex: blockIndex(),
+						delta: event.delta,
+						partial: output,
+					});
+				}
+			} else if (event.type === "response.content_part.added") {
+				if (currentItem?.type === "message") {
+					currentItem.content = currentItem.content || [];
+					// Filter out ReasoningText, only accept output_text and refusal
+					if (event.part.type === "output_text" || event.part.type === "refusal") {
+						currentItem.content.push(event.part);
 					}
-					toolCall = currentBlock;
-				} else {
-					toolCall = {
-						type: "toolCall",
-						id: `${item.call_id}|${item.id}`,
-						name: guard?.active ? guard.fromWire(item.name) : item.name,
-						arguments: args,
+				}
+			} else if (event.type === "response.output_text.delta") {
+				if (currentItem?.type === "message" && currentBlock?.type === "text") {
+					if (!currentItem.content || currentItem.content.length === 0) {
+						continue;
+					}
+					const lastPart = currentItem.content[currentItem.content.length - 1];
+					if (lastPart?.type === "output_text") {
+						currentBlock.text += event.delta;
+						lastPart.text += event.delta;
+						stream.push({
+							type: "text_delta",
+							contentIndex: blockIndex(),
+							delta: event.delta,
+							partial: output,
+						});
+					}
+				}
+			} else if (event.type === "response.refusal.delta") {
+				if (currentItem?.type === "message" && currentBlock?.type === "text") {
+					if (!currentItem.content || currentItem.content.length === 0) {
+						continue;
+					}
+					const lastPart = currentItem.content[currentItem.content.length - 1];
+					if (lastPart?.type === "refusal") {
+						currentBlock.text += event.delta;
+						lastPart.refusal += event.delta;
+						stream.push({
+							type: "text_delta",
+							contentIndex: blockIndex(),
+							delta: event.delta,
+							partial: output,
+						});
+					}
+				}
+			} else if (event.type === "response.function_call_arguments.delta") {
+				const block = resolveToolCallBlock(event.item_id);
+				if (block) {
+					// Accumulate only — finalize once on response.function_call_arguments.done.
+					// Per-delta parseStreamingJson over growing string is O(N²).
+					block.partialJson += event.delta;
+					stream.push({
+						type: "toolcall_delta",
+						contentIndex: output.content.indexOf(block),
+						delta: event.delta,
+						partial: output,
+					});
+				}
+			} else if (event.type === "response.function_call_arguments.done") {
+				const block = resolveToolCallBlock(event.item_id);
+				if (block) {
+					const previousPartialJson = block.partialJson;
+					block.partialJson = event.arguments;
+					block.arguments = parseStreamingJson(block.partialJson);
+
+					if (event.arguments.startsWith(previousPartialJson)) {
+						const delta = event.arguments.slice(previousPartialJson.length);
+						if (delta.length > 0) {
+							stream.push({
+								type: "toolcall_delta",
+								contentIndex: output.content.indexOf(block),
+								delta,
+								partial: output,
+							});
+						}
+					}
+				}
+			} else if (event.type === "response.output_item.done") {
+				const item = event.item;
+
+				if (item.type === "reasoning" && currentBlock?.type === "thinking") {
+					const summaryText = item.summary?.map((s) => s.text).join("\n\n") || "";
+					const contentText = item.content?.map((c) => c.text).join("\n\n") || "";
+					currentBlock.thinking = summaryText || contentText || currentBlock.thinking;
+					currentBlock.thinkingSignature = JSON.stringify(item);
+					stream.push({
+						type: "thinking_end",
+						contentIndex: blockIndex(),
+						content: currentBlock.thinking,
+						partial: output,
+					});
+					currentBlock = null;
+				} else if (item.type === "message" && currentBlock?.type === "text") {
+					currentBlock.text = (item.content ?? [])
+						.map((c) => (c.type === "output_text" ? c.text : c.refusal))
+						.join("");
+					currentBlock.textSignature = encodeTextSignatureV1(item.id, item.phase ?? undefined);
+					stream.push({
+						type: "text_end",
+						contentIndex: blockIndex(),
+						content: currentBlock.text,
+						partial: output,
+					});
+					currentBlock = null;
+				} else if (item.type === "function_call") {
+					// Route to the block this item owns (keyed by item_id) so interleaved
+					// parallel calls finalize the right one, not the most-recent block.
+					let block: (ToolCall & { partialJson: string }) | null = null;
+					if (item.id) {
+						block = toolCallBlocks.get(item.id) ?? null;
+					} else if (currentBlock?.type === "toolCall") {
+						// Keyless stream (item_id omitted): fall back to the open tool block.
+						block = currentBlock;
+					}
+					const guard = options?.toolNameGuard;
+
+					let toolCall: ToolCall;
+					let contentIndex: number;
+					if (block) {
+						// Finalize in-place and strip the scratch buffer so replay only
+						// carries parsed arguments. Shared with the H10 terminal drain.
+						finalizeToolCallBlock(block, item.arguments);
+						toolCall = block;
+						contentIndex = output.content.indexOf(block);
+						if (currentBlock === block) currentBlock = null;
+					} else {
+						// H9: a function_call `done` with no matching `added`. Persist the block
+						// into content (like the keyed path) so the final message matches the
+						// toolcall_end the harness already saw on the stream, instead of emitting
+						// an event for a block that never lands in content.
+						const orphan: ToolCall = {
+							type: "toolCall",
+							id: `${item.call_id}|${item.id}`,
+							name: guard?.active ? guard.fromWire(item.name) : item.name,
+							arguments: finalizeStreamingJson(item.arguments || "{}").value,
+						};
+						output.content.push(orphan);
+						toolCall = orphan;
+						contentIndex = blockIndex();
+					}
+					if (item.id) toolCallBlocks.delete(item.id);
+
+					stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: output });
+				}
+			} else if (event.type === "response.completed" || event.type === "response.incomplete") {
+				// `response.incomplete` is its OWN terminal event in the Responses SDK
+				// (ResponseStreamEvent union) — the direct openai-responses route emits
+				// it verbatim when the model runs out of `max_output_tokens`. It was
+				// previously unhandled here, so such a turn fell out of the loop with
+				// sawTerminalEvent false and died as "Stream ended without
+				// response.completed", discarding the whole partial message. It carries
+				// the same `response` payload as `completed` (status `incomplete` →
+				// stopReason `length` via mapStopReason), so both share this branch.
+				// The codex routes already normalize it to `response.completed` in
+				// mapCodexEvents, which is why only the direct route was affected.
+				sawTerminalEvent = true;
+				// H10: finalize anything the wire left open BEFORE computing stopReason,
+				// so a truncated call is a real tool call in content, not `arguments: {}`.
+				finalizeOpenToolCalls();
+				const response = event.response;
+				if (response?.id) {
+					output.responseId = response.id;
+				}
+				if (response?.usage) {
+					const cachedTokens = response.usage.input_tokens_details?.cached_tokens || 0;
+					output.usage = {
+						// OpenAI includes cached tokens in input_tokens, so subtract to get non-cached input
+						input: (response.usage.input_tokens || 0) - cachedTokens,
+						output: response.usage.output_tokens || 0,
+						cacheRead: cachedTokens,
+						cacheWrite: 0,
+						totalTokens: response.usage.total_tokens || 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 					};
 				}
-
-				currentBlock = null;
-				stream.push({ type: "toolcall_end", contentIndex: blockIndex(), toolCall, partial: output });
+				calculateCost(model, output.usage);
+				if (options?.applyServiceTierPricing) {
+					const serviceTier = options.resolveServiceTier
+						? options.resolveServiceTier(response?.service_tier, options.serviceTier)
+						: (response?.service_tier ?? options.serviceTier);
+					options.applyServiceTierPricing(output.usage, serviceTier);
+				}
+				// Map status to stop reason
+				output.stopReason = mapStopReason(response?.status);
+				if (output.content.some((b) => b.type === "toolCall") && output.stopReason === "stop") {
+					output.stopReason = "toolUse";
+				}
+			} else if (event.type === "error") {
+				throw new Error(`Error Code ${event.code}: ${event.message}`);
+			} else if (event.type === "response.failed") {
+				sawTerminalEvent = true;
+				const error = event.response?.error;
+				const details = event.response?.incomplete_details;
+				let msg: string;
+				if (error) {
+					msg = `${error.code || "unknown"}: ${error.message || "no message"}`;
+				} else if (details?.reason) {
+					msg = `incomplete: ${details.reason}`;
+				} else {
+					msg = "Unknown error (no error details in response)";
+				}
+				throw new Error(msg);
 			}
-		} else if (event.type === "response.completed") {
-			sawTerminalEvent = true;
-			const response = event.response;
-			if (response?.id) {
-				output.responseId = response.id;
-			}
-			if (response?.usage) {
-				const cachedTokens = response.usage.input_tokens_details?.cached_tokens || 0;
-				output.usage = {
-					// OpenAI includes cached tokens in input_tokens, so subtract to get non-cached input
-					input: (response.usage.input_tokens || 0) - cachedTokens,
-					output: response.usage.output_tokens || 0,
-					cacheRead: cachedTokens,
-					cacheWrite: 0,
-					totalTokens: response.usage.total_tokens || 0,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				};
-			}
-			calculateCost(model, output.usage);
-			if (options?.applyServiceTierPricing) {
-				const serviceTier = options.resolveServiceTier
-					? options.resolveServiceTier(response?.service_tier, options.serviceTier)
-					: (response?.service_tier ?? options.serviceTier);
-				options.applyServiceTierPricing(output.usage, serviceTier);
-			}
-			// Map status to stop reason
-			output.stopReason = mapStopReason(response?.status);
-			if (output.content.some((b) => b.type === "toolCall") && output.stopReason === "stop") {
-				output.stopReason = "toolUse";
-			}
-		} else if (event.type === "error") {
-			throw new Error(`Error Code ${event.code}: ${event.message}`);
-		} else if (event.type === "response.failed") {
-			sawTerminalEvent = true;
-			const error = event.response?.error;
-			const details = event.response?.incomplete_details;
-			let msg: string;
-			if (error) {
-				msg = `${error.code || "unknown"}: ${error.message || "no message"}`;
-			} else if (details?.reason) {
-				msg = `incomplete: ${details.reason}`;
-			} else {
-				msg = "Unknown error (no error details in response)";
-			}
-			throw new Error(msg);
+		}
+	} finally {
+		// H10 — defensive sweep at the one chokepoint every Responses route shares
+		// (openai-responses, codex SSE, codex WebSocket all funnel through here).
+		// No streaming scratch may survive into the returned/persisted message on
+		// ANY exit path. Providers only strip in their `catch`, so before this the
+		// success path had no sweep at all: a block the drain above did not cover —
+		// or a scratch field added later — would ride into the transcript and
+		// re-serialize on replay. Deleting absent fields is a no-op, so this is
+		// free on the overwhelmingly common already-clean path.
+		for (const block of output.content) {
+			stripStreamingScratch(block);
 		}
 	}
 

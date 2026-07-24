@@ -1,12 +1,19 @@
 import { performance } from "node:perf_hooks";
 import type { AutocompleteProvider, AutocompleteSuggestions } from "../autocomplete.ts";
 import { getKeybindings } from "../keybindings.ts";
-import { decodePrintableKey, matchesKey } from "../keys.ts";
+import { decodePrintableKey, type MouseEvent, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
 import { computeWordDeletion, computeWordMoveColumn, decodeBracketedPasteCsiU } from "../text-edit-core.ts";
-import { type Component, CURSOR_MARKER, type Focusable, type TUI } from "../tui.ts";
+import { type Component, CURSOR_MARKER, type Focusable, type MouseTarget, type TUI } from "../tui.ts";
 import { UndoStack } from "../undo-stack.ts";
-import { extractAnsiCode, getSegmenter, isWhitespaceChar, truncateToWidth, visibleWidth } from "../utils.ts";
+import {
+	extractAnsiCode,
+	getSegmenter,
+	isWhitespaceChar,
+	sliceByColumn,
+	truncateToWidth,
+	visibleWidth,
+} from "../utils.ts";
 import { type SelectItem, SelectList, type SelectListLayoutOptions, type SelectListTheme } from "./select-list.ts";
 
 const baseSegmenter = getSegmenter();
@@ -269,6 +276,14 @@ export interface EditorOptions {
 	 */
 	onPasteTruncated?: (info: { originalBytes: number; keptBytes: number }) => void;
 	/**
+	 * Called with the current selection text when the copy-selection keybinding
+	 * (`tui.editor.copySelection`) fires while a selection is active. The editor has
+	 * no clipboard of its own — the consumer plumbs this to its clipboard helper
+	 * (e.g. copyToClipboard). No-op when omitted. Mirrors onPasteTruncated's layering
+	 * so the tui package never imports the coding-agent clipboard.
+	 */
+	copySelection?: (text: string) => void;
+	/**
 	 * Visible-column count of a leading placeholder prefix (e.g. a prompt glyph
 	 * like `❯ `) painted with `borderColor` instead of `placeholderColor` — lets a
 	 * consumer carry a state signal (mode/permission color) on the glyph without
@@ -340,6 +355,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined>
  * for this long (~530ms each, the classic terminal cadence). */
 const CURSOR_BLINK_HALF_MS = 530;
 
+/** Max gap between two left presses (and near the same cell) to count as a
+ * double-click, which selects the word under the pointer. */
+const DOUBLE_CLICK_MS = 400;
+
 // Hoisted: recompiling these per keystroke in insertCharacter is wasteful.
 const AUTOCOMPLETE_TRIGGER_CHAR_RE = /[a-zA-Z0-9.\-_]/;
 const SYMBOL_COMPLETION_CONTEXT_RE = /(?:^|[\s])[@#][^\s]*$/;
@@ -350,7 +369,7 @@ const CONTROL_CHARS_EXCEPT_NEWLINE_RE = /[\x00-\x09\x0b-\x1f]/g;
 // huge blob can't freeze the event loop or OOM the TUI.
 const MAX_PASTE_BYTES = 10 * 1024 * 1024;
 
-export class Editor implements Component, Focusable {
+export class Editor implements Component, Focusable, MouseTarget {
 	private state: EditorState = {
 		lines: [""],
 		cursorLine: 0,
@@ -392,6 +411,12 @@ export class Editor implements Component, Focusable {
 
 	// Store last render width for cursor navigation
 	private lastWidth: number = 80;
+
+	// Clamped horizontal padding actually applied by the last render (paddingX is
+	// clamped by width in render() — a narrow terminal shrinks it). Mouse hit-test
+	// subtracts this to turn a click column into a content-column; using the raw
+	// this.paddingX would misplace the cursor when the clamp kicked in.
+	private lastPaddingX: number = 0;
 
 	// Vertical scrolling support
 	private scrollOffset: number = 0;
@@ -475,6 +500,8 @@ export class Editor implements Component, Focusable {
 	private pasteCounter: number = 0;
 	// Optional consumer callback fired when a paste is truncated at MAX_PASTE_BYTES.
 	private onPasteTruncated?: (info: { originalBytes: number; keptBytes: number }) => void;
+	// Optional consumer callback fired to copy the active selection (see EditorOptions).
+	private copySelection?: (text: string) => void;
 
 	// Bracketed paste mode buffering
 	private pasteBuffer: string = "";
@@ -518,6 +545,21 @@ export class Editor implements Component, Focusable {
 	// NOT call — stays the single place that clears the redo stack on real edits.
 	private applyingHistory = false;
 
+	// --- Mouse selection (Phase 2) ---
+	// Anchor of an active selection in logical coords; the head is the live cursor
+	// (state.cursorLine/cursorCol). null when there is no selection; a collapsed
+	// selection (anchor === head) reads as "no selection" via getNormalizedSelection.
+	// Selection lives OUTSIDE EditorState (not part of undo/redo snapshots) and never
+	// bumps bufferRevision (it doesn't affect wrap), but every buffer mutation and
+	// every explicit clear zeros it (see touchBuffer/invalidateWrapCache).
+	private selectionAnchor: { line: number; col: number } | null = null;
+	// True between a left press and its release so drag events extend the live
+	// selection. A double-click word-select still runs through the press path.
+	private mouseSelecting = false;
+	// Double-click detection: timestamp + local cell of the last left press.
+	private lastClickAt = 0;
+	private lastClickCell: { row: number; col: number } | null = null;
+
 	public onSubmit?: (text: string) => void;
 	public onChange?: (text: string) => void;
 	public disableSubmit: boolean = false;
@@ -543,6 +585,7 @@ export class Editor implements Component, Focusable {
 		this.placeholderPromptCols = Number.isFinite(promptCols) ? Math.max(0, Math.floor(promptCols)) : 0;
 		this.highlightBangPrefix = options.highlightBangPrefix === true;
 		this.onPasteTruncated = options.onPasteTruncated;
+		this.copySelection = options.copySelection;
 	}
 
 	/** Set of currently valid paste IDs, for marker-aware segmentation. */
@@ -587,10 +630,18 @@ export class Editor implements Component, Focusable {
 		this.bufferRevision++;
 		this.wrapCache.clear();
 		this.wrapCacheWidth = -1;
+		// A content/segmentation change invalidates any selection built against the
+		// old buffer; keep the single invariant "buffer changed → no selection".
+		this.selectionAnchor = null;
 	}
 
 	private touchBuffer(): void {
 		this.bufferRevision++;
+		// Central invariant: every buffer mutation clears the selection. Selection
+		// gestures (press/drag/release) mutate cursor/anchor only and never call
+		// touchBuffer, so a live drag is unaffected; deleteSelectionInternal reads
+		// the range before its own touchBuffer runs.
+		this.selectionAnchor = null;
 	}
 
 	/**
@@ -848,6 +899,8 @@ export class Editor implements Component, Focusable {
 		const innerWidth = Math.max(1, width - frameWidth);
 		const maxPadding = Math.max(0, Math.floor((innerWidth - 1) / 2));
 		const paddingX = Math.min(this.paddingX, maxPadding);
+		// Capture the clamped padding for mouse hit-test (click column → content column).
+		this.lastPaddingX = paddingX;
 		const contentWidth = Math.max(1, innerWidth - paddingX * 2);
 
 		// Layout width: with padding the cursor can overflow into it,
@@ -908,6 +961,12 @@ export class Editor implements Component, Focusable {
 
 		// Get visible lines slice
 		const visibleLines = layoutLines.slice(this.scrollOffset, this.scrollOffset + maxVisibleLines);
+
+		// Selection highlight: resolve the normalized range once, plus the visual-line
+		// map (1:1 with layoutLines at this width) so each visible line can intersect
+		// its logical span with the selection. Only built when a selection is active.
+		const selection = this.getNormalizedSelection();
+		const selectionMap = selection ? this.buildVisualLineMap(layoutWidth) : null;
 
 		const result: string[] = [];
 		const leftPadding = " ".repeat(paddingX);
@@ -976,6 +1035,23 @@ export class Editor implements Component, Focusable {
 			let lineVisibleWidth = layoutLine.visibleWidth;
 			let cursorInPadding = false;
 
+			// Selection intersection for this visual line, as char offsets [a,b) into
+			// the (plain) line text. The visual line at scrollOffset+visibleIndex owns
+			// logical columns [startCol, startCol+length); intersect it with the
+			// selection's per-line column span. null when nothing is selected here.
+			let selRange: { a: number; b: number } | null = null;
+			if (selection && selectionMap) {
+				const vl = selectionMap[this.scrollOffset + visibleIndex];
+				if (vl && vl.logicalLine >= selection.start.line && vl.logicalLine <= selection.end.line) {
+					const lineLen = (this.state.lines[vl.logicalLine] ?? "").length;
+					const selStartChar = vl.logicalLine === selection.start.line ? selection.start.col : 0;
+					const selEndChar = vl.logicalLine === selection.end.line ? selection.end.col : lineLen;
+					const lo = Math.max(selStartChar, vl.startCol) - vl.startCol;
+					const hi = Math.min(selEndChar, vl.startCol + vl.length) - vl.startCol;
+					if (hi > lo) selRange = { a: lo, b: hi };
+				}
+			}
+
 			// Empty-editor placeholder: dim hint behind the cursor at pos 0. Cleared
 			// as soon as the buffer has content (isEditorEmpty is false).
 			const showPlaceholder =
@@ -986,10 +1062,11 @@ export class Editor implements Component, Focusable {
 				layoutLine.hasCursor;
 
 			if (showPlaceholder) {
-				// Cursor is a reverse-video space at col 0; the full placeholder
-				// follows in dim. Eating the first grapheme of the hint with reverse
-				// video made "D" look like a selection box and "escribe a task…"
-				// look like overflow outside it.
+				// Cursor is a reverse-video space BEFORE the dim hint (never eating its
+				// first grapheme — reverse-video on "D" read as a selection box). With a
+				// prompt glyph (`❯ `, placeholderPromptCols > 0) the caret goes AFTER the
+				// glyph: a caret to the LEFT of the prompt reads as contradictory (the
+				// glyph is a mode signal, not typeable content).
 				const colorize = this.theme.placeholderColor ?? ((t: string) => t);
 				const marker = emitCursorMarker ? CURSOR_MARKER : "";
 				const blinkOff = this.cursorBlinkEnabled && !this.cursorBlinkVisible;
@@ -997,17 +1074,31 @@ export class Editor implements Component, Focusable {
 				// Reserve 1 col for the cursor so the hint never overflows contentWidth.
 				const hintBudget = Math.max(0, contentWidth - 1);
 				const truncated = hintBudget > 0 ? truncateToWidth(this.placeholder!, hintBudget) : "";
-				// A leading prompt glyph (e.g. `❯ `) paints with borderColor instead of
-				// the dim hint color, so a mode/permission signal rides on the glyph
-				// without a framed border — opt-in via placeholderPromptCols (default 0
-				// keeps the whole hint in placeholderColor, unchanged).
-				const coloredHint = truncated
-					? this.placeholderPromptCols > 0
-						? this.paintPrefixVisible(truncated, this.placeholderPromptCols, this.borderColor, colorize)
-						: colorize(truncated)
-					: "";
-				displayText = marker + cursor + coloredHint;
+				if (truncated && this.placeholderPromptCols > 0) {
+					// Glyph (borderColor — carries the mode/permission signal), then the
+					// caret, then the rest of the hint in dim. The placeholder is plain
+					// text, so a visible-column slice is grapheme-safe.
+					const glyph = sliceByColumn(truncated, 0, this.placeholderPromptCols);
+					const rest = truncated.slice(glyph.length);
+					displayText = this.borderColor(glyph) + marker + cursor + colorize(rest);
+				} else {
+					displayText = marker + cursor + (truncated ? colorize(truncated) : "");
+				}
 				lineVisibleWidth = 1 + visibleWidth(truncated);
+			} else if (selRange) {
+				// Selection highlight (reverse video), composed with the caret when the
+				// head sits on this line. Content is plain text (no ANSI), so grapheme
+				// slicing is safe; composeSelectedLine handles the cursor-in-selection
+				// case without doubling the escape.
+				const cursorPos = layoutLine.hasCursor && layoutLine.cursorPos !== undefined ? layoutLine.cursorPos : null;
+				const marker = emitCursorMarker && cursorPos !== null ? CURSOR_MARKER : "";
+				const blinkOff = this.cursorBlinkEnabled && !this.cursorBlinkVisible;
+				const composed = this.composeSelectedLine(displayText, selRange.a, selRange.b, cursorPos, marker, blinkOff);
+				displayText = composed.text;
+				lineVisibleWidth += composed.extraWidth;
+				if (composed.extraWidth > 0 && lineVisibleWidth > contentWidth && paddingX > 0) {
+					cursorInPadding = true;
+				}
 			} else if (layoutLine.hasCursor && layoutLine.cursorPos !== undefined) {
 				// Add cursor if this line has it
 				const before = displayText.slice(0, layoutLine.cursorPos);
@@ -1273,6 +1364,25 @@ export class Editor implements Component, Focusable {
 
 		// Ctrl+C - let parent handle (exit/clear)
 		if (kb.matches(data, "tui.input.copy")) {
+			return;
+		}
+
+		// Copy selection (default alt+c — Ctrl+C is the app interrupt, not reusable).
+		// Consumes the key regardless so alt+c never leaks a stray character; a copy
+		// only happens when a selection is active and a consumer plumbed copySelection.
+		if (kb.matches(data, "tui.editor.copySelection")) {
+			const selected = this.getSelectedText();
+			if (selected) this.copySelection?.(selected);
+			return;
+		}
+
+		// Esc collapses an active selection before any other Esc handling (autocomplete
+		// cancel, app interrupt in subclasses). Subclasses that own Esc — e.g. the
+		// coding-agent CustomEditor — clear the selection first in their own handler;
+		// this covers a standalone base Editor.
+		if (this.selectionAnchor !== null && !this.autocompleteState && matchesKey(data, "escape")) {
+			this.collapseSelection();
+			this.tui.requestRender();
 			return;
 		}
 
@@ -1671,6 +1781,136 @@ export class Editor implements Component, Focusable {
 		return { line: this.state.cursorLine, col: this.state.cursorCol };
 	}
 
+	/**
+	 * Normalized active selection in logical coords, or null when there is no
+	 * selection (no anchor, or a collapsed anchor === head). `start` precedes
+	 * `end` in (line, col) order regardless of drag direction.
+	 */
+	private getNormalizedSelection(): {
+		start: { line: number; col: number };
+		end: { line: number; col: number };
+	} | null {
+		const anchor = this.selectionAnchor;
+		if (!anchor) return null;
+		const head = { line: this.state.cursorLine, col: this.state.cursorCol };
+		if (anchor.line === head.line && anchor.col === head.col) return null; // collapsed
+		const anchorFirst = anchor.line < head.line || (anchor.line === head.line && anchor.col <= head.col);
+		return anchorFirst ? { start: anchor, end: head } : { start: head, end: anchor };
+	}
+
+	/** Whether a non-collapsed selection is currently active. */
+	hasActiveSelection(): boolean {
+		return this.getNormalizedSelection() !== null;
+	}
+
+	/**
+	 * The currently selected text (multi-line join with "\n"), or "" when there is
+	 * no active selection. The head/anchor order is normalized first, so the result
+	 * reads left-to-right / top-to-bottom regardless of drag direction.
+	 */
+	getSelectedText(): string {
+		const sel = this.getNormalizedSelection();
+		if (!sel) return "";
+		const { start, end } = sel;
+		if (start.line === end.line) {
+			return (this.state.lines[start.line] ?? "").slice(start.col, end.col);
+		}
+		const parts: string[] = [(this.state.lines[start.line] ?? "").slice(start.col)];
+		for (let i = start.line + 1; i < end.line; i++) parts.push(this.state.lines[i] ?? "");
+		parts.push((this.state.lines[end.line] ?? "").slice(0, end.col));
+		return parts.join("\n");
+	}
+
+	/** Drop any active selection (explicit clear — e.g. Esc). Repaints. */
+	clearSelection(): void {
+		if (this.selectionAnchor === null) return;
+		this.selectionAnchor = null;
+		this.tui.requestRender();
+	}
+
+	/** Collapse the selection without a repaint (callers re-render anyway, e.g. a
+	 * cursor move that immediately repaints). */
+	private collapseSelection(): void {
+		this.selectionAnchor = null;
+	}
+
+	/**
+	 * Delete the active selection with NO undo snapshot (callers that need undo push
+	 * one first, so a replace stays a single atomic step). Molded on the multi-line
+	 * branch of deleteYankedText: splice [start.line, end.line] down to
+	 * `before + after`, move the cursor to `start`, then touchBuffer/onChange (which
+	 * also clears the anchor). No-op when there is no selection.
+	 */
+	private deleteSelectionInternal(): void {
+		const sel = this.getNormalizedSelection();
+		if (!sel) {
+			this.selectionAnchor = null;
+			return;
+		}
+		const { start, end } = sel;
+		const before = (this.state.lines[start.line] ?? "").slice(0, start.col);
+		const after = (this.state.lines[end.line] ?? "").slice(end.col);
+		this.state.lines.splice(start.line, end.line - start.line + 1, before + after);
+		this.state.cursorLine = start.line;
+		this.setCursorCol(start.col);
+		this.selectionAnchor = null;
+		this.touchBuffer();
+		if (this.onChange) {
+			this.onChange(this.getText());
+		}
+	}
+
+	/**
+	 * Compose one visual line's display text with the selection highlight (reverse
+	 * video over [a,b)) and, when the head is on this line, the caret. `plain` is the
+	 * line's plain text; `a`/`b` are grapheme-boundary char offsets with a < b;
+	 * `cursorPos` is the caret's char offset on this line or null.
+	 *
+	 * The head of a selection is always at a boundary (a or b), so the caret either
+	 * coincides with the first selected cell (already reverse — no doubled escape) or
+	 * sits just past the selection. Visible width is unchanged except when the caret
+	 * lands past end-of-line, which appends one reverse space (extraWidth = 1) exactly
+	 * like the plain end-of-line caret path. The zero-width marker is placed so its
+	 * visible column equals the caret column, keeping extractCursorPosition correct.
+	 */
+	private composeSelectedLine(
+		plain: string,
+		a: number,
+		b: number,
+		cursorPos: number | null,
+		marker: string,
+		blinkOff: boolean,
+	): { text: string; extraWidth: number } {
+		const rev = (s: string): string => `\x1b[7m${s}\x1b[0m`;
+		const before = plain.slice(0, a);
+		const sel = plain.slice(a, b);
+		const after = plain.slice(b);
+
+		// No caret on this line (middle line of a multi-line selection, or an
+		// unfocused/other line): just highlight the span. Also the defensive fallback
+		// for a caret that is not at a boundary (unreachable for a single-head range).
+		if (cursorPos === null || (cursorPos !== a && cursorPos !== b)) {
+			return { text: before + rev(sel) + after, extraWidth: 0 };
+		}
+
+		if (cursorPos === a) {
+			// Head at selection start: the first selected cell is the caret (already
+			// reverse). Marker (zero width) rides just before the reverse span.
+			return { text: before + marker + rev(sel) + after, extraWidth: 0 };
+		}
+
+		// cursorPos === b: caret sits just past the selection.
+		if (after.length > 0) {
+			const firstGrapheme = this.segment(after)[Symbol.iterator]().next().value?.segment || "";
+			const restAfter = after.slice(firstGrapheme.length);
+			const caret = blinkOff ? firstGrapheme : rev(firstGrapheme);
+			return { text: before + rev(sel) + marker + caret + restAfter, extraWidth: 0 };
+		}
+		// End of line: caret is a trailing space.
+		const caret = blinkOff ? " " : rev(" ");
+		return { text: before + rev(sel) + marker + caret, extraWidth: 1 };
+	}
+
 	setText(text: string): void {
 		this.cancelAutocomplete();
 		this.lastAction = null;
@@ -1759,13 +1999,23 @@ export class Editor implements Component, Focusable {
 	private insertCharacter(char: string, skipUndoCoalescing?: boolean): void {
 		this.historyIndex = -1; // Exit history browsing mode
 
+		// Typing over a selection replaces it: one undo snapshot captures the
+		// pre-replace state, then the selection is deleted (no extra snapshot) and
+		// the char is inserted — a single atomic undo restores the whole thing. The
+		// coalescing snapshot below is skipped in this case so exactly one is pushed.
+		const hadSelection = this.getNormalizedSelection() !== null;
+		if (hadSelection) {
+			this.pushUndoSnapshot();
+			this.deleteSelectionInternal();
+		}
+
 		// Undo coalescing (fish-style):
 		// - Consecutive word chars coalesce into one undo unit
 		// - Space captures state before itself (so undo removes space+following word together)
 		// - Each space is separately undoable
 		// Skip coalescing when called from atomic operations (e.g., handlePaste)
 		if (!skipUndoCoalescing) {
-			if (isWhitespaceChar(char) || this.lastAction !== "type-word") {
+			if (!hadSelection && (isWhitespaceChar(char) || this.lastAction !== "type-word")) {
 				this.pushUndoSnapshot();
 			}
 			this.lastAction = "type-word";
@@ -1823,6 +2073,13 @@ export class Editor implements Component, Focusable {
 		this.lastAction = null;
 
 		this.pushUndoSnapshot();
+
+		// Paste over a selection replaces it: the snapshot above already captured the
+		// pre-replace state, so delete the selection without pushing another (single
+		// atomic undo restores the pre-paste text and the selection content together).
+		if (this.getNormalizedSelection() !== null) {
+			this.deleteSelectionInternal();
+		}
 
 		// Cap the paste BEFORE any full-string pass. A multi-MB blob (base64, log,
 		// file dump) would otherwise block the event loop or OOM in the passes
@@ -1896,6 +2153,11 @@ export class Editor implements Component, Focusable {
 
 		this.pushUndoSnapshot();
 
+		// Enter over a selection replaces it with the newline (single atomic undo).
+		if (this.getNormalizedSelection() !== null) {
+			this.deleteSelectionInternal();
+		}
+
 		const currentLine = this.state.lines[this.state.cursorLine] || "";
 
 		const before = currentLine.slice(0, this.state.cursorCol);
@@ -1948,6 +2210,13 @@ export class Editor implements Component, Focusable {
 	private handleBackspace(): void {
 		this.historyIndex = -1; // Exit history browsing mode
 		this.lastAction = null;
+
+		// Backspace with an active selection deletes the selection (one undoable step).
+		if (this.getNormalizedSelection() !== null) {
+			this.pushUndoSnapshot();
+			this.deleteSelectionInternal();
+			return;
+		}
 
 		if (this.state.cursorCol > 0) {
 			this.pushUndoSnapshot();
@@ -2015,6 +2284,135 @@ export class Editor implements Component, Focusable {
 		this.state.cursorCol = col;
 		this.preferredVisualCol = null;
 		this.snappedFromCursorCol = null;
+	}
+
+	/**
+	 * MouseTarget: place the cursor and drive selection. `localRow`/`localCol` are
+	 * 0-based within this editor's own rendered rows (the walker already peeled off
+	 * every ancestor's offset).
+	 *
+	 * Gestures:
+	 *  - left press: set the selection anchor at the clicked cell and move the cursor
+	 *    there (a plain click leaves a collapsed, invisible selection). A press within
+	 *    DOUBLE_CLICK_MS and ±1 cell of the previous one selects the word instead.
+	 *  - drag (button held): recompute the head at the pointer, keeping the anchor —
+	 *    the same visualToLogical path as press. No auto-scroll: the router only
+	 *    delivers drags while the pointer is over the editor, so above/below the text
+	 *    is naturally clamped (index clamp in visualToLogical). [PR6: auto-scroll.]
+	 *  - release: end the gesture; collapse to no-selection when head === anchor
+	 *    (i.e. a plain click with no movement).
+	 *
+	 * Row math: the editor's first text row sits below an optional 1-row header (the
+	 * scroll `↑ N more` / jump cue, or the standalone rule when not embedded).
+	 * `scrollOffset + textRow` is the visual-line index into buildVisualLineMap;
+	 * `localCol - lastPaddingX` is the content column. A press above the text
+	 * (header/rule) is declined; below the text clamps to the last visual line.
+	 */
+	onMouse(ev: MouseEvent, localRow: number, localCol: number): boolean {
+		const headerLines = this.jumpMode !== null || this.scrollOffset > 0 || !this.embedded ? 1 : 0;
+		const cellCol = localCol - this.lastPaddingX;
+
+		if (ev.type === "press") {
+			if (ev.button !== "left") return false;
+			const textRow = localRow - headerLines;
+			if (textRow < 0) return false; // press on the rule / scroll indicator
+
+			const now = performance.now();
+			const last = this.lastClickCell;
+			const isDouble =
+				last !== null &&
+				now - this.lastClickAt <= DOUBLE_CLICK_MS &&
+				Math.abs(localRow - last.row) <= 1 &&
+				Math.abs(localCol - last.col) <= 1;
+			this.lastClickAt = now;
+			this.lastClickCell = { row: localRow, col: localCol };
+
+			// Position the head at the clicked cell (sets cursorLine/cursorCol).
+			this.visualToLogical(this.scrollOffset + textRow, cellCol);
+
+			if (isDouble) {
+				this.selectWordAtCursor();
+				this.mouseSelecting = true;
+				this.tui.requestRender();
+				return true;
+			}
+
+			// Begin a (collapsed) selection anchored at the click.
+			this.selectionAnchor = { line: this.state.cursorLine, col: this.state.cursorCol };
+			this.mouseSelecting = true;
+			this.tui.requestRender();
+			return true;
+		}
+
+		if (ev.type === "drag") {
+			if (!this.mouseSelecting) return false;
+			const textRow = Math.max(0, localRow - headerLines);
+			this.visualToLogical(this.scrollOffset + textRow, cellCol);
+			this.tui.requestRender();
+			return true;
+		}
+
+		if (ev.type === "release") {
+			if (!this.mouseSelecting) return false;
+			this.mouseSelecting = false;
+			// A press+release with no movement (head === anchor) collapses to a plain
+			// caret; getNormalizedSelection would already read it as collapsed, but
+			// null it out so no stale anchor lingers.
+			if (this.getNormalizedSelection() === null) {
+				this.selectionAnchor = null;
+			}
+			this.tui.requestRender();
+			return true;
+		}
+
+		return false;
+	}
+
+	/**
+	 * Select the word under the cursor (double-click). Anchor = word start, head =
+	 * word end, using the same Emacs-style backward/forward boundary as word-move
+	 * (computeWordMoveColumn), so punctuation runs and atomic paste markers select
+	 * as single units.
+	 */
+	private selectWordAtCursor(): void {
+		const line = this.state.lines[this.state.cursorLine] ?? "";
+		const col = this.state.cursorCol;
+		const beforeGraphemes = [...this.segment(line.slice(0, col))];
+		const start = computeWordMoveColumn(beforeGraphemes, col, "backward", isPasteMarker);
+		const afterGraphemes = [...this.segment(line.slice(col))];
+		const end = computeWordMoveColumn(afterGraphemes, col, "forward", isPasteMarker);
+		this.selectionAnchor = { line: this.state.cursorLine, col: start };
+		this.state.cursorCol = end;
+		this.preferredVisualCol = null;
+		this.snappedFromCursorCol = null;
+	}
+
+	/**
+	 * Position the logical cursor from a visual-line index and a content column
+	 * (visible cells). Inverse of the rendering pipeline: the visual line comes
+	 * from buildVisualLineMap (1:1 with the wrapped display lines), its plain text
+	 * is sliced by column to a grapheme/wide-safe character offset, and the offset
+	 * is clamped last-vs-mid-segment exactly as findVisualLineAt bounds the cursor
+	 * (a non-final wrapped segment stops one char short so the caret never spills
+	 * onto the next visual line's start). Out-of-range indices clamp to the map.
+	 */
+	private visualToLogical(visualLineIndex: number, cellCol: number): void {
+		const visualLines = this.buildVisualLineMap(this.lastWidth);
+		if (visualLines.length === 0) return;
+		const idx = Math.max(0, Math.min(visualLineIndex, visualLines.length - 1));
+		const vl = visualLines[idx]!;
+		const line = this.state.lines[vl.logicalLine] ?? "";
+		const vlText = line.slice(vl.startCol, vl.startCol + vl.length);
+		const isLastSegmentOfLine =
+			idx === visualLines.length - 1 || visualLines[idx + 1]?.logicalLine !== vl.logicalLine;
+		const maxOffset = isLastSegmentOfLine ? vl.length : Math.max(0, vl.length - 1);
+		const offset = Math.min(maxOffset, sliceByColumn(vlText, 0, Math.max(0, cellCol), true).length);
+		// Fresh placement: leave history browsing; setCursorCol drops the sticky
+		// preferred column and any atomic-segment snap so the next vertical move
+		// recomputes from the new position.
+		this.historyIndex = -1;
+		this.state.cursorLine = vl.logicalLine;
+		this.setCursorCol(vl.startCol + offset);
 	}
 
 	/**
@@ -2158,11 +2556,13 @@ export class Editor implements Component, Focusable {
 
 	private moveToLineStart(): void {
 		this.lastAction = null;
+		this.collapseSelection();
 		this.setCursorCol(0);
 	}
 
 	private moveToLineEnd(): void {
 		this.lastAction = null;
+		this.collapseSelection();
 		const currentLine = this.state.lines[this.state.cursorLine] || "";
 		this.setCursorCol(currentLine.length);
 	}
@@ -2332,6 +2732,13 @@ export class Editor implements Component, Focusable {
 		this.historyIndex = -1; // Exit history browsing mode
 		this.lastAction = null;
 
+		// Forward-delete with an active selection deletes the selection (one step).
+		if (this.getNormalizedSelection() !== null) {
+			this.pushUndoSnapshot();
+			this.deleteSelectionInternal();
+			return;
+		}
+
 		const currentLine = this.state.lines[this.state.cursorLine] || "";
 
 		if (this.state.cursorCol < currentLine.length) {
@@ -2487,6 +2894,8 @@ export class Editor implements Component, Focusable {
 		precomputedVisualLines?: Array<{ logicalLine: number; startCol: number; length: number }>,
 	): void {
 		this.lastAction = null;
+		// A plain cursor move (no shift-select in this phase) drops any selection.
+		this.collapseSelection();
 
 		// Up/down navigation needs the full visual-line map. Left/right only needs
 		// it for the rare "at end of last line" preferred-column update, so build it
@@ -2549,6 +2958,7 @@ export class Editor implements Component, Focusable {
 	 */
 	private pageScroll(direction: -1 | 1): void {
 		this.lastAction = null;
+		this.collapseSelection();
 		const terminalRows = this.tui.terminal.rows;
 		const pageSize = Math.max(5, Math.floor(terminalRows * 0.3));
 
@@ -2561,6 +2971,7 @@ export class Editor implements Component, Focusable {
 
 	private moveWordBackwards(): void {
 		this.lastAction = null;
+		this.collapseSelection();
 		const currentLine = this.state.lines[this.state.cursorLine] || "";
 
 		// If at start of line, move to end of previous line
@@ -2750,6 +3161,7 @@ export class Editor implements Component, Focusable {
 	 */
 	private jumpToChar(char: string, direction: "forward" | "backward"): void {
 		this.lastAction = null;
+		this.collapseSelection();
 		const isForward = direction === "forward";
 		const lines = this.state.lines;
 
@@ -2787,6 +3199,7 @@ export class Editor implements Component, Focusable {
 
 	private moveWordForwards(): void {
 		this.lastAction = null;
+		this.collapseSelection();
 		const currentLine = this.state.lines[this.state.cursorLine] || "";
 
 		// If at end of line, move to start of next line

@@ -122,6 +122,7 @@ function createHost(): {
 		recordFusionSpend: fusionSpend,
 		prepareFusionContextEconomy: async () => {},
 		evaluateFusionBudget: () => ({ allowed: true }),
+		getContextUsage: () => undefined,
 	};
 	return { host, events, fusionSpend };
 }

@@ -14,6 +14,7 @@ export interface SlashCommandHost {
 	handleGoalCommand(args: string): void | Promise<void>;
 	handlePinCommand(args: string): void | Promise<void>;
 	handleUnpinCommand(args: string): void | Promise<void>;
+	toggleMouse(): void;
 	showStatus(text: string): void;
 	getTodoSummaryText(): string;
 	showSettingsSelector(): void | Promise<void>;
@@ -58,6 +59,7 @@ export const DISPATCHED_SLASH_COMMAND_NAMES = [
 	"plan",
 	"settings",
 	"theme",
+	"mouse",
 	"config",
 	"tree",
 	"fork",
@@ -85,6 +87,7 @@ export const exactSlashCommands = new Map<string, (host: SlashCommandHost) => vo
 	["/plan", (host) => host.promptExtensionCommand("/permission-mode plan")],
 	["/settings", (host) => host.showSettingsSelector()],
 	["/theme", (host) => host.showThemeSelector()],
+	["/mouse", (host) => host.toggleMouse()],
 	["/config", (host) => host.showConfigSelector()],
 	["/tree", (host) => host.showTreeSelector()],
 	["/fork", (host) => host.showUserMessageSelector()],

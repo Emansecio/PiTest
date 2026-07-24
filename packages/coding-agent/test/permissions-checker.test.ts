@@ -93,6 +93,30 @@ describe("PermissionChecker — auto mode (guarded default)", () => {
 		deny("rm -rf ~");
 	});
 
+	it("blocks GNU long-form and long/short-mixed destructive rm commands (H13)", () => {
+		const c = new PermissionChecker({ cwd, mode: "auto", settings: {} });
+		const deny = (command: string) =>
+			expect(c.check({ type: "exec", toolName: "bash", command }).decision, command).toBe("deny");
+		// GNU long `--recursive` (+ optional `--force`), any order, targeting root.
+		deny("rm --recursive --force /");
+		deny("rm --recursive /");
+		deny("rm --force --recursive /");
+		deny("rm --recursive -f /"); // long recursive + short force
+		deny("rm -f --recursive /"); // short force + long recursive
+		deny("rm -rf --force /"); // short recursive cluster + long companion (escaped before H13)
+		// Long forms against $HOME / ~ and root globs / `--` separator.
+		deny("rm --recursive --force ~");
+		deny("rm --recursive ~");
+		deny("rm --recursive --force $HOME");
+		// biome-ignore lint/suspicious/noTemplateCurlyInString: literal shell `${HOME}` IS the case under test — not a JS template placeholder.
+		deny("rm --recursive --force ${HOME}");
+		deny("rm --recursive --force /*");
+		deny("rm --recursive --force -- /");
+		// Adjacent equivalent gap also closed: short-separated flags targeting $HOME.
+		deny("rm -r -f $HOME");
+		deny("rm -f -r $HOME");
+	});
+
 	it("allows deep Unix paths that merely start with / or ~ (no false positive from plan 022)", () => {
 		const c = new PermissionChecker({ cwd, mode: "auto", settings: {} });
 		const allow = (command: string) =>
@@ -100,6 +124,23 @@ describe("PermissionChecker — auto mode (guarded default)", () => {
 		allow("rm -rf /tmp/build");
 		allow("rm -rf ~/proj/node_modules");
 		allow("rm -rf $HOME/proj/node_modules");
+		// H13 must not over-block: long forms with a deep (non-root) target stay allowed.
+		allow("rm --recursive --force /tmp/build");
+		allow("rm --recursive ~/proj/node_modules");
+		allow("rm --recursive --force $HOME/proj/node_modules");
+	});
+
+	it("keeps non-recursive rm (short OR GNU long `--force`) allowed — H13 closes only recursive-of-root equivalences", () => {
+		const c = new PermissionChecker({ cwd, mode: "auto", settings: {} });
+		const allow = (command: string) =>
+			expect(c.check({ type: "exec", toolName: "bash", command }).decision, command).toBe("allow");
+		// `rm --force file` must get the SAME treatment as `rm -f file` (both allowed by the
+		// deny floor); the fix only closes equivalences of the already-dangerous recursive forms.
+		allow("rm --force file.txt");
+		allow("rm -f file.txt");
+		// Recursive but a non-root single target — the middle-tier speed-bump's job, not the floor's.
+		allow("rm --recursive file.txt");
+		allow("rm --recursive src");
 	});
 
 	it("blocks the PowerShell/cmd catastrophic tier (drive roots, /, ~)", () => {

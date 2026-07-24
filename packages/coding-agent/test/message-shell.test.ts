@@ -49,6 +49,19 @@ describe("MessageShell — basic gutter rendering", () => {
 		expect(shell.render(40)).toEqual([]);
 	});
 
+	it("gutterContinuationChar marks only the first line (user-role ❯ + indented continuations)", () => {
+		const shell = new MessageShell({ gutterChar: "❯", gutterContinuationChar: " " });
+		shell.addChild(new Canned(["first", "wrapped", "more"]));
+
+		const out = shell.render(40).map(stripAnsi);
+
+		expect(out[0]).toBe("");
+		expect(out[1]).toBe("❯ first");
+		// Continuations indent to the same text column — no column of arrows.
+		expect(out[2]).toBe("  wrapped");
+		expect(out[3]).toBe("  more");
+	});
+
 	it("renders empty when children produce no lines", () => {
 		const shell = new MessageShell();
 		shell.addChild(new Canned([]));

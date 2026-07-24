@@ -125,7 +125,7 @@ describe.skipIf(!hasAnthropicCredentials)("Anthropic interleaved thinking", () =
 		"should do interleaved thinking on Claude Opus 4.5",
 		{ retry: 3 },
 		live("anthropic", async () => {
-			const llm = getModel("anthropic", "claude-opus-4-8");
+			const llm = getModel("anthropic", "claude-opus-5");
 			await assertSecondToolCallWithInterleavedThinking(llm, "high");
 		}),
 	);
@@ -134,7 +134,7 @@ describe.skipIf(!hasAnthropicCredentials)("Anthropic interleaved thinking", () =
 		"should do interleaved thinking on Claude Opus 4.6",
 		{ retry: 3 },
 		live("anthropic", async () => {
-			const llm = getModel("anthropic", "claude-opus-4-8");
+			const llm = getModel("anthropic", "claude-opus-5");
 			await assertSecondToolCallWithInterleavedThinking(llm, "high");
 		}),
 	);

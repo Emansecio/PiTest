@@ -21,7 +21,7 @@ import {
 	type UserMessage,
 } from "@pit/ai";
 import { Type } from "typebox";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { agentLoop } from "../src/agent-loop.js";
 import { ToolRewriteRegistry } from "../src/tool-rewrite-registry.js";
 import type {
@@ -145,6 +145,15 @@ async function runAndCollect(
 	for await (const event of stream) events.push(event);
 	const messages = await stream.result();
 	return { events, messages };
+}
+
+/** Externally resolvable promise, to order two executions deterministically. */
+function createDeferred(): { promise: Promise<void>; resolve: () => void } {
+	let resolve!: () => void;
+	const promise = new Promise<void>((r) => {
+		resolve = r;
+	});
+	return { promise, resolve };
 }
 
 async function withEnvVarAsync<T>(name: string, value: string, fn: () => Promise<T>): Promise<T> {
@@ -518,6 +527,120 @@ describe("P1 speculative tool execution", () => {
 		const toolResult = messages.find((m) => m.role === "toolResult") as Extract<AgentMessage, { role: "toolResult" }>;
 		const text = toolResult.content[0]?.type === "text" ? toolResult.content[0].text : "";
 		expect(text).toContain('"a":2');
+	});
+
+	// --- 7b. Fingerprint mismatch must not unregister the REAL abort controller ----
+
+	it("regression: a late speculative release must not unregister the real tool's abort controller", async () => {
+		// Same provider edge as test 7 (streamed args a:1, final args a:2), but with a
+		// per-tool controller registry wired. The mismatch discards the speculation and
+		// defers its `release()` until the aborted speculative outcome settles — by then
+		// the normal path has re-registered a FRESH controller under the SAME id for the
+		// real execution. A blind `registry.delete(id)` there kills granular
+		// `cancelTool(id)` for a tool that is still running.
+		//
+		// Seam: `makePerToolSignal` is module-private, so this drives the smallest
+		// reachable public surface — `agentLoop` with `config.toolAbortControllers`,
+		// the same seam agent-loop.test.ts uses for per-tool abort. Both executes are
+		// gated so the two registrations for id "c1" overlap in the failing order.
+		const toolAbortControllers = new Map<string, AbortController>();
+		const specGate = createDeferred();
+		const realGate = createDeferred();
+		let specController: AbortController | undefined;
+		let realController: AbortController | undefined;
+		let realStarted = false;
+		let realSawAbort = false;
+
+		const tool: AgentTool = {
+			name: "spec_tool",
+			label: "spec_tool",
+			description: "",
+			parameters: Type.Object({}, { additionalProperties: true }),
+			speculationSafe: true,
+			async execute(id, args, signal) {
+				if ((args as { a?: number }).a === 1) {
+					// Speculative run: still pending when the mismatch discards it, so its
+					// deferred release() cannot fire before the real re-registration. It is
+					// the discard's own abort — raced by `raceToolExecute` inside
+					// executePreparedToolCall — that settles the outcome, one funnel later,
+					// i.e. after the real path already registered its controller.
+					specController = toolAbortControllers.get(id);
+					await specGate.promise;
+					return { content: [{ type: "text", text: "spec" }], details: {} };
+				}
+				// Real run, under its own freshly registered controller.
+				realController = toolAbortControllers.get(id);
+				realStarted = true;
+				signal?.addEventListener(
+					"abort",
+					() => {
+						realSawAbort = true;
+						realGate.resolve();
+					},
+					{ once: true },
+				);
+				await realGate.promise;
+				return { content: [{ type: "text", text: "real" }], details: {}, terminate: true };
+			},
+		};
+
+		let streamCalls = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			const call = ++streamCalls;
+			queueMicrotask(() => {
+				if (call > 1) {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "stopped" }], "stop"),
+					});
+					return;
+				}
+				pushStreamedToolCalls(stream, [{ id: "c1", name: "spec_tool", arguments: { a: 1 } }]);
+				setTimeout(() => {
+					// Final message: SAME id, DIFFERENT args → fingerprint mismatch → discard.
+					const message = createAssistantMessage(
+						[{ type: "toolCall", id: "c1", name: "spec_tool", arguments: { a: 2 } }],
+						"toolUse",
+					);
+					stream.push({ type: "done", reason: "toolUse", message });
+				}, 10);
+			});
+			return stream;
+		};
+
+		const stream = agentLoop(
+			[createUserMessage("go")],
+			baseContext([tool]),
+			baseConfig({ toolAbortControllers }),
+			undefined,
+			streamFn,
+		);
+		const consume = (async () => {
+			for await (const _event of stream) {
+				// drain
+			}
+		})();
+
+		// Wait until the real execution is in flight under its own controller, then let
+		// the discarded speculation's deferred release() land.
+		await vi.waitFor(() => expect(realStarted).toBe(true));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+
+		expect(specController).toBeDefined();
+		expect(realController).toBeDefined();
+		// Sanity: two distinct registrations landed on the same id.
+		expect(realController).not.toBe(specController);
+		// The real controller must still be registered (the stale release is a no-op)...
+		expect(toolAbortControllers.get("c1")).toBe(realController);
+		// ...and granular cancellation must still reach the in-flight tool.
+		toolAbortControllers.get("c1")?.abort();
+		await vi.waitFor(() => expect(realSawAbort).toBe(true));
+
+		specGate.resolve();
+		realGate.resolve();
+		await consume;
 	});
 
 	// --- 8. Gates: speculation must NOT start early ------------------------------

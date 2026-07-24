@@ -20,7 +20,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { Agent, AgentEvent, AgentMessage, AgentState, AgentTool, ThinkingLevel } from "@pit/agent-core";
 import { isStreamGuardAbortMessage, setUnknownToolHintProvider } from "@pit/agent-core";
-import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@pit/ai";
+import type { AssistantMessage, CacheRetention, ImageContent, Message, Model, TextContent } from "@pit/ai";
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
@@ -57,6 +57,7 @@ import {
 	compactSession,
 	maybeStartSpeculativeCompaction,
 	measureMidTurnWirePressure,
+	parseMidTurnPressureRatio,
 	resolveCompactModel,
 } from "./agent-session-compaction.ts";
 import {
@@ -85,6 +86,7 @@ import {
 	adoptSupersedeScanState,
 	applyOldThinkingCap,
 	applySupersedeOnly,
+	type ContextPrunePlan,
 	cloneToolResultMessagesForPrune,
 	elideAllMutatingToolCallArguments,
 	planContextPrune,
@@ -207,6 +209,7 @@ import {
 	setCurrentPreviewQueue,
 } from "./preview-queue.ts";
 import { expandPromptTemplate, type PromptTemplate, parseCommandArgs, substituteArgs } from "./prompt-templates.js";
+import { evaluatePruneCacheEconomics, PRUNE_CACHE_ECONOMICS_HORIZON_TURNS } from "./prune-economics.ts";
 import { getLivingRepoMap, type LivingRepoMap } from "./repo-map/living-index.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
 import {
@@ -346,6 +349,13 @@ export interface AgentSessionConfig {
 	disableHashlineAnchors?: boolean;
 	/** Optional permission checker for Fusion verify / subagent policy (from services). */
 	permissionChecker?: import("./permissions/index.ts").PermissionChecker;
+	/**
+	 * RAW per-session prompt-cache retention option (undefined = provider "long"
+	 * default). Not applied here — the send path in sdk.ts owns that — but the
+	 * cache-keepalive scheduler reads it (resolved env-first) to pick its idle
+	 * ping cadence: ~55min for long (1h TTL), ~4m30 for short.
+	 */
+	cacheRetention?: CacheRetention;
 }
 
 export interface ExtensionBindings {
@@ -496,6 +506,51 @@ function visualNudgePrompt(file: string): string {
 		`You changed a rendered visual artifact (${file}) but didn't look at it this turn.`,
 		"Before reporting done, render it with the `preview` tool (pass the file, a served directory, or your dev-server URL), then review the screenshot and the console/network for defects. If it can't be rendered (no browser, or it isn't independently viewable), say so explicitly instead of assuming it looks right.",
 	].join("\n");
+}
+
+/** Length of a message's serialized toolCall arguments (0 when absent/unserializable). */
+function stringifyArgsLength(args: unknown): number {
+	if (args === undefined || args === null) return 0;
+	try {
+		return JSON.stringify(args)?.length ?? 0;
+	} catch {
+		return 0;
+	}
+}
+
+/**
+ * Per-message content-length signature over exactly what `pruneOldToolOutputs`
+ * rewrites: text-block text, user string content, and toolCall arguments. Used to
+ * locate the first message a prune probe actually shrank (see
+ * firstDivergentPruneIndex) — message-object identity can't, since the prune
+ * clone shallow-copies every toolResult/assistant/user message even when untouched.
+ */
+function pruneContentLengthSignature(msg: AgentMessage): number {
+	const content = (msg as { content?: unknown }).content;
+	if (typeof content === "string") return content.length;
+	if (!Array.isArray(content)) return 0;
+	let total = 0;
+	for (const block of content) {
+		if (!block || typeof block !== "object") continue;
+		const b = block as { type?: string; text?: string; arguments?: unknown };
+		if (b.type === "text" && typeof b.text === "string") total += b.text.length;
+		else if (b.type === "toolCall") total += stringifyArgsLength(b.arguments);
+	}
+	return total;
+}
+
+/**
+ * First index at which a prune probe's per-message content diverges from the
+ * original — i.e. the first message the size-prune actually shrank, which is where
+ * the provider's cached tail must be cold-rewritten. Returns -1 when nothing
+ * diverged (treated by the caller as "don't defer").
+ */
+function firstDivergentPruneIndex(original: AgentMessage[], pruned: AgentMessage[]): number {
+	const n = Math.min(original.length, pruned.length);
+	for (let i = 0; i < n; i++) {
+		if (pruneContentLengthSignature(original[i]) !== pruneContentLengthSignature(pruned[i])) return i;
+	}
+	return -1;
 }
 
 /**
@@ -654,6 +709,10 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	private _allowedToolNames?: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _disableHashlineAnchors: boolean;
+	/** RAW per-session cache-retention option (undefined = default); consumed by the cache-keepalive scheduler via getSessionCacheRetention(). */
+	private readonly _cacheRetention: CacheRetention | undefined;
+	/** One-shot latch for the visible persist-failure notice (H24) — re-armed when a persist succeeds again. */
+	private _persistFailureWarned = false;
 	/** Optional; wired from AgentSessionServices for Fusion verify policy. */
 	readonly permissionChecker: import("./permissions/index.ts").PermissionChecker | undefined;
 	private readonly _readDedupeStore: ReadDedupeStore | undefined;
@@ -931,6 +990,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._disableHashlineAnchors = config.disableHashlineAnchors ?? false;
+		this._cacheRetention = config.cacheRetention;
 		this.permissionChecker = config.permissionChecker;
 		// Per-session de-dup of identical repeat reads. On by default; PIT_READ_DEDUPE=0
 		// disables. Content-hashed + LRU-bounded, so edited or long-ago reads re-send.
@@ -2125,6 +2185,11 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 					}
 				}
 				// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
+				// A successful persist after a warned failure streak re-arms the warning
+				// for a future, distinct streak.
+				if (this._persistFailureWarned && this.sessionManager.getConsecutivePersistFailures() === 0) {
+					this._persistFailureWarned = false;
+				}
 			} catch (err) {
 				recordDiagnostic({
 					category: "error.isolated",
@@ -2132,6 +2197,29 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 					source: "agent-session.message_end",
 					context: { note: err instanceof Error ? err.message : String(err) },
 				});
+				// Escalate a persistent failure streak to a VISIBLE notice (H24):
+				// /diagnostics alone means the user never learns their history stopped
+				// being saved. One-shot per streak; the notice itself flows back through
+				// this handler (its persist will fail too), so the flag must be set
+				// BEFORE emitting to keep this non-recursive.
+				if (!this._persistFailureWarned && this.sessionManager.getConsecutivePersistFailures() >= 3) {
+					this._persistFailureWarned = true;
+					const notice = {
+						role: "custom" as const,
+						customType: "pit.session-notice",
+						content:
+							"Session persistence is failing repeatedly — recent history is NOT being saved to disk. " +
+							"Check disk space, permissions, or antivirus locks on the session file.",
+						display: true,
+						timestamp: Date.now(),
+					};
+					try {
+						this.emit({ type: "message_start", message: notice });
+						this.emit({ type: "message_end", message: notice });
+					} catch {
+						// Notice render failure is non-fatal; the diagnostic above remains.
+					}
+				}
 			}
 
 			// Track assistant message for auto-compaction (checked on agent_end)
@@ -2905,6 +2993,11 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		// First synchronous step: mark disposed so a subagent that settles during/after
 		// teardown is dropped by _deliverAsyncResult instead of mutating a dead session.
 		this._disposed = true;
+		// Disarm the cache-keepalive: its unref'd idle timer would otherwise survive
+		// dispose and fire a provider ping against a dead session (up to ~55min later
+		// under long retention). onActivity() clears the timer and bumps the ping
+		// generation so an in-flight ping cannot reschedule either.
+		this._cacheKeepalive.onActivity();
 		// Cancel any in-flight verification check so its child process does not keep
 		// holding the session cwd (Windows rmSync EBUSY in tests).
 		this._verificationAbort?.abort();
@@ -3112,6 +3205,16 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	/** Current model (may be undefined if not yet selected) */
 	get model(): Model<any> | undefined {
 		return this.agent.state.model;
+	}
+
+	/**
+	 * RAW per-session cache-retention option (undefined = provider default).
+	 * Part of CacheKeepaliveHost: the idle-ping scheduler resolves this env-first
+	 * to decide short vs long ping cadence. Deliberately NOT the effective wire
+	 * value — resolution (env override, model support) lives in the keepalive.
+	 */
+	getSessionCacheRetention(): CacheRetention | undefined {
+		return this._cacheRetention;
 	}
 
 	/** The id under which this session is registered on the inter-agent message bus, if any. */
@@ -4030,6 +4133,15 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 			// is this turn's leftover — mark it handled so a future unrelated prompt
 			// never blocks on (or reports) a stale check "out of nowhere".
 			this._markLingeringCheckJobsHandled();
+			// Drain the async persist queue at the turn boundary so a non-graceful
+			// kill between turns cannot lose this turn's trailing JSONL deltas —
+			// dispose() only covers graceful shutdown. Fail-open: a failing disk is
+			// already counted/escalated by the persist-failure counter.
+			try {
+				await this.sessionManager.flushWrites();
+			} catch {
+				// Counted inside the manager (session.persist_failed); never fail the turn.
+			}
 			// UI settles the working loader / deferred turn-done on this event. Emitted
 			// only from the outer prompt() owner (not re-entrant continuation calls).
 			this.emit({ type: "prompt_end" });
@@ -4224,6 +4336,27 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 			} else {
 				threshold = adaptivePruneThreshold(contextTokens, contextWindow);
 				runToolPrune = wouldPruneOldToolOutputs(messages, threshold, protectTurns, prunePlan);
+				// Cache-cost guard: below real pressure, a size-prune of the MIDDLE of
+				// the transcript forces the provider to cold-write the whole cached tail
+				// from the first pruned message on. When the reclaimed tokens don't earn
+				// that re-write back within the horizon, defer the SIZE prune — but keep
+				// the semantic supersede collapse (stale/duplicate results), which is a
+				// correction, never a size play, and must never be deferred. See
+				// prune-economics.ts + _shouldDeferToolPruneForCache.
+				if (
+					runToolPrune &&
+					this._shouldDeferToolPruneForCache(
+						messages,
+						threshold,
+						protectTurns,
+						prunePlan,
+						contextTokens,
+						contextWindow,
+					)
+				) {
+					runToolPrune = false;
+					runSupersedeOnly = wouldApplySupersedeOnly(messages, protectTurns, prunePlan);
+				}
 			}
 		}
 
@@ -4298,6 +4431,106 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		}
 
 		return reclaimed > 0 ? copy : messages;
+	}
+
+	/**
+	 * Below real context pressure, decide whether a proactive size-prune should be
+	 * DEFERRED on cache-cost grounds. A mid-history prune invalidates the provider's
+	 * cached tail from the first pruned message onward, so the provider cold-writes
+	 * `tailTokens − reclaimed` tokens once; the recurring payoff is the cheaper
+	 * cache-read on `reclaimed` tokens each future turn. When the horizon of savings
+	 * can't cover the one-time re-write we hold the bulk until real pressure (or
+	 * supersession) reclaims it. Pure arithmetic lives in prune-economics.ts.
+	 *
+	 * Measurement without a second live prune: run `pruneOldToolOutputs` on a
+	 * throw-away clone under an ISOLATED deferred store (so probe `put()`s never
+	 * pollute the live store's ids/memory), read `reclaimed` from its return, and
+	 * locate the first message whose pruned content diverges from the original.
+	 * Clones shallow-copy every toolResult/assistant/user message even when
+	 * untouched, so message-object identity can't flag pruned entries — a per-message
+	 * text+args length signature is compared instead (pruneOldToolOutputs only
+	 * rewrites text blocks and toolCall arguments).
+	 *
+	 * Kill-switch: PIT_NO_PRUNE_CACHE_ECONOMICS restores the always-prune behavior.
+	 */
+	private _shouldDeferToolPruneForCache(
+		messages: AgentMessage[],
+		threshold: number,
+		protectTurns: number,
+		prunePlan: ContextPrunePlan,
+		contextTokens: number,
+		contextWindow: number,
+	): boolean {
+		if (isTruthyEnvFlag(process.env.PIT_NO_PRUNE_CACHE_ECONOMICS)) return false;
+		if (contextWindow <= 0) return false;
+		const cost = this.model?.cost;
+		if (!cost) return false;
+		const cacheRead = cost.cacheRead ?? 0;
+		const cacheWrite = cost.cacheWrite ?? 0;
+		// Provider without a cache tier (write price 0/absent → e.g. codex) has no
+		// re-write penalty to weigh: never defer. (Also guarded in the helper.)
+		if (!(cacheRead > 0) || !(cacheWrite > 0)) return false;
+
+		// Occupancy from the WIRE view when available: contextTokens covers messages
+		// only, but the pressure the presend guard acts on includes system prompt +
+		// tools. Taking the max is conservative — a higher occupancy can only push us
+		// into the pressure band, where we never defer (prune wins), so wire awareness
+		// cannot cause over-deferring; without it, a big system+tools block could make
+		// a genuinely pressured window look comfortable and wrongly defer the prune.
+		const wireTokens = this.getContextUsage()?.wireTokens;
+		const occupancyTokens = typeof wireTokens === "number" && wireTokens > contextTokens ? wireTokens : contextTokens;
+		const occupancy = occupancyTokens / contextWindow;
+		// Resolve the comfortable-band boundary from the same env the mid-turn
+		// pressure guard uses (parseMidTurnPressureRatio is exported from
+		// agent-session-compaction.ts; clamp lives there). In the pressure band we
+		// never defer — short-circuit before paying for the probe.
+		const pressureRatio = parseMidTurnPressureRatio(process.env.PIT_MID_TURN_PRESSURE_RATIO);
+		if (occupancy >= pressureRatio) return false;
+
+		// Probe the prune on a throw-away clone under an isolated store so the live
+		// deferred-output store keeps its id sequence and memory untouched.
+		const probe = cloneToolResultMessagesForPrune(messages);
+		const savedStore = getCurrentDeferredOutputStore();
+		const probeStore = createDeferredOutputStore();
+		let reclaimed = 0;
+		setCurrentDeferredOutputStore(probeStore);
+		try {
+			reclaimed = pruneOldToolOutputs(probe, threshold, protectTurns, true, prunePlan);
+		} finally {
+			setCurrentDeferredOutputStore(savedStore);
+			probeStore.dispose();
+		}
+		if (reclaimed <= 0) return false;
+
+		const firstPrunedIndex = firstDivergentPruneIndex(messages, probe);
+		if (firstPrunedIndex < 0) return false; // sanity guard: no divergence → don't defer
+
+		const tailTokens = estimateContextTokens(messages.slice(firstPrunedIndex)).tokens;
+		const decision = evaluatePruneCacheEconomics({
+			reclaimedTokens: reclaimed,
+			tailTokens,
+			occupancy,
+			pressureRatio,
+			cacheReadCostPerMTok: cacheRead,
+			cacheWriteCostPerMTok: cacheWrite,
+		});
+		if (!decision.defer) return false;
+
+		recordDiagnostic({
+			category: "prune.economics-defer",
+			level: "info",
+			source: "agent-session.pruneContextForProvider",
+			context: {
+				bytes: reclaimed,
+				reclaimedTokens: reclaimed,
+				note:
+					`deferred: ctx=${contextTokens}tok reclaimed=${reclaimed}tok tail=${tailTokens}tok ` +
+					`oneTime=$${decision.oneTimeInvalidationCostUsd.toFixed(6)} ` +
+					`gainx${PRUNE_CACHE_ECONOMICS_HORIZON_TURNS}=$${decision.recurringReadSavingsUsd.toFixed(6)} ` +
+					`occ=${occupancy.toFixed(3)} firstPruned=${firstPrunedIndex}`,
+			},
+		});
+		return true;
 	}
 
 	/**

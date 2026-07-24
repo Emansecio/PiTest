@@ -16,7 +16,7 @@
 
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -30,6 +30,7 @@ import type { Model } from "@pit/ai";
 import { type Message, repairJson, streamSimple } from "@pit/ai";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
+import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { areSubagentGuardsDisabled, createSubagentGuardChain } from "../built-ins/subagent-guards.ts";
 import type { ToolCallEvent, ToolResultEvent } from "../extensions/types.ts";
 import type { ModelRegistry } from "../model-registry.ts";
@@ -148,6 +149,46 @@ export function resolveSubagentThinking(model: Model<any> | undefined): Thinking
 	return "medium";
 }
 
+/**
+ * Upper bound on a derived subagent cache key, mirroring the OpenAI
+ * prompt_cache_key wire clamp (`OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH` = 64 in
+ * `@pit/ai`'s openai-prompt-cache). That clamp keeps the FIRST 64 chars and
+ * drops the tail — which would silently erase the `:sub:<type>` suffix on a long
+ * parent id and collapse distinct types onto one key. We pre-truncate the PARENT
+ * component instead (see {@link deriveSubagentCacheKey}) so the type suffix
+ * always survives. Kept as a local literal to avoid importing from a provider
+ * route (the wire clamp remains the authority; this must not exceed it).
+ */
+const SUBAGENT_CACHE_KEY_MAX_CHARS = 64;
+
+/**
+ * Derive a subagent's `prompt_cache_key` from the parent session id and a stable
+ * type/role label: `${parentSessionId}:sub:${label}`.
+ *
+ * The label is what lets a fan-out of the SAME type SHARE one key (→ provider
+ * cache-shard affinity) while different types stay isolated, so it must be stable
+ * across same-type spawns and must NOT encode anything unique per spawn (index,
+ * timestamp, subagent id) — that would defeat the shared-key affinity. An absent
+ * label defaults to the literal "task".
+ *
+ * If the full key would exceed the 64-char wire clamp, the PARENT component is
+ * truncated (head kept) so the `:sub:${label}` suffix survives intact — the type
+ * must always differentiate. In the pathological case where the suffix alone
+ * exceeds the budget, only the suffix head is kept.
+ */
+export function deriveSubagentCacheKey(parentSessionId: string, label: string | undefined): string {
+	const cleanLabel = (label ?? "").trim() || "task";
+	const suffix = `:sub:${cleanLabel}`;
+	const suffixChars = Array.from(suffix);
+	if (suffixChars.length >= SUBAGENT_CACHE_KEY_MAX_CHARS) {
+		return suffixChars.slice(0, SUBAGENT_CACHE_KEY_MAX_CHARS).join("");
+	}
+	const parentBudget = SUBAGENT_CACHE_KEY_MAX_CHARS - suffixChars.length;
+	const parentChars = Array.from(parentSessionId);
+	const parent = parentChars.length > parentBudget ? parentChars.slice(0, parentBudget).join("") : parentSessionId;
+	return `${parent}${suffix}`;
+}
+
 /** Coerce an AbortSignal `reason` into an Error for rejection. `controller.abort()`
  * may be called with an explanatory Error (turn cap / timeout / parent), a string,
  * or nothing (default DOMException). Keeps the message informative downstream. */
@@ -219,6 +260,23 @@ export interface SpawnSubagentDependencies {
 	 * worktree retargeter is used, so direct API callers are isolated too.
 	 */
 	retargetToolsForCwd?: (tools: AgentTool[], cwd: string) => AgentTool[];
+	/**
+	 * The parent session's id. Used to derive each subagent's `prompt_cache_key`
+	 * (`${parentSessionId}:sub:${agentTypeLabel}` — see {@link deriveSubagentCacheKey})
+	 * so a fan-out of same-type subagents shares provider cache-shard affinity.
+	 *
+	 * Shard affinity ONLY — it never changes results. OpenAI-family providers map
+	 * `options.sessionId` to `prompt_cache_key` (a routing hint over the shared
+	 * system-prompt+tools prefix). The Anthropic route uses it as the
+	 * `x-session-affinity` header for API-key auth only (ignored under OAuth) —
+	 * HTTP client/backend routing affinity, NOT content caching. Because same-type
+	 * children share the derived key, the distinct-key count is bounded by the
+	 * number of agent types, not by spawn count.
+	 *
+	 * Omitted (or with `PIT_NO_SUBAGENT_CACHE_KEY` truthy) → subagents send no
+	 * key, exactly like before this feature (legacy behavior).
+	 */
+	parentSessionId?: string;
 }
 
 /**
@@ -305,8 +363,41 @@ async function createWorktree(parentCwd: string, taskName: string, spec: Worktre
 	// this avoids branch conflicts and keeps the parent branch untouched.
 	const args = ["worktree", "add", "--detach", "--", dir, spec.branch ?? "HEAD"];
 	const timeoutMs = resolveWorktreeGitTimeoutMs();
-	await execFileWithTimeout("git", args, { cwd: parentCwd }, timeoutMs);
+	try {
+		await execFileWithTimeout("git", args, { cwd: parentCwd }, timeoutMs);
+	} catch (err) {
+		// A failed `git worktree add` — a SIGKILL when the git timeout
+		// (PIT_WORKTREE_GIT_TIMEOUT_MS) fires mid-checkout, an index.lock, a bad
+		// branch — can leave a half-created worktree: a partial dir under
+		// .pit/worktrees and/or a dangling `.git/worktrees` admin entry. Left alone
+		// they accrete garbage and stale locks that trip later spawns. Clean both,
+		// best-effort, then re-throw the ORIGINAL error unchanged. (H20)
+		await cleanupPartialWorktree(parentCwd, dir);
+		throw err;
+	}
 	return { path: dir, cleanup: spec.cleanup ?? "auto" };
+}
+
+/**
+ * Best-effort teardown of a worktree whose creation failed partway. Runs the
+ * existing removal (`git worktree remove --force`), then `git worktree prune` to
+ * clear a dangling/prunable admin entry the remove could not, then deletes any
+ * partial directory git left behind. Every step swallows its own error so this
+ * never masks the caller's original failure.
+ */
+export async function cleanupPartialWorktree(parentCwd: string, dir: string): Promise<void> {
+	await cleanupSubagentWorktree(parentCwd, dir);
+	const timeoutMs = resolveWorktreeGitTimeoutMs();
+	try {
+		await execFileWithTimeout("git", ["worktree", "prune"], { cwd: parentCwd }, timeoutMs);
+	} catch {
+		// prune is best-effort; a missing/locked repo just means nothing to prune.
+	}
+	try {
+		await rm(dir, { recursive: true, force: true });
+	} catch {
+		// dir may never have been created — nothing to remove.
+	}
 }
 
 export async function cleanupSubagentWorktree(parentCwd: string, path: string): Promise<void> {
@@ -486,7 +577,20 @@ async function runSpawned(
 	const guardChain = areSubagentGuardsDisabled()
 		? undefined
 		: createSubagentGuardChain({ cwd: worktree?.path ?? parentCwd });
+	// Prompt-cache shard affinity for subagent fan-out. Derived from the parent
+	// session id + a stable type/role label so an N-way fan-out of same-type
+	// children (identical system prompt + tools) shares one key and lands on the
+	// same provider cache shard. OpenAI-family maps this to `prompt_cache_key`
+	// (over the shared prefix); Anthropic maps it to the `x-session-affinity`
+	// header (API-key auth only, ignored under OAuth) — client/backend routing
+	// affinity, NOT content caching, so it can never alter a subagent's output.
+	// Opt out with PIT_NO_SUBAGENT_CACHE_KEY (→ no key, legacy behavior).
+	const subagentCacheKey =
+		deps.parentSessionId && !isTruthyEnvFlag(process.env.PIT_NO_SUBAGENT_CACHE_KEY)
+			? deriveSubagentCacheKey(deps.parentSessionId, options.agentTypeLabel)
+			: undefined;
 	const agent = new Agent({
+		sessionId: subagentCacheKey,
 		initialState: {
 			systemPrompt,
 			// Heterogeneous spawn: a task may run on a cheaper model than the parent.
@@ -583,7 +687,14 @@ async function runSpawned(
 		},
 	});
 
-	agent.subscribe((event) => {
+	// Captured so it can be torn down on settle. The coordinator keeps this same
+	// Agent LIVE for a later op:"continue"/op:"resume" (see coordinator-extension's
+	// continuable/resumable maps), re-driving it OUTSIDE runSpawned. If this
+	// subscription survived, its closure `turnCount` would keep accumulating across
+	// those reuses and — once the cumulative count crossed this run's `maxTurns` —
+	// fire `controller.abort()`, phantom-aborting an unrelated follow-up and
+	// double-writing this run's registry record. Unsubscribed in cleanup(). (H18)
+	const unsubscribeTurns = agent.subscribe((event) => {
 		if (event.type === "turn_end") {
 			turnCount++;
 			// GAP #5: accumulate token/cost usage from the assistant message.
@@ -617,8 +728,12 @@ async function runSpawned(
 	// turn_end telemetry, and writing into the worktree that cleanup() is about
 	// to remove (corruption risk). abort() settles agent.prompt() so the race
 	// resolves and cleanup awaits a quiesced run before removing the worktree.
+	// Named so cleanup() can remove it: a stale controller (a run that settled
+	// WITHOUT aborting leaves this once-listener armed) must not be able to abort
+	// the same Agent after it is re-driven by a later continue/resume. (H18)
+	const abortAgentOnController = () => agent.abort();
 	if (controller.signal.aborted) agent.abort();
-	else controller.signal.addEventListener("abort", () => agent.abort(), { once: true });
+	else controller.signal.addEventListener("abort", abortAgentOnController, { once: true });
 
 	// Best-effort: a throwing onAgentReady must not abort the spawn (and leak the
 	// timeout/abort wiring set up below). The only caller attaches a bus responder.
@@ -638,6 +753,12 @@ async function runSpawned(
 		// listener teardown and `git worktree remove --force` would run twice.
 		if (settled) return;
 		settled = true;
+		// Tear down this run's Agent wiring FIRST so a later continue/resume that
+		// reuses the SAME live Agent (the coordinator keeps it around) is never
+		// touched by this run's stale turn-cap subscription or abort listener. This
+		// is the single settle point for success, error, AND abort. (H18)
+		unsubscribeTurns();
+		controller.signal.removeEventListener("abort", abortAgentOnController);
 		try {
 			options.onSettle?.();
 		} catch {

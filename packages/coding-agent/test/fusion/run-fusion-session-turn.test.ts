@@ -4,7 +4,7 @@
  */
 
 import { Agent } from "@pit/agent-core";
-import type { AssistantMessage, ImageContent } from "@pit/ai";
+import type { AssistantMessage, Context, ImageContent, Model, SimpleStreamOptions } from "@pit/ai";
 import { getModel } from "@pit/ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -46,12 +46,45 @@ import { CompactionController } from "../../src/core/agent-session-compaction.ts
 import type { AgentSessionEvent } from "../../src/core/agent-session-events.ts";
 import { type FusionHost, runFusionSessionTurn } from "../../src/core/agent-session-fusion.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
+import type { ContextUsage } from "../../src/core/extensions/index.js";
 import * as orchestrator from "../../src/core/fusion/orchestrator.ts";
 import { ModelRegistry } from "../../src/core/model-registry.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
 
 const model = getModel("anthropic", "claude-sonnet-5")!;
+
+const EMPTY_ANALYSIS = {
+	consensus: [],
+	contradictions: [],
+	partialCoverage: [],
+	uniqueInsights: [],
+	blindSpots: [],
+	unsupportedClaims: [],
+};
+
+/** ContextUsage with a given wire-prefix size (the writer prefix-reuse size gate reads wireTokens). */
+function usage(wireTokens: number): ContextUsage {
+	return { tokens: null, wireTokens, contextWindow: 200_000, percent: null };
+}
+
+/** Read the single writer streamSimple call (model, context, options). */
+function writerCall(): [Model<any>, Context, SimpleStreamOptions | undefined] {
+	expect(streamSimpleMock).toHaveBeenCalledTimes(1);
+	return streamSimpleMock.mock.calls[0] as unknown as [Model<any>, Context, SimpleStreamOptions | undefined];
+}
+
+/** Mock the panel/judge orchestration to jump straight to the writer with a fixed panel answer. */
+function mockWriterOnly(panelText = "PANEL_ALPHA"): void {
+	vi.spyOn(orchestrator, "runFusionTurn").mockImplementation(async (deps) => {
+		await deps.writer(
+			"original task",
+			[{ member: { cli: "claude", model: "opus" }, ok: true, text: panelText }],
+			EMPTY_ANALYSIS,
+		);
+		return { handled: true, text: "ok" };
+	});
+}
 
 function messageText(message: unknown): string {
 	const content = (message as { content?: unknown }).content;
@@ -65,7 +98,10 @@ function messageText(message: unknown): string {
 function createHost(opts?: {
 	panel?: Array<{ cli: "claude" | "codex"; model: string }>;
 	budget?: { allowed: boolean; reason?: string };
+	model?: Model<any>;
+	contextUsage?: ContextUsage;
 }): { host: FusionHost; agent: Agent; events: AgentSessionEvent[]; fusionSpend: ReturnType<typeof vi.fn> } {
+	const hostModel = opts?.model ?? model;
 	const authStorage = AuthStorage.inMemory();
 	authStorage.setRuntimeApiKey("anthropic", "test-key");
 	const settingsManager = SettingsManager.inMemory({
@@ -82,7 +118,7 @@ function createHost(opts?: {
 	const agent = new Agent({
 		getApiKey: () => "test-key",
 		initialState: {
-			model,
+			model: hostModel,
 			systemPrompt: "sys",
 			tools: [],
 			thinkingLevel: "off",
@@ -94,7 +130,7 @@ function createHost(opts?: {
 	const fusionSpend = vi.fn();
 	let fusionAbort: AbortController | undefined;
 	const host: FusionHost = {
-		model,
+		model: hostModel,
 		agent,
 		sessionManager,
 		settingsManager,
@@ -102,7 +138,7 @@ function createHost(opts?: {
 		cwd: process.cwd(),
 		compaction: new CompactionController({
 			sessionId: "test",
-			model,
+			model: hostModel,
 			thinkingLevel: "off",
 			agent,
 			sessionManager,
@@ -135,6 +171,7 @@ function createHost(opts?: {
 		recordFusionSpend: fusionSpend,
 		prepareFusionContextEconomy: async () => {},
 		evaluateFusionBudget: () => opts?.budget ?? { allowed: true },
+		getContextUsage: () => opts?.contextUsage,
 	};
 	return { host, agent, events, fusionSpend };
 }
@@ -156,6 +193,8 @@ describe("runFusionSessionTurn", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 		delete process.env.PIT_NO_FUSION;
+		delete process.env.PIT_NO_FUSION_PREFIX_REUSE;
+		delete process.env.PIT_NO_LAZY_TOOL_SCHEMAS;
 	});
 
 	it("returns false with synthetic message when panel has fewer than 2 members", async () => {
@@ -358,10 +397,22 @@ describe("runFusionSessionTurn", () => {
 		} satisfies AssistantMessage);
 
 		vi.spyOn(orchestrator, "runFusionTurn").mockImplementation(async (deps) => {
-			const analysis = await deps.runJudge("Q", [
+			const judgeOutcome = await deps.runJudge("Q", [
 				{ member: { cli: "claude", model: "opus" }, ok: true, text: "A" },
 				{ member: { cli: "codex", model: "gpt" }, ok: true, text: "B" },
 			]);
+			// Parse-fail now surfaces as undefined (so the orchestrator never skips
+			// verify on a failed judge); the writer gets an empty analysis like the
+			// real orchestrator's EMPTY_ANALYSIS fallback.
+			expect(judgeOutcome).toBeUndefined();
+			const analysis = judgeOutcome ?? {
+				consensus: [],
+				contradictions: [],
+				partialCoverage: [],
+				uniqueInsights: [],
+				blindSpots: [],
+				unsupportedClaims: [],
+			};
 			await deps.writer("Q", [], analysis);
 			return { handled: true, text: "ok", analysis };
 		});
@@ -369,5 +420,77 @@ describe("runFusionSessionTurn", () => {
 		const { host, events } = createHost();
 		await runFusionSessionTurn(host, "Q");
 		expect(noteContents(events).some((t) => t.includes("could not parse structured output"))).toBe(true);
+	});
+
+	describe("writer prefix reuse", () => {
+		it("reuses the session prefix when all gates pass (session system + tools block, toolChoice none)", async () => {
+			mockWriterOnly("PANEL_ALPHA");
+			const { host } = createHost({ contextUsage: usage(20_000) });
+			await runFusionSessionTurn(host, "original task");
+
+			const [callModel, ctx, options] = writerCall();
+			// Session prefix, not the private WRITER_SYSTEM.
+			expect(ctx.systemPrompt).toBe("sys");
+			// Full tools block shipped for prefix identity, tool calls forbidden.
+			expect(options?.toolChoice).toBe("none");
+			// The writer synthesizes with the session model.
+			expect(callModel.provider).toBe("anthropic");
+			// One trailing user block carries the panel material + inline writer instruction;
+			// the current user request rides in the reused history, NOT restated as a "## Task".
+			const last = ctx.messages[ctx.messages.length - 1];
+			const content = typeof last.content === "string" ? last.content : JSON.stringify(last.content);
+			expect(last.role).toBe("user");
+			expect(content).toContain("PANEL_ALPHA");
+			expect(content).toContain("## Your job");
+			expect(content).not.toContain("## Task");
+			// The reused history still contains the current user request as its own message.
+			const firstText =
+				typeof ctx.messages[0].content === "string"
+					? ctx.messages[0].content
+					: JSON.stringify(ctx.messages[0].content);
+			expect(firstText).toContain("original task");
+		});
+
+		it("falls back to the legacy context when PIT_NO_FUSION_PREFIX_REUSE is set", async () => {
+			process.env.PIT_NO_FUSION_PREFIX_REUSE = "1";
+			mockWriterOnly();
+			const { host } = createHost({ contextUsage: usage(20_000) });
+			await runFusionSessionTurn(host, "original task");
+
+			const [, ctx, options] = writerCall();
+			expect(ctx.systemPrompt).not.toBe("sys"); // WRITER_SYSTEM
+			expect(options?.toolChoice).toBeUndefined();
+		});
+
+		it("falls back to the legacy context when the wire prefix is below the reuse floor", async () => {
+			mockWriterOnly();
+			const { host } = createHost({ contextUsage: usage(5_000) });
+			await runFusionSessionTurn(host, "original task");
+
+			const [, ctx, options] = writerCall();
+			expect(ctx.systemPrompt).not.toBe("sys");
+			expect(options?.toolChoice).toBeUndefined();
+		});
+
+		it("falls back to the legacy context when the wire prefix size is unknown", async () => {
+			mockWriterOnly();
+			const { host } = createHost(); // no contextUsage → getContextUsage() undefined
+			await runFusionSessionTurn(host, "original task");
+
+			const [, ctx, options] = writerCall();
+			expect(ctx.systemPrompt).not.toBe("sys");
+			expect(options?.toolChoice).toBeUndefined();
+		});
+
+		it("falls back to the legacy context on a non-Anthropic session model", async () => {
+			const codex = getModel("openai-codex", "gpt-5.5")!;
+			mockWriterOnly();
+			const { host } = createHost({ model: codex, contextUsage: usage(20_000) });
+			await runFusionSessionTurn(host, "original task");
+
+			const [, ctx, options] = writerCall();
+			expect(ctx.systemPrompt).not.toBe("sys");
+			expect(options?.toolChoice).toBeUndefined();
+		});
 	});
 });

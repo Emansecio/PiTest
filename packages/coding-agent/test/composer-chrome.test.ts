@@ -119,3 +119,55 @@ describe("ComposerChrome pet perch", () => {
 		expect(content.lastWidth).toBe(120);
 	});
 });
+
+describe("ComposerChrome.hitTestChild", () => {
+	test("returns null before the first render (no cache)", () => {
+		const composer = new ComposerChrome(new Text("a", 0, 0), new Text("f", 0, 0));
+		expect(composer.hitTestChild(0)).toBeNull();
+	});
+
+	test("maps body rows to content, then lowerContent; perch and footer are null", () => {
+		const content = new Text("a\nb", 0, 0); // 2 rows
+		const lower = new Text("w\nx\ny", 0, 0); // 3 rows
+		const footer = new Text("f", 0, 0); // 1 row
+		const composer = new ComposerChrome(content, footer, lower);
+		composer.render(40); // rows: content[0,1] lower[2,3,4] footer[5]
+
+		expect(composer.hitTestChild(0)).toEqual({ child: content, childStart: 0 });
+		expect(composer.hitTestChild(1)).toEqual({ child: content, childStart: 0 });
+		expect(composer.hitTestChild(2)).toEqual({ child: lower, childStart: 2 });
+		expect(composer.hitTestChild(4)).toEqual({ child: lower, childStart: 2 });
+		expect(composer.hitTestChild(5)).toBeNull(); // footer strip
+		expect(composer.hitTestChild(6)).toBeNull(); // beyond content
+		expect(composer.hitTestChild(-1)).toBeNull();
+	});
+
+	test("offsets the body spans past the perch rows", () => {
+		const content = new Text("a\nb", 0, 0); // 2 rows
+		const lower = new Text("w\nx\ny", 0, 0); // 3 rows
+		const footer = new Text("f", 0, 0); // 1 row
+		const composer = new ComposerChrome(content, footer, lower);
+		// A 2-row perch above the input, always visible.
+		composer.setPerch(new Text("p1\np2", 0, 0), () => true);
+		composer.render(40); // rows: perch[0,1] content[2,3] lower[4,5,6] footer[7]
+
+		expect(composer.hitTestChild(0)).toBeNull(); // perch decoration
+		expect(composer.hitTestChild(1)).toBeNull();
+		expect(composer.hitTestChild(2)).toEqual({ child: content, childStart: 2 });
+		expect(composer.hitTestChild(3)).toEqual({ child: content, childStart: 2 });
+		expect(composer.hitTestChild(4)).toEqual({ child: lower, childStart: 4 });
+		expect(composer.hitTestChild(6)).toEqual({ child: lower, childStart: 4 });
+		expect(composer.hitTestChild(7)).toBeNull(); // footer strip
+	});
+
+	test("handles a missing lowerContent (content then footer)", () => {
+		const content = new Text("a\nb", 0, 0); // 2 rows
+		const footer = new Text("f", 0, 0); // 1 row
+		const composer = new ComposerChrome(content, footer); // no lowerContent
+		composer.render(40); // rows: content[0,1] footer[2]
+
+		expect(composer.hitTestChild(0)).toEqual({ child: content, childStart: 0 });
+		expect(composer.hitTestChild(1)).toEqual({ child: content, childStart: 0 });
+		expect(composer.hitTestChild(2)).toBeNull(); // footer strip
+	});
+});

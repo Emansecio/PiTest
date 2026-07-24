@@ -56,7 +56,7 @@ function sanitizeStatusText(text: string | undefined): string {
 
 /**
  * Collapse runs of identical labels into `label ×N` so a self-fusion of two
- * identical members reads `claude-opus-4-8 ×2` instead of repeating the full id
+ * identical members reads `claude-opus-5 ×2` instead of repeating the full id
  * twice. Distinct groups join with ` + `, preserving order.
  */
 function collapseAdjacent(labels: string[]): string {
@@ -392,7 +392,7 @@ export class FooterComponent implements Component {
 	 * `fusion: (no panel — /fusion)`. The synthesizer is the active /model, already
 	 * shown on the footer's first line, so it is NOT repeated here. The redundant
 	 * `cli:` prefix is dropped when the model id already names the cli
-	 * (`claude:claude-opus-4-8` → `claude-opus-4-8`), kept otherwise
+	 * (`claude:claude-opus-5` → `claude-opus-5`), kept otherwise
 	 * (`codex:gpt-5.5-codex`). The string is raw (uncolored); the caller colorizes
 	 * and composeLeftRight width-bounds the line, so no clipping math here.
 	 */

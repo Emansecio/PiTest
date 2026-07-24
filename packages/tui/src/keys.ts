@@ -1350,3 +1350,143 @@ function decodeModifyOtherKeysPrintable(data: string): string | undefined {
 export function decodePrintableKey(data: string): string | undefined {
 	return decodeKittyPrintable(data) ?? decodeModifyOtherKeysPrintable(data);
 }
+
+// =============================================================================
+// SGR Mouse Decoding
+// =============================================================================
+//
+// SGR extended mouse reporting (DECSET ?1006). Framing: ESC [ < b ; x ; y (M|m)
+//   - b: button/modifier bitfield of the first number (see bit contract below).
+//   - x, y: cell coordinates, 1-based.
+//   - trailing byte: 'M' = press/motion, 'm' = release.
+// SGR-only by design: we always request ?1006, so the legacy X10 ESC[M form
+// (three raw bytes after ESC[M) is intentionally NOT decoded here. SGR also
+// avoids the 223-column cap of the legacy encoding (coordinates are decimal, not
+// a single offset byte). Old-style ESC[M is left as a future increment; see plan.
+
+const SGR_MOUSE_REGEX = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/;
+
+/** Semantic classification of a mouse report. */
+export type MouseType = "press" | "release" | "drag" | "wheel";
+
+/** Which button the report carries. "none" = motion with no button held. */
+export type MouseButton = "left" | "middle" | "right" | "none";
+
+export interface MouseEvent {
+	type: MouseType;
+	/** Button in play; "none" for buttonless drag (b&3===3) and for wheel reports. */
+	button: MouseButton;
+	/**
+	 * Present only when type === "wheel". Horizontal ticks (trackpad swipe or a
+	 * tilt wheel, SGR 66/67) report "left"/"right" — never a vertical direction.
+	 */
+	wheel?: "up" | "down" | "left" | "right";
+	/** Cell column, 1-based. */
+	x: number;
+	/** Cell row, 1-based. */
+	y: number;
+	shift: boolean;
+	ctrl: boolean;
+	alt: boolean;
+	/** The exact sequence this event was decoded from. */
+	raw: string;
+}
+
+// Bit contract of the SGR button field (first number):
+//   b&3   button bits: 0 left, 1 middle, 2 right, 3 none (buttonless motion)
+//   b&4   shift        b&8 alt        b&16 ctrl
+//   b&32  drag  (motion with a button held)
+//   b&64  wheel; the low 2 bits are then an AXIS, not a button:
+//         64 up, 65 down, 66 left, 67 right (66/67 = trackpad/tilt horizontal)
+const MOUSE_BUTTON_MASK = 3;
+const MOUSE_SHIFT_BIT = 4;
+const MOUSE_ALT_BIT = 8;
+const MOUSE_CTRL_BIT = 16;
+const MOUSE_DRAG_BIT = 32;
+const MOUSE_WHEEL_BIT = 64;
+
+function decodeMouseButton(b: number): MouseButton {
+	switch (b & MOUSE_BUTTON_MASK) {
+		case 0:
+			return "left";
+		case 1:
+			return "middle";
+		case 2:
+			return "right";
+		default:
+			return "none";
+	}
+}
+
+/**
+ * Direction of a wheel report (b&64). All four directions live in the low 2 bits
+ * of the SAME field the button bits use: 64 up, 65 down, 66 left, 67 right.
+ * Reading only b&1 would decode a horizontal tick (66/67) as a vertical one.
+ */
+function decodeWheelDirection(b: number): "up" | "down" | "left" | "right" {
+	switch (b & MOUSE_BUTTON_MASK) {
+		case 0:
+			return "up";
+		case 1:
+			return "down";
+		case 2:
+			return "left";
+		default:
+			return "right";
+	}
+}
+
+/**
+ * Cheap predictor: does `data` even look like an SGR mouse report? Prefix-only
+ * (ESC [ <), no full parse. Intended for the input router (future PR3) to gate
+ * the expensive `parseMouse` call. A true result does not guarantee a valid
+ * event — only `parseMouse` returning defined does.
+ */
+export function isMouseSequence(data: string): boolean {
+	return data.startsWith("\x1b[<");
+}
+
+/**
+ * Decode a single SGR mouse report into a MouseEvent. Pure; returns undefined
+ * for anything that is not a complete, well-formed SGR sequence (including the
+ * legacy ESC[M form and ordinary key sequences).
+ */
+export function parseMouse(data: string): MouseEvent | undefined {
+	const match = data.match(SGR_MOUSE_REGEX);
+	if (!match) return undefined;
+
+	const b = Number.parseInt(match[1] ?? "", 10);
+	const x = Number.parseInt(match[2] ?? "", 10);
+	const y = Number.parseInt(match[3] ?? "", 10);
+	const final = match[4];
+	if (!Number.isFinite(b) || !Number.isFinite(x) || !Number.isFinite(y)) return undefined;
+
+	const isWheel = (b & MOUSE_WHEEL_BIT) !== 0;
+	const isDrag = (b & MOUSE_DRAG_BIT) !== 0;
+
+	let type: MouseType;
+	let wheel: MouseEvent["wheel"];
+	if (isWheel) {
+		type = "wheel";
+		wheel = decodeWheelDirection(b);
+	} else if (isDrag) {
+		type = "drag";
+	} else {
+		type = final === "M" ? "press" : "release";
+	}
+
+	// Wheel reports carry the direction in the low bits, not a button.
+	const button = isWheel ? "none" : decodeMouseButton(b);
+
+	return {
+		type,
+		button,
+		wheel,
+		x,
+		y,
+		shift: (b & MOUSE_SHIFT_BIT) !== 0,
+		alt: (b & MOUSE_ALT_BIT) !== 0,
+		ctrl: (b & MOUSE_CTRL_BIT) !== 0,
+		raw: data,
+	};
+}

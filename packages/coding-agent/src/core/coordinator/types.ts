@@ -111,6 +111,16 @@ export interface SpawnSubagentOptions {
 	timeoutMs?: number;
 	/** Optional task name used for the worktree path. Collisions are auto-resolved to stay unique. */
 	taskName?: string;
+	/**
+	 * Stable type/role label used to derive the subagent's `prompt_cache_key`
+	 * (`${parentSessionId}:sub:${agentTypeLabel}`) for cache-shard affinity across
+	 * a same-type fan-out. Set to the reusable agent type's name when one applies;
+	 * left undefined for an untyped spawn, which defaults to the literal "task" at
+	 * derivation time (see deriveSubagentCacheKey in spawn.ts). It must NOT encode
+	 * anything unique per spawn — that would defeat the shared-key affinity that
+	 * lets same-type children land on the same shard.
+	 */
+	agentTypeLabel?: string;
 	/** Working directory used as the parent for `.pit/worktrees` and the default cwd. */
 	cwd?: string;
 	/** Nesting depth of the subagent being spawned (0 = top-level). Recorded on the registry. */

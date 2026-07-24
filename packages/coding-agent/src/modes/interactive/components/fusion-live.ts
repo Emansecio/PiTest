@@ -15,7 +15,7 @@ import { spinnerFrameIndexAt } from "./spinner-ticker.ts";
  */
 export interface FusionLiveMember {
 	/** Panel slot (0-based). Used as the registry key so two identical members in a
-	 * self-fusion (e.g. claude-opus-4-8 ×2) render as two distinct rows instead of
+	 * self-fusion (e.g. claude-opus-5 ×2) render as two distinct rows instead of
 	 * collapsing into one (the cli/model key collision that hid a member). */
 	index: number;
 	cli: string; // "codex" | "claude"
@@ -189,7 +189,7 @@ export class FusionLiveComponent implements Component {
 		this.animationUnsub = this.ui.addAnimationCallback((now) => this.tick(now));
 	}
 
-	/** Set the synthesizer model id shown in the header (e.g. "opus 4.8"). */
+	/** Set the synthesizer model id shown in the header (e.g. "opus 5"). */
 	setSynth(synthId: string): void {
 		if (synthId === this.synthId) return;
 		this.synthId = synthId;

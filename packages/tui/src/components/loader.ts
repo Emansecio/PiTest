@@ -127,8 +127,12 @@ export class Loader extends Text {
 		messageColorFn: LoaderColorFn,
 		message: string = "Loading…",
 		indicator?: LoaderIndicatorOptions,
+		// Left padding in columns. Default 1 keeps every existing caller (cards,
+		// overlays, footers) exactly as before; the footer working loader passes 0
+		// so its label aligns at column 0 with the transcript gutters (❯ / ● / │).
+		paddingX = 1,
 	) {
-		super("", 1, 0);
+		super("", paddingX, 0);
 		this.ui = ui;
 		const palette = Array.isArray(spinnerColor) ? spinnerColor.slice() : [spinnerColor];
 		this.spinnerPalette = palette.length > 0 ? palette : [(s) => s];

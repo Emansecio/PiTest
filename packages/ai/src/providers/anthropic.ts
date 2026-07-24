@@ -63,7 +63,7 @@ function getCacheControl(
 // Anthropic routes Pro/Max OAuth traffic by the Claude Code fingerprint, and the
 // user-agent VERSION is part of it. A spoofed version too far behind the actual
 // release gets intermittent 5xx (overloaded_error) on OAuth traffic — worst on
-// the newest models (e.g. opus-4-8, whose validation is stricter than 4-7's).
+// the newest models (e.g. opus-5, whose validation is stricter than 4-7's).
 // The coding-agent detects the installed `claude --version` at boot and exports
 // PIT_CLAUDE_CODE_VERSION; this constant is the offline fallback. Override
 // per-machine via the env var without a rebuild.
@@ -805,7 +805,9 @@ export function defaultSupportsAdaptiveThinking(modelId: string): boolean {
  * Fable / Mythos family (Mythos-class Claude 5 tier — `claude-fable-5`,
  * `claude-mythos-5`, `claude-mythos-preview`) keeps thinking always on and
  * returns a 400 for an explicit `thinking: {type: "disabled"}`. Opus and Sonnet
- * — including Opus 4.8/4.7 and Sonnet 5 — accept `disabled`, so they stay false.
+ * — including Opus 5/4.8 and Sonnet 5 — accept `disabled`, so they stay false.
+ * (Opus 5 rejects `disabled` only when effort is xhigh/max; the thinking-off
+ * path never sends `output_config`, so it lands on the default effort.)
  * `\b` treats the id's hyphens as word boundaries (`claude-fable-5`).
  */
 export function defaultThinkingAlwaysOn(modelId: string): boolean {

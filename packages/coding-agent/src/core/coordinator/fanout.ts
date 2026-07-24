@@ -38,6 +38,8 @@ export interface FanoutStage {
 	systemPrompt?: string;
 	/** Per-stage catalog override (used for agent-type-scoped memory/tools). */
 	tools?: AgentTool[];
+	/** Type/role label for this stage's `prompt_cache_key` derivation (see deriveSubagentCacheKey). */
+	agentTypeLabel?: string;
 }
 
 export interface FanoutReviewerStage {
@@ -48,6 +50,12 @@ export interface FanoutReviewerStage {
 	thinkingLevel?: ThinkingLevel;
 	systemPrompt?: string;
 	tools?: AgentTool[];
+	/**
+	 * Shared type/role label for every reviewer's `prompt_cache_key`. All N
+	 * reviewers run the same prompt template + tools, so one shared label lands
+	 * them on the same cache shard (the core fan-out affinity win).
+	 */
+	agentTypeLabel?: string;
 }
 
 export interface FanoutSpec {
@@ -127,6 +135,7 @@ export async function runFanout(
 		thinkingLevel: spec.scout.thinkingLevel ?? context.thinkingLevel,
 		signal: context.signal,
 		taskName: "fanout-scout",
+		agentTypeLabel: spec.scout.agentTypeLabel,
 		onSubagentEvent: (info) => safeNotify(() => context.onStageEvent?.("fanout-scout", info)),
 	};
 
@@ -168,6 +177,8 @@ export async function runFanout(
 			model: context.model,
 			thinkingLevel: context.thinkingLevel,
 			signal: context.signal,
+			// One shared label for all reviewers → same cache shard (fan-out affinity).
+			agentTypeLabel: spec.reviewer.agentTypeLabel,
 		},
 		onTaskStart: context.onStageStart,
 		onTaskEvent: context.onStageEvent,
@@ -194,6 +205,7 @@ export async function runFanout(
 				systemPrompt: spec.worker.systemPrompt,
 				signal: context.signal,
 				taskName: "fanout-worker",
+				agentTypeLabel: spec.worker.agentTypeLabel,
 				onSubagentEvent: (info) => safeNotify(() => context.onStageEvent?.("fanout-worker", info)),
 			},
 			spec.worker.acceptance,

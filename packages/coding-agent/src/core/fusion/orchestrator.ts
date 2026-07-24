@@ -10,8 +10,10 @@ export interface FusionTurnDeps {
 	signal?: AbortSignal;
 	/** Run one member (cli-runner in prod). */
 	runMember: (member: PanelMember) => Promise<PanelResult>;
-	/** Structured judge over the surviving results. */
-	runJudge: (userPrompt: string, results: PanelResult[]) => Promise<JudgeAnalysis>;
+	/** Structured judge over the surviving results. `undefined` = the judge ran but
+	 * could not produce a parsable analysis — callers must treat that as "nothing was
+	 * checked" (verify still runs), never as "nothing to check". */
+	runJudge: (userPrompt: string, results: PanelResult[]) => Promise<JudgeAnalysis | undefined>;
 	/** Backoff before the single coordinated retry when both members throttle together.
 	 * Injectable purely as a test seam; defaults to BOTH_THROTTLED_RETRY_BACKOFF_MS in prod. */
 	bothThrottledBackoffMs?: number;
@@ -117,13 +119,19 @@ export async function runFusionTurn(deps: FusionTurnDeps): Promise<FusionTurnOut
 	// Single survivor: skip the judge (degenerate over [1 real + 1 failed]); the verifier still
 	// fact-checks the lone advisor, and the writer synthesizes/streams.
 	const judged = survivors.length >= 2;
-	const analysis = judged ? await deps.runJudge(deps.userPrompt, results) : EMPTY_ANALYSIS;
+	const judgeOutcome = judged ? await deps.runJudge(deps.userPrompt, results) : undefined;
+	// A parse-failed judge (undefined) must NOT count as "judged" for the verify
+	// skip: an empty analysis from a FAILED judge means "nothing was checked",
+	// not "nothing to check" — skipping verify there would drop fact-checking
+	// exactly when the judge signal is absent.
+	const judgeSucceeded = judgeOutcome !== undefined;
+	const analysis = judgeOutcome ?? EMPTY_ANALYSIS;
 
 	// Verify stage: fact-check unsupported claims against the code (read-only). Skipped when the
 	// judge found nothing to fact-check (F2); still runs for a lone survivor (no judge). Fail-open.
 	let verification: VerificationReport | undefined;
 	if (deps.verify) {
-		if (shouldSkipFusionVerify(analysis, judged)) {
+		if (shouldSkipFusionVerify(analysis, judged && judgeSucceeded)) {
 			recordDiagnostic({
 				category: "fusion.verify-skipped",
 				level: "info",
@@ -138,5 +146,11 @@ export async function runFusionTurn(deps: FusionTurnDeps): Promise<FusionTurnOut
 	}
 
 	const text = await deps.writer(deps.userPrompt, results, analysis, verification);
-	return { handled: true, text, analysis: judged ? analysis : undefined, results, verification };
+	return {
+		handled: true,
+		text,
+		analysis: judged && judgeSucceeded ? analysis : undefined,
+		results,
+		verification,
+	};
 }

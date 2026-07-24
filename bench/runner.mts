@@ -6,7 +6,7 @@
  *
  * Opções:
  *   --agents pit,cc,codex   quais harnesses rodar (default: todos disponíveis)
- *   --pit-model <id>        default claude-opus-4-8
+ *   --pit-model <id>        default claude-opus-5
  *   --cc-model <id>         default opus
  *   --codex-model <id>      default gpt-5.2-codex
  *   --thinking <lvl>        nível de thinking do Pit (ex.: high, xhigh)

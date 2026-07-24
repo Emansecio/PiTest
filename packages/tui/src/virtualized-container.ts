@@ -1,4 +1,4 @@
-import type { Component } from "./tui.ts";
+import type { Component, MouseHitContainer, MouseHitTarget } from "./tui.ts";
 
 /** Default hot-zone: re-render this many trailing lines every frame. */
 export const DEFAULT_VIRTUALIZED_TAIL_LINE_BUDGET = 200;
@@ -26,7 +26,7 @@ function renderChild(child: Component, width: number): string[] {
  * Chat history components are mostly immutable once settled; only the bottom
  * slice (spinner, streaming, latest blocks) changes each frame.
  */
-export class VirtualizedContainer implements Component {
+export class VirtualizedContainer implements Component, MouseHitContainer {
 	children: Component[] = [];
 	private tailLineBudget: number;
 	private cacheWidth = -1;
@@ -220,5 +220,39 @@ export class VirtualizedContainer implements Component {
 		}
 		this.flattenLines = lines;
 		return lines;
+	}
+
+	/**
+	 * Map a local row (0-based, into this container's last flatten) to the child
+	 * that rendered it, mirroring Container.hitTestChild. Child i spans
+	 * `[childOffsets[i], childOffsets[i+1] ?? flattenLines.length)`. Refuses
+	 * (null) unless `childCaches.length === children.length` — i.e. the offset
+	 * cache is in lockstep with the current child list — or when the row is
+	 * outside the flattened range.
+	 */
+	hitTestChild(localRow: number): MouseHitTarget | null {
+		const children = this.children;
+		const offsets = this.childOffsets;
+		if (this.childCaches.length !== children.length || offsets.length !== children.length) {
+			return null;
+		}
+		if (localRow < 0 || localRow >= this.flattenLines.length) return null;
+		let lo = 0;
+		let hi = children.length - 1;
+		let found = -1;
+		while (lo <= hi) {
+			const mid = (lo + hi) >>> 1;
+			if (offsets[mid]! <= localRow) {
+				found = mid;
+				lo = mid + 1;
+			} else {
+				hi = mid - 1;
+			}
+		}
+		if (found === -1) return null;
+		const start = offsets[found]!;
+		const end = found + 1 < offsets.length ? offsets[found + 1]! : this.flattenLines.length;
+		if (localRow < start || localRow >= end) return null;
+		return { child: children[found]!, childStart: start };
 	}
 }

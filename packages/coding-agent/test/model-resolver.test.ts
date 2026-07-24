@@ -382,7 +382,7 @@ describe("resolveCliModel", () => {
 
 describe("default model selection", () => {
 	test("kept-provider defaults track current models", () => {
-		expect(defaultModelPerProvider.anthropic).toBe("claude-opus-4-8");
+		expect(defaultModelPerProvider.anthropic).toBe("claude-opus-5");
 		expect(defaultModelPerProvider["openai-codex"]).toBe("gpt-5.5");
 	});
 

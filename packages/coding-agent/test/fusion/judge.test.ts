@@ -4,6 +4,7 @@ import {
 	buildJudgeContext,
 	buildVerifierPrompt,
 	buildWriterContext,
+	buildWriterPrefixReuseContext,
 	capPanelText,
 	FUSION_PANEL_TEXT_MAX_CHARS,
 	JUDGE_SCHEMA,
@@ -137,6 +138,48 @@ describe("fusion judge", () => {
 		expect(shouldSkipFusionVerify(empty, true)).toBe(true);
 		expect(shouldSkipFusionVerify({ ...empty, unsupportedClaims: ["claim"] }, true)).toBe(false);
 		expect(shouldSkipFusionVerify(empty, false)).toBe(false);
+	});
+
+	it("buildWriterPrefixReuseContext reuses the session prefix and rides the writer instruction inline", () => {
+		const history = [
+			{ role: "user", content: "earlier question", timestamp: 1 },
+			{ role: "assistant", content: "earlier answer", timestamp: 2 },
+			{ role: "user", content: "the current request", timestamp: 3 },
+		] as unknown as Message[];
+		const tools = [{ name: "read", description: "d", parameters: { type: "object", properties: {} } }] as never;
+		const ctx = buildWriterPrefixReuseContext(
+			[{ member: { cli: "claude", model: "opus" }, ok: true, text: "panel answer" }],
+			EMPTY_ANALYSIS,
+			undefined,
+			{ systemPrompt: "session-system", messages: history, tools },
+		);
+		// Session prefix carried verbatim so it cache-hits.
+		expect(ctx.systemPrompt).toBe("session-system");
+		expect(ctx.tools).toBe(tools);
+		// Full history preserved + exactly ONE trailing user block appended.
+		expect(ctx.messages).toHaveLength(4);
+		expect(ctx.messages.slice(0, 3)).toEqual(history);
+		const last = ctx.messages[3];
+		expect(last.role).toBe("user");
+		const content = typeof last.content === "string" ? last.content : JSON.stringify(last.content);
+		expect(content).toContain("panel answer");
+		expect(content).toContain("## Your job");
+		// References the request already in history instead of restating it as a "## Task".
+		expect(content).toContain("user's request is the last message above");
+		expect(content).not.toContain("## Task");
+	});
+
+	it("buildWriterPrefixReuseContext folds in verification findings when present", () => {
+		const ctx = buildWriterPrefixReuseContext(
+			[{ member: { cli: "claude", model: "opus" }, ok: true, text: "panel answer" }],
+			EMPTY_ANALYSIS,
+			{ findings: [{ claim: "X does Y", verdict: "refuted", evidence: "actually Z" }] },
+			{ systemPrompt: undefined, messages: [], tools: undefined },
+		);
+		const last = ctx.messages[ctx.messages.length - 1];
+		const content = typeof last.content === "string" ? last.content : JSON.stringify(last.content);
+		expect(content).toContain("Verification");
+		expect(content).toContain("refuted");
 	});
 
 	it("buildWriterContext prepends prior conversation history before the task block", () => {

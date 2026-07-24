@@ -16,6 +16,7 @@ import {
 	completeSimple,
 	estimateStringTokens,
 	isDenseText,
+	recordDiagnostic,
 	recordTokenEstimateSample,
 	tokenEstimateFactor,
 } from "@pit/ai";
@@ -29,6 +30,7 @@ import { buildSessionContext, type CompactionEntry, type SessionEntry } from "..
 import { MUTATING_TOOL_NAMES } from "../stagnation.ts";
 import { crushJson } from "../tools/json-crush.ts";
 import { canonicalPathKey, FS_CASE_INSENSITIVE } from "../tools/path-utils.ts";
+import { type CacheAwareGeneration, decideCacheAwareRoute } from "./cache-aware.ts";
 import { buildFileDigests, formatFileDigests, MAX_DIGEST_BYTES } from "./file-digests.ts";
 import { groundSummaryPaths } from "./summary-grounding.ts";
 import {
@@ -2500,6 +2502,7 @@ export async function generateSummary(
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
 	serialized?: SerializedWindow,
+	cacheAware?: CacheAwareGeneration,
 ): Promise<string> {
 	const maxTokens = summarizationMaxTokens(model, reserveTokens, 0.8);
 
@@ -2514,6 +2517,55 @@ export async function generateSummary(
 			: SUMMARIZATION_PROMPT;
 	if (customInstructions) {
 		basePrompt = `${basePrompt}\n\nAdditional focus: ${customInstructions}`;
+	}
+
+	// Cache-aware route selection (PER REQUEST — see cache-aware.ts). When the
+	// session prefix is hot and the arithmetic favors it, generate the summary by
+	// re-reading that cached prefix on the SESSION model (~0.1x cacheRead) instead
+	// of serializing the window as fresh 1x text to the sibling `model`. `model`
+	// here IS the text/sibling route's model, so `model.cost` is the sibling cost;
+	// `cacheAware.sessionModel.cost` is the session cost. `sumMessageTokens` is the
+	// pure (usage-free) size of what the sibling would serialize. Kill-switch guards
+	// again here so the flag is a hard override no matter how `cacheAware` arrived.
+	if (cacheAware && !isTruthyEnvFlag(process.env.PIT_NO_CACHE_AWARE_COMPACTION)) {
+		const siblingInputTokens = sumMessageTokens(currentMessages);
+		const decision = decideCacheAwareRoute({
+			siblingInputTokens,
+			cacheReadTokens: cacheAware.prefixWireTokens,
+			liveMessageTokens: cacheAware.liveMessageTokens,
+			siblingCost: model.cost,
+			sessionCost: cacheAware.sessionModel.cost,
+			warm: cacheAware.warm,
+		});
+		recordDiagnostic({
+			category: "compaction.cache-aware",
+			level: "info",
+			source: "compaction.generateSummary",
+			context: {
+				note: `route=${decision.route} reason=${decision.reason} sibUsd=${decision.siblingCostUsd.toFixed(6)} cacheUsd=${decision.cacheReadCostUsd.toFixed(6)} sibTok=${siblingInputTokens} cacheTok=${cacheAware.prefixWireTokens} retention=${cacheAware.retention}`,
+			},
+		});
+		if (decision.route === "cache-read") {
+			const cacheReadSummary = await runCacheAwareSummarization(
+				cacheAware,
+				basePrompt,
+				previousSummary,
+				maxTokens,
+				thinkingLevel,
+				signal,
+				streamFn,
+			);
+			if (cacheReadSummary !== undefined) return cacheReadSummary;
+			// Route-specific failure (e.g. a proxy rejecting tool_choice) must never
+			// fail the whole compaction — the text/sibling route below is always
+			// valid. Aborts do NOT land here (they return partial text above).
+			recordDiagnostic({
+				category: "compaction.cache-aware",
+				level: "warn",
+				source: "compaction.generateSummary",
+				context: { note: "cache-read route failed — falling back to the text/sibling route" },
+			});
+		}
 	}
 
 	// Serialize conversation so the model doesn't try to continue it.
@@ -2644,6 +2696,74 @@ async function runSummarization(
 	}
 	// Both 'ok' and 'aborted' carry text; the original extracted text regardless of an aborted stopReason.
 	const raw = outcome.text;
+	return summarizationUsesJsonOutput() ? normalizeStructuredSummaryOutput(raw) : raw;
+}
+
+/**
+ * Cache-read generation route (see cache-aware.ts). Instead of serializing the
+ * window as one fresh user message under {@link SUMMARIZATION_SYSTEM_PROMPT},
+ * reuse the SESSION prefix verbatim (session system prompt + live message window
+ * + tool block) so Anthropic serves it from cache at ~0.1x, and hang the
+ * summarization instruction off a tiny trailing user message. Only the PREFIX
+ * needs byte-for-byte identity to hit the cache; the trailing user turn is fresh
+ * (uncached) but negligible. `toolChoice: "none"` keeps the tool block on the
+ * wire (prefix identity) while forbidding tool calls.
+ *
+ * `basePrompt`, `maxTokens`, and `thinkingLevel` are exactly the ones the text
+ * route would use — the ONLY things that change are the model (session, not
+ * sibling), the auth (session), the prefix reuse, and tool_choice. An aborted
+ * stream falls through to text extraction (partial or empty) like
+ * {@link runSummarization}; a hard error returns `undefined` so the caller falls
+ * back to the always-valid text/sibling route instead of failing the compaction
+ * on a route-specific rejection. The initial `SUMMARIZATION_PROMPT` already
+ * opens "The messages above are a conversation to summarize", which reads
+ * correctly with the live window above the instruction.
+ */
+async function runCacheAwareSummarization(
+	cacheAware: CacheAwareGeneration,
+	basePrompt: string,
+	previousSummary: string | undefined,
+	maxTokens: number,
+	thinkingLevel: ThinkingLevel | undefined,
+	signal: AbortSignal | undefined,
+	streamFn: StreamFn | undefined,
+): Promise<string | undefined> {
+	const context = await cacheAware.buildContext();
+	const finalPromptText = previousSummary
+		? `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n${basePrompt}`
+		: basePrompt;
+	const messages: Message[] = [
+		...context.messages,
+		{ role: "user", content: [{ type: "text", text: finalPromptText }], timestamp: Date.now() },
+	];
+	const options: SimpleStreamOptions = {
+		maxTokens,
+		signal,
+		apiKey: cacheAware.sessionApiKey,
+		headers: cacheAware.sessionHeaders,
+		toolChoice: "none",
+	};
+	if (cacheAware.sessionModel.reasoning && thinkingLevel && thinkingLevel !== "off") {
+		options.reasoning = thinkingLevel;
+	}
+	const response = await completeSummarization(
+		cacheAware.sessionModel,
+		{ systemPrompt: context.systemPrompt, messages, tools: context.tools },
+		options,
+		streamFn,
+	);
+	if (response.stopReason === "error") {
+		// Route-specific failure → undefined so the caller falls back to the text
+		// route. Never throw here: this route is an optimization, not the only path.
+		recordDiagnostic({
+			category: "compaction.cache-aware",
+			level: "warn",
+			source: "compaction.runCacheAwareSummarization",
+			context: { note: `cache-read summarization failed: ${(response.errorMessage ?? "unknown").slice(0, 150)}` },
+		});
+		return undefined;
+	}
+	const raw = extractTextFromResponse(response);
 	return summarizationUsesJsonOutput() ? normalizeStructuredSummaryOutput(raw) : raw;
 }
 
@@ -3140,6 +3260,7 @@ export async function compact(
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
+	cacheAware?: CacheAwareGeneration,
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -3226,6 +3347,7 @@ export async function compact(
 							thinkingLevel,
 							streamFn,
 							mainWindow,
+							cacheAware,
 						)
 					: Promise.resolve("No prior history."),
 				generateTurnPrefixSummary(
@@ -3254,6 +3376,7 @@ export async function compact(
 				thinkingLevel,
 				streamFn,
 				mainWindow,
+				cacheAware,
 			);
 		}
 

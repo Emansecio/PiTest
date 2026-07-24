@@ -192,6 +192,10 @@ export async function createAgentSessionServices(
 		current?: (tools: import("@pit/agent-core").AgentTool[], cwd: string) => import("@pit/agent-core").AgentTool[];
 	} = {};
 	const parentMessagingIdRef: { current?: string } = {};
+	// Parent session id, bound after the session exists (same lazy-ref reason as
+	// parentModelRef). Feeds the coordinator's subagent prompt_cache_key derivation
+	// (shard affinity for same-type fan-out); undefined until bound → no key.
+	const parentSessionIdRef: { current?: string } = {};
 	const asyncDeliverRef: {
 		current?: (
 			handle: string,
@@ -230,6 +234,7 @@ export async function createAgentSessionServices(
 			hooks: settingsManager.getHooksSettings(),
 			mcp: composeMcpSettings(settingsManager.getMcpSettingsLayered(), loadMcpConfigFiles(cwd, agentDir)),
 			getParentModel: () => parentModelRef.current?.(),
+			getParentSessionId: () => parentSessionIdRef.current,
 			getAvailableTools: () => availableToolsRef.current?.() ?? [],
 			retargetToolsForCwd: (tools, targetCwd) =>
 				retargetToolsRef.current?.(tools, targetCwd) ?? retargetToolsForWorktree(tools, targetCwd),
@@ -308,6 +313,7 @@ export async function createAgentSessionServices(
 				registerAbortDetached: (abortFn: () => void) => void,
 				getReadDedupeStore: () => ReadDedupeStore | undefined,
 				getWarmFileCache: () => WarmFileCache | undefined,
+				parentSessionId: string | undefined,
 			) => void;
 		}
 	).__bindBuiltInRefs = (
@@ -322,6 +328,7 @@ export async function createAgentSessionServices(
 		registerAbortDetached,
 		getReadDedupeStore,
 		getWarmFileCache,
+		parentSessionId,
 	) => {
 		parentModelRef.current = getModel;
 		availableToolsRef.current = getTools;
@@ -334,6 +341,7 @@ export async function createAgentSessionServices(
 		abortDetachedRef.current = registerAbortDetached;
 		readDedupeStoreRef.current = getReadDedupeStore;
 		warmFileCacheRef.current = getWarmFileCache;
+		parentSessionIdRef.current = parentSessionId;
 	};
 
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
@@ -451,6 +459,7 @@ export async function createAgentSessionFromServices(
 				registerAbortDetached: (abortFn: () => void) => void,
 				getReadDedupeStore: () => ReadDedupeStore | undefined,
 				getWarmFileCache: () => WarmFileCache | undefined,
+				parentSessionId: string | undefined,
 			) => void;
 		}
 	).__bindBuiltInRefs;
@@ -469,6 +478,8 @@ export async function createAgentSessionFromServices(
 			},
 			() => result.session.readDedupeStore,
 			() => result.session.graphPrefetchCache,
+			// Parent session id → coordinator's subagent prompt_cache_key derivation.
+			options.sessionManager.getSessionId(),
 		);
 	}
 

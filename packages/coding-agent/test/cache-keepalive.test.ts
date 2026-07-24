@@ -1,10 +1,16 @@
-import type { Model } from "@pit/ai";
-import { describe, expect, it, vi } from "vitest";
+import type { CacheRetention, Model } from "@pit/ai";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	CACHE_KEEPALIVE_INTERVAL_MS,
+	CACHE_KEEPALIVE_LONG_INTERVAL_MS,
+	CACHE_KEEPALIVE_LONG_MAX_PINGS,
+	CACHE_KEEPALIVE_MAX_PINGS,
 	CacheKeepalive,
 	type CacheKeepaliveGates,
+	type CacheKeepaliveHost,
 	type CacheKeepaliveTimer,
+	createGatesForHost,
+	effectiveKeepaliveRetention,
 	modelHasShortCacheRetention,
 } from "../src/core/cache-keepalive.js";
 
@@ -54,6 +60,8 @@ function createGates(overrides: Partial<CacheKeepaliveGates> = {}): CacheKeepali
 		isIdle: () => true,
 		hasLargeEnoughPrefix: () => true,
 		isCompactionInFlight: () => false,
+		intervalMs: () => CACHE_KEEPALIVE_INTERVAL_MS,
+		maxPings: () => CACHE_KEEPALIVE_MAX_PINGS,
 		...overrides,
 	};
 }
@@ -252,5 +260,187 @@ describe("modelHasShortCacheRetention", () => {
 	it("is true only when compat explicitly disables long retention", () => {
 		const model = { ...baseModel, compat: { supportsLongCacheRetention: false } } as unknown as Model<any>;
 		expect(modelHasShortCacheRetention(model)).toBe(true);
+	});
+});
+
+describe("CacheKeepalive — long-retention cadence", () => {
+	it("arms the long interval and pings through the long-retention cap", async () => {
+		const timer = createFakeTimer();
+		const ping = vi.fn().mockResolvedValue(true);
+		const kp = new CacheKeepalive({
+			timer,
+			gates: createGates({
+				intervalMs: () => CACHE_KEEPALIVE_LONG_INTERVAL_MS,
+				maxPings: () => CACHE_KEEPALIVE_LONG_MAX_PINGS,
+			}),
+			ping,
+		});
+
+		kp.scheduleIdle();
+		expect(timer.pendingDelays()).toEqual([CACHE_KEEPALIVE_LONG_INTERVAL_MS]);
+
+		for (let i = 0; i < CACHE_KEEPALIVE_LONG_MAX_PINGS; i++) {
+			timer.fireLatest();
+			await flush();
+		}
+		expect(ping).toHaveBeenCalledTimes(CACHE_KEEPALIVE_LONG_MAX_PINGS);
+		// Cap reached — no further timer armed for this idle period.
+		expect(timer.pendingCount()).toBe(0);
+	});
+
+	it("re-reads interval/cap fresh at each (re)schedule (long → short mid-idle)", async () => {
+		const timer = createFakeTimer();
+		const ping = vi.fn().mockResolvedValue(true);
+		let long = true;
+		const kp = new CacheKeepalive({
+			timer,
+			gates: createGates({
+				intervalMs: () => (long ? CACHE_KEEPALIVE_LONG_INTERVAL_MS : CACHE_KEEPALIVE_INTERVAL_MS),
+				maxPings: () => (long ? CACHE_KEEPALIVE_LONG_MAX_PINGS : CACHE_KEEPALIVE_MAX_PINGS),
+			}),
+			ping,
+		});
+
+		kp.scheduleIdle();
+		expect(timer.pendingDelays()).toEqual([CACHE_KEEPALIVE_LONG_INTERVAL_MS]);
+
+		long = false; // env/model flipped during the idle wait
+		timer.fireLatest(); // ping #1 → reschedule must read the fresh (short) cadence
+		await flush();
+		expect(ping).toHaveBeenCalledTimes(1);
+		expect(timer.pendingDelays()).toEqual([CACHE_KEEPALIVE_INTERVAL_MS]);
+	});
+});
+
+function fakeModel(provider: string, compat?: { supportsLongCacheRetention?: boolean }): Model<any> {
+	return { id: `${provider}-test`, provider, ...(compat ? { compat } : {}) } as unknown as Model<any>;
+}
+
+function fakeHost(opts: {
+	model?: Model<any>;
+	sessionRetention?: CacheRetention;
+	isFusing?: boolean;
+}): CacheKeepaliveHost {
+	return {
+		agent: {} as never,
+		compaction: { backgroundCompactionPromise: undefined } as never,
+		model: opts.model,
+		isStreaming: false,
+		isFusing: opts.isFusing,
+		getContextUsage: () => ({ wireTokens: 999_999 }) as never,
+		getCompactionRequestAuth: async () => ({}),
+		getSessionCacheRetention: () => opts.sessionRetention,
+	};
+}
+
+describe("effectiveKeepaliveRetention", () => {
+	const anthropic = fakeModel("anthropic");
+	const anthropicShortOnly = fakeModel("anthropic", { supportsLongCacheRetention: false });
+	const originalEnv = process.env.PIT_CACHE_RETENTION;
+
+	beforeEach(() => {
+		delete process.env.PIT_CACHE_RETENTION;
+	});
+	afterEach(() => {
+		if (originalEnv === undefined) delete process.env.PIT_CACHE_RETENTION;
+		else process.env.PIT_CACHE_RETENTION = originalEnv;
+	});
+
+	it("defaults to long for an Anthropic model with no session option", () => {
+		expect(effectiveKeepaliveRetention(fakeHost({ model: anthropic }))).toBe("long");
+	});
+
+	it("honors an explicit session 'short'", () => {
+		expect(effectiveKeepaliveRetention(fakeHost({ model: anthropic, sessionRetention: "short" }))).toBe("short");
+	});
+
+	it("is 'none' when the session option is 'none'", () => {
+		expect(effectiveKeepaliveRetention(fakeHost({ model: anthropic, sessionRetention: "none" }))).toBe("none");
+	});
+
+	it("demotes long → short when the model lacks long-retention support", () => {
+		expect(effectiveKeepaliveRetention(fakeHost({ model: anthropicShortOnly, sessionRetention: "long" }))).toBe(
+			"short",
+		);
+	});
+
+	it("is 'none' for a non-Anthropic model regardless of session option", () => {
+		expect(effectiveKeepaliveRetention(fakeHost({ model: fakeModel("openai"), sessionRetention: "long" }))).toBe(
+			"none",
+		);
+	});
+
+	it("is 'none' when no model is selected yet", () => {
+		expect(effectiveKeepaliveRetention(fakeHost({ model: undefined }))).toBe("none");
+	});
+
+	it("lets PIT_CACHE_RETENTION outrank the session option", () => {
+		process.env.PIT_CACHE_RETENTION = "short";
+		expect(effectiveKeepaliveRetention(fakeHost({ model: anthropic, sessionRetention: "long" }))).toBe("short");
+		process.env.PIT_CACHE_RETENTION = "none";
+		expect(effectiveKeepaliveRetention(fakeHost({ model: anthropic, sessionRetention: "long" }))).toBe("none");
+		process.env.PIT_CACHE_RETENTION = "long";
+		expect(effectiveKeepaliveRetention(fakeHost({ model: anthropic, sessionRetention: "short" }))).toBe("long");
+	});
+});
+
+describe("createGatesForHost cadence mapping", () => {
+	const originalEnv = process.env.PIT_CACHE_RETENTION;
+
+	beforeEach(() => {
+		delete process.env.PIT_CACHE_RETENTION;
+	});
+	afterEach(() => {
+		if (originalEnv === undefined) delete process.env.PIT_CACHE_RETENTION;
+		else process.env.PIT_CACHE_RETENTION = originalEnv;
+	});
+
+	it("maps long retention to the long interval/cap and stays eligible", () => {
+		const gates = createGatesForHost(fakeHost({ model: fakeModel("anthropic") }));
+		expect(gates.isEligibleModel()).toBe(true);
+		expect(gates.intervalMs()).toBe(CACHE_KEEPALIVE_LONG_INTERVAL_MS);
+		expect(gates.maxPings()).toBe(CACHE_KEEPALIVE_LONG_MAX_PINGS);
+	});
+
+	it("keeps short retention on the current short cadence (regression)", () => {
+		const gates = createGatesForHost(fakeHost({ model: fakeModel("anthropic"), sessionRetention: "short" }));
+		expect(gates.isEligibleModel()).toBe(true);
+		expect(gates.intervalMs()).toBe(CACHE_KEEPALIVE_INTERVAL_MS);
+		expect(gates.maxPings()).toBe(CACHE_KEEPALIVE_MAX_PINGS);
+	});
+
+	it("makes 'none' retention ineligible (never pings)", () => {
+		const gates = createGatesForHost(fakeHost({ model: fakeModel("anthropic"), sessionRetention: "none" }));
+		expect(gates.isEligibleModel()).toBe(false);
+	});
+
+	it("treats an in-flight Fusion turn as busy — isIdle() false while isFusing", () => {
+		const busy = createGatesForHost(fakeHost({ model: fakeModel("anthropic"), isFusing: true }));
+		expect(busy.isIdle()).toBe(false);
+		// Hosts that don't expose isFusing (narrow mocks) stay idle-eligible as before.
+		const idle = createGatesForHost(fakeHost({ model: fakeModel("anthropic") }));
+		expect(idle.isIdle()).toBe(true);
+	});
+
+	it("falls back to short cadence when a long-opted model lacks long-retention support", () => {
+		const gates = createGatesForHost(
+			fakeHost({ model: fakeModel("anthropic", { supportsLongCacheRetention: false }), sessionRetention: "long" }),
+		);
+		expect(gates.isEligibleModel()).toBe(true);
+		expect(gates.intervalMs()).toBe(CACHE_KEEPALIVE_INTERVAL_MS);
+		expect(gates.maxPings()).toBe(CACHE_KEEPALIVE_MAX_PINGS);
+	});
+
+	it("lets PIT_CACHE_RETENTION=short force short cadence over a long session option", () => {
+		process.env.PIT_CACHE_RETENTION = "short";
+		const gates = createGatesForHost(fakeHost({ model: fakeModel("anthropic"), sessionRetention: "long" }));
+		expect(gates.intervalMs()).toBe(CACHE_KEEPALIVE_INTERVAL_MS);
+		expect(gates.maxPings()).toBe(CACHE_KEEPALIVE_MAX_PINGS);
+	});
+
+	it("lets PIT_CACHE_RETENTION=none make an otherwise-eligible model ineligible", () => {
+		process.env.PIT_CACHE_RETENTION = "none";
+		const gates = createGatesForHost(fakeHost({ model: fakeModel("anthropic") }));
+		expect(gates.isEligibleModel()).toBe(false);
 	});
 });

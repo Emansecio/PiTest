@@ -77,6 +77,23 @@ export interface Terminal {
 	 * episode). Optional for the same reason as isBackpressured().
 	 */
 	onDrain?(cb: () => void): void;
+
+	/**
+	 * Enable/disable mouse tracking (SGR button-event mode). Optional so existing
+	 * Terminal implementations (VirtualTerminal, test mocks) keep compiling — the
+	 * wiring treats a missing implementation as a no-op. Idempotent per contract.
+	 */
+	enableMouse?(): void;
+	disableMouse?(): void;
+
+	/**
+	 * Set the session-level mouse tracking intent (the runtime /mouse toggle).
+	 * Distinct from enableMouse/disableMouse, which flip the physical tracking
+	 * state directly (used by the TUI's wheel auto-suspend): this setter records
+	 * intent and, when the terminal is already started, applies it immediately.
+	 * Optional for the same compile-compat reason as enableMouse/disableMouse.
+	 */
+	setMouseEnabled?(enabled: boolean): void;
 }
 
 /**
@@ -84,6 +101,19 @@ export interface Terminal {
  */
 export class ProcessTerminal implements Terminal {
 	private wasRaw = false;
+	// Session-level mouse intent, distinct from the physical tracking state below.
+	// Default false in this PR — the coding-agent turns it on (PR4) via the
+	// constructor arg or setMouseEnabled(). Survives stop()/start() so suspend/
+	// resume (SIGTSTP → stop()/start()) re-arms tracking automatically.
+	private mouseEnabled: boolean;
+	// Whether the 1002/1006 tracking sequences are currently written to the
+	// terminal. Guards enable/disable so they stay idempotent: disable only emits
+	// when tracking was actually on (e.g. drainInput() then stop() writes once).
+	private mouseTrackingOn = false;
+	// Whether start() has run without a matching stop(). Gates setMouseEnabled()'s
+	// immediate apply: before start() the flag alone suffices (start() emits the
+	// sequence itself), and after stop() there is nothing live to write to.
+	private started = false;
 	private inputHandler?: (data: string) => void;
 	private resizeHandler?: () => void;
 	// Listener actually attached to process.stdout "resize"; debounces bursts of
@@ -123,6 +153,14 @@ export class ProcessTerminal implements Terminal {
 		return env;
 	})();
 
+	/**
+	 * @param mouseEnabled - Seed the session mouse intent. Default false in this
+	 * PR; the coding-agent (PR4) constructs with true / flips it via setMouseEnabled().
+	 */
+	constructor(mouseEnabled = false) {
+		this.mouseEnabled = mouseEnabled;
+	}
+
 	get kittyProtocolActive(): boolean {
 		return this._kittyProtocolActive;
 	}
@@ -130,6 +168,7 @@ export class ProcessTerminal implements Terminal {
 	start(onInput: (data: string) => void, onResize: () => void): void {
 		this.inputHandler = onInput;
 		this.resizeHandler = onResize;
+		this.started = true;
 
 		// Save previous state and enable raw mode
 		this.wasRaw = process.stdin.isRaw || false;
@@ -141,6 +180,13 @@ export class ProcessTerminal implements Terminal {
 
 		// Enable bracketed paste mode - terminal will wrap pastes in \x1b[200~ ... \x1b[201~
 		process.stdout.write("\x1b[?2004h");
+
+		// Enable mouse tracking right after bracketed paste when this session has it
+		// turned on. Gated by the flag (default off in this PR — the on-by-default
+		// wiring arrives in the coding-agent, PR4). Idempotent via mouseTrackingOn.
+		if (this.mouseEnabled) {
+			this.enableMouse();
+		}
 
 		// Set up resize handler with a leading+trailing debounce: the first event of a
 		// burst repaints immediately (so a drag-resize isn't frozen until you let go),
@@ -319,6 +365,10 @@ export class ProcessTerminal implements Terminal {
 			process.stdout.write("\x1b[>4;0m");
 			this._modifyOtherKeysActive = false;
 		}
+		// Same rationale as the kitty/modifyOtherKeys disables above: stop generating
+		// new escape sequences during the drain so late mouse events can't leak SGR
+		// reports to the parent shell. Idempotent — no-op if tracking was never on.
+		this.disableMouse();
 
 		const previousHandler = this.inputHandler;
 		this.inputHandler = undefined;
@@ -346,6 +396,7 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	stop(): void {
+		this.started = false;
 		if (this.clearProgressInterval()) {
 			process.stdout.write(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
 		}
@@ -360,6 +411,11 @@ export class ProcessTerminal implements Terminal {
 
 		// Disable bracketed paste mode
 		process.stdout.write("\x1b[?2004l");
+
+		// Disable mouse tracking (idempotent — no-op if drainInput() already did it,
+		// or if this session never had mouse enabled). mouseEnabled is left intact so
+		// a later start() (suspend/resume) re-arms tracking automatically.
+		this.disableMouse();
 
 		// Restore the cursor. The Terminal.stop() contract now guarantees the
 		// cursor is shown regardless of caller, so any teardown path (including
@@ -445,6 +501,40 @@ export class ProcessTerminal implements Terminal {
 
 	onDrain(cb: () => void): void {
 		this.drainCallbacks.add(cb);
+	}
+
+	enableMouse(): void {
+		// 1002 = button-event tracking (press/release/drag) — never 1003 (any-motion),
+		// which floods on every pixel of movement. 1006 = SGR extended coordinates,
+		// which avoids the legacy 223-column limit of the old byte-encoded scheme.
+		if (this.mouseTrackingOn) return;
+		process.stdout.write("\x1b[?1002h\x1b[?1006h");
+		this.mouseTrackingOn = true;
+	}
+
+	disableMouse(): void {
+		// Idempotent: only emit the disable pair when tracking is actually on, so a
+		// double disable (e.g. drainInput() then stop()) writes the sequence once.
+		if (!this.mouseTrackingOn) return;
+		process.stdout.write("\x1b[?1002l\x1b[?1006l");
+		this.mouseTrackingOn = false;
+	}
+
+	/**
+	 * Turn mouse tracking on/off for this session (used by the runtime /mouse toggle,
+	 * PR4). The intent survives stop()/start(), so suspend/resume re-arms tracking on
+	 * its own. When the terminal is already started the change takes effect immediately;
+	 * before start() the flag alone is enough (start() emits the enable sequence), and
+	 * after stop() there is nothing live to write to.
+	 */
+	setMouseEnabled(enabled: boolean): void {
+		this.mouseEnabled = enabled;
+		if (!this.started) return;
+		if (enabled) {
+			this.enableMouse();
+		} else {
+			this.disableMouse();
+		}
 	}
 
 	get columns(): number {

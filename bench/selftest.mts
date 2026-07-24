@@ -82,10 +82,10 @@ const m = {
 	toolTotal: 0, toolErrors: 0, turns: 0, inTok: 1_000_000, outTok: 1_000_000, cacheReadTok: 0,
 	rewrites: 0, rejects: 0, errorHints: 0, verifyPassed: 0, verifyFailed: 0, retries: 0, parseErrors: 0,
 };
-const opusCost = estimateCostUsd("claude-opus-4-8", m);
+const opusCost = estimateCostUsd("claude-opus-5", m);
 ok(opusCost === 15 + 75, `opus: 1M in + 1M out = $${opusCost} (esperado $90)`);
 ok(estimateCostUsd("gpt-5.5", m) === 1.25 + 10, "codex/gpt-5: 1M+1M = $11.25");
-ok(priceFor("anthropic/claude-opus-4-8") !== null, "modelo com prefixo de provider casa a tabela (opus)");
+ok(priceFor("anthropic/claude-opus-5") !== null, "modelo com prefixo de provider casa a tabela (opus)");
 ok(estimateCostUsd("modelo-desconhecido-xyz", m) === null, "modelo fora da tabela → null (não inventa custo)");
 
 console.log(failures === 0 ? "\nPASS: selftest da infra de métricas OK" : `\nFAIL: ${failures} checagem(ns)`);

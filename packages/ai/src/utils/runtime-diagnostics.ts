@@ -39,10 +39,20 @@ export type DiagnosticCategory =
 	| "output.cap"
 	| "process.kill"
 	| "io.retry"
+	// A session persist-write (JSONL append or atomic rewrite) failed and was
+	// swallowed fail-open, so in-memory history and the on-disk session diverged.
+	// `count` carries the consecutive-failure run; the session escalates to a
+	// visible warning once it crosses a small threshold.
+	| "session.persist_failed"
 	| "error.isolated"
 	| "limit.evicted"
 	| "input.truncated"
 	| "prune.proactive"
+	// Below real pressure, a proactive size-prune was DEFERRED because the reclaimed
+	// tokens don't earn back the one-time cost of invalidating the cached tail within
+	// the amortization horizon (see coding-agent prune-economics.ts). `note` carries
+	// reclaimed/tail tokens and the estimated one-time vs recurring USD figures.
+	| "prune.economics-defer"
 	| "prune.supersede-only"
 	| "prune.thinking-cap"
 	| "prune.live"
@@ -97,7 +107,12 @@ export type DiagnosticCategory =
 	// A prompt-cache keepalive ping fired while the session was idle (P3):
 	// a minimal max_tokens:1 request against the session's own wire prefix,
 	// meant to renew Anthropic's short cache-retention TTL before it lapses.
-	| "cache.keepalive";
+	| "cache.keepalive"
+	// Cache-aware compaction: the summarizer chose between serializing the window
+	// as fresh text to the cheap sibling vs re-reading the session's hot prefix on
+	// the session model (~0.1x cacheRead). `note` carries route/reason and the two
+	// estimated USD figures.
+	| "compaction.cache-aware";
 
 export interface DiagnosticContext {
 	/** Byte size involved (cap hit, payload, buffer depth). */

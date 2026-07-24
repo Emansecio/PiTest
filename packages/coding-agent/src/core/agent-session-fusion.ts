@@ -11,12 +11,14 @@ import { type CompactionController, checkCompaction } from "./agent-session-comp
 import type { AgentSessionEvent } from "./agent-session-events.ts";
 import { estimateCharsAsTokens } from "./compaction/utils.ts";
 import { getSubagentErrorUsage, SubagentRegistry, spawnSubagent } from "./coordinator/index.ts";
+import type { ContextUsage } from "./extensions/index.js";
 import { providerForCli, runPanelMember } from "./fusion/cli-runner.ts";
 import {
 	buildAdvisorBriefContext,
 	buildJudgeContext,
 	buildVerifierPrompt,
 	buildWriterContext,
+	buildWriterPrefixReuseContext,
 	parseJudgeOutput,
 	VERIFICATION_SCHEMA,
 	VERIFIER_SYSTEM_PROMPT,
@@ -29,6 +31,7 @@ import type { SessionManager } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
 import type { SpawnBudgetDecision } from "./token-governor.ts";
 import { consumedTokens } from "./token-usage.ts";
+import { compactToolsForProviderContext } from "./tool-wire-schema.ts";
 
 /** Stable session surface fusion reads; implemented by AgentSession. */
 export interface FusionHost {
@@ -58,6 +61,8 @@ export interface FusionHost {
 	evaluateFusionBudget(): SpawnBudgetDecision;
 	/** Session permission checker for the verify subagent (optional in tests). */
 	readonly permissionChecker?: PermissionChecker;
+	/** Live wire-prefix estimate — gates the writer prefix-reuse path (same source the cache-keepalive uses). */
+	getContextUsage(): ContextUsage | undefined;
 }
 
 function recordFusionSpendTokens(host: FusionHost, tokens: number): void {
@@ -152,7 +157,13 @@ export function emitFusionNote(host: FusionHost, text: string): void {
 export async function streamFusionWriter(
 	host: FusionHost,
 	context: Context,
-	opts: { apiKey?: string; headers?: Record<string, string>; signal?: AbortSignal },
+	opts: {
+		apiKey?: string;
+		headers?: Record<string, string>;
+		signal?: AbortSignal;
+		/** "none" ships the full tools block (prefix identity) while forbidding tool calls — prefix-reuse path. */
+		toolChoice?: "auto" | "any" | "none";
+	},
 ): Promise<string> {
 	const model = host.model;
 	if (!model) return "";
@@ -188,6 +199,64 @@ export async function streamFusionWriter(
 		// non-fatal — the hard threshold check on the next turn is the fallback.
 	}
 	return assistantText(final);
+}
+
+/**
+ * Wire-prefix floor below which reusing the session cache isn't worth it. Mirrors
+ * the cache-keepalive floor (CACHE_KEEPALIVE_MIN_WIRE_TOKENS): both gate the same
+ * "is the cacheable prefix large enough to bother" question.
+ */
+const FUSION_PREFIX_REUSE_MIN_WIRE_TOKENS = 15_000;
+
+/**
+ * Whether the writer should reuse the session's cached prefix (see
+ * {@link buildWriterPrefixReuseContext}) instead of the legacy WRITER_SYSTEM +
+ * filtered-history context. Any gate false → the byte-identical legacy path.
+ * Kill-switch: PIT_NO_FUSION_PREFIX_REUSE.
+ */
+function shouldReuseWriterPrefix(host: FusionHost, writerModel: Model<any>): boolean {
+	if (isTruthyEnvFlag(process.env.PIT_NO_FUSION_PREFIX_REUSE)) return false;
+	const sessionModel = host.model;
+	if (!sessionModel) return false;
+	// The writer synthesizes with the session model, so its prefix is the session's
+	// cached prefix only while provider+id match — a divergence would mean a
+	// different cache key and no hit. Defensive: today they are always the same ref.
+	if (writerModel.provider !== sessionModel.provider || writerModel.id !== sessionModel.id) return false;
+	// toolChoice:"none" (full tools block for prefix identity, tool calls forbidden)
+	// is only honored on the Anthropic route here.
+	if (sessionModel.provider !== "anthropic") return false;
+	// Trade arithmetic: the reused wire history (with tool results) is BIGGER than
+	// the filtered user/assistant history the legacy path sends, but cached it
+	// re-reads at ~0.1x while the smaller filtered history is UNCACHED at 1x. Reuse
+	// only wins once the prefix is large — gate on the same wire floor as keepalive.
+	const wireTokens = host.getContextUsage()?.wireTokens;
+	return typeof wireTokens === "number" && wireTokens >= FUSION_PREFIX_REUSE_MIN_WIRE_TOKENS;
+}
+
+/**
+ * Assemble the prefix-reuse writer context: the session's system prompt + tools +
+ * full (wire-converted) history, plus one trailing user block with the panel/judge/
+ * verify material. Assembly mirrors cache-keepalive.ts's buildPingContext (system +
+ * convertToLlm(messages) + compacted tools) — replicated locally on purpose while
+ * that file's consolidation is in flight; do NOT reach into cache-keepalive.ts.
+ */
+async function buildWriterContextForSession(
+	host: FusionHost,
+	results: PanelResult[],
+	analysis: JudgeAnalysis,
+	verification: VerificationReport | undefined,
+): Promise<Context> {
+	const messages = await host.agent.convertToLlm(host.agent.state.messages);
+	const context = buildWriterPrefixReuseContext(results, analysis, verification, {
+		systemPrompt: host.agent.state.systemPrompt,
+		messages,
+		tools: host.agent.state.tools,
+	});
+	// Same lazy-tool-schema economy the real send path applies (gated by
+	// PIT_NO_LAZY_TOOL_SCHEMAS) so the tools block stays byte-identical to the
+	// session's cached prefix and cache-hits.
+	if (isTruthyEnvFlag(process.env.PIT_NO_LAZY_TOOL_SCHEMAS)) return context;
+	return compactToolsForProviderContext(context);
 }
 
 export async function fusionVerify(
@@ -432,17 +501,13 @@ export async function runFusionSessionTurn(host: FusionHost, text: string, image
 						host,
 						"Fusion judge could not parse structured output — synthesizing without judge analysis.",
 					);
+					// undefined (not an empty analysis): the orchestrator must know the
+					// judge FAILED so the verify stage still runs — an empty analysis
+					// with judged=true would trip shouldSkipFusionVerify and drop the
+					// fact-check exactly when the judge signal is absent.
+					return undefined;
 				}
-				const analysis = parsed.ok
-					? parsed.value
-					: {
-							consensus: [],
-							contradictions: [],
-							partialCoverage: [],
-							uniqueInsights: [],
-							blindSpots: [],
-							unsupportedClaims: [],
-						};
+				const analysis = parsed.value;
 				if (settings.showSynthesis) {
 					const collect = (
 						kind: NonNullable<FusionSummaryData["synthesis"]>[number]["kind"],
@@ -496,6 +561,19 @@ export async function runFusionSessionTurn(host: FusionHost, text: string, image
 				}
 				if (settings.showSynthesis) summary.synthesis = synthesisItems;
 				emitFusionSummary(host, summary);
+				// Prefix-reuse path: reuse the session's cached prefix (system + tools +
+				// history) so the synthesizer re-reads Anthropic's cache instead of
+				// re-paying the filtered history uncached. Any gate false falls through
+				// to the byte-identical legacy path below.
+				if (shouldReuseWriterPrefix(host, model)) {
+					const reuseContext = await buildWriterContextForSession(host, results, analysis, verification);
+					return streamFusionWriter(host, reuseContext, {
+						apiKey,
+						headers,
+						signal: fusionAbort.signal,
+						toolChoice: "none",
+					});
+				}
 				const priorHistory = host.agent.state.messages
 					.filter((m): m is Message => m.role === "user" || m.role === "assistant")
 					.slice(0, -1);

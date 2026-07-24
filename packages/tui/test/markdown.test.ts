@@ -1441,4 +1441,84 @@ bar`,
 			assert.ok(plain.includes("H3:Section title"));
 		});
 	});
+
+	describe("Prose reading-column cap (proseMaxColumns)", () => {
+		// paddingX=0 in these cases so contentWidth === width; the cap is 40 and the
+		// terminal is 100, so a capping effect (40) is clearly distinguishable from
+		// full width (up to 100).
+		const longParagraph =
+			"This is a fairly long paragraph of prose that should wrap at the reading-column measure rather than stretching across the whole terminal width when a cap is active and the terminal is wide.";
+
+		function maxLineWidth(lines: string[]): number {
+			return Math.max(0, ...lines.map((line) => stripAnsi(line).length));
+		}
+
+		it("caps prose paragraphs at proseMaxColumns", () => {
+			const md = new Markdown(longParagraph, 0, 0, defaultMarkdownTheme, undefined, 40);
+			const lines = md.render(100).filter((line) => stripAnsi(line).length > 0);
+			assert.ok(lines.length > 1, "long paragraph should wrap to multiple lines under the cap");
+			for (const line of lines) {
+				assert.ok(stripAnsi(line).length <= 40, `prose line exceeds cap: "${stripAnsi(line)}"`);
+			}
+		});
+
+		it("does NOT cap a wide table (uses full width)", () => {
+			const table = [
+				"| Column A | Column B | Column C |",
+				"| --- | --- | --- |",
+				"| this is a fairly long cell value | another quite long cell value here | a third long cell value too |",
+			].join("\n");
+			const md = new Markdown(table, 0, 0, defaultMarkdownTheme, undefined, 40);
+			const width = maxLineWidth(md.render(100));
+			assert.ok(width > 40, `table should exceed the prose cap, got ${width}`);
+			assert.ok(width <= 100, `table should stay within terminal width, got ${width}`);
+		});
+
+		it("does NOT cap a code block (uses full width)", () => {
+			const code =
+				"```js\nconst reallyLongVariableName = someFunctionCall(argumentOne, argumentTwo, argThree);\n```";
+			const md = new Markdown(code, 0, 0, defaultMarkdownTheme, undefined, 40);
+			const width = maxLineWidth(md.render(100));
+			assert.ok(width > 40, `code block should exceed the prose cap, got ${width}`);
+		});
+
+		it("caps an hr with the prose policy (never widened)", () => {
+			const md = new Markdown("---", 0, 0, defaultMarkdownTheme, undefined, 40);
+			const ruleLines = md
+				.render(100)
+				.map((line) => stripAnsi(line))
+				.filter((line) => line.includes("─"));
+			assert.ok(ruleLines.length > 0, "expected a horizontal-rule line");
+			for (const line of ruleLines) {
+				assert.ok(line.length <= 40, `hr should be capped to the prose measure, got ${line.length}`);
+			}
+		});
+
+		it("proseMaxColumns=0 is byte-identical to the no-arg default and leaves prose uncapped", () => {
+			const doc = `${longParagraph}\n\n| A | B |\n| --- | --- |\n| x | y |\n\n\`\`\`\ncode line\n\`\`\`\n\n---`;
+			const withZero = new Markdown(doc, 1, 0, defaultMarkdownTheme, undefined, 0).render(100);
+			const withDefault = new Markdown(doc, 1, 0, defaultMarkdownTheme).render(100);
+			assert.deepStrictEqual(withZero, withDefault);
+
+			// And the disabled cap genuinely leaves prose at full width.
+			const para = new Markdown(longParagraph, 0, 0, defaultMarkdownTheme, undefined, 0);
+			const width = maxLineWidth(para.render(100));
+			assert.ok(width > 40, `uncapped prose should use full width, got ${width}`);
+		});
+
+		it("streams a code block with the cap active without corrupting output", () => {
+			// Code is a wide block, but the streaming (deferred-highlight) path must
+			// still thread the full width consistently while a prose cap is set.
+			const full = "```js\nconst a = 1;\nconst b = 2;\nconst c = 3;\n```";
+			const streaming = new Markdown("", 0, 0, defaultMarkdownTheme, undefined, 40);
+			for (let i = 1; i <= full.length; i++) {
+				streaming.setText(full.slice(0, i));
+				streaming.render(100);
+			}
+			streaming.setText(full);
+			const streamed = streaming.render(100);
+			const oneShot = new Markdown(full, 0, 0, defaultMarkdownTheme, undefined, 40).render(100);
+			assert.deepStrictEqual(streamed, oneShot);
+		});
+	});
 });

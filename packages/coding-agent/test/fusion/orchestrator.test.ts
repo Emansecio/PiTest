@@ -273,6 +273,31 @@ describe("runFusionTurn", () => {
 		expect(recordDiagnosticMock).toHaveBeenCalledWith(expect.objectContaining({ category: "fusion.verify-skipped" }));
 	});
 
+	it("still verifies when the judge FAILED to parse (undefined) — empty analysis from a failed judge is not 'nothing to check'", async () => {
+		recordDiagnosticMock.mockClear();
+		let verifyCalls = 0;
+		const out = await runFusionTurn({
+			userPrompt: "Q",
+			panel: PANEL,
+			staggerSameCliMs: 0,
+			runMember: async (m) => okResult(m, `ans-${m.cli}`),
+			// Parse-fail contract: undefined, NOT an empty analysis.
+			runJudge: async () => undefined,
+			verify: async () => {
+				verifyCalls++;
+				return { findings: [] };
+			},
+			writer: async () => "FINAL",
+		});
+		expect(out.handled).toBe(true);
+		expect(verifyCalls).toBe(1);
+		// A failed judge must not be reported as a (vacuously empty) analysis either.
+		expect(out.analysis).toBeUndefined();
+		expect(recordDiagnosticMock).not.toHaveBeenCalledWith(
+			expect.objectContaining({ category: "fusion.verify-skipped" }),
+		);
+	});
+
 	it("verifies the lone survivor even when the judge is skipped", async () => {
 		let judgeCalls = 0;
 		let verifyCalls = 0;

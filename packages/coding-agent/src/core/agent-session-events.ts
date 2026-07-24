@@ -27,7 +27,7 @@ export type AgentSessionEvent =
 	| {
 			type: "fusion_member";
 			/** Panel slot (0-based). Distinguishes identical members in a self-fusion
-			 * (e.g. two claude-opus-4-8) that would otherwise collide on cli/model. */
+			 * (e.g. two claude-opus-5) that would otherwise collide on cli/model. */
 			index: number;
 			cli: string;
 			model: string;

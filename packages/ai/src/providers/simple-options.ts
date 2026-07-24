@@ -34,7 +34,11 @@ export function resolveCacheRetention(
 	return defaultValue;
 }
 
-export function buildBaseOptions(_model: Model<Api>, options?: SimpleStreamOptions, apiKey?: string): StreamOptions {
+export function buildBaseOptions(
+	_model: Model<Api>,
+	options?: SimpleStreamOptions,
+	apiKey?: string,
+): StreamOptions & Pick<SimpleStreamOptions, "toolChoice"> {
 	return {
 		temperature: options?.temperature,
 		maxTokens: options?.maxTokens,
@@ -43,6 +47,7 @@ export function buildBaseOptions(_model: Model<Api>, options?: SimpleStreamOptio
 		transport: options?.transport,
 		cacheRetention: options?.cacheRetention,
 		sessionId: options?.sessionId,
+		toolChoice: options?.toolChoice,
 		headers: options?.headers,
 		onPayload: options?.onPayload,
 		onResponse: options?.onResponse,

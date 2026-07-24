@@ -14,7 +14,7 @@ import { type FauxProviderRegistration, fauxAssistantMessage, registerFauxProvid
 import { afterEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { createCoordinatorExtension } from "../src/core/built-ins/coordinator-extension.js";
-import { saveResumeState } from "../src/core/coordinator/resume-store.js";
+import { resumeStateStem, saveResumeState } from "../src/core/coordinator/resume-store.js";
 import { convertToLlm } from "../src/core/messages.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 
@@ -68,7 +68,7 @@ describe("coordinator op:resume from disk (Tier 2)", () => {
 
 	it("persists an interrupted run and resumes it in a fresh coordinator, then cleans up", async () => {
 		root = mkdtempSync(join(tmpdir(), "pit-rd-"));
-		const stateFile = join(root, ".pit", "subagents", "probe.json");
+		const stateFile = join(root, ".pit", "subagents", `${resumeStateStem("probe")}.json`);
 
 		// Process #1: run is interrupted (network drop) → persisted to disk.
 		const task1 = freshCoordinator(root, [fauxAssistantMessage("", { stopReason: "error", errorMessage: "drop" })]);
@@ -95,7 +95,7 @@ describe("coordinator op:resume from disk (Tier 2)", () => {
 		// run ended on a stopReason:"error" turn WITHOUT throwing (a fresh network
 		// drop). That destroyed the only resumable transcript and lied about success.
 		root = mkdtempSync(join(tmpdir(), "pit-rd-"));
-		const stateFile = join(root, ".pit", "subagents", "probe.json");
+		const stateFile = join(root, ".pit", "subagents", `${resumeStateStem("probe")}.json`);
 
 		// Process #1: interrupted run → persisted to disk.
 		const task1 = freshCoordinator(root, [fauxAssistantMessage("", { stopReason: "error", errorMessage: "drop" })]);

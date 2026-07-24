@@ -56,6 +56,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	},
 	{ name: "fusion", description: "Configure the Fusion panel (pick two models)", group: "Model" },
 	{ name: "theme", description: "Pick a color theme (live preview, Esc reverts)", group: "Config" },
+	{ name: "mouse", description: "Toggle mouse: click positions cursor · Shift+drag = native select", group: "Config" },
 	{ name: "name", description: "Set session display name", group: "Session", argumentHint: "<display name>" },
 	{ name: "session", description: "Show session info and stats", group: "Info" },
 	{ name: "tree", description: "Browse and jump around the session tree", group: "Session" },

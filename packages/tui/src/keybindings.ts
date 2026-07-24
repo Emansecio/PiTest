@@ -29,6 +29,7 @@ export interface Keybindings {
 	"tui.editor.undo": true;
 	"tui.editor.redo": true;
 	"tui.editor.historySearch": true;
+	"tui.editor.copySelection": true;
 	// Help
 	"tui.help.cheatsheet": true;
 	// Generic input actions
@@ -123,6 +124,9 @@ export const TUI_KEYBINDINGS = {
 	"tui.editor.undo": { defaultKeys: "ctrl+-", description: "Undo" },
 	"tui.editor.redo": { defaultKeys: "ctrl+shift+-", description: "Redo" },
 	"tui.editor.historySearch": { defaultKeys: "ctrl+r", description: "Reverse-search prompt history" },
+	// alt+c, not ctrl+c: Ctrl+C is the app interrupt (tui.input.copy → exit/clear),
+	// so it can't double as copy-selection without stealing the interrupt.
+	"tui.editor.copySelection": { defaultKeys: "alt+c", description: "Copy selection" },
 	"tui.help.cheatsheet": { defaultKeys: ["f1", "ctrl+/"], description: "Show keybinding cheatsheet" },
 	"tui.input.newLine": { defaultKeys: "shift+enter", description: "Insert newline" },
 	"tui.input.submit": { defaultKeys: "enter", description: "Submit input" },

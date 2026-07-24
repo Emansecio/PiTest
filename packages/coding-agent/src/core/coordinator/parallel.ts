@@ -45,6 +45,12 @@ export interface ParallelTask {
 	systemPrompt?: string;
 	/** Per-task catalog override (used for agent-type-scoped memory/tools). */
 	tools?: AgentTool[];
+	/**
+	 * Per-task type/role label for `prompt_cache_key` derivation; defaults to
+	 * `base.agentTypeLabel`. Same-label tasks share a cache shard, so untyped
+	 * fan-out (all → "task") gets affinity for free. See deriveSubagentCacheKey.
+	 */
+	agentTypeLabel?: string;
 }
 
 export interface ParallelTaskResult {
@@ -97,6 +103,7 @@ export async function spawnAll(
 			model: task.model ?? base.model,
 			thinkingLevel: task.thinkingLevel ?? base.thinkingLevel,
 			systemPrompt: task.systemPrompt ?? base.systemPrompt,
+			agentTypeLabel: task.agentTypeLabel ?? base.agentTypeLabel,
 			onSubagentEvent: (info) => safeNotify(() => options.onTaskEvent?.(handle, info)),
 		};
 

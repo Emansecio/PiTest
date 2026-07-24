@@ -3,6 +3,7 @@ import { formatModelDisplayName } from "../src/modes/interactive/model-display-n
 
 describe("formatModelDisplayName", () => {
 	it.each([
+		["claude-opus-5", "Opus 5"],
 		["claude-opus-4-8", "Opus 4.8"],
 		["claude-sonnet-4-6", "Sonnet 4.6"],
 		["anthropic/claude-haiku-3-5", "Haiku 3.5"],

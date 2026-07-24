@@ -21,6 +21,7 @@ export {
 	listResumeHandlesSync,
 	loadResumeState,
 	type ResumeState,
+	resumeStateStem,
 	saveResumeState,
 } from "./resume-store.ts";
 export { slotStats, withoutLease, withRunSlot, yieldRunSlotWhile } from "./slots.ts";

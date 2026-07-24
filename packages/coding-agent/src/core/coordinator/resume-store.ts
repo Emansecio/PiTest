@@ -11,6 +11,7 @@
  * the agent loop — persistence is an enhancement, not a correctness dependency.
  */
 
+import { createHash } from "node:crypto";
 import { readdirSync, statSync, unlinkSync } from "node:fs";
 import { mkdir, readFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
@@ -48,13 +49,50 @@ function storeDir(cwd: string): string {
 	return join(cwd, ".pit", "subagents");
 }
 
-/** Filesystem-safe filename stem for a handle (handles are usually already safe). */
-function sanitize(handle: string): string {
-	return handle.replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 80) || "task";
+/**
+ * Readable prefix of a handle's filename stem. Capped BELOW the 80-char filename
+ * budget so that `${prefix}-${8 hex}` (see {@link resumeStateStem}) still fits in
+ * 80 — otherwise a re-sanitize (`slice(0, 80)`) on the composed stem would shave
+ * the discriminator back off and reintroduce the very collision it prevents.
+ */
+const READABLE_STEM_MAX = 71;
+
+function readableStem(handle: string): string {
+	return handle.replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, READABLE_STEM_MAX) || "task";
 }
 
-function stateFile(cwd: string, handle: string): string {
-	return join(storeDir(cwd), `${sanitize(handle)}.json`);
+/**
+ * On-disk filename stem for a handle: a readable, filesystem-safe prefix plus a
+ * short deterministic discriminator (8 hex of the FULL, pre-truncation handle).
+ *
+ * `sanitize`-style collapsing (non-`[a-zA-Z0-9_-]` runs → `_`) and an 80-char
+ * truncation are BOTH lossy, so two distinct handles ("a b" vs "a_b", or two
+ * long names sharing a prefix) could otherwise map to the same file and overwrite
+ * each other's persisted transcript. The discriminator keeps the mapping
+ * injective while the prefix keeps the filename human-readable. Exported so
+ * tests (and any op:"list" consumer) can address the file deterministically. (H21)
+ */
+export function resumeStateStem(handle: string): string {
+	const digest = createHash("sha256").update(handle).digest("hex").slice(0, 8);
+	return `${readableStem(handle)}-${digest}`;
+}
+
+/**
+ * Candidate filenames for a lookup key, most-specific first. A `key` reaching
+ * load/delete may be:
+ *  - a RAW handle (resume of a live/known handle) → its canonical stem file;
+ *  - an already-computed STEM surfaced by op:"list" → matched literally;
+ *  - a PRE-discriminator handle from an older Pit whose file is `${sanitize}.json`.
+ * The literal form is `sanitize(key).json`, which is idempotent on a stem (a stem
+ * is already ≤80 filename-safe chars) and equal to the legacy filename — so both
+ * the list→resume round-trip and pre-upgrade files still resolve.
+ */
+function candidateFiles(cwd: string, key: string): string[] {
+	const dir = storeDir(cwd);
+	const canonical = resumeStateStem(key);
+	const literal = key.replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 80) || "task";
+	const stems = canonical === literal ? [canonical] : [canonical, literal];
+	return stems.map((s) => join(dir, `${s}.json`));
 }
 
 export async function saveResumeState(cwd: string, state: ResumeState): Promise<void> {
@@ -66,33 +104,39 @@ export async function saveResumeState(cwd: string, state: ResumeState): Promise<
 		// transcript carries tool outputs (bash/read) that may embed credentials;
 		// each match is replaced by a `[REDACTED:<type>]` marker that contains no
 		// JSON metacharacters, so the serialized state stays valid JSON.
-		await writeFileAtomic(stateFile(cwd, state.handle), redactForDisk(JSON.stringify(state)));
+		const file = join(storeDir(cwd), `${resumeStateStem(state.handle)}.json`);
+		await writeFileAtomic(file, redactForDisk(JSON.stringify(state)));
 	} catch {
 		// Best-effort: a persistence failure must not break the spawn/turn.
 	}
 }
 
 export async function loadResumeState(cwd: string, handle: string): Promise<ResumeState | undefined> {
-	try {
-		const raw = await readFile(stateFile(cwd, handle), "utf8");
-		const parsed = JSON.parse(raw) as ResumeState;
-		if (!parsed || !Array.isArray(parsed.messages)) return undefined;
-		// Expired: GC the stale state instead of resuming a week-old transcript.
-		if (typeof parsed.savedAt === "number" && Date.now() - parsed.savedAt > RESUME_STATE_TTL_MS) {
-			await unlink(stateFile(cwd, handle)).catch(() => {});
-			return undefined;
+	for (const file of candidateFiles(cwd, handle)) {
+		try {
+			const raw = await readFile(file, "utf8");
+			const parsed = JSON.parse(raw) as ResumeState;
+			if (!parsed || !Array.isArray(parsed.messages)) continue;
+			// Expired: GC the stale state instead of resuming a week-old transcript.
+			if (typeof parsed.savedAt === "number" && Date.now() - parsed.savedAt > RESUME_STATE_TTL_MS) {
+				await unlink(file).catch(() => {});
+				continue;
+			}
+			return parsed;
+		} catch {
+			// Missing/corrupt candidate — try the next.
 		}
-		return parsed;
-	} catch {
-		return undefined;
 	}
+	return undefined;
 }
 
 export async function deleteResumeState(cwd: string, handle: string): Promise<void> {
-	try {
-		await unlink(stateFile(cwd, handle));
-	} catch {
-		// Already gone / never written — fine.
+	for (const file of candidateFiles(cwd, handle)) {
+		try {
+			await unlink(file);
+		} catch {
+			// Already gone / never written — fine.
+		}
 	}
 }
 

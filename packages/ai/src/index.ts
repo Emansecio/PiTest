@@ -26,6 +26,7 @@ export type {
 export type { OpenAICompletionsOptions } from "./providers/openai-completions.ts";
 export type { OpenAIResponsesOptions } from "./providers/openai-responses.ts";
 export * from "./providers/register-builtins.ts";
+export { resolveCacheRetention } from "./providers/simple-options.ts";
 export * from "./retry-with-fallback.ts";
 export * from "./session-resources.ts";
 export * from "./stream.ts";

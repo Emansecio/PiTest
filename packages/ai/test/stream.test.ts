@@ -362,8 +362,8 @@ describe("Generate E2E Tests", () => {
 		});
 	});
 
-	describe("Anthropic OAuth Provider (claude-opus-4-6 with adaptive thinking)", () => {
-		const model = getModel("anthropic", "claude-opus-4-8");
+	describe("Anthropic OAuth Provider (claude-opus-5 with adaptive thinking)", () => {
+		const model = getModel("anthropic", "claude-opus-5");
 
 		it.skipIf(!anthropicOAuthToken)(
 			"should complete basic text generation",

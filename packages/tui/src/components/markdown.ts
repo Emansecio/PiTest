@@ -54,6 +54,20 @@ function applyTextWithNewlines(text: string, applyText: (t: string) => string): 
 		.join("\n");
 }
 
+/**
+ * Whether a top-level token is a "wide" block that opts OUT of the prose
+ * reading-column cap (see Markdown#proseMaxColumns). Only tables and fenced code
+ * qualify: both are scanned as a grid / read column-by-column, not word-wrapped
+ * prose, so the legibility argument for a narrow measure does not apply —
+ * capping them to ~120 cols would force needless wrapping and hurt scannability.
+ * Everything else (paragraph, heading, list, blockquote, hr, html, text, space)
+ * is prose and IS capped. In particular `hr` deliberately stays prose: widening
+ * a horizontal rule would make it MORE prominent, the opposite of the intent.
+ */
+function isWideBlock(tokenType: string | undefined): boolean {
+	return tokenType === "table" || tokenType === "code";
+}
+
 const markdownParser = new Marked();
 markdownParser.setOptions({
 	tokenizer: new StrictStrikethroughTokenizer(),
@@ -164,6 +178,11 @@ export class Markdown implements Component {
 	private defaultTextStyle?: DefaultTextStyle;
 	private theme: MarkdownTheme;
 	private defaultStylePrefix?: string;
+	// Reading-column cap (cols) applied to PROSE tokens only; wide blocks (tables,
+	// code — see isWideBlock) always use the full content width. 0 disables the cap
+	// (full width for everything, the historical behavior). Immutable per instance,
+	// so the width-keyed render/token caches stay sound (see render()).
+	private proseMaxColumns: number;
 
 	// Cache for rendered output
 	private cachedText?: string;
@@ -272,12 +291,14 @@ export class Markdown implements Component {
 		paddingY: number,
 		theme: MarkdownTheme,
 		defaultTextStyle?: DefaultTextStyle,
+		proseMaxColumns = 0,
 	) {
 		this.text = text;
 		this.paddingX = paddingX;
 		this.paddingY = paddingY;
 		this.theme = theme;
 		this.defaultTextStyle = defaultTextStyle;
+		this.proseMaxColumns = proseMaxColumns;
 	}
 
 	setText(text: string): void {
@@ -409,13 +430,24 @@ export class Markdown implements Component {
 			const token = tokens[i];
 			const nextTokenType = tokens[i + 1]?.type;
 			const deferCodeHighlight = i === deferHighlightCodeIdx;
-			const cacheKey = this.getTokenCacheKey(token, width, nextTokenType, deferCodeHighlight);
+			// Prose caps at proseMaxColumns so long answers form a fixed reading
+			// measure on wide terminals; wide blocks (tables, code) keep the full
+			// content width. effWidth is the padded outer width the cap implies —
+			// both the background pad (buildTokenLines uses it for applyBackground)
+			// and the token cache key MUST use it, not the global `width`, so a
+			// capped block never fills bg past the cap and a cache entry is never
+			// served at the wrong width. When no cap applies (proseMaxColumns=0 or a
+			// wide block) effWidth === width, keeping that path byte-identical.
+			const capProse = this.proseMaxColumns > 0 && !isWideBlock(token.type);
+			const effContentWidth = capProse ? Math.min(contentWidth, this.proseMaxColumns) : contentWidth;
+			const effWidth = capProse ? effContentWidth + this.paddingX * 2 : width;
+			const cacheKey = this.getTokenCacheKey(token, effWidth, nextTokenType, deferCodeHighlight);
 			let tokenLines = prevTokenCache?.get(cacheKey) ?? nextTokenCache.get(cacheKey);
 			if (!tokenLines) {
 				tokenLines = this.buildTokenLines(
 					token,
-					contentWidth,
-					width,
+					effContentWidth,
+					effWidth,
 					nextTokenType,
 					leftMargin,
 					rightMargin,

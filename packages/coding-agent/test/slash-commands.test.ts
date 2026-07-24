@@ -146,6 +146,16 @@ describe("new command dispatch", () => {
 		expect(clearEditor).toHaveBeenCalledOnce();
 		expect(handleUnpinCommand).toHaveBeenCalledWith("p1");
 	});
+
+	test("/mouse calls host.toggleMouse and clears the editor", async () => {
+		const clearEditor = vi.fn();
+		const toggleMouse = vi.fn();
+		const host = spyHost({ clearEditor, toggleMouse });
+
+		expect(await dispatchSlashCommand(host, "/mouse")).toBe(true);
+		expect(toggleMouse).toHaveBeenCalledOnce();
+		expect(clearEditor).toHaveBeenCalledOnce();
+	});
 });
 
 describe("buildGroupedSlashHelp", () => {

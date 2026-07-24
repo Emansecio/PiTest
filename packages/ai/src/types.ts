@@ -225,6 +225,15 @@ export interface SimpleStreamOptions extends StreamOptions {
 	reasoning?: ThinkingLevel;
 	/** Custom token budgets for thinking levels (token-based providers only) */
 	thinkingBudgets?: ThinkingBudgets;
+	/**
+	 * Tool invocation policy, in the neutral subset every supporting provider
+	 * accepts. "none" lets a request carry the full tool block (preserving
+	 * prompt-cache prefix identity) while forbidding tool calls — used by
+	 * cache-reusing side calls (summarization, fusion writer). Providers that
+	 * don't support it ignore the field; callers relying on "none" must gate on
+	 * provider support.
+	 */
+	toolChoice?: "auto" | "any" | "none";
 }
 
 // Generic StreamFunction with typed options.
@@ -479,8 +488,12 @@ export interface AnthropicMessagesCompat {
 	 * `thinking: {type: "disabled"}` with a 400 (Fable 5 / Mythos 5 and the
 	 * Mythos-class family). For these the provider omits the `thinking` param
 	 * entirely on the thinking-off path (and never sends `temperature`, which they
-	 * also reject). Opus 4.8/4.7 and Sonnet 5 accept `disabled`, so this stays
+	 * also reject). Opus 5/4.8/4.7 and Sonnet 5 accept `disabled`, so this stays
 	 * false for them. When omitted, derived from the model id by family.
+	 *
+	 * Opus 5 caveat: it accepts `disabled` only at effort `high` or below (a 400
+	 * above that). The provider never pairs `disabled` with an `output_config`,
+	 * so the request lands on the server default (`high`) and stays valid.
 	 */
 	thinkingAlwaysOn?: boolean;
 }

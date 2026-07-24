@@ -1051,6 +1051,12 @@ export class SessionManager {
 	private cwd: string;
 	private persist: boolean;
 	private flushed: boolean = false;
+	// How many leading fileEntries are already durable on disk. The deferred
+	// initial flush (see _persist) appends only fileEntries.slice(this count) so a
+	// header that was pre-written to disk (empty/corrupt-file recovery, v1→v3
+	// migration, or a fork of an assistant-less session) is never re-appended.
+	// 0 for a brand-new file that _persist will create from scratch.
+	private _persistedEntryCount = 0;
 	private fileEntries: FileEntry[] = [];
 	private byId: Map<string, SessionEntry> = new Map();
 	private labelsById: Map<string, string> = new Map();
@@ -1098,6 +1104,9 @@ export class SessionManager {
 
 			this._buildIndex();
 			this.flushed = true;
+			// Everything loaded (and any migration rewrite) is already on disk, so the
+			// deferred initial flush must not re-append the header + loaded entries.
+			this._persistedEntryCount = this.fileEntries.length;
 			this._hasAssistantMessage = this.fileEntries.some(
 				(e) => e.type === "message" && e.message.role === "assistant",
 			);
@@ -1124,6 +1133,7 @@ export class SessionManager {
 		this.labelsById.clear();
 		this.leafId = null;
 		this.flushed = false;
+		this._persistedEntryCount = 0;
 		this._hasAssistantMessage = false;
 		this._entriesOnlyCache = null;
 		this._ctxCache = null;
@@ -1180,6 +1190,12 @@ export class SessionManager {
 		// Atomic rewrite (temp + rename) so a crash mid-write never truncates the
 		// session file. Falls back to a direct write if rename is unavailable.
 		writeFileAtomic(this.sessionFile, safe);
+		// The full file now mirrors every in-memory entry, so a later deferred
+		// initial flush appends only the not-yet-persisted tail (never re-appends
+		// the header). Covers empty/corrupt-file recovery, v1→v3 migration, and
+		// createBranchedSession — all of which rewrite before the first assistant
+		// message, leaving flushed=true but the pre-assistant gate about to reset it.
+		this._persistedEntryCount = this.fileEntries.length;
 	}
 
 	isPersisted(): boolean {
@@ -1205,6 +1221,13 @@ export class SessionManager {
 	private _hasAssistantMessage = false;
 	private _writeQueue: string[] = [];
 	private _draining: Promise<void> | null = null;
+	// Consecutive persist-write failures (synchronous initial flush or async
+	// delta drain), reset to 0 on any successful write. Persistence is fail-open —
+	// a failed write never aborts the turn — so without this counter a failing
+	// disk is only visible in /diagnostics and the user never learns their history
+	// has stopped being saved. The session reads it after a message_end persist to
+	// escalate to a visible warning once failures pile up.
+	private _consecutivePersistFailures = 0;
 	private _entriesOnlyCache: SessionEntry[] | null = null;
 	// Cache the built context per leaf. buildSessionContext() is called from
 	// ~7 sites per turn (runtime, agent-session, interactive, sdk, main); the
@@ -1246,14 +1269,34 @@ export class SessionManager {
 		// in-memory entries are left verbatim for the active turn.
 		const isInitialFlush = !this.flushed;
 		if (isInitialFlush) {
-			let batch = this.fileEntries.map((e) => `${redactForDisk(JSON.stringify(e))}\n`).join("");
+			// Append ONLY the entries not already durable on disk. When the file was
+			// pre-created with a header (empty/corrupt-file recovery, v1→v3 migration,
+			// or a fork of an assistant-less session) _persistedEntryCount is > 0, so
+			// serializing the whole fileEntries here would re-append the header (and any
+			// already-written entries), corrupting the JSONL with a duplicate header.
+			// For a brand-new session the file does not exist yet and the count is 0, so
+			// this stays a full create-append — identical to the original behavior.
+			let batch = this.fileEntries
+				.slice(this._persistedEntryCount)
+				.map((e) => `${redactForDisk(JSON.stringify(e))}\n`)
+				.join("");
 			// First durable write must stay synchronous — callers may list/re-open
 			// the session immediately after the first assistant message lands.
 			if (this._writeQueue.length > 0) {
 				batch = this._writeQueue.join("") + batch;
 			}
-			appendWithRetry(this.sessionFile, batch);
+			try {
+				appendWithRetry(this.sessionFile, batch);
+			} catch (err) {
+				// Fail-open at the caller (the throw preserves the A6 flushed=false
+				// invariant so the next attempt re-emits the full tail), but count the
+				// failure so repeated divergence becomes visible.
+				this._notePersistFailure(err);
+				throw err;
+			}
+			this._notePersistSuccess();
 			this.flushed = true;
+			this._persistedEntryCount = this.fileEntries.length;
 			this._writeQueue.length = 0;
 			return;
 		}
@@ -1288,8 +1331,16 @@ export class SessionManager {
 			while (this._writeQueue.length > 0 && this.sessionFile) {
 				const pending = this._writeQueue.length;
 				const batch = this._writeQueue.join("");
-				await appendWithRetryAsync(this.sessionFile, batch);
+				try {
+					await appendWithRetryAsync(this.sessionFile, batch);
+				} catch (err) {
+					// Leave the queue intact (a later flushWrites/retry can still land it)
+					// and count the failure before propagating to the drain's caller.
+					this._notePersistFailure(err);
+					throw err;
+				}
 				this._writeQueue.splice(0, pending);
+				this._notePersistSuccess();
 			}
 		})();
 		this._draining = drainPromise;
@@ -1304,6 +1355,36 @@ export class SessionManager {
 
 	async flushWrites(): Promise<void> {
 		await this._drainQueue();
+	}
+
+	private _notePersistFailure(err: unknown): void {
+		this._consecutivePersistFailures += 1;
+		recordDiagnostic({
+			category: "session.persist_failed",
+			level: "warn",
+			source: "session-manager._persist",
+			context: {
+				path: this.sessionFile,
+				count: this._consecutivePersistFailures,
+				note: err instanceof Error ? err.message : String(err),
+			},
+		});
+	}
+
+	private _notePersistSuccess(): void {
+		this._consecutivePersistFailures = 0;
+	}
+
+	/**
+	 * Consecutive session persist-write failures since the last successful write
+	 * (0 when healthy). Both the synchronous initial flush and the async delta
+	 * drain feed it. Persistence is fail-open — a failed write never aborts the
+	 * turn — so the session polls this after a message_end persist and surfaces a
+	 * visible warning once it crosses a small threshold, rather than letting
+	 * in-memory history silently diverge from disk for the rest of the run.
+	 */
+	getConsecutivePersistFailures(): number {
+		return this._consecutivePersistFailures;
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
@@ -1744,7 +1825,11 @@ export class SessionManager {
 				this._rewriteFile();
 				this.flushed = true;
 			} else {
+				// Nothing written yet: the new file does not exist on disk, so the first
+				// flush must create it from scratch (count 0). _rewriteFile above already
+				// set the count in the assistant branch.
 				this.flushed = false;
+				this._persistedEntryCount = 0;
 			}
 
 			return newSessionFile;

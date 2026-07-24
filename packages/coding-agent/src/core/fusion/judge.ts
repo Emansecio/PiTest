@@ -72,6 +72,71 @@ export function buildWriterContext(
 	};
 }
 
+/**
+ * Adapted WRITER_SYSTEM for the prefix-reuse writer path. The writer's role
+ * instructions ride INLINE in the trailing user message (not as a private system
+ * prompt), so the session's own system prompt + tools + history stay the cacheable
+ * prefix. References "the user's request above" because that request is already the
+ * last message in the reused history (emitFusionUserMessage pushed it before the
+ * writer ran) — restating the task verbatim would duplicate it on the wire.
+ */
+const WRITER_INLINE_INSTRUCTION =
+	"You are the writer in a model-fusion pipeline. The user's request is the last message above. " +
+	"Using the judge's analysis and the verifier's fact-check below, write the single best answer to " +
+	"that request — take the best of each member rather than discarding one wholesale. A verifier " +
+	"checked key claims against the ACTUAL code: treat any claim marked 'refuted' as FALSE (correct it " +
+	"or omit it — never restate it as fact), treat 'unverified' as uncertain (hedge it or drop it), and " +
+	"rely on 'confirmed' claims. Add a one-line rationale only when you override one member in favor of " +
+	"the other or when you drop/correct a refuted claim." +
+	UNTRUSTED_FUSION_DATA_INSTRUCTION;
+
+/**
+ * Prefix-reuse writer context (kill-switch: PIT_NO_FUSION_PREFIX_REUSE; gated at
+ * the call site on provider/model/prefix-size). Where {@link buildWriterContext}
+ * ships a PRIVATE WRITER_SYSTEM + a filtered history — a prefix that diverges from
+ * the session's at position 0, so Anthropic re-writes the whole history at ~1.25x —
+ * this reuses the SESSION's own cacheable prefix (its system prompt, tools, and full
+ * message history, byte-identical to the last real send) so the writer call re-reads
+ * the cache at ~0.1x. The writer's role instructions move inline into the single
+ * trailing user message alongside the panel/judge/verify material.
+ *
+ * `session.messages` is the session history already converted for the wire
+ * (host.agent.convertToLlm(state.messages)); it ALREADY ends with the current turn's
+ * user request, so the trailing message references it ("the user's request above")
+ * instead of restating the task. Prefix assembly (system + convertToLlm(messages) +
+ * compacted tools) mirrors cache-keepalive.ts's buildPingContext; the tool-compaction
+ * step lives at the call site. Panel-material formatting is duplicated from
+ * buildWriterContext on purpose — that function must stay byte-identical for the
+ * legacy fallback.
+ */
+export function buildWriterPrefixReuseContext(
+	results: PanelResult[],
+	analysis: JudgeAnalysis,
+	verification: VerificationReport | undefined,
+	session: { systemPrompt: Context["systemPrompt"]; messages: Message[]; tools: Context["tools"] },
+): Context {
+	const ans = results
+		.map(
+			(r, i) =>
+				`### Member ${i + 1} (${r.member.cli}:${r.member.model})\n${r.ok ? formatPanelMemberText(r) : "[failed]"}`,
+		)
+		.join("\n\n");
+	const a = JSON.stringify(analysis, null, 2);
+	const verifySection =
+		verification && verification.findings.length > 0
+			? `\n\n## Verification (key claims fact-checked against the code)\n${JSON.stringify(verification.findings, null, 2)}`
+			: "";
+	const content = `## Panel answers\n${ans}\n\n## Judge analysis\n${a}${verifySection}\n\n## Your job\n${WRITER_INLINE_INSTRUCTION}`;
+	return {
+		systemPrompt: session.systemPrompt,
+		tools: session.tools,
+		// Reuse the session's converted history (which already ends with the current
+		// user request) and append ONE trailing user block carrying the panel/judge/
+		// verify material + the inline writer instruction.
+		messages: [...session.messages, { role: "user", content, timestamp: Date.now() }],
+	};
+}
+
 const BRIEF_SYSTEM =
 	"You are the orchestrator of a model-fusion pipeline. You will dispatch the user's request to two " +
 	"independent READ-ONLY advisor models that inspect the codebase/problem and report back to you. " +

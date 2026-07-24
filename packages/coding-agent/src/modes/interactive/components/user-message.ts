@@ -2,7 +2,6 @@ import { Markdown, type MarkdownTheme } from "@pit/tui";
 import { DEFAULT_ASSISTANT_READING_COLUMNS } from "../../../core/settings-manager.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { MessageShell } from "./message-shell.ts";
-import { ReadingColumn } from "./reading-column.ts";
 
 // FTCS / OSC 133 semantic prompt zone. A user message is the "command" the
 // user issued, so it carries the PROMPT zone: A (prompt start) … B (command
@@ -56,11 +55,21 @@ export class UserMessageComponent extends MessageShell {
 		super({
 			gutterColor: (content: string) => theme.fg("gutterUser", content),
 			gutterChar: "❯",
+			// The prompt tick marks only the FIRST line; wrapped/continuation lines
+			// indent to the same text column instead of repeating a column of arrows.
+			gutterContinuationChar: " ",
 		});
-		const markdown = new Markdown(text, 0, 0, markdownTheme, {
-			color: (content: string) => theme.fg("userMessageText", content),
-		});
-		this.addChild(new ReadingColumn(markdown, readingColumns > 0 ? readingColumns : 0));
+		const markdown = new Markdown(
+			text,
+			0,
+			0,
+			markdownTheme,
+			{
+				color: (content: string) => theme.fg("userMessageText", content),
+			},
+			readingColumns > 0 ? readingColumns : 0,
+		);
+		this.addChild(markdown);
 	}
 
 	override render(width: number): string[] {

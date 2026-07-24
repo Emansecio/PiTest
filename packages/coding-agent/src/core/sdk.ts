@@ -582,6 +582,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionStartEvent: options.sessionStartEvent,
 		disableHashlineAnchors: options.disableHashlineAnchors,
 		permissionChecker: options.permissionChecker,
+		// Raw session retention → AgentSession → cache-keepalive cadence. The send
+		// path resolves its own effective value (see sessionCacheRetention above);
+		// this hands the keepalive the same raw input to resolve independently.
+		cacheRetention: options.cacheRetention,
 	});
 	const extensionsResult = resourceLoader.getExtensions();
 

@@ -573,8 +573,8 @@ export default function (pi: ExtensionAPI) {
 
 		models: [
 			{
-				id: "claude-opus-4-8",
-				name: "Claude Opus 4.5 (Custom)",
+				id: "claude-opus-5",
+				name: "Claude Opus 5 (Custom)",
 				reasoning: true,
 				input: ["text", "image"],
 				cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },

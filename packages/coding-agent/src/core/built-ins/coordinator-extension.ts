@@ -41,6 +41,7 @@ import {
 	loadAgentTypes,
 	loadResumeState,
 	type ParallelTaskResult,
+	resumeStateStem,
 	retargetToolsForWorktree,
 	runFanout,
 	runWithAcceptance,
@@ -376,6 +377,13 @@ export interface CoordinatorExtensionOptions {
 	permissionChecker?: import("../permissions/index.ts").PermissionChecker;
 	/** Provider that returns the parent's currently active model. */
 	getParentModel: () => import("@pit/ai").Model<any> | undefined;
+	/**
+	 * Returns the parent session's id, used to derive each subagent's
+	 * `prompt_cache_key` (`${parentSessionId}:sub:${type}`) for fan-out cache-shard
+	 * affinity. Optional: when absent (or the id is undefined), subagents send no
+	 * key — identical to pre-feature behavior. See deriveSubagentCacheKey.
+	 */
+	getParentSessionId?: () => string | undefined;
 	/** Provider that returns the parent's full AgentTool catalog at call time. */
 	getAvailableTools: () => AgentTool[];
 	/**
@@ -777,6 +785,10 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			convertToLlm: options.convertToLlm ?? ((messages) => messages as never),
 			permissionChecker: options.permissionChecker,
 			skills: options.getSkills?.(),
+			// Parent session id → per-type subagent prompt_cache_key (shard affinity
+			// for same-type fan-out). Read lazily per spawn so a session-id change is
+			// picked up. See deriveSubagentCacheKey / PIT_NO_SUBAGENT_CACHE_KEY.
+			parentSessionId: options.getParentSessionId?.(),
 			// Worktree spawns rebuild their cwd-sensitive tools bound to the worktree
 			// so the isolation is real. Prefer the session-aware rebinder (preserves
 			// configured shell/search/LSP options); the native fallback remains
@@ -798,6 +810,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				systemPrompt: string | undefined;
 				allowedTools: string[] | undefined;
 				tools: AgentTool[];
+				agentTypeLabel: string | undefined;
 		  }
 	> {
 		const agentType = resolveAgentType(agentTypeMap, raw.type);
@@ -822,6 +835,9 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			systemPrompt: agentType?.systemPrompt,
 			allowedTools,
 			tools: withAgentScope([...childTools], scope, cwd, autoAddMemory),
+			// Type name (if any) drives the child's prompt_cache_key label; untyped
+			// children fall back to the "task" default at derivation time.
+			agentTypeLabel: agentType?.name,
 		};
 	}
 
@@ -841,8 +857,12 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			records.length ? `Subagents (${records.length}):\n${recLines.join("\n")}` : "No subagents tracked.",
 		);
 		if (handleLines.length) sections.push(`Async handles (${handleLines.length}):\n${handleLines.join("\n")}`);
+		// Disk stems carry a discriminator (resumeStateStem); the in-memory map is
+		// keyed by raw handle. Map the live keys through the same stem so a handle
+		// that is BOTH live and persisted is not listed twice. (H21)
+		const liveStems = new Set([...resumable.keys()].map(resumeStateStem));
 		const diskHandles = listResumeHandlesSync(options.getCwd ? options.getCwd() : process.cwd()).filter(
-			(h) => !resumable.has(h),
+			(h) => !liveStems.has(h),
 		);
 		const resumeLines = [
 			...[...resumable.keys()].map((h) => `- ${h}`),
@@ -1350,6 +1370,9 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 								thinkingLevel: subThinking,
 								systemPrompt: effSystemPrompt,
 								allowedTools: effAllowedToolsScoped,
+								// Type name (if any) → shared prompt_cache_key label; untyped spawns
+								// default to "task" so a manual N-way fan-out still shares a shard.
+								agentTypeLabel: agentType?.name,
 								maxTurns: max_turns,
 								signal: controller.signal,
 								resultSchema,
@@ -1488,6 +1511,9 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						thinkingLevel: subThinking,
 						systemPrompt: effSystemPrompt,
 						allowedTools: effAllowedToolsScoped,
+						// Type name (if any) → shared prompt_cache_key label; untyped runs
+						// default to "task" at derivation time. See deriveSubagentCacheKey.
+						agentTypeLabel: agentType?.name,
 						maxTurns: max_turns,
 						signal,
 						resultSchema,
@@ -1742,6 +1768,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						thinkingLevel: preset.thinkingLevel,
 						systemPrompt: preset.systemPrompt,
 						tools: preset.tools,
+						agentTypeLabel: preset.agentTypeLabel,
 					});
 				}
 				try {
@@ -1849,6 +1876,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 								thinkingLevel: scoutPreset.thinkingLevel,
 								systemPrompt: scoutPreset.systemPrompt,
 								tools: scoutPreset.tools,
+								agentTypeLabel: scoutPreset.agentTypeLabel,
 							},
 							reviewer: {
 								prompt_template: p.reviewer.prompt_template,
@@ -1857,6 +1885,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 								thinkingLevel: reviewerPreset.thinkingLevel,
 								systemPrompt: reviewerPreset.systemPrompt,
 								tools: reviewerPreset.tools,
+								agentTypeLabel: reviewerPreset.agentTypeLabel,
 							},
 							worker: {
 								prompt: p.worker.prompt,
@@ -1867,6 +1896,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 								thinkingLevel: workerPreset.thinkingLevel,
 								systemPrompt: workerPreset.systemPrompt,
 								tools: workerPreset.tools,
+								agentTypeLabel: workerPreset.agentTypeLabel,
 							},
 							concurrency: p.concurrency,
 						},
@@ -2029,9 +2059,11 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				// Still unfinished — keep the on-disk transcript (do NOT delete) so a
 				// later attempt can resume again, and persist the latest progress so the
 				// next resume continues from here instead of replaying the old seed. Save
-				// to the same `cwd` load/delete use so the next op:"resume" finds it.
+				// under the ORIGINAL handle (state.handle, not the lookup key which may be
+				// a list-surfaced filename stem) so it lands on the same canonical file
+				// that load/delete resolve. (H21)
 				await saveResumeState(cwd, {
-					handle: key,
+					handle: state.handle,
 					messages: capturedAgent.state.messages,
 					modelId: state.modelId,
 					thinkingLevel: state.thinkingLevel,

@@ -31,7 +31,7 @@ Roles map an _intent_ to a concrete model configuration. Pit ships five roles:
 ```sh
 pit --smol claude-sonnet-4-6          # smol role with this specific model
 pit --slow                             # slow role with the model from settings
-pit --plan anthropic/claude-opus-4-8  # plan role with explicit model
+pit --plan anthropic/claude-opus-5  # plan role with explicit model
 ```
 
 You can also switch the active role interactively: `/model <role>` (e.g. `/model smol`, `/model slow`).
@@ -44,7 +44,7 @@ Roles are configured under `modelRoles` in `settings.json` (not in `models.json`
 {
   "modelRoles": {
     "default": {
-      "model": "anthropic/claude-opus-4-8",
+      "model": "anthropic/claude-opus-5",
       "thinkingLevel": "medium"
     },
     "smol": {
@@ -53,11 +53,11 @@ Roles are configured under `modelRoles` in `settings.json` (not in `models.json`
       "fallbackChain": ["anthropic/claude-haiku-4-8"]
     },
     "slow": {
-      "model": "anthropic/claude-opus-4-8",
+      "model": "anthropic/claude-opus-5",
       "thinkingLevel": "xhigh"
     },
     "plan": {
-      "model": "anthropic/claude-opus-4-8",
+      "model": "anthropic/claude-opus-5",
       "thinkingLevel": "high",
       "paths": {
         "/work/big-repo/**": "anthropic/claude-sonnet-4-6"
@@ -75,7 +75,7 @@ Roles are configured under `modelRoles` in `settings.json` (not in `models.json`
 
 | Field | Type | Description |
 |-|-|-|
-| `model` | `string` | Primary model pattern, e.g. `"anthropic/claude-opus-4-8"` or `"sonnet:high"`. |
+| `model` | `string` | Primary model pattern, e.g. `"anthropic/claude-opus-5"` or `"sonnet:high"`. |
 | `thinkingLevel` | `string` | Default thinking level for this role: `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"`. |
 | `fallbackChain` | `string[]` | Ordered fallback models tried when the primary is unavailable. |
 | `paths` | `Record<string, string>` | Glob-keyed per-path overrides; the closest matching glob wins. |
@@ -419,7 +419,7 @@ By default pit sends per-tool `eager_input_streaming: true`. If a proxy or Anthr
       },
       "models": [
         {
-          "id": "claude-opus-4-8",
+          "id": "claude-opus-5",
           "reasoning": true,
           "input": ["text", "image"]
         }

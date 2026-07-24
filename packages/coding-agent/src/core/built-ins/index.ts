@@ -56,6 +56,8 @@ export interface BuiltInExtensionsOptions {
 	mcp: McpSettings;
 	/** Returns the parent's active model — used by the coordinator. */
 	getParentModel: () => Model<any> | undefined;
+	/** Returns the parent session's id — used by the coordinator to derive subagent prompt_cache_keys. */
+	getParentSessionId?: () => string | undefined;
 	/** Returns the parent's tool catalog — used by the coordinator. */
 	getAvailableTools: () => AgentTool[];
 	/** Rebuilds cwd-sensitive tools with the session's configured options for worktree children. */
@@ -205,6 +207,7 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 			modelRegistry: options.modelRegistry,
 			permissionChecker,
 			getParentModel: options.getParentModel,
+			getParentSessionId: options.getParentSessionId,
 			getAvailableTools: options.getAvailableTools,
 			retargetToolsForCwd: options.retargetToolsForCwd,
 			getSkills: options.getSkills,

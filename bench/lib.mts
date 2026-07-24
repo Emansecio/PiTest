@@ -588,14 +588,14 @@ export interface AgentModels {
 }
 
 export const DEFAULT_MODELS: AgentModels = {
-	pit: "claude-opus-4-8",
+	pit: "claude-opus-5",
 	cc: "opus",
 	codex: "gpt-5.5",
-	droid: "claude-opus-4-8",
+	droid: "claude-opus-5",
 	// Registered as a custom model in opencode.json (provider.anthropic.models).
 	// Routes via opencode's anthropic OAuth; runs once the Max opus quota is free
 	// (a 400 "out of extra usage" means quota, not a config problem).
-	opencode: "anthropic/claude-opus-4-8",
+	opencode: "anthropic/claude-opus-5",
 };
 
 export function modelOf(models: AgentModels, agent: AgentId): string {

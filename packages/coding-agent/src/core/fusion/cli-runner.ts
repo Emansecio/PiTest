@@ -59,7 +59,7 @@ export function buildMemberEnv(
 
 /**
  * Strip a registry model id down to what the CLI accepts on `--model`/`-m`.
- * Registry ids can carry a variant suffix in brackets (e.g. `claude-opus-4-8[1m]`)
+ * Registry ids can carry a variant suffix in brackets (e.g. `claude-opus-5[1m]`)
  * that the CLI rejects; we drop any `[...]` suffix and trim. Deliberately
  * conservative — no family remapping (e.g. `gpt-5.5-codex` is NOT rewritten).
  */

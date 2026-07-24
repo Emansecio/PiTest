@@ -5,7 +5,7 @@
  * not-read / new-file / read-then-edit invariants.
  */
 
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getRuntimeDiagnostics, resetRuntimeDiagnostics } from "@pit/ai";
@@ -159,6 +159,92 @@ describe("read-guard — basic invariants", () => {
 		expect(
 			fire("tool_call", toolCall("edit", { path: "link.ts", oldText: "hello", newText: "bye" })),
 		).toBeUndefined();
+	});
+});
+
+describe("read-guard — ast_edit coverage (H16)", () => {
+	const astCall = (input: Record<string, unknown>) => toolCall("ast_edit", { pattern: "$X", rewrite: "$X", ...input });
+
+	it("blocks a single-file ast_edit on a file that was never read this session", () => {
+		const cwd = makeDir();
+		writeFileSync(join(cwd, "a.ts"), "const x = 1;\n", "utf-8");
+		const { api, fire } = makeFakePi();
+		createReadGuardExtension({ cwd })(api);
+		const r = fire("tool_call", astCall({ path: "a.ts" }));
+		expect(r?.block).toBe(true);
+		expect(String(r?.reason)).toMatch(/unread/i);
+		expect(String(r?.reason)).toContain("a.ts");
+	});
+
+	it("allows a single-file ast_edit after the file was read this session", () => {
+		const cwd = makeDir();
+		writeFileSync(join(cwd, "a.ts"), "const x = 1;\n", "utf-8");
+		const { api, fire } = makeFakePi();
+		createReadGuardExtension({ cwd })(api);
+		fire("tool_call", toolCall("read", { path: "a.ts" }));
+		expect(fire("tool_call", astCall({ path: "a.ts" }))).toBeUndefined();
+	});
+
+	it("allows ast_edit on a path that does not exist (fail-open new-target exemption)", () => {
+		const cwd = makeDir();
+		const { api, fire } = makeFakePi();
+		createReadGuardExtension({ cwd })(api);
+		expect(fire("tool_call", astCall({ path: "nope.ts" }))).toBeUndefined();
+	});
+
+	it("allows an ast_edit whose path is a DIRECTORY without a prior read (multi-file rewrite)", () => {
+		const cwd = makeDir();
+		mkdirSync(join(cwd, "src"));
+		writeFileSync(join(cwd, "src", "a.ts"), "const x = 1;\n", "utf-8");
+		const { api, fire } = makeFakePi();
+		createReadGuardExtension({ cwd })(api);
+		// The directory was never "read"; a directory-scoped rewrite has no single anchor.
+		expect(fire("tool_call", astCall({ path: "src" }))).toBeUndefined();
+	});
+
+	it("allows an ast_edit with no path (default cwd, multi-file) without a prior read", () => {
+		const cwd = makeDir();
+		writeFileSync(join(cwd, "a.ts"), "const x = 1;\n", "utf-8");
+		const { api, fire } = makeFakePi();
+		createReadGuardExtension({ cwd })(api);
+		expect(fire("tool_call", astCall({}))).toBeUndefined();
+	});
+
+	it("allows dry_run / preview ast_edit on an unread file (neither mutates disk here)", () => {
+		const cwd = makeDir();
+		writeFileSync(join(cwd, "a.ts"), "const x = 1;\n", "utf-8");
+		const { api, fire } = makeFakePi();
+		createReadGuardExtension({ cwd })(api);
+		expect(fire("tool_call", astCall({ path: "a.ts", dry_run: true }))).toBeUndefined();
+		expect(fire("tool_call", astCall({ path: "a.ts", preview: true }))).toBeUndefined();
+	});
+
+	it("does NOT drift-block a single-file ast_edit like a write (surgical, edit-like)", () => {
+		const cwd = makeDir();
+		writeFileSync(join(cwd, "a.ts"), "const x = 1;\n", "utf-8");
+		const { api, fire } = makeFakePi();
+		createReadGuardExtension({ cwd })(api);
+		fire("tool_call", toolCall("read", { path: "a.ts" }));
+		// Concurrent change after the read — a WRITE would drift-block; ast_edit must not.
+		writeFileSync(join(cwd, "a.ts"), "const x = 1; // user touched\n", "utf-8");
+		expect(fire("tool_call", astCall({ path: "a.ts" }))).toBeUndefined();
+	});
+
+	it("re-stamps after the model's OWN ast_edit across compaction so a follow-up ast_edit is not stale", () => {
+		const cwd = makeDir();
+		writeFileSync(join(cwd, "a.ts"), "const x = 1;\n", "utf-8");
+		const { api, fire } = makeFakePi();
+		createReadGuardExtension({ cwd })(api);
+
+		fire("tool_call", toolCall("read", { path: "a.ts" }));
+		fire("session_before_compact", {});
+		// Unchanged since the pre-compaction read → first ast_edit is allowed.
+		expect(fire("tool_call", astCall({ path: "a.ts" }))).toBeUndefined();
+		// The ast_edit lands on disk (different size) + its success result re-stamps.
+		writeFileSync(join(cwd, "a.ts"), "const xyz = 1;\n", "utf-8");
+		fire("tool_result", toolResult("ast_edit", { path: "a.ts" }));
+		// Second ast_edit must NOT be blocked as stale — the model itself made the change.
+		expect(fire("tool_call", astCall({ path: "a.ts" }))).toBeUndefined();
 	});
 });
 

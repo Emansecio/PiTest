@@ -1250,7 +1250,21 @@ function makePerToolSignal(
 	const controller = new AbortController();
 	registry.set(toolCallId, controller);
 	const signal = runSignal ? AbortSignal.any([runSignal, controller.signal]) : controller.signal;
-	return { signal, release: () => registry.delete(toolCallId) };
+	// Compare-and-delete, not a blind `delete(toolCallId)`: the SAME id can be
+	// registered twice. P1 discards a speculation on args-fingerprint mismatch
+	// (`SpeculationController.take`) and defers its `release()` until the aborted
+	// speculative outcome settles, while the normal path already re-registered a
+	// fresh controller under that id for the REAL execution. A blind delete there
+	// unregisters the live controller mid-execution and `cancelTool(id)` can no
+	// longer reach the in-flight tool (run-level abort still would). Deleting only
+	// when the registry still maps the id to OUR controller makes the late release
+	// a no-op; the real owner's own `release()` still cleans up in its `finally`.
+	return {
+		signal,
+		release: () => {
+			if (registry.get(toolCallId) === controller) registry.delete(toolCallId);
+		},
+	};
 }
 
 /**
@@ -1413,75 +1427,89 @@ async function executeToolCallsSequential(
 ): Promise<ExecutedToolCallBatch> {
 	const finalizedCalls: FinalizedToolCallOutcome[] = [];
 	const messages: ToolResultMessage[] = [];
+	// Ids whose result message has been emitted, so an unwind (a tool_execution_end
+	// listener throwing — the doom-loop abort) can pair only the calls still missing
+	// a tool_result instead of double-emitting.
+	const emittedResultIds = new Set<string>();
 
-	for (const toolCall of toolCalls) {
-		await emit({
-			type: "tool_execution_start",
-			toolCallId: toolCall.id,
-			toolName: toolCall.name,
-			args: toolCall.arguments,
-		});
+	try {
+		for (const toolCall of toolCalls) {
+			await emit({
+				type: "tool_execution_start",
+				toolCallId: toolCall.id,
+				toolName: toolCall.name,
+				args: toolCall.arguments,
+			});
 
-		const preparation = await prepareToolCall(
-			currentContext,
-			assistantMessage,
-			toolCall,
-			toolMap,
-			config,
-			signal,
-			emit,
-		);
-		let finalized: FinalizedToolCallOutcome;
-		if (preparation.kind === "immediate") {
-			finalized = await finalizeImmediatePreparation(toolCall, preparation, config, emit);
-		} else {
-			const { signal: toolSignal, release } = makePerToolSignal(toolCall.id, signal, config);
-			try {
-				const executed = await executePreparedToolCall(preparation, toolSignal, emit, config);
-				finalized = await finalizeExecutedToolCall(
-					currentContext,
-					assistantMessage,
-					preparation,
-					executed,
-					config,
-					toolSignal,
-					emit,
-				);
-			} finally {
-				release();
+			const preparation = await prepareToolCall(
+				currentContext,
+				assistantMessage,
+				toolCall,
+				toolMap,
+				config,
+				signal,
+				emit,
+			);
+			let finalized: FinalizedToolCallOutcome;
+			if (preparation.kind === "immediate") {
+				finalized = await finalizeImmediatePreparation(toolCall, preparation, config, emit);
+			} else {
+				const { signal: toolSignal, release } = makePerToolSignal(toolCall.id, signal, config);
+				try {
+					const executed = await executePreparedToolCall(preparation, toolSignal, emit, config);
+					finalized = await finalizeExecutedToolCall(
+						currentContext,
+						assistantMessage,
+						preparation,
+						executed,
+						config,
+						toolSignal,
+						emit,
+					);
+				} finally {
+					release();
+				}
+			}
+
+			await emitToolExecutionEnd(finalized, emit);
+			const toolResultMessage = createToolResultMessage(finalized);
+			await emitToolResultMessage(toolResultMessage, emit);
+			emittedResultIds.add(toolResultMessage.toolCallId);
+			finalizedCalls.push(finalized);
+			messages.push(toolResultMessage);
+
+			if (signal?.aborted) {
+				// Provider APIs require a tool result per tool call. Synthesize aborted
+				// results for any remaining calls so the transcript stays consistent.
+				const remaining = toolCalls.slice(finalizedCalls.length);
+				for (const skipped of remaining) {
+					await emit({
+						type: "tool_execution_start",
+						toolCallId: skipped.id,
+						toolName: skipped.name,
+						args: skipped.arguments,
+					});
+					const aborted: FinalizedToolCallOutcome = {
+						toolCall: skipped,
+						result: createErrorToolResult("Operation aborted"),
+						isError: true,
+					};
+					await emitToolExecutionEnd(aborted, emit);
+					const abortedMessage = createToolResultMessage(aborted);
+					await emitToolResultMessage(abortedMessage, emit);
+					emittedResultIds.add(abortedMessage.toolCallId);
+					finalizedCalls.push(aborted);
+					messages.push(abortedMessage);
+				}
+				break;
 			}
 		}
-
-		await emitToolExecutionEnd(finalized, emit);
-		const toolResultMessage = createToolResultMessage(finalized);
-		await emitToolResultMessage(toolResultMessage, emit);
-		finalizedCalls.push(finalized);
-		messages.push(toolResultMessage);
-
-		if (signal?.aborted) {
-			// Provider APIs require a tool result per tool call. Synthesize aborted
-			// results for any remaining calls so the transcript stays consistent.
-			const remaining = toolCalls.slice(finalizedCalls.length);
-			for (const skipped of remaining) {
-				await emit({
-					type: "tool_execution_start",
-					toolCallId: skipped.id,
-					toolName: skipped.name,
-					args: skipped.arguments,
-				});
-				const aborted: FinalizedToolCallOutcome = {
-					toolCall: skipped,
-					result: createErrorToolResult("Operation aborted"),
-					isError: true,
-				};
-				await emitToolExecutionEnd(aborted, emit);
-				const abortedMessage = createToolResultMessage(aborted);
-				await emitToolResultMessage(abortedMessage, emit);
-				finalizedCalls.push(aborted);
-				messages.push(abortedMessage);
-			}
-			break;
-		}
+	} catch (err) {
+		// A tool_execution_end listener threw (doom-loop abort) before this and any
+		// later call's result message was emitted. Pair them so the aborted turn's
+		// transcript has no orphaned tool_use, then let the abort propagate.
+		await synthesizeMissingToolResults(toolCalls, emittedResultIds, emit);
+		throw err;
 	}
 
 	return {
@@ -1598,32 +1626,44 @@ async function executeToolCallsParallel(
 	emit: AgentEventSink,
 	speculation?: SpeculationController,
 ): Promise<ExecutedToolCallBatch> {
-	// Run preparation in parallel: emit start + prepare per tool concurrently.
-	// beforeToolCall hook (potentially IO) no longer serializes the batch.
-	const preparations = await Promise.all(
-		toolCalls.map((toolCall) =>
-			prepareParallelCall(currentContext, assistantMessage, toolCall, toolMap, config, signal, emit, speculation),
-		),
-	);
+	// The result-message fan-out is DEFERRED until after every call's
+	// tool_execution_end (the Promise.all below). A tool_execution_end listener
+	// throwing (the doom-loop Tier-3 abort) therefore bails before ANY of the
+	// batch's result messages are emitted, orphaning every tool_use. Track what was
+	// emitted and pair the rest on the unwind.
+	const emittedResultIds = new Set<string>();
+	try {
+		// Run preparation in parallel: emit start + prepare per tool concurrently.
+		// beforeToolCall hook (potentially IO) no longer serializes the batch.
+		const preparations = await Promise.all(
+			toolCalls.map((toolCall) =>
+				prepareParallelCall(currentContext, assistantMessage, toolCall, toolMap, config, signal, emit, speculation),
+			),
+		);
 
-	const orderedFinalizedCalls = await Promise.all(
-		preparations.map((phaseOne) =>
-			finalizeParallelCall(currentContext, assistantMessage, phaseOne, config, signal, emit),
-		),
-	);
-	const messages = orderedFinalizedCalls.map(createToolResultMessage);
-	// Serial emit (not Promise.all): listeners persist messages by mutating the
-	// session leaf pointer, so concurrent emits can interleave message_end events
-	// and reorder tool results in the JSONL tree. Tool execution itself stays
-	// parallel via the Promise.all above — only the result fan-out is ordered.
-	for (const msg of messages) {
-		await emitToolResultMessage(msg, emit);
+		const orderedFinalizedCalls = await Promise.all(
+			preparations.map((phaseOne) =>
+				finalizeParallelCall(currentContext, assistantMessage, phaseOne, config, signal, emit),
+			),
+		);
+		const messages = orderedFinalizedCalls.map(createToolResultMessage);
+		// Serial emit (not Promise.all): listeners persist messages by mutating the
+		// session leaf pointer, so concurrent emits can interleave message_end events
+		// and reorder tool results in the JSONL tree. Tool execution itself stays
+		// parallel via the Promise.all above — only the result fan-out is ordered.
+		for (const msg of messages) {
+			await emitToolResultMessage(msg, emit);
+			emittedResultIds.add(msg.toolCallId);
+		}
+
+		return {
+			messages,
+			terminate: shouldTerminateToolBatch(orderedFinalizedCalls),
+		};
+	} catch (err) {
+		await synthesizeMissingToolResults(toolCalls, emittedResultIds, emit);
+		throw err;
 	}
-
-	return {
-		messages,
-		terminate: shouldTerminateToolBatch(orderedFinalizedCalls),
-	};
 }
 
 /**
@@ -1664,105 +1704,114 @@ async function executeToolCallsPartitioned(
 	});
 
 	const finalizedByIndex = new Array<FinalizedToolCallOutcome | undefined>(toolCalls.length).fill(undefined);
-
-	// --- Parallel-safe subset: same two-phase concurrency as executeToolCallsParallel,
-	// minus the result-message emit (deferred to the merged replay below). ---
-	const parallelCalls = parallelIndices.map((i) => toolCalls[i]);
-	const preparations = await Promise.all(
-		parallelCalls.map((toolCall) =>
-			prepareParallelCall(currentContext, assistantMessage, toolCall, toolMap, config, signal, emit, speculation),
-		),
-	);
-	const parallelFinalized = await Promise.all(
-		preparations.map((phaseOne) =>
-			finalizeParallelCall(currentContext, assistantMessage, phaseOne, config, signal, emit),
-		),
-	);
-	parallelIndices.forEach((origIdx, k) => {
-		finalizedByIndex[origIdx] = parallelFinalized[k];
-	});
-
-	// --- Sequential subset: serial, in original relative order, with early-abort. ---
-	let aborted = false;
-	for (const origIdx of sequentialIndices) {
-		const toolCall = toolCalls[origIdx];
-		await emit({
-			type: "tool_execution_start",
-			toolCallId: toolCall.id,
-			toolName: toolCall.name,
-			args: toolCall.arguments,
-		});
-		const preparation = await prepareToolCall(
-			currentContext,
-			assistantMessage,
-			toolCall,
-			toolMap,
-			config,
-			signal,
-			emit,
+	// Result messages are replayed only after both subsets settle, so a
+	// tool_execution_end listener throwing (doom-loop abort) unwinds before the
+	// fan-out. Pair whatever is still missing a result on the unwind.
+	const emittedResultIds = new Set<string>();
+	try {
+		// --- Parallel-safe subset: same two-phase concurrency as executeToolCallsParallel,
+		// minus the result-message emit (deferred to the merged replay below). ---
+		const parallelCalls = parallelIndices.map((i) => toolCalls[i]);
+		const preparations = await Promise.all(
+			parallelCalls.map((toolCall) =>
+				prepareParallelCall(currentContext, assistantMessage, toolCall, toolMap, config, signal, emit, speculation),
+			),
 		);
-		let finalized: FinalizedToolCallOutcome;
-		if (preparation.kind === "immediate") {
-			finalized = await finalizeImmediatePreparation(toolCall, preparation, config, emit);
-		} else {
-			const { signal: toolSignal, release } = makePerToolSignal(toolCall.id, signal, config);
-			try {
-				const executed = await executePreparedToolCall(preparation, toolSignal, emit, config);
-				finalized = await finalizeExecutedToolCall(
-					currentContext,
-					assistantMessage,
-					preparation,
-					executed,
-					config,
-					toolSignal,
-					emit,
-				);
-			} finally {
-				release();
-			}
-		}
-		await emitToolExecutionEnd(finalized, emit);
-		finalizedByIndex[origIdx] = finalized;
-		if (signal?.aborted) {
-			aborted = true;
-			break;
-		}
-	}
+		const parallelFinalized = await Promise.all(
+			preparations.map((phaseOne) =>
+				finalizeParallelCall(currentContext, assistantMessage, phaseOne, config, signal, emit),
+			),
+		);
+		parallelIndices.forEach((origIdx, k) => {
+			finalizedByIndex[origIdx] = parallelFinalized[k];
+		});
 
-	// Abort synthesis: fill any still-unrun slots (only trailing sequential ones
-	// can be empty — the parallel subset settled above) with aborted results, in
-	// original order, mirroring executeToolCallsSequential.
-	if (aborted) {
-		for (let i = 0; i < toolCalls.length; i++) {
-			if (finalizedByIndex[i]) continue;
-			const skipped = toolCalls[i];
+		// --- Sequential subset: serial, in original relative order, with early-abort. ---
+		let aborted = false;
+		for (const origIdx of sequentialIndices) {
+			const toolCall = toolCalls[origIdx];
 			await emit({
 				type: "tool_execution_start",
-				toolCallId: skipped.id,
-				toolName: skipped.name,
-				args: skipped.arguments,
+				toolCallId: toolCall.id,
+				toolName: toolCall.name,
+				args: toolCall.arguments,
 			});
-			const abortedOutcome: FinalizedToolCallOutcome = {
-				toolCall: skipped,
-				result: createErrorToolResult("Operation aborted"),
-				isError: true,
-			};
-			await emitToolExecutionEnd(abortedOutcome, emit);
-			finalizedByIndex[i] = abortedOutcome;
+			const preparation = await prepareToolCall(
+				currentContext,
+				assistantMessage,
+				toolCall,
+				toolMap,
+				config,
+				signal,
+				emit,
+			);
+			let finalized: FinalizedToolCallOutcome;
+			if (preparation.kind === "immediate") {
+				finalized = await finalizeImmediatePreparation(toolCall, preparation, config, emit);
+			} else {
+				const { signal: toolSignal, release } = makePerToolSignal(toolCall.id, signal, config);
+				try {
+					const executed = await executePreparedToolCall(preparation, toolSignal, emit, config);
+					finalized = await finalizeExecutedToolCall(
+						currentContext,
+						assistantMessage,
+						preparation,
+						executed,
+						config,
+						toolSignal,
+						emit,
+					);
+				} finally {
+					release();
+				}
+			}
+			await emitToolExecutionEnd(finalized, emit);
+			finalizedByIndex[origIdx] = finalized;
+			if (signal?.aborted) {
+				aborted = true;
+				break;
+			}
 		}
-	}
 
-	// Every slot is now filled. Replay result messages in ORIGINAL toolCall order.
-	const orderedFinalized = finalizedByIndex as FinalizedToolCallOutcome[];
-	const messages = orderedFinalized.map(createToolResultMessage);
-	for (const msg of messages) {
-		await emitToolResultMessage(msg, emit);
-	}
+		// Abort synthesis: fill any still-unrun slots (only trailing sequential ones
+		// can be empty — the parallel subset settled above) with aborted results, in
+		// original order, mirroring executeToolCallsSequential.
+		if (aborted) {
+			for (let i = 0; i < toolCalls.length; i++) {
+				if (finalizedByIndex[i]) continue;
+				const skipped = toolCalls[i];
+				await emit({
+					type: "tool_execution_start",
+					toolCallId: skipped.id,
+					toolName: skipped.name,
+					args: skipped.arguments,
+				});
+				const abortedOutcome: FinalizedToolCallOutcome = {
+					toolCall: skipped,
+					result: createErrorToolResult("Operation aborted"),
+					isError: true,
+				};
+				await emitToolExecutionEnd(abortedOutcome, emit);
+				finalizedByIndex[i] = abortedOutcome;
+			}
+		}
 
-	return {
-		messages,
-		terminate: shouldTerminateToolBatch(orderedFinalized),
-	};
+		// Every slot is now filled. Replay result messages in ORIGINAL toolCall order.
+		const orderedFinalized = finalizedByIndex as FinalizedToolCallOutcome[];
+		const messages = orderedFinalized.map(createToolResultMessage);
+		for (const msg of messages) {
+			await emitToolResultMessage(msg, emit);
+			emittedResultIds.add(msg.toolCallId);
+		}
+
+		return {
+			messages,
+			terminate: shouldTerminateToolBatch(orderedFinalized),
+		};
+	} catch (err) {
+		await synthesizeMissingToolResults(toolCalls, emittedResultIds, emit);
+		throw err;
+	}
 }
 
 type PreparedToolCall = {
@@ -2267,4 +2316,42 @@ function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResul
 async function emitToolResultMessage(toolResultMessage: ToolResultMessage, emit: AgentEventSink): Promise<void> {
 	await emit({ type: "message_start", message: toolResultMessage });
 	await emit({ type: "message_end", message: toolResultMessage });
+}
+
+/**
+ * Pair every still-unresolved tool call in a batch with a synthesized result
+ * message during an UNWIND — i.e. a listener on `tool_execution_end` threw (the
+ * coding-agent doom-loop Tier-3 abort is the live case) and the executor is bailing
+ * before it emitted the batch's result messages. Without this the assistant
+ * `tool_use` blocks are left with no paired `tool_result` and the next provider
+ * request rejects the transcript (Anthropic 400).
+ *
+ * Emits ONLY the result message (message_start/message_end) — never a fresh
+ * `tool_execution_end` — so the throwing listener is not re-triggered by the very
+ * call that just aborted. Uses the same aborted-result shape/marker as the
+ * signal-abort synthesis in the sequential/partitioned executors. Best-effort:
+ * a failed emit for one call must not stop the others (the caller re-throws the
+ * original error regardless). `emittedResultIds` is the set of ids whose result
+ * message the executor already emitted on its happy path; those are skipped.
+ */
+async function synthesizeMissingToolResults(
+	toolCalls: AgentToolCall[],
+	emittedResultIds: Set<string>,
+	emit: AgentEventSink,
+): Promise<void> {
+	for (const toolCall of toolCalls) {
+		if (emittedResultIds.has(toolCall.id)) continue;
+		emittedResultIds.add(toolCall.id);
+		const message = createToolResultMessage({
+			toolCall,
+			result: createErrorToolResult("Operation aborted"),
+			isError: true,
+		});
+		try {
+			await emitToolResultMessage(message, emit);
+		} catch {
+			// Keep pairing the remaining calls even if one emit fails; the caller
+			// re-throws the original unwind error.
+		}
+	}
 }

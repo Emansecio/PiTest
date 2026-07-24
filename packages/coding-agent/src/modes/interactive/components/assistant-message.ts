@@ -21,7 +21,6 @@ import { interpolateFg } from "../theme/color-interpolation.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { ColorEase } from "./color-ease.ts";
 import { MessageShell, SHELL_GUTTER_CHAR } from "./message-shell.ts";
-import { ReadingColumn } from "./reading-column.ts";
 
 // Period of the "Thinking…" breathing oscillation (dim ⇄ normal) while the model
 // is mid-thought with no answer yet. Shares the unified @pit/tui
@@ -66,14 +65,15 @@ const OSC133_OUTPUT_START = "\x1b]133;C\x07"; // FTCS C: command output start
  * cache while preserving the per-token `tokenLineCache`, so appending a chunk
  * re-renders only the trailing (mutated) token instead of re-lexing and
  * re-highlighting the whole buffer on every delta (the old `clear()` + `new
- * Markdown(...)` path was O(n²) per message). The `ReadingColumn` wrapper is
- * reused too — its child is fixed at construction, but the child here never
- * changes, so the wrapper stays valid.
+ * Markdown(...)` path was O(n²) per message). The Markdown caps prose at the
+ * reading-column measure internally (wide blocks — tables, code — keep the full
+ * width), so no separate width-capping wrapper is needed: the Markdown IS the
+ * rendered component for text.
  */
 interface BlockComponentCacheEntry {
 	kind: "text" | "thinking";
 	markdown: Markdown;
-	/** ReadingColumn for text; MessageShell(ReadingColumn) for visible thinking. */
+	/** The Markdown itself for text; MessageShell(Markdown) for visible thinking. */
 	component: Component;
 }
 
@@ -191,7 +191,7 @@ export class AssistantMessageComponent extends Container {
 	private hiddenThinkingLabel: string;
 	private lastMessage?: AssistantMessage;
 	private hasToolCalls = false;
-	// Persistent Markdown/ReadingColumn instances keyed by content-block index.
+	// Persistent Markdown instances keyed by content-block index.
 	// Reused across streaming deltas so the trailing block's tokenLineCache
 	// survives; only recreated when the block at that index changes kind.
 	private blockComponents: (BlockComponentCacheEntry | undefined)[] = [];
@@ -431,14 +431,20 @@ export class AssistantMessageComponent extends Container {
 			const glyph = this.deliverableEase ? this.deliverableEase.colorize("accent", "●") : theme.fg("accent", "●");
 			for (let i = 0; i < lines.length; i++) {
 				if (visibleWidth(stripAnsi(lines[i])) > 0) {
-					lines[i] = `${glyph} ${lines[i]}`;
-					// Prepending "● " adds 2 cols without re-truncating. With
-					// readingColumns=0 the prose already fills the full width, so the
-					// marked line can spill to width+2. Downstream clampLineToWidth would
-					// catch it (and truncate to the same `truncateToWidth(line, width, "…")`),
-					// but under PIT_RENDER_ASSERT it throws instead. Re-truncate here to the
-					// identical result so the assert never trips; the common case (line fits)
-					// short-circuits and is byte-identical.
+					// The assistant Markdown renders with paddingX=1 (a raw leading space);
+					// the glyph ABSORBS that space so the marked line's text starts at
+					// col 2 — the same column as the user gutter's `❯ ` — instead of
+					// drifting one column right of it.
+					const bare = lines[i].startsWith(" ") ? lines[i].slice(1) : lines[i];
+					lines[i] = `${glyph} ${bare}`;
+					// Prepending "● " adds up to 2 cols without re-truncating (1 when the
+					// absorbed padding gives a col back). With readingColumns=0 the prose
+					// already fills the full width, so the marked line can spill past
+					// width. Downstream clampLineToWidth would catch it (and truncate to
+					// the same `truncateToWidth(line, width, "…")`), but under
+					// PIT_RENDER_ASSERT it throws instead. Re-truncate here to the
+					// identical result so the assert never trips; the common case (line
+					// fits) short-circuits and is byte-identical.
 					if (visibleWidth(stripAnsi(lines[i])) > width) {
 						lines[i] = truncateToWidth(lines[i], width, "…");
 					}
@@ -584,7 +590,7 @@ export class AssistantMessageComponent extends Container {
 			this.contentContainer.addChild(new Spacer(1));
 		}
 
-		// Render content in order. Reuse the persistent Markdown/ReadingColumn for
+		// Render content in order. Reuse the persistent Markdown for
 		// block index `i` when it is still the same kind ("text"/"thinking"); call
 		// setText() to preserve its tokenLineCache instead of re-allocating. Only
 		// recreate the slot when the kind at that index changed (structural change).
@@ -602,7 +608,7 @@ export class AssistantMessageComponent extends Container {
 					entry = {
 						kind: "text",
 						markdown,
-						component: new ReadingColumn(markdown, this.readingColumns),
+						component: markdown,
 					};
 					this.blockComponents[i] = entry;
 				}
@@ -645,16 +651,22 @@ export class AssistantMessageComponent extends Container {
 							entry.component.setGutterColor(theme.getThinkingBorderColor(this.thinkingLevel));
 						}
 					} else {
-						const markdown = new Markdown(thinking, 1, 0, this.markdownTheme, {
-							color: (text: string) => theme.fg("thinkingText", text),
-							italic: true,
-						});
-						const column = new ReadingColumn(markdown, this.readingColumns);
+						const markdown = new Markdown(
+							thinking,
+							1,
+							0,
+							this.markdownTheme,
+							{
+								color: (text: string) => theme.fg("thinkingText", text),
+								italic: true,
+							},
+							this.readingColumns,
+						);
 						const shell = new MessageShell({
 							gutterColor: theme.getThinkingBorderColor(this.thinkingLevel),
 							noLeadingGap: true,
 						});
-						shell.addChild(column);
+						shell.addChild(markdown);
 						entry = {
 							kind: "thinking",
 							markdown,
@@ -928,8 +940,15 @@ export class AssistantMessageComponent extends Container {
 
 	private makeProseMarkdown(text: string): Markdown {
 		return this.isNarration
-			? new Markdown(text, 1, 0, this.markdownTheme, { color: (t: string) => theme.fg("muted", t) })
-			: new Markdown(text, 1, 0, this.markdownTheme);
+			? new Markdown(
+					text,
+					1,
+					0,
+					this.markdownTheme,
+					{ color: (t: string) => theme.fg("muted", t) },
+					this.readingColumns,
+				)
+			: new Markdown(text, 1, 0, this.markdownTheme, undefined, this.readingColumns);
 	}
 
 	/** Drive the hidden "Thinking…" label's dim⇄normal oscillation. No-op if

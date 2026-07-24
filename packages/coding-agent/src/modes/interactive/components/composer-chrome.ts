@@ -1,4 +1,4 @@
-import { type Component, truncateToWidth, visibleWidth } from "@pit/tui";
+import { type Component, type MouseHitContainer, type MouseHitTarget, truncateToWidth, visibleWidth } from "@pit/tui";
 
 interface ComposerCache {
 	width: number;
@@ -18,7 +18,7 @@ interface ComposerCache {
  * leading `!` bang-prefix (see custom-editor/interactive-mode's
  * `updateEditorBorderColor`), so there is nothing left for this component to color.
  */
-export class ComposerChrome implements Component {
+export class ComposerChrome implements Component, MouseHitContainer {
 	private readonly content: Component;
 	private readonly lowerContent: Component | undefined;
 	private footer: Component;
@@ -100,5 +100,31 @@ export class ComposerChrome implements Component {
 
 		this.cache = { width, contentLines, lowerLines, footerLines, perchActive, perchLines, lines };
 		return lines;
+	}
+
+	/**
+	 * Map a local row to the child that rendered it, by the fixed stack arithmetic
+	 * `[perch, body, footer]` where `body = [content, lowerContent]` — using the
+	 * segment sizes cached by the last render (perch/content/lower/footer rows all
+	 * live in the ComposerCache as their rendered arrays). Perch and footer rows
+	 * are decorations with no mouse target, so they resolve to null; the editor
+	 * (content) and the lower widgets get their own spans, offset past the perch.
+	 * Returns null before the first render (no cache) or for an out-of-range row.
+	 */
+	hitTestChild(localRow: number): MouseHitTarget | null {
+		const cache = this.cache;
+		if (!cache) return null;
+		const perchLen = cache.perchLines.length;
+		const contentLen = cache.contentLines.length;
+		const lowerLen = cache.lowerLines.length;
+		const contentStart = perchLen;
+		const contentEnd = contentStart + contentLen;
+		const lowerEnd = contentEnd + lowerLen;
+		if (localRow < contentStart) return null; // perch decoration
+		if (localRow < contentEnd) return { child: this.content, childStart: contentStart };
+		if (this.lowerContent && localRow < lowerEnd) {
+			return { child: this.lowerContent, childStart: contentEnd };
+		}
+		return null; // footer strip or beyond
 	}
 }

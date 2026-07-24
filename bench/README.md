@@ -58,8 +58,8 @@ Flags: `--pit-model`, `--cc-model`, `--codex-model`, `--droid-model`,
 `--opencode-model`, `--thinking <lvl>` (Pit), `--timeout <seg>`, `--out <dir>`,
 `--only a,b`, `--agents`, `--keep`, `--dry`.
 
-Defaults: pit=`claude-opus-4-8`, cc=`opus`, codex=`gpt-5.5`,
-droid=`claude-opus-4-8`, opencode=`anthropic/claude-opus-4-8`.
+Defaults: pit=`claude-opus-5`, cc=`opus`, codex=`gpt-5.5`,
+droid=`claude-opus-5`, opencode=`anthropic/claude-opus-5`.
 
 ### Notas por agente (droid e opencode)
 
@@ -69,8 +69,8 @@ droid=`claude-opus-4-8`, opencode=`anthropic/claude-opus-4-8`.
   se outro proxy (ex.: CCS) já ocupa a porta `:8317`, o do droid sobe com "0 Claude
   API keys" e retorna `Exec failed`. Libere `:8317` para o droid antes de rodar.
 - **opencode** (`opencode run --format json --dangerously-skip-permissions`): o
-  `opus-4-8` foi adicionado como **custom model** em
-  `~/.config/opencode/opencode.json` (`provider.anthropic.models.claude-opus-4-8`)
+  `opus-5` foi adicionado como **custom model** em
+  `~/.config/opencode/opencode.json` (`provider.anthropic.models.claude-opus-5`)
   e roteia pela OAuth anthropic do opencode. Um erro `400 "out of extra usage"`
   significa **cota Max esgotada** (overage desabilitado no org), não falha de
   config — roda quando a janela de uso liberar. opencode reporta **custo real** por

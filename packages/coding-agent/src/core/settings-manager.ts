@@ -576,6 +576,7 @@ export interface Settings {
 	autocompleteMaxVisible?: number; // Max visible items in autocomplete dropdown (default: 5)
 	assistantReadingColumns?: number; // Reading-column cap (cols) for assistant prose; default 120; 0 = full width
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
+	mouse?: boolean; // Mouse tracking in the TUI (click positions the cursor). Default on; kill-switch PIT_NO_MOUSE
 	cursorBlink?: boolean; // Blink the input editor's block cursor while focused (default: true)
 	streamingSmoothing?: boolean; // Reveal streamed assistant text at a steady rate instead of in provider-sized bursts (default: true)
 	markdown?: MarkdownSettings;
@@ -697,6 +698,7 @@ const KNOWN_SETTINGS_KEYS: ReadonlySet<string> = new Set<keyof Settings>([
 	"autocompleteMaxVisible",
 	"assistantReadingColumns",
 	"showHardwareCursor",
+	"mouse",
 	"cursorBlink",
 	"streamingSmoothing",
 	"markdown",
@@ -2082,6 +2084,21 @@ export class SettingsManager {
 
 	setShowHardwareCursor(enabled: boolean): void {
 		this.setTopLevel("showHardwareCursor", enabled);
+	}
+
+	/**
+	 * Whether TUI mouse tracking is enabled (click positions the cursor, Shift+drag
+	 * keeps native selection). On by default; `PIT_NO_MOUSE` is a hard kill-switch
+	 * that wins over the setting (checked first) so a terminal that misbehaves under
+	 * SGR 1002/1006 can always be forced back to plain keyboard mode from the env.
+	 */
+	getMouseEnabled(): boolean {
+		if (isTruthyEnvFlag(process.env.PIT_NO_MOUSE)) return false;
+		return this.settings.mouse ?? true;
+	}
+
+	setMouseEnabled(enabled: boolean): void {
+		this.setTopLevel("mouse", enabled);
 	}
 
 	getCursorBlink(): boolean {

@@ -114,28 +114,28 @@ describe("Anthropic thinking disable payload", () => {
 	});
 
 	it("sends thinking.type=disabled for adaptive reasoning models when thinking is off", async () => {
-		const payload = await capturePayload(getModel("anthropic", "claude-opus-4-8"));
+		const payload = await capturePayload(getModel("anthropic", "claude-opus-5"));
 
 		expect(payload.thinking).toEqual({ type: "disabled" });
 		expect(payload.output_config).toBeUndefined();
 	});
 
-	it("sends thinking.type=disabled for Claude Opus 4.7 when thinking is off", async () => {
-		const payload = await capturePayload(getModel("anthropic", "claude-opus-4-8"));
+	it("sends thinking.type=disabled for Claude Opus 5 when thinking is off", async () => {
+		const payload = await capturePayload(getModel("anthropic", "claude-opus-5"));
 
 		expect(payload.thinking).toEqual({ type: "disabled" });
 		expect(payload.output_config).toBeUndefined();
 	});
 
-	it("uses adaptive thinking for Claude Opus 4.7 when reasoning is enabled", async () => {
-		const payload = await capturePayload(getModel("anthropic", "claude-opus-4-8"), { reasoning: "high" });
+	it("uses adaptive thinking for Claude Opus 5 when reasoning is enabled", async () => {
+		const payload = await capturePayload(getModel("anthropic", "claude-opus-5"), { reasoning: "high" });
 
 		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
 		expect(payload.output_config).toEqual({ effort: "high" });
 	});
 
-	it("maps xhigh reasoning to effort=xhigh for Claude Opus 4.7", async () => {
-		const payload = await capturePayload(getModel("anthropic", "claude-opus-4-8"), { reasoning: "xhigh" });
+	it("maps xhigh reasoning to effort=xhigh for Claude Opus 5", async () => {
+		const payload = await capturePayload(getModel("anthropic", "claude-opus-5"), { reasoning: "xhigh" });
 
 		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
 		expect(payload.output_config).toEqual({ effort: "xhigh" });
@@ -180,7 +180,7 @@ describe("defaultThinkingAlwaysOn", () => {
 	});
 
 	it("is false for Opus / Sonnet / Haiku (they accept thinking:disabled)", () => {
-		expect(defaultThinkingAlwaysOn("claude-opus-4-8")).toBe(false);
+		expect(defaultThinkingAlwaysOn("claude-opus-5")).toBe(false);
 		expect(defaultThinkingAlwaysOn("claude-opus-4-7")).toBe(false);
 		expect(defaultThinkingAlwaysOn("claude-sonnet-5")).toBe(false);
 		expect(defaultThinkingAlwaysOn("claude-haiku-4-5")).toBe(false);
