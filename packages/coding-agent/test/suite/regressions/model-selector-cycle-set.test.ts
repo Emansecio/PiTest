@@ -96,19 +96,32 @@ describe("model selector cycle set", () => {
 		expect(lines).not.toContain("Scope:");
 		expect(lines).not.toContain("all | enabled");
 
-		// SelectorCard frames list rows; section headers are substring matches, not bare lines.
+		// Two-level accordion: the cycle set is its own collapsible group pinned above
+		// the provider groups. The partition is visible in the COUNTS without opening
+		// anything — cycle holds b1, the alpha group holds the other two.
 		const cycleSectionIdx = lines.findIndex((line) => line.includes("● Cycle set"));
-		const allHeaderIdx = lines.findIndex((line) => line.includes("All models"));
-		const b1Idx = lines.findIndex((line) => line.includes("Beta One"));
-		const a2Idx = lines.findIndex((line) => line.includes("Alpha Two"));
+		const alphaGroupIdx = lines.findIndex((line) => /[▸▾]\salpha\s\(2\)/.test(line));
 
 		expect(cycleSectionIdx).toBeGreaterThanOrEqual(0);
-		expect(allHeaderIdx).toBeGreaterThan(cycleSectionIdx);
-		expect(b1Idx).toBeGreaterThan(cycleSectionIdx);
-		expect(b1Idx).toBeLessThan(allHeaderIdx);
-		expect(a2Idx).toBeGreaterThan(allHeaderIdx);
+		expect(lines[cycleSectionIdx]).toContain("(1)");
+		expect(alphaGroupIdx).toBeGreaterThan(cycleSectionIdx);
+		// b1 lives in the cycle group, so it must NOT surface among the provider
+		// groups while everything is collapsed — the old flat list asserted the same
+		// thing by index (b1 before the "All models" header).
+		expect(lines.some((line) => line.includes("Beta One"))).toBe(false);
+		// …and beta has no models left outside the cycle, so it gets no group at all.
+		expect(lines.some((line) => /[▸▾]\sbeta\s\(/.test(line))).toBe(false);
+
+		// Opening the alpha group (the cursor is parked on it) lists the rest, below
+		// the pinned cycle section.
+		selector.handleInput(" ");
+		await waitForAsyncRender();
+		const expanded = stripAnsi(selector.render(120).join("\n"))
+			.split("\n")
+			.map((line) => line.trim());
+		const a2Idx = expanded.findIndex((line) => line.includes("Alpha Two"));
+		expect(a2Idx).toBeGreaterThan(expanded.findIndex((line) => line.includes("● Cycle set")));
 		expect(lines.some((line) => line.includes("[beta]"))).toBe(false);
-		expect(lines.some((line) => line.includes("alpha/a1"))).toBe(true);
 	});
 
 	it("excludes scoped models without configured auth from the cycle set", async () => {
@@ -164,9 +177,21 @@ describe("model selector cycle set", () => {
 			.split("\n")
 			.map((line) => line.trim());
 
-		expect(lines.some((line) => line.includes("Cycle set"))).toBe(true);
-		expect(lines.some((line) => line.includes("Alpha One"))).toBe(true);
-		expect(lines.some((line) => line.includes("Ghost Model"))).toBe(false);
-		expect(lines.some((line) => line.includes("ghost-provider"))).toBe(false);
+		// The cycle group's COUNT is the assertion that matters: the unauthed model
+		// would make it (2). It stays (1) — the ghost never entered the set.
+		const cycleIdx = lines.findIndex((line) => line.includes("Cycle set"));
+		expect(cycleIdx).toBeGreaterThanOrEqual(0);
+		expect(lines[cycleIdx]).toContain("(1)");
+
+		// Open it (the cursor is parked on the cycle group) and confirm WHICH model
+		// survived — the authed one, never the ghost.
+		selector.handleInput(" ");
+		await waitForAsyncRender();
+		const expanded = stripAnsi(selector.render(120).join("\n"))
+			.split("\n")
+			.map((line) => line.trim());
+		expect(expanded.some((line) => line.includes("Alpha One"))).toBe(true);
+		expect(expanded.some((line) => line.includes("Ghost Model"))).toBe(false);
+		expect(expanded.some((line) => line.includes("ghost-provider"))).toBe(false);
 	});
 });

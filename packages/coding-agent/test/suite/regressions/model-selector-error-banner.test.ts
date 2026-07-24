@@ -67,10 +67,19 @@ describe("model selector error banner", () => {
 
 		const rendered = stripAnsi(selector.render(120).join("\n"));
 
-		// The list must still render an anthropic model…
-		expect(rendered).toContain("anthropic");
-		expect(rendered).toMatch(/Claude|claude/);
+		// The list must still offer the anthropic models. Under the two-level
+		// accordion they sit behind one collapsed group row carrying the provider's
+		// display label and its count — the models themselves appear once it opens.
+		expect(rendered).toMatch(/[▸▾]\s.*Claude.*\(\d+\)/);
 		// …AND the error must surface as a banner (regression: it used to replace the list).
 		expect(rendered).toContain("Invalid models.json schema");
+
+		// Open the group (the cursor is parked on it) and confirm real model rows are
+		// listed ALONGSIDE the banner, not instead of it — the actual regression.
+		selector.handleInput(" ");
+		await waitForAsyncRender();
+		const expanded = stripAnsi(selector.render(120).join("\n"));
+		expect(expanded).toMatch(/claude/i);
+		expect(expanded).toContain("Invalid models.json schema");
 	});
 });

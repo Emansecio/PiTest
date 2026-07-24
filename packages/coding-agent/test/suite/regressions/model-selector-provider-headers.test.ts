@@ -91,25 +91,45 @@ describe("model selector provider group headers", () => {
 			.split("\n")
 			.map((line) => line.trim());
 
-		// Provider headers render as dim provider ids inside the SelectorCard frame.
+		// Two-level accordion: each provider is one collapsible group row carrying a
+		// `▸`/`▾` disclosure and its model count. Groups open COLLAPSED, so the model
+		// rows below only exist once a group is expanded.
 		const stripCardFrame = (line: string) => line.replaceAll("│", "").trim();
-		const alphaHeaderIdx = lines.findIndex((line) => stripCardFrame(line) === "alpha");
-		const betaHeaderIdx = lines.findIndex((line) => stripCardFrame(line) === "beta");
+		const groupIdx = (provider: string) =>
+			lines.findIndex((line) => new RegExp(`^[→\\s]*[▸▾]\\s${provider}\\s\\(\\d+\\)`).test(stripCardFrame(line)));
+		const alphaHeaderIdx = groupIdx("alpha");
+		const betaHeaderIdx = groupIdx("beta");
 		expect(alphaHeaderIdx).toBeGreaterThanOrEqual(0);
 		expect(betaHeaderIdx).toBeGreaterThanOrEqual(0);
 		expect(alphaHeaderIdx).toBeLessThan(betaHeaderIdx);
 
-		// The current model is the selected (→) line and sits under the alpha header.
+		// The cursor parks on the group holding the current model, and a COLLAPSED
+		// group carrying the current model is marked ✓ so it is findable unexpanded.
 		const selectedLine = lines.find((line) => line.includes("→"));
-		expect(selectedLine).toContain("Alpha One");
+		expect(stripCardFrame(selectedLine ?? "")).toMatch(/^→\s▸\salpha\s\(2\)\s✓$/);
 
-		// Provider block is contiguous: a1, a2 (both alpha) come before b1 (beta),
-		// so a header never splits a provider's models.
-		const a1Idx = lines.findIndex((line) => line.includes("Alpha One"));
-		const a2Idx = lines.findIndex((line) => line.includes("Alpha Two"));
-		const b1Idx = lines.findIndex((line) => line.includes("Beta One"));
+		// Expand alpha (the cursor is already parked on it): its two models must then
+		// render contiguously between its own header and the next provider's header —
+		// a header never splits a provider's block.
+		selector.handleInput(" ");
+		await waitForAsyncRender();
+		const expanded = stripAnsi(selector.render(120).join("\n"))
+			.split("\n")
+			.map((line) => line.trim());
+		const a1Idx = expanded.findIndex((line) => line.includes("Alpha One"));
+		const a2Idx = expanded.findIndex((line) => line.includes("Alpha Two"));
+		const betaAfterIdx = expanded.findIndex((line) => /^[→\s]*[▸▾]\sbeta\s\(\d+\)/.test(stripCardFrame(line)));
+		expect(a1Idx).toBeGreaterThanOrEqual(0);
 		expect(a1Idx).toBeLessThan(a2Idx);
-		expect(a2Idx).toBeLessThan(b1Idx);
+		expect(a2Idx).toBeLessThan(betaAfterIdx);
+		// Beta stays collapsed, so none of its models leak into alpha's block.
+		expect(expanded.some((line) => line.includes("Beta One"))).toBe(false);
+		// The current model carries the ✓ once its group is open.
+		expect(expanded[a1Idx]).toContain("✓");
+
+		// Collapse alpha again so the search assertions below start from the default.
+		selector.handleInput(" ");
+		await waitForAsyncRender();
 
 		// Fuzzy rank interleaves alpha/x, beta/zx, alpha/zzx. Search results are
 		// therefore a flat ranked list with provider names inline, not three noisy
