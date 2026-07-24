@@ -82,3 +82,81 @@ describe("Leak 2: interactive stop() closes the theme watcher", () => {
 		expect(stopThemeWatcher).toHaveBeenCalledTimes(1);
 	});
 });
+
+describe("Leak 3: interactive stop() disposes the retry countdown", () => {
+	// CountdownTimer owns a real `setInterval(…, 1000)` cleared only by dispose().
+	// Quitting mid-backoff (or any fatal path) used to leave it live, holding the
+	// Node event loop open.
+	test("stop() tears down a live auto-retry backoff", async () => {
+		const harness = createInteractiveHarness();
+
+		await harness.emit({
+			type: "auto_retry_start",
+			attempt: 1,
+			maxAttempts: 3,
+			delayMs: 1000,
+			errorMessage: "boom",
+		} as never);
+
+		// Guard the guard: without a live countdown the assertion below is vacuous.
+		expect(harness.internals().retryCountdown).toBeDefined();
+		expect(harness.internals().retryLoader).toBeDefined();
+
+		harness.dispose();
+
+		expect(harness.internals().retryCountdown).toBeUndefined();
+		expect(harness.internals().retryLoader).toBeUndefined();
+	});
+
+	test("stop() is a no-op for the retry surface when no retry is in flight", () => {
+		const harness = createInteractiveHarness();
+
+		expect(() => harness.dispose()).not.toThrow();
+		expect(harness.internals().retryCountdown).toBeUndefined();
+	});
+
+	// The restore keyed off the SAVED HANDLER's truthiness, so an editor with no
+	// prior onEscape (the headless case) kept the retry's abortRetry bound after the
+	// retry ended — shadowing Esc-interrupts-the-turn. `retryEscapeBound` separates
+	// "nothing was saved" from "undefined was saved".
+	test("retry teardown restores an absent Esc handler instead of keeping abortRetry bound", async () => {
+		const harness = createInteractiveHarness();
+		const editor = harness.internals().defaultEditor;
+		editor.onEscape = undefined;
+
+		await harness.emit({
+			type: "auto_retry_start",
+			attempt: 1,
+			maxAttempts: 3,
+			delayMs: 1000,
+			errorMessage: "boom",
+		} as never);
+		expect(editor.onEscape).toBeTypeOf("function");
+
+		await harness.emit({ type: "auto_retry_end", success: true, attempt: 1 } as never);
+
+		expect(editor.onEscape).toBeUndefined();
+		harness.dispose();
+	});
+
+	test("retry teardown restores a pre-existing Esc handler", async () => {
+		const harness = createInteractiveHarness();
+		const editor = harness.internals().defaultEditor;
+		const original = () => undefined;
+		editor.onEscape = original;
+
+		await harness.emit({
+			type: "auto_retry_start",
+			attempt: 1,
+			maxAttempts: 3,
+			delayMs: 1000,
+			errorMessage: "boom",
+		} as never);
+		expect(editor.onEscape).not.toBe(original);
+
+		await harness.emit({ type: "auto_retry_end", success: true, attempt: 1 } as never);
+
+		expect(editor.onEscape).toBe(original);
+		harness.dispose();
+	});
+});

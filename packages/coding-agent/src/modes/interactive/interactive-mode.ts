@@ -705,6 +705,14 @@ export class InteractiveMode {
 	private retryLoader: Loader | undefined = undefined;
 	private retryCountdown: CountdownTimer | undefined = undefined;
 	private retryEscapeHandler?: () => void;
+	/**
+	 * Whether {@link retryEscapeHandler} holds a SAVED value — distinct from that
+	 * value being `undefined`, which is a legitimate thing to restore (an editor
+	 * with no prior `onEscape`). Keying the restore off the handler's truthiness
+	 * conflated the two and left the retry's `abortRetry` bound forever in that
+	 * case, shadowing the normal Esc-interrupts-the-turn binding.
+	 */
+	private retryEscapeBound = false;
 
 	// Messages queued while compaction is running
 	private compactionQueuedMessages: CompactionQueuedMessage[] = [];
@@ -3911,6 +3919,7 @@ export class InteractiveMode {
 					break;
 				case "bind-retry-escape":
 					this.retryEscapeHandler = this.defaultEditor.onEscape;
+					this.retryEscapeBound = true;
 					this.defaultEditor.onEscape = () => {
 						this.session.abortRetry();
 					};
@@ -4525,9 +4534,10 @@ export class InteractiveMode {
 	}
 
 	private _cleanupRetryUI(): void {
-		if (this.retryEscapeHandler) {
+		if (this.retryEscapeBound) {
 			this.defaultEditor.onEscape = this.retryEscapeHandler;
 			this.retryEscapeHandler = undefined;
+			this.retryEscapeBound = false;
 		}
 		if (this.retryCountdown) {
 			this.retryCountdown.dispose();
@@ -8569,6 +8579,12 @@ Customize: \`${keybindingsPath}\` — \`/reload\` to apply.
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
 		}
+		// The retry backoff owns a REAL `setInterval(…, 1000)` (CountdownTimer) that
+		// only `dispose()` clears, so quitting mid-backoff used to leave a live 1s
+		// timer holding the event loop open. `_cleanupRetryUI` is the single teardown
+		// for the whole retry surface — countdown, loader and the editor's Esc
+		// handler — and is a no-op when no retry is in flight.
+		this._cleanupRetryUI();
 		this.clearExtensionTerminalInputListeners();
 		this.footer.dispose();
 		this.footerDataProvider.dispose();
