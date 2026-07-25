@@ -33,10 +33,13 @@ describe("buildSessionSummaryRecord", () => {
 
 	it("reduces cache stats to totals when provided", () => {
 		const cache: CacheStats = {
-			turns: [{ index: 1, input: 10, cacheRead: 90, cacheWrite: 0, promptTokens: 100, hitRate: 0.9 }],
+			turns: [
+				{ index: 1, input: 10, cacheRead: 90, cacheWrite: 0, cacheWriteLong: 0, promptTokens: 100, hitRate: 0.9 },
+			],
 			totalInput: 10,
 			totalCacheRead: 90,
 			totalCacheWrite: 0,
+			totalCacheWriteLong: 0,
 			promptTokens: 100,
 			hitRate: 0.9,
 			estReadSavingsTokens: 81,

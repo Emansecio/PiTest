@@ -147,6 +147,14 @@ export interface CacheAwareGeneration {
 	sessionApiKey: string | undefined;
 	sessionHeaders: Record<string, string> | undefined;
 	/**
+	 * Provider-side cache routing identity of the session's prefix. This route
+	 * exists to RE-READ that prefix, so it has to ask for it on the same shard a
+	 * real turn would; an unkeyed request can land elsewhere and miss the very
+	 * cache the arithmetic assumed was hot.
+	 */
+	sessionPromptCacheKey: string | undefined;
+	sessionId: string | undefined;
+	/**
 	 * Assemble the prefix byte-for-byte identical to the real send path (system
 	 * prompt + convertToLlm messages + lazy-compacted tool block) so the cache
 	 * hits. Async because message conversion is.

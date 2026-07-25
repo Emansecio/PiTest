@@ -8012,7 +8012,15 @@ export class InteractiveMode {
 		info += `${theme.bold("Session")}\n`;
 		info += `${theme.fg("dim", "Hit rate:")}     ${pct(stats.hitRate)}\n`;
 		info += `${theme.fg("dim", "Cache reads:")}  ${stats.totalCacheRead.toLocaleString()} tok\n`;
-		info += `${theme.fg("dim", "Cache writes:")} ${stats.totalCacheWrite.toLocaleString()} tok\n`;
+		info += `${theme.fg("dim", "Cache writes:")} ${stats.totalCacheWrite.toLocaleString()} tok`;
+		// The long (1h) tier costs 1.6x the short one per written token. Shown only
+		// when it was actually bought, so the line reads as the premium being paid
+		// for surviving idle gaps — the input to whether "long" earns its default.
+		if (stats.totalCacheWriteLong > 0) {
+			const longShare = stats.totalCacheWrite > 0 ? stats.totalCacheWriteLong / stats.totalCacheWrite : 0;
+			info += theme.fg("muted", `  ·  ${pct(longShare)} at 1h tier (1.6× price)`);
+		}
+		info += "\n";
 		info += `${theme.fg("dim", "Uncached in:")}  ${stats.totalInput.toLocaleString()} tok\n`;
 		info += `${theme.fg("dim", "Est. saved:")}   ~${stats.estReadSavingsTokens.toLocaleString()} tok-equiv (reads billed ~10%)\n`;
 

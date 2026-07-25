@@ -91,8 +91,3 @@ export function compactToolsForProviderContext(context: Context): Context {
 		tools,
 	};
 }
-
-/** Stable sort for prompt-cache keying on the tools block (E2). */
-export function sortToolsForWireCache<T extends { name: string }>(tools: T[]): T[] {
-	return [...tools].sort((a, b) => a.name.localeCompare(b.name));
-}

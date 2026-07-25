@@ -596,6 +596,8 @@ export function buildCacheAwareGeneration(
 		sessionModel: model,
 		sessionApiKey: session.apiKey,
 		sessionHeaders: session.headers,
+		sessionPromptCacheKey: host.agent.promptCacheKey,
+		sessionId: host.agent.sessionId,
 		warm: true,
 		prefixWireTokens: wireTokens,
 		// Fold-coverage guard input: the cache-read summary scopes to the whole live

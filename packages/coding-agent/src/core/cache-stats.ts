@@ -19,8 +19,10 @@ export interface CacheTurnStat {
 	input: number;
 	/** Tokens served from cache (billed ~10%). */
 	cacheRead: number;
-	/** Tokens written to cache this turn (billed ~125%). */
+	/** Tokens written to cache this turn (billed ~125% at the short tier). */
 	cacheWrite: number;
+	/** Subset of `cacheWrite` written at LONG retention, billed ~200% instead. 0 when the provider reports no split. */
+	cacheWriteLong: number;
 	/** input + cacheRead + cacheWrite. */
 	promptTokens: number;
 	/** cacheRead / promptTokens, in [0, 1]. */
@@ -32,6 +34,13 @@ export interface CacheStats {
 	totalInput: number;
 	totalCacheRead: number;
 	totalCacheWrite: number;
+	/**
+	 * Of `totalCacheWrite`, how much was bought at the long (1h) tier. The long
+	 * tier costs 1.6x the short one per token, so this is the price paid for
+	 * surviving idle gaps beyond ~5 minutes — the number to weigh against how
+	 * often the session actually idles that long before settling the default.
+	 */
+	totalCacheWriteLong: number;
 	/** totalInput + totalCacheRead + totalCacheWrite. */
 	promptTokens: number;
 	/** Aggregate cacheRead / promptTokens, in [0, 1]. */
@@ -59,12 +68,16 @@ export function computeCacheStats(messages: ReadonlyArray<UsageMessage>): CacheS
 		const input = m.usage.input ?? 0;
 		const cacheRead = m.usage.cacheRead ?? 0;
 		const cacheWrite = m.usage.cacheWrite ?? 0;
+		// Clamped the same way calculateCost clamps it, so the panel can never
+		// report a long slice bigger than the write it came from.
+		const cacheWriteLong = Math.min(Math.max(m.usage.cacheWriteLong ?? 0, 0), cacheWrite);
 		const promptTokens = input + cacheRead + cacheWrite;
 		turns.push({
 			index: turns.length + 1,
 			input,
 			cacheRead,
 			cacheWrite,
+			cacheWriteLong,
 			promptTokens,
 			hitRate: promptTokens > 0 ? cacheRead / promptTokens : 0,
 		});
@@ -73,6 +86,7 @@ export function computeCacheStats(messages: ReadonlyArray<UsageMessage>): CacheS
 	const totalInput = sum(turns, (t) => t.input);
 	const totalCacheRead = sum(turns, (t) => t.cacheRead);
 	const totalCacheWrite = sum(turns, (t) => t.cacheWrite);
+	const totalCacheWriteLong = sum(turns, (t) => t.cacheWriteLong);
 	const promptTokens = totalInput + totalCacheRead + totalCacheWrite;
 
 	return {
@@ -80,6 +94,7 @@ export function computeCacheStats(messages: ReadonlyArray<UsageMessage>): CacheS
 		totalInput,
 		totalCacheRead,
 		totalCacheWrite,
+		totalCacheWriteLong,
 		promptTokens,
 		hitRate: promptTokens > 0 ? totalCacheRead / promptTokens : 0,
 		estReadSavingsTokens: Math.round(totalCacheRead * 0.9),

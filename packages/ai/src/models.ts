@@ -52,11 +52,33 @@ export function getModels<TProvider extends KnownProvider>(
 	return models ? (Array.from(models.values()) as Model<ModelApi<TProvider, keyof ModelsCatalog[TProvider]>>[]) : [];
 }
 
+/**
+ * Price of a LONG-retention cache write relative to the model catalog's listed
+ * `cost.cacheWrite`.
+ *
+ * Every catalog entry carries the SHORT (default-tier) write price — Anthropic
+ * bills that at 1.25x base input, which is exactly what the generated table
+ * holds (e.g. claude-opus-5: input 5, cacheWrite 6.25). A 1-hour write is billed
+ * at 2.0x base input instead, i.e. 2.0 / 1.25 = 1.6x the listed rate.
+ *
+ * This matters because the long tier is the DEFAULT for the long-lived
+ * interactive session (see coding-agent `sdk.ts`), so pricing every write at the
+ * listed rate under-reports real spend by ~37% on the most common configuration.
+ * Providers without a long tier never report {@link Usage.cacheWriteLong}, so the
+ * multiplier is inert for them.
+ */
+export const LONG_CACHE_WRITE_MULTIPLIER = 1.6;
+
 export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage): Usage["cost"] {
 	usage.cost.input = (model.cost.input / 1000000) * usage.input;
 	usage.cost.output = (model.cost.output / 1000000) * usage.output;
 	usage.cost.cacheRead = (model.cost.cacheRead / 1000000) * usage.cacheRead;
-	usage.cost.cacheWrite = (model.cost.cacheWrite / 1000000) * usage.cacheWrite;
+	// Clamped: a provider reporting a long slice larger than the total would
+	// otherwise inflate the bill. Missing/zero => everything at the listed rate,
+	// byte-identical to the pre-split behavior.
+	const longWrite = Math.min(Math.max(usage.cacheWriteLong ?? 0, 0), usage.cacheWrite);
+	const shortWrite = usage.cacheWrite - longWrite;
+	usage.cost.cacheWrite = ((shortWrite + longWrite * LONG_CACHE_WRITE_MULTIPLIER) * model.cost.cacheWrite) / 1000000;
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 	return usage.cost;
 }

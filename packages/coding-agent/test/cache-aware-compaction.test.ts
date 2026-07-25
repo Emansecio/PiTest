@@ -239,6 +239,8 @@ function cacheAwareFor(sessionModel: Model<"anthropic-messages">): CacheAwareGen
 		sessionModel,
 		sessionApiKey: "session-key",
 		sessionHeaders: { "x-session": "1" },
+		sessionPromptCacheKey: "pit:testkey",
+		sessionId: "session-1",
 		warm: true,
 		prefixWireTokens: windowTokens,
 		// Generation-route tests model the eligible case: fold set == live window.

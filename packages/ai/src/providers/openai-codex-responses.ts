@@ -57,7 +57,7 @@ import {
 	RESPONSES_TOOL_CALL_PROVIDERS,
 	stripStreamingScratch,
 } from "./openai-responses-shared.ts";
-import { buildBaseOptions } from "./simple-options.ts";
+import { buildBaseOptions, resolvePromptCacheKey } from "./simple-options.ts";
 
 // ============================================================================
 // Configuration
@@ -428,7 +428,10 @@ function buildRequestBody(
 		input: messages,
 		text: { verbosity: options?.textVerbosity || "low" },
 		include: ["reasoning.encrypted_content"],
-		prompt_cache_key: clampOpenAIPromptCacheKey(options?.sessionId),
+		// Prefix identity, not conversation identity: the WebSocket pool below
+		// stays keyed by the raw `sessionId` (a shared connection across sessions
+		// would be a real hazard), while cache routing follows the prefix.
+		prompt_cache_key: clampOpenAIPromptCacheKey(resolvePromptCacheKey(options)),
 		tool_choice: "auto",
 		parallel_tool_calls: true,
 	};

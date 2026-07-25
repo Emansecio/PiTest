@@ -106,6 +106,7 @@ export interface AgentOptions {
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
 	sessionId?: string;
+	promptCacheKey?: string;
 	thinkingBudgets?: ThinkingBudgets;
 	transport?: Transport;
 	maxRetryDelayMs?: number;
@@ -240,6 +241,12 @@ export class Agent {
 	private activeRun?: ActiveRun;
 	/** Session identifier forwarded to providers for cache-aware backends. */
 	public sessionId?: string;
+	/**
+	 * Prefix identity forwarded to providers for prompt-cache routing. Distinct
+	 * from `sessionId` (see `StreamOptions.promptCacheKey`); falls back to it
+	 * inside the provider layer when unset.
+	 */
+	public promptCacheKey?: string;
 	/** Optional per-level thinking token budgets forwarded to the stream function. */
 	public thinkingBudgets?: ThinkingBudgets;
 	/** Preferred transport forwarded to the stream function. */
@@ -280,6 +287,7 @@ export class Agent {
 		// into the next turn that runs, never one-per-turn.
 		this.passiveQueue = new PendingMessageQueue("all");
 		this.sessionId = options.sessionId;
+		this.promptCacheKey = options.promptCacheKey;
 		this.thinkingBudgets = options.thinkingBudgets;
 		this.transport = options.transport ?? "auto";
 		this.maxRetryDelayMs = options.maxRetryDelayMs;
@@ -571,6 +579,7 @@ export class Agent {
 			// inert and every run silently used DEFAULT_MAX_TURNS.
 			maxTurns: this._state.maxTurns,
 			sessionId: this.sessionId,
+			promptCacheKey: this.promptCacheKey,
 			onPayload: this.onPayload,
 			onResponse: this.onResponse,
 			transport: this.transport,

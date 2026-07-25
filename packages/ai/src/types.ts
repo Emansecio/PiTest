@@ -120,6 +120,18 @@ export interface StreamOptions {
 	 */
 	sessionId?: string;
 	/**
+	 * Identity of the CACHEABLE PREFIX this request rides, used for provider-side
+	 * cache routing (`prompt_cache_key`, `session_id` / `x-session-affinity`
+	 * headers). Falls back to {@link sessionId} when absent.
+	 *
+	 * Deliberately distinct from `sessionId`, which identifies the CONVERSATION:
+	 * two different sessions over the same workspace and model share a prefix and
+	 * should land on the same cache shard, while connection-level state keyed by
+	 * `sessionId` (e.g. the Codex WebSocket pool) must stay strictly per-session.
+	 * Collapsing the two makes every new session start on a cold shard.
+	 */
+	promptCacheKey?: string;
+	/**
 	 * Optional callback for inspecting or replacing provider payloads before sending.
 	 * Return undefined to keep the payload unchanged.
 	 */
@@ -297,6 +309,18 @@ export interface Usage {
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
+	/**
+	 * Subset of `cacheWrite` written at LONG retention, when the provider reports
+	 * the breakdown (Anthropic `usage.cache_creation.ephemeral_1h_input_tokens`).
+	 *
+	 * A long-retention write is a strictly more expensive product than the default
+	 * short-retention one — Anthropic bills 2.0x base input against 1.25x — so the
+	 * single `Model["cost"].cacheWrite` rate (which carries the SHORT price) cannot
+	 * price both. `calculateCost` scales this slice by
+	 * {@link LONG_CACHE_WRITE_MULTIPLIER}; leaving it undefined means "no long
+	 * writes / provider has no long tier" and prices everything at the listed rate.
+	 */
+	cacheWriteLong?: number;
 	totalTokens: number;
 	cost: {
 		input: number;

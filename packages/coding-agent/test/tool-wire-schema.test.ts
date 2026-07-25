@@ -4,7 +4,6 @@ import {
 	compactToolsForProviderContext,
 	compactWireToolSurface,
 	LAZY_TOOL_DESCRIPTION_MAX_CHARS,
-	sortToolsForWireCache,
 } from "../src/core/tool-wire-schema.js";
 
 describe("compactToolSchemaForWire (E1)", () => {
@@ -85,12 +84,5 @@ describe("compactWireToolSurface (E1)", () => {
 		expect(out.description.length).toBeLessThanOrEqual(LAZY_TOOL_DESCRIPTION_MAX_CHARS);
 		expect(out.description.endsWith("…")).toBe(true);
 		expect(out.description).not.toBe(long);
-	});
-});
-
-describe("sortToolsForWireCache (E2)", () => {
-	it("sorts tools by name for stable cache keys", () => {
-		const sorted = sortToolsForWireCache([{ name: "write" }, { name: "bash" }, { name: "read" }]);
-		expect(sorted.map((t) => t.name)).toEqual(["bash", "read", "write"]);
 	});
 });

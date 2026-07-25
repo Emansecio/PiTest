@@ -32,7 +32,7 @@ import {
 	RESPONSES_TOOL_CALL_PROVIDERS,
 	stripStreamingScratch,
 } from "./openai-responses-shared.ts";
-import { buildBaseOptions, resolveCacheRetention } from "./simple-options.ts";
+import { buildBaseOptions, resolveCacheRetention, resolvePromptCacheKey } from "./simple-options.ts";
 
 function getCompat(model: Model<"openai-responses">): Required<OpenAIResponsesCompat> {
 	return {
@@ -90,7 +90,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			// Create OpenAI client
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
-			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
+			const cacheSessionId = cacheRetention === "none" ? undefined : resolvePromptCacheKey(options);
 			const client = createClient(model, apiKey, options?.headers, cacheSessionId);
 			const toolNameGuard = buildToolNameGuard(context.tools);
 			let params = buildParams(model, context, options, toolNameGuard);
@@ -265,7 +265,8 @@ function buildParams(
 		model: model.id,
 		input: messages,
 		stream: true,
-		prompt_cache_key: cacheRetention === "none" ? undefined : clampOpenAIPromptCacheKey(options?.sessionId),
+		prompt_cache_key:
+			cacheRetention === "none" ? undefined : clampOpenAIPromptCacheKey(resolvePromptCacheKey(options)),
 		prompt_cache_retention: getPromptCacheRetention(compat, cacheRetention),
 		store: false,
 	};

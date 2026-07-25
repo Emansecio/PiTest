@@ -252,7 +252,21 @@ async function pingHost(host: CacheKeepaliveHost): Promise<boolean> {
 		// point — so it uses the shared assembly in core/wire-context.ts.
 		const context = await buildWireContext(host.agent);
 		const { apiKey, headers } = await host.getCompactionRequestAuth(model);
-		const response = await completeSimple(model, context, { maxTokens: 1, apiKey, headers });
+		const response = await completeSimple(model, context, {
+			maxTokens: 1,
+			apiKey,
+			headers,
+			// Send the retention this ping was SCHEDULED for. Without it the
+			// provider falls back to its own default, which only happens to match
+			// the interactive session's — a session that explicitly chose "short"
+			// would get a short cadence renewing a long (2.0x input) entry.
+			cacheRetention: retention,
+			// Ride the session's own cache shard: the entire point of the ping is
+			// to touch the SAME prefix a real turn will, and on providers that
+			// route by key an unkeyed ping can renew a different shard's copy.
+			promptCacheKey: host.agent.promptCacheKey,
+			sessionId: host.agent.sessionId,
+		});
 		if (response.stopReason === "error") {
 			recordDiagnostic({
 				category: "cache.keepalive",

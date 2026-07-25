@@ -3,7 +3,16 @@
  */
 
 import type { Agent, AgentMessage, AgentTool } from "@pit/agent-core";
-import type { AssistantMessage, Context, ImageContent, Message, Model, TextContent, Usage } from "@pit/ai";
+import type {
+	AssistantMessage,
+	CacheRetention,
+	Context,
+	ImageContent,
+	Message,
+	Model,
+	TextContent,
+	Usage,
+} from "@pit/ai";
 import { completeSimple, recordDiagnostic, streamSimple } from "@pit/ai";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { sliceSafe } from "../utils/surrogate.ts";
@@ -63,6 +72,19 @@ export interface FusionHost {
 	readonly permissionChecker?: PermissionChecker;
 	/** Live wire-prefix estimate — gates the writer prefix-reuse path (same source the cache-keepalive uses). */
 	getContextUsage(): ContextUsage | undefined;
+	/**
+	 * RAW per-session cache-retention option (undefined = provider default).
+	 * Fusion's own provider calls resolve it themselves rather than inheriting the
+	 * session's `streamFn`, so without this they would silently buy whatever tier
+	 * the provider defaults to instead of the one the session chose. Optional: a
+	 * host that omits it keeps exactly that provider default.
+	 */
+	getSessionCacheRetention?(): CacheRetention | undefined;
+}
+
+/** The retention Fusion's own provider calls should buy — the session's choice, or the provider default. */
+function fusionCacheRetention(host: FusionHost): CacheRetention | undefined {
+	return host.getSessionCacheRetention?.();
 }
 
 function recordFusionSpendTokens(host: FusionHost, tokens: number): void {
@@ -163,6 +185,16 @@ export async function streamFusionWriter(
 		signal?: AbortSignal;
 		/** "none" ships the full tools block (prefix identity) while forbidding tool calls — prefix-reuse path. */
 		toolChoice?: "auto" | "any" | "none";
+		/** Session-chosen cache tier; undefined falls back to the provider default. */
+		cacheRetention?: CacheRetention;
+		/**
+		 * Provider-side cache routing identity. Set ONLY on the prefix-reuse path,
+		 * where the request really does ride the session's cached prefix — the
+		 * legacy path ships its own system prompt and filtered history, so claiming
+		 * the session's shard for it would route a different prefix there.
+		 */
+		promptCacheKey?: string;
+		sessionId?: string;
 	},
 ): Promise<string> {
 	const model = host.model;
@@ -396,6 +428,7 @@ export async function runFusionSessionTurn(host: FusionHost, text: string, image
 					apiKey,
 					headers,
 					signal: fusionAbort.signal,
+					cacheRetention: fusionCacheRetention(host),
 				});
 				recordFusionUsage(host, briefOut.usage);
 				const brief = assistantText(briefOut).trim();
@@ -481,6 +514,7 @@ export async function runFusionSessionTurn(host: FusionHost, text: string, image
 						apiKey,
 						headers,
 						signal: fusionAbort.signal,
+						cacheRetention: fusionCacheRetention(host),
 					});
 					recordFusionUsage(host, out.usage);
 					return parseJudgeOutput(assistantText(out));
@@ -571,6 +605,10 @@ export async function runFusionSessionTurn(host: FusionHost, text: string, image
 						headers,
 						signal: fusionAbort.signal,
 						toolChoice: "none",
+						cacheRetention: fusionCacheRetention(host),
+						// This request IS the session's prefix — route it to the same shard.
+						promptCacheKey: host.agent.promptCacheKey,
+						sessionId: host.agent.sessionId,
 					});
 				}
 				const priorHistory = host.agent.state.messages
@@ -583,6 +621,9 @@ export async function runFusionSessionTurn(host: FusionHost, text: string, image
 						apiKey,
 						headers,
 						signal: fusionAbort.signal,
+						// Retention follows the session policy on both paths; the routing
+						// key does not — this context is a different prefix.
+						cacheRetention: fusionCacheRetention(host),
 					},
 				);
 			},

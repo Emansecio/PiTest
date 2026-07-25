@@ -208,6 +208,7 @@ import {
 	type PreviewQueue,
 	setCurrentPreviewQueue,
 } from "./preview-queue.ts";
+import { resolveSessionPromptCacheKey } from "./prompt-cache-key.ts";
 import { expandPromptTemplate, type PromptTemplate, parseCommandArgs, substituteArgs } from "./prompt-templates.js";
 import { evaluatePruneCacheEconomics, PRUNE_CACHE_ECONOMICS_HORIZON_TURNS } from "./prune-economics.ts";
 import { getLivingRepoMap, type LivingRepoMap } from "./repo-map/living-index.ts";
@@ -1114,6 +1115,12 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		});
 		this.compaction = new CompactionController(this);
 		this._cacheKeepalive = createCacheKeepalive(this);
+		// Publish the prefix routing key on the Agent, where every path that talks
+		// to a provider can reach it: real turns forward it through the loop config,
+		// and the off-turn prefix-reusing calls (keepalive ping, cache-aware
+		// compaction, Fusion writer) read `agent.promptCacheKey` directly. Single
+		// owner — `setModel` is the only other writer.
+		this._refreshPromptCacheKey();
 
 		this._openHindsightBank();
 		this._openDeferredOutputStore();
@@ -2660,6 +2667,13 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 			this._refreshToolRegistry();
 		}
 		if (toActivate.length > 0) {
+			// APPEND-ONLY, deliberately: the tools block is the first segment of the
+			// provider's cacheable prefix (tools -> system -> messages), so growing it
+			// at the tail leaves the prefix up to the previously-last tool valid and
+			// only re-writes from the new tool onward. Splicing a newly activated tool
+			// into the middle (e.g. by name-sorting) would invalidate the tools block,
+			// the system prompt, and the whole message history behind it. See the
+			// breakpoint comment in @pit/ai anthropic.ts convertTools.
 			this.setActiveToolsByName([...new Set([...this.getActiveToolNames(), ...toActivate])]);
 		}
 	}
@@ -3836,6 +3850,20 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		const prompt = buildSystemPrompt(this._baseSystemPromptOptions);
 		this._trackPrefixStability(prompt, reason);
 		return prompt;
+	}
+
+	/**
+	 * Recompute the provider-side prompt-cache routing key from the live model.
+	 * Called at construction and on every `setModel`; those are the only two
+	 * moments the key's inputs (cwd, provider, model id) can change. Undefined
+	 * (no model, or `PIT_NO_SESSION_CACHE_KEY`) makes the provider layer fall
+	 * back to the session id — the behavior before this existed.
+	 */
+	private _refreshPromptCacheKey(): void {
+		const model = this.agent.state.model;
+		this.agent.promptCacheKey = model
+			? resolveSessionPromptCacheKey({ cwd: this._cwd, provider: model.provider, modelId: model.id })
+			: undefined;
 	}
 
 	/**
@@ -5851,6 +5879,10 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		const previousModel = this.model;
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
 		this.agent.state.model = model;
+		// Re-key the prompt cache: the routing key names the prefix, and the model
+		// is part of it. Leaving the old key would aim the new prefix at the shard
+		// holding the previous model's.
+		this._refreshPromptCacheKey();
 		this.sessionManager.appendModelChange(model.provider, model.id);
 		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
 

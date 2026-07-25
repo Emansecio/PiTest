@@ -2779,6 +2779,10 @@ async function runCacheAwareSummarization(
 		apiKey: cacheAware.sessionApiKey,
 		headers: cacheAware.sessionHeaders,
 		toolChoice: "none",
+		// Ask for the session's prefix on the session's shard — this route only
+		// pays off if the cache read actually hits.
+		promptCacheKey: cacheAware.sessionPromptCacheKey,
+		sessionId: cacheAware.sessionId,
 	};
 	if (cacheAware.sessionModel.reasoning && thinkingLevel && thinkingLevel !== "off") {
 		options.reasoning = thinkingLevel;

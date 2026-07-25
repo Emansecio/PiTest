@@ -41,7 +41,12 @@ import { buildToolNameGuard, NOOP_TOOL_NAME_GUARD, type ToolNameGuard } from "..
 
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { createInitialAssistantMessage, sanitizeToolCallId, stripStreamingScratch } from "./openai-responses-shared.ts";
-import { adjustMaxTokensForThinking, buildBaseOptions, resolveCacheRetention } from "./simple-options.ts";
+import {
+	adjustMaxTokensForThinking,
+	buildBaseOptions,
+	resolveCacheRetention,
+	resolvePromptCacheKey,
+} from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 function getCacheControl(
@@ -535,7 +540,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				const apiKey = options?.apiKey ?? getEnvApiKey(model.provider) ?? "";
 
 				const cacheRetention = resolveCacheRetention(options?.cacheRetention, "long");
-				const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
+				const cacheSessionId = cacheRetention === "none" ? undefined : resolvePromptCacheKey(options);
 
 				const created = createClient(
 					model,
@@ -573,6 +578,10 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			const blockIndexMap = new Map<number, number>();
 			// Build O(1) reverse lookup for fromClaudeCodeName once before the loop.
 			const toolNameLookup = buildToolNameLookup(context.tools);
+			// Fraction of this request's cache writes that landed in the 1h tier.
+			// Set once from message_start's `cache_creation` breakdown (see there);
+			// 0 means "all short" — the default when the provider omits the split.
+			let longCacheWriteShare = 0;
 
 			for await (const event of iterateAnthropicEvents(response, connectGuard.signal, timeouts.idleTimeoutMs)) {
 				if (event.type === "message_start") {
@@ -583,6 +592,18 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					output.usage.output = event.message.usage.output_tokens || 0;
 					output.usage.cacheRead = event.message.usage.cache_read_input_tokens || 0;
 					output.usage.cacheWrite = event.message.usage.cache_creation_input_tokens || 0;
+					// Split the write by TTL tier: a 1h write costs 1.6x a 5m one, and
+					// only `message_start` carries the breakdown (MessageDeltaUsage has
+					// no `cache_creation` object). Cache creation is settled during
+					// prompt processing, before any output token, so this share is final
+					// for the request — remember it to re-derive the slice if a later
+					// `message_delta` restates the cumulative total.
+					const creation = event.message.usage.cache_creation;
+					longCacheWriteShare =
+						creation && output.usage.cacheWrite > 0
+							? (creation.ephemeral_1h_input_tokens || 0) / output.usage.cacheWrite
+							: 0;
+					output.usage.cacheWriteLong = Math.round(output.usage.cacheWrite * longCacheWriteShare);
 					// Anthropic doesn't provide total_tokens, compute from components
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
@@ -746,6 +767,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					}
 					if (event.usage.cache_creation_input_tokens != null) {
 						output.usage.cacheWrite = event.usage.cache_creation_input_tokens;
+						// Re-derive the long slice from the share captured at
+						// message_start (this event has no per-TTL breakdown).
+						output.usage.cacheWriteLong = Math.round(output.usage.cacheWrite * longCacheWriteShare);
 					}
 					// Anthropic doesn't provide total_tokens, compute from components
 					output.usage.totalTokens =
@@ -1350,11 +1374,20 @@ function convertTools(
 			},
 			// Pin the breakpoint on the LAST tool: an Anthropic cache_control
 			// breakpoint caches the prefix up to and including its block, so the
-			// last entry covers the entire (name-sorted, stable) tool array even
-			// when downstream blocks (system prompt, messages) churn. On tools[0]
-			// it covered exactly one tool. Any change to the tool set invalidates
-			// the cache from the changed tool onward regardless of where the
-			// breakpoint sits, so "last" strictly dominates "first" (E2/M3).
+			// last entry covers the entire tool array even when downstream blocks
+			// (system prompt, messages) churn. On tools[0] it covered exactly one
+			// tool. Any change to the tool set invalidates the cache from the
+			// changed tool onward regardless of where the breakpoint sits, so
+			// "last" strictly dominates "first" (E2/M3).
+			//
+			// The array is NOT sorted, deliberately. `tools` is the first segment
+			// of the cacheable prefix (tools -> system -> messages), so the cheapest
+			// possible mutation is one that only ever grows the tail: callers keep
+			// tool activation append-only (coding-agent `_reconcileDiscoveryActivations`),
+			// which leaves the prefix up to the previously-last tool intact. Sorting
+			// by name would splice a newly activated tool into the MIDDLE and
+			// invalidate the tools block, the system prompt, and the entire message
+			// history behind it.
 			...(cacheControl && index === tools.length - 1 ? { cache_control: cacheControl } : {}),
 		};
 	});

@@ -26,11 +26,15 @@
  *
  * Conservative bias notes:
  *  - `cacheWrite` here is the model's *listed* cache-write price (Anthropic ≈ 1.25×
- *    input for the 5-minute tier). Long-retention writes cost ~2× input in reality,
- *    which makes a mid-history invalidation even more expensive — so using the
- *    listed 1.25× number UNDER-states the true one-time cost and biases us toward
- *    pruning (never toward over-deferring). Intentional: we'd rather occasionally
- *    prune when it was marginal than hold stale bulk in a comfortable window.
+ *    input for the 5-minute tier). A long-retention write costs `@pit/ai`'s
+ *    `LONG_CACHE_WRITE_MULTIPLIER` (1.6×) more than that — and long IS the default
+ *    for the interactive session — which makes a mid-history invalidation more
+ *    expensive than this arithmetic assumes. Feeding the listed rate therefore
+ *    UNDER-states the true one-time cost and biases us toward pruning (never
+ *    toward over-deferring). Intentional and kept that way now that the effective
+ *    rate is derivable: we'd rather occasionally prune when it was marginal than
+ *    hold stale bulk in a comfortable window. Pass the scaled rate here only as a
+ *    deliberate product change, not as a "fix".
  *  - A short HORIZON (10 turns) means we only prune eagerly when the per-turn read
  *    savings clear the re-write within ~10 turns; anything slower waits for real
  *    pressure (or natural supersession) to reclaim it.

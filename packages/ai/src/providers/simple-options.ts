@@ -34,6 +34,18 @@ export function resolveCacheRetention(
 	return defaultValue;
 }
 
+/**
+ * The key providers should route prompt-cache lookups by. Prefers the explicit
+ * prefix identity and falls back to the conversation id, so callers that never
+ * set `promptCacheKey` keep their existing behavior byte-for-byte.
+ * See {@link StreamOptions.promptCacheKey} for why the two are separate.
+ */
+export function resolvePromptCacheKey(
+	options?: Pick<SimpleStreamOptions, "promptCacheKey" | "sessionId">,
+): string | undefined {
+	return options?.promptCacheKey ?? options?.sessionId;
+}
+
 export function buildBaseOptions(
 	_model: Model<Api>,
 	options?: SimpleStreamOptions,
@@ -47,6 +59,7 @@ export function buildBaseOptions(
 		transport: options?.transport,
 		cacheRetention: options?.cacheRetention,
 		sessionId: options?.sessionId,
+		promptCacheKey: options?.promptCacheKey,
 		toolChoice: options?.toolChoice,
 		headers: options?.headers,
 		onPayload: options?.onPayload,
