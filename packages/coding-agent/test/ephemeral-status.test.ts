@@ -49,6 +49,31 @@ describe("EphemeralStatusController", () => {
 		expect(c.isActive()).toBe(false);
 	});
 
+	it("sticky status never auto-dismisses, and a replacing status ends the tenancy", () => {
+		vi.useFakeTimers();
+		const paints: Array<{ message: string; kind: string }> = [];
+		let clears = 0;
+		const c = new EphemeralStatusController({
+			paint: (message, kind) => paints.push({ message, kind }),
+			clear: () => {
+				clears++;
+			},
+		});
+		// A running task of unknown duration must not vanish mid-flight.
+		c.show("Agent “e” · turn 2", "sticky");
+		vi.advanceTimersByTime(10 * 60_000);
+		expect(clears).toBe(0);
+		expect(c.isActive()).toBe(true);
+		// The terminal report takes over the line and schedules its own TTL.
+		c.show("Agent “e” finished", "info");
+		expect(paints).toEqual([
+			{ message: "Agent “e” · turn 2", kind: "sticky" },
+			{ message: "Agent “e” finished", kind: "info" },
+		]);
+		vi.advanceTimersByTime(EPHEMERAL_INFO_TTL_MS);
+		expect(clears).toBe(1);
+	});
+
 	it("warning uses longer TTL than info", () => {
 		vi.useFakeTimers();
 		let clears = 0;

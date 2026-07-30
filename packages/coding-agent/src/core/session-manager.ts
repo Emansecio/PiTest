@@ -311,6 +311,30 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
 	return null;
 }
 
+/**
+ * Whether an entry is worth creating the session file for.
+ *
+ * The file is created lazily, on the first entry that passes this test; anything
+ * appended before it is held in memory and written retroactively in the same
+ * initial flush. So this predicate decides exactly one thing: how long a crash
+ * can still cost the user their history.
+ *
+ * A conversation turn qualifies — user OR assistant. It used to be assistant
+ * only, which sounds equivalent and is not: an assistant entry is persisted at
+ * message_end, so the window spanned the ENTIRE turn. A crash, an OOM kill, a
+ * closed laptop during a five-minute turn took the prompt with it, and the prompt
+ * is the one thing in a session the user typed by hand and cannot get back.
+ *
+ * Bookkeeping-only entries (model change, thinking level) still defer: on their
+ * own they are not a session, and materializing one for them would put an empty
+ * shell in the resume list.
+ */
+function isDurableEntry(entry: FileEntry): boolean {
+	if (entry.type !== "message") return false;
+	const role = entry.message?.role;
+	return role === "user" || role === "assistant";
+}
+
 // Derived LLM messages (custom / branch-summary / compaction-summary) are
 // rebuilt from immutable entry fields on every buildSessionContext call.
 // Memoize per source entry so the SAME object is returned across turns —
@@ -432,16 +456,35 @@ export function buildSessionContext(
 			),
 		);
 
-		// Emit kept messages (before compaction, starting from firstKeptEntryId)
-		let foundFirstKept = false;
-		for (let i = 0; i < compactionIdx; i++) {
-			const entry = path[i];
-			if (entry.id === compaction.firstKeptEntryId) {
-				foundFirstKept = true;
-			}
-			if (foundFirstKept) {
-				appendMessage(entry);
-			}
+		// Emit kept messages (before compaction, starting from firstKeptEntryId).
+		//
+		// FAIL-SAFE when that anchor is missing. `firstKeptEntryId` is a required
+		// field its producer refuses to omit, so an id that matches nothing here means
+		// the anchor was LOST, not that the compaction meant to keep nothing —
+		// a session migrated from the pre-id format whose index pointed at the header
+		// (see _buildIndex, which then leaves the field undefined), an entry dropped by
+		// a branch/rewind, a hand-edited file. Scanning for it and finding nothing used
+		// to silently emit zero kept messages: every turn between the summary and the
+		// compaction point vanished from the model's context, with nothing said.
+		//
+		// Keeping everything instead is strictly the safer failure. The cost is a
+		// window that carries both the summary and the history it summarizes, which is
+		// wasteful and self-corrects at the next compaction; the alternative cost is
+		// context the user believed was there and cannot get back.
+		const firstKeptIdx = path.findIndex((entry) => entry.id === compaction.firstKeptEntryId);
+		if (firstKeptIdx === -1) {
+			recordDiagnostic({
+				category: "session.compaction_anchor_missing",
+				level: "warn",
+				source: "session-manager.buildSessionContext",
+				context: {
+					note: `anchor ${compaction.firstKeptEntryId ?? "<unset>"} not on path — kept full pre-compaction history`,
+					count: compactionIdx,
+				},
+			});
+		}
+		for (let i = firstKeptIdx === -1 ? 0 : firstKeptIdx; i < compactionIdx; i++) {
+			appendMessage(path[i]);
 		}
 
 		// Emit messages after compaction
@@ -1107,9 +1150,7 @@ export class SessionManager {
 			// Everything loaded (and any migration rewrite) is already on disk, so the
 			// deferred initial flush must not re-append the header + loaded entries.
 			this._persistedEntryCount = this.fileEntries.length;
-			this._hasAssistantMessage = this.fileEntries.some(
-				(e) => e.type === "message" && e.message.role === "assistant",
-			);
+			this._hasDurableEntry = this.fileEntries.some(isDurableEntry);
 		} else {
 			const explicitPath = this.sessionFile;
 			this.newSession();
@@ -1134,7 +1175,7 @@ export class SessionManager {
 		this.leafId = null;
 		this.flushed = false;
 		this._persistedEntryCount = 0;
-		this._hasAssistantMessage = false;
+		this._hasDurableEntry = false;
 		this._entriesOnlyCache = null;
 		this._ctxCache = null;
 		this.latestSessionName = undefined;
@@ -1218,7 +1259,12 @@ export class SessionManager {
 		return this.sessionFile;
 	}
 
-	private _hasAssistantMessage = false;
+	/**
+	 * Whether anything worth a file has been appended yet — see {@link isDurableEntry}.
+	 * Until then `_persist` defers, so bookkeeping entries alone (a model change, a
+	 * thinking-level change) never materialize a session with no conversation in it.
+	 */
+	private _hasDurableEntry = false;
 	private _writeQueue: string[] = [];
 	private _draining: Promise<void> | null = null;
 	// Consecutive persist-write failures (synchronous initial flush or async
@@ -1244,19 +1290,28 @@ export class SessionManager {
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
 
-		if (!this._hasAssistantMessage) {
-			if (entry.type === "message" && entry.message.role === "assistant") {
-				this._hasAssistantMessage = true;
-			} else {
+		if (!this._hasDurableEntry) {
+			if (!isDurableEntry(entry)) {
 				this.flushed = false;
 				return;
 			}
+			this._hasDurableEntry = true;
+			// Take the SYNCHRONOUS initial-flush path for this one, even when the file
+			// already exists with nothing but a header (a resumed session, a v1→v3
+			// migration, corrupt-file recovery). `flushed` is true in that state, which
+			// would route the session's first real content through the async queue and
+			// hand back the crash window this whole gate exists to close.
+			this.flushed = false;
 		}
 
 		// Build the batch up front. The first durable write stays synchronous —
-		// callers may list/re-open the session immediately after the first
-		// assistant message lands. Subsequent deltas drain asynchronously via
-		// _drainQueue (flushWrites() at turn/dispose boundaries restores durability).
+		// callers may list/re-open the session the moment it has any content. That
+		// used to mean "the first assistant message", because the file was created BY
+		// it; now the user's prompt creates the file (see isDurableEntry), so the
+		// listable-immediately guarantee is met strictly EARLIER, by a write that
+		// already carries the session's title text. Subsequent deltas — including that
+		// first answer — drain asynchronously via _drainQueue (flushWrites() at
+		// turn/dispose boundaries restores durability).
 		// Redact credentials on the disk-egress boundary only, PER PHYSICAL LINE.
 		// The private-key pattern's `[\s\S]*?` body matches across literal `\n`, so
 		// scrubbing the joined multi-line batch would let a BEGIN armor in one entry
@@ -1288,9 +1343,13 @@ export class SessionManager {
 			try {
 				appendWithRetry(this.sessionFile, batch);
 			} catch (err) {
-				// Fail-open at the caller (the throw preserves the A6 flushed=false
-				// invariant so the next attempt re-emits the full tail), but count the
-				// failure so repeated divergence becomes visible.
+				// A6: the next attempt must re-emit the FULL undrained tail, which only
+				// the initial-flush branch does — the async queue carries just the line
+				// handed to it, so entries from this failed batch would never be written
+				// again. Set the invariant explicitly rather than inheriting it from
+				// "flushed was already false": the first-assistant write also comes
+				// through here, and by then a successful earlier flush has set it true.
+				this.flushed = false;
 				this._notePersistFailure(err);
 				throw err;
 			}
@@ -1818,10 +1877,8 @@ export class SessionManager {
 			this.sessionFile = newSessionFile;
 			this._buildIndex();
 
-			this._hasAssistantMessage = this.fileEntries.some(
-				(e) => e.type === "message" && e.message.role === "assistant",
-			);
-			if (this._hasAssistantMessage) {
+			this._hasDurableEntry = this.fileEntries.some(isDurableEntry);
+			if (this._hasDurableEntry) {
 				this._rewriteFile();
 				this.flushed = true;
 			} else {

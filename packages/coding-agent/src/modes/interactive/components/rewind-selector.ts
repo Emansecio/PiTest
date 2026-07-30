@@ -66,7 +66,11 @@ class RewindList implements Component {
 		lines.push(theme.fg("warning", theme.bold(`Restore ${n === 1 ? "1 file" : `${n} files`} to before this turn?`)));
 		lines.push("");
 		for (const file of turn.files.slice(0, 8)) {
-			lines.push(theme.fg("muted", `  ${truncateToWidth(file, width - 2, "…", false)}`));
+			// Ellipsis pre-colored, like footer.ts: `truncateToWidth` emits its own
+			// `\x1b[0m` right before the ellipsis, so a bare "…" here would land
+			// outside the surrounding `muted` and print brighter than the path it
+			// abbreviates.
+			lines.push(theme.fg("muted", `  ${truncateToWidth(file, width - 2, theme.fg("muted", "…"), false)}`));
 		}
 		if (turn.files.length > 8) lines.push(theme.fg("muted", `  …and ${turn.files.length - 8} more`));
 		lines.push("");

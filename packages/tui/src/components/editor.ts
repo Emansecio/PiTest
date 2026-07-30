@@ -1062,29 +1062,36 @@ export class Editor implements Component, Focusable, MouseTarget {
 				layoutLine.hasCursor;
 
 			if (showPlaceholder) {
-				// Cursor is a reverse-video space BEFORE the dim hint (never eating its
-				// first grapheme — reverse-video on "D" read as a selection box). With a
+				// Cursor is a reverse-video block OVER the hint's first grapheme (like a
+				// normal text caret), never an extra blank cell before it — a leading
+				// space cell reads as a phantom space typed before the word. With a
 				// prompt glyph (`❯ `, placeholderPromptCols > 0) the caret goes AFTER the
 				// glyph: a caret to the LEFT of the prompt reads as contradictory (the
-				// glyph is a mode signal, not typeable content).
+				// glyph is a mode signal, not typeable content). When the hint is empty
+				// the caret still needs a cell to occupy, so it falls back to a space.
 				const colorize = this.theme.placeholderColor ?? ((t: string) => t);
 				const marker = emitCursorMarker ? CURSOR_MARKER : "";
 				const blinkOff = this.cursorBlinkEnabled && !this.cursorBlinkVisible;
-				const cursor = blinkOff ? " " : "\x1b[7m \x1b[0m";
+				const reverse = (s: string) => (blinkOff ? s : `\x1b[7m${s}\x1b[0m`);
 				// Reserve 1 col for the cursor so the hint never overflows contentWidth.
 				const hintBudget = Math.max(0, contentWidth - 1);
 				const truncated = hintBudget > 0 ? truncateToWidth(this.placeholder!, hintBudget) : "";
 				if (truncated && this.placeholderPromptCols > 0) {
 					// Glyph (borderColor — carries the mode/permission signal), then the
-					// caret, then the rest of the hint in dim. The placeholder is plain
-					// text, so a visible-column slice is grapheme-safe.
+					// caret over the hint's first character, then the rest of the hint in
+					// dim. The placeholder is plain text, so a visible-column slice is
+					// grapheme-safe.
 					const glyph = sliceByColumn(truncated, 0, this.placeholderPromptCols);
-					const rest = truncated.slice(glyph.length);
-					displayText = this.borderColor(glyph) + marker + cursor + colorize(rest);
+					const afterGlyph = truncated.slice(glyph.length);
+					const first = afterGlyph ? [...afterGlyph][0] : " ";
+					const rest = afterGlyph.slice(first.length);
+					displayText = this.borderColor(glyph) + marker + reverse(first) + colorize(rest);
 				} else {
-					displayText = marker + cursor + (truncated ? colorize(truncated) : "");
+					const first = truncated ? [...truncated][0] : " ";
+					const rest = truncated.slice(first.length);
+					displayText = marker + reverse(first) + (rest ? colorize(rest) : "");
 				}
-				lineVisibleWidth = 1 + visibleWidth(truncated);
+				lineVisibleWidth = visibleWidth(truncated) || 1;
 			} else if (selRange) {
 				// Selection highlight (reverse video), composed with the caret when the
 				// head sits on this line. Content is plain text (no ANSI), so grapheme

@@ -100,7 +100,11 @@ export interface FanoutContext {
 /** Simple `{{target}}` templating — objects are JSON-stringified. */
 export function substituteTarget(template: string, target: unknown): string {
 	const targetStr = typeof target === "string" ? target : JSON.stringify(target);
-	return template.replace(/\{\{target\}\}/g, targetStr);
+	// Replacer FUNCTION, not a replacement string: targets come from the scout —
+	// paths, selectors, shell snippets — and `$&`, "$`", `$'` and `$$` are all
+	// substitution patterns to `String.replace`. A target carrying one silently
+	// rewrote itself, and the reviewer was sent to look at the wrong thing.
+	return template.replace(/\{\{target\}\}/g, () => targetStr);
 }
 
 function formatReviews(reviews: ParallelTaskResult[]): string {
@@ -122,7 +126,13 @@ export async function runFanout(
 	spec: FanoutSpec,
 	context: FanoutContext,
 ): Promise<FanoutResult> {
-	const concurrency = spec.concurrency ?? resolveMaxSubagentConcurrency();
+	// Clamped, not just defaulted: past the cap, slots are REJECTED once the wait
+	// queue fills rather than queued, so an unclamped spec loses reviewers to
+	// "subagent queue full" instead of simply running them a few at a time.
+	const concurrency = Math.max(
+		1,
+		Math.min(spec.concurrency ?? Number.POSITIVE_INFINITY, resolveMaxSubagentConcurrency()),
+	);
 	const childDepth = context.depth + 1;
 
 	const scoutBase: SpawnSubagentOptions = {

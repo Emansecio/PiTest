@@ -49,6 +49,7 @@ type RenderSessionContextThis = {
 	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void;
 	setWorkingPhase(label: string): void;
 	refreshLoaderTrailingSuffix(): void;
+	recordTurnFile(toolName: string, component: ToolExecutionComponent): void;
 	_addToolBlock(component: ToolExecutionComponent): void;
 };
 
@@ -94,6 +95,8 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		setWorkingPhase: vi.fn(),
 		// tool_execution_start/end refresh the loader hint at the boundary.
 		refreshLoaderTrailingSuffix: vi.fn(),
+		// A settled edit/write also lands in the turn's file ledger (right rail).
+		recordTurnFile: vi.fn(),
 		// Passthrough stub for the real consecutive-tool-block grouping helper;
 		// this regression asserts pending-tool registration, not the leading-gap.
 		_addToolBlock(component: ToolExecutionComponent) {

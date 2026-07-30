@@ -11,7 +11,10 @@ import {
 	_setUnreviewedImpactForTest,
 } from "../src/core/built-ins/impact-extension.ts";
 import { GoalManager, setCurrentGoalManager } from "../src/core/goal/goal-manager.js";
-import { createGoalCompleteToolDefinition } from "../src/core/tools/goal-complete.js";
+import {
+	_resetGoalCompleteGateStateForTest,
+	createGoalCompleteToolDefinition,
+} from "../src/core/tools/goal-complete.js";
 
 const tool = createGoalCompleteToolDefinition(process.cwd());
 
@@ -29,6 +32,7 @@ function textOf(result: { content: Array<{ type: string; text?: string }> }): st
 describe("goal_complete R10 (unreviewed impact-graph dependents)", () => {
 	afterEach(() => {
 		_resetImpactStateForTest();
+		_resetGoalCompleteGateStateForTest();
 		setCurrentGoalManager(undefined);
 		resetRuntimeDiagnostics();
 	});
@@ -120,6 +124,42 @@ describe("goal_complete R10 (unreviewed impact-graph dependents)", () => {
 		expect(text).toContain("Tests covering the changed files (run them): ");
 		expect(text).toContain("test/dep4.test.ts, +2 more");
 		expect(text).not.toContain("test/dep5.test.ts");
+	});
+
+	it("refuses at most once per goal — a second call completes with the list unchanged", async () => {
+		const mgr = new GoalManager();
+		mgr.start("ship it", {});
+		setCurrentGoalManager(mgr);
+
+		_setUnreviewedImpactForTest([{ path: "src/b.ts", seeds: ["src/a.ts"] }]);
+		const blocked = await complete("c1", "done");
+		expect(blocked.details?.completed).toBe(false);
+
+		// Nothing cleared: the registry still lists the same dependent. The gate has
+		// spent its one refusal for this goal, so it must let the goal finish instead
+		// of walling it forever (the doom-loop the R7 gate used to produce).
+		const ok = await complete("c2", "done");
+		expect(ok.details?.completed).toBe(true);
+		expect(mgr.get()?.status).toBe("complete");
+
+		const waived = getRuntimeDiagnostics().recent.find((e) => e.context?.ruleId === "impact-gate-waived");
+		expect(waived?.category).toBe("quality.impact-guard");
+	});
+
+	it("spends the refusal per goal — a new goal gets its own", async () => {
+		const first = new GoalManager();
+		first.start("goal one", {});
+		setCurrentGoalManager(first);
+		_setUnreviewedImpactForTest([{ path: "src/b.ts", seeds: ["src/a.ts"] }]);
+		expect((await complete("c1", "done")).details?.completed).toBe(false);
+		expect((await complete("c2", "done")).details?.completed).toBe(true);
+
+		const second = new GoalManager();
+		second.start("goal two", {});
+		setCurrentGoalManager(second);
+		const blocked = await complete("c3", "done");
+		expect(blocked.details?.completed).toBe(false);
+		expect(textOf(blocked)).toContain("import graph shows 1 file(s)");
 	});
 
 	it("covering tests alone (no pending files) do NOT block completion (Fase 4B)", async () => {

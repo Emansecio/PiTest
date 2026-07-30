@@ -74,9 +74,10 @@ describe("Editor placeholder", () => {
 		const editor = new Editor(createTestTUI(80, 24), borderMarkerTheme, { placeholderPromptCols: 2 });
 		editor.setPlaceholder("❯ Describe a task…");
 		const raw = editor.render(80)[1]!;
-		// The glyph + following space are borderColor; the rest of the hint stays placeholderColor.
+		// The glyph + following space are borderColor; the caret overlays the hint's
+		// first grapheme (reverse video), the rest of the hint stays placeholderColor.
 		assert.ok(raw.includes("<BORDER>❯ </BORDER>"), `expected the glyph prefix borderColor'd, got: ${raw}`);
-		assert.ok(raw.includes("<PH>Describe a task…</PH>"), `expected the hint tail placeholderColor'd, got: ${raw}`);
+		assert.ok(raw.includes("escribe a task…</PH>"), `expected the hint tail placeholderColor'd, got: ${raw}`);
 	});
 
 	it("keeps the whole placeholder in placeholderColor when placeholderPromptCols is unset (default 0)", () => {
@@ -87,8 +88,9 @@ describe("Editor placeholder", () => {
 		const editor = new Editor(createTestTUI(80, 24), borderMarkerTheme);
 		editor.setPlaceholder("❯ Describe a task…");
 		const raw = editor.render(80)[1]!;
+		// The caret overlays the hint's first grapheme; the rest stays placeholderColor.
 		assert.ok(!raw.includes("<BORDER>"), "no prompt-prefix split without opting in");
-		assert.ok(raw.includes("<PH>❯ Describe a task…</PH>"), `expected the whole hint placeholderColor'd, got: ${raw}`);
+		assert.ok(raw.includes("<PH> Describe a task…</PH>"), `expected the hint tail placeholderColor'd, got: ${raw}`);
 	});
 });
 

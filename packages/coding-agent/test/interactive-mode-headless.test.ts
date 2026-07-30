@@ -82,7 +82,7 @@ describe("InteractiveMode headless (injected terminal)", () => {
 		harness = createInteractiveHarness();
 
 		await harness.emit({ type: "subagent_start", handle: "explorer" } as never);
-		expect(harness.statusText()).toContain("subagent 'explorer' started");
+		expect(harness.statusText()).toContain("Agent “explorer” started");
 
 		await harness.emit({
 			type: "subagent_complete",
@@ -91,7 +91,7 @@ describe("InteractiveMode headless (injected terminal)", () => {
 			turns: 3,
 			totalTokens: 1234,
 		} as never);
-		expect(harness.statusText()).toContain("subagent 'explorer' finished");
+		expect(harness.statusText()).toContain("Agent “explorer” finished");
 		expect(harness.statusText()).toContain("3 turns");
 		// `toLocaleString()` groups per the host locale (1,234 / 1.234) — assert
 		// the grouping happened without pinning the separator.

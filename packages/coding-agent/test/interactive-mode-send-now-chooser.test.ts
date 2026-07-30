@@ -1,3 +1,4 @@
+import { visibleWidth } from "@pit/tui";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { SendNowChooser } from "../src/modes/interactive/components/send-now-chooser.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
@@ -19,8 +20,9 @@ function proto<T>(name: string): T {
 }
 
 function createEditor(text = "next message") {
-	// Stateful so setText() round-trips to getText()/getExpandedText() — the real
-	// editor is the source of truth, and confirmSendNowChooser now reads it live.
+	// Stateful so setText() round-trips to getText()/getExpandedText(): the chooser
+	// empties the composer when it opens and hands the draft back when it closes
+	// without sending, so these tests need a composer that remembers.
 	let current = text;
 	return {
 		getExpandedText: () => current,
@@ -56,6 +58,7 @@ function createChooserThis(overrides: Record<string, any> = {}): any {
 		confirmSendNowChooser: proto("confirmSendNowChooser"),
 		cancelSendNowChooser: proto("cancelSendNowChooser"),
 		closeSendNowChooser: proto("closeSendNowChooser"),
+		restoreSendNowDraft: proto("restoreSendNowDraft"),
 		sendNowChooserEnabled: proto("sendNowChooserEnabled"),
 		...overrides,
 	};
@@ -85,6 +88,52 @@ describe("SendNowChooser component", () => {
 		expect(lines[0]).toContain("Queue");
 		expect(lines[0]).toContain("Cancel");
 		expect(lines[0]).toContain("refactor the parser");
+	});
+
+	test("occupies a single row — the hint line is gone", () => {
+		expect(new SendNowChooser("hello").render(80)).toHaveLength(1);
+	});
+
+	test("labels the actions with the glyphs of the message each one produces", () => {
+		const line = new SendNowChooser("hello").render(80)[0] ?? "";
+		// ▸ Steer / ◷ Queued in system-message-glyphs.ts.
+		expect(line).toContain("▸ Send now");
+		expect(line).toContain("◷ Queue");
+		expect(line).toContain("✕ Cancel");
+	});
+
+	test("carries navigation only — confirm/cancel are what the buttons already say", () => {
+		const line = new SendNowChooser("hello").render(80)[0] ?? "";
+		expect(line).toContain("←/→");
+		expect(line).not.toContain("choose");
+		expect(line).not.toContain("confirm");
+		expect(line).not.toContain("esc cancel");
+	});
+
+	test("row width never shifts as the highlight moves", () => {
+		const widths = [0, 1, 2].map((steps) => {
+			const chooser = new SendNowChooser("a message worth previewing");
+			for (let i = 0; i < steps; i++) chooser.next();
+			return visibleWidth(chooser.render(90)[0] ?? "");
+		});
+		expect(new Set(widths).size).toBe(1);
+	});
+
+	test("drops the preview instead of truncating it to noise when space is tight", () => {
+		const wide = new SendNowChooser("refactor the parser").render(90)[0] ?? "";
+		const narrow = new SendNowChooser("refactor the parser").render(46)[0] ?? "";
+		expect(wide).toContain("refactor");
+		expect(narrow).not.toContain("r…");
+		// The buttons survive intact — they are the part the user has to act on.
+		expect(narrow).toContain("Send now");
+		expect(narrow).toContain("Cancel");
+	});
+
+	test("never overflows the given width", () => {
+		for (const width of [120, 80, 60, 46, 38]) {
+			const line = new SendNowChooser("some reasonably long pending message").render(width)[0] ?? "";
+			expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+		}
 	});
 });
 
@@ -145,11 +194,15 @@ describe("Send-now chooser routing", () => {
 		expect(editor.setText).toHaveBeenCalledWith("");
 	});
 
-	test("opening re-seats the text in the composer and installs a key listener", () => {
+	test("opening empties the composer — the message shows once, in the chooser", () => {
 		const { fakeThis, editor } = createChooserThis();
-		fakeThis.openSendNowChooser.call(fakeThis, "keep me visible");
+		fakeThis.openSendNowChooser.call(fakeThis, "decide about me");
 
-		expect(editor.setText).toHaveBeenCalledWith("keep me visible");
+		// The chooser now owns the message; a copy left in the composer read as if it
+		// were both awaiting a decision and still being typed.
+		expect(editor.setText).toHaveBeenCalledWith("");
+		expect(editor.getText()).toBe("");
+		expect(fakeThis.sendNowChooserDraft).toBe("decide about me");
 		expect(fakeThis.sendNowChooser).toBeInstanceOf(SendNowChooser);
 		expect(fakeThis.ui.addInputListener).toHaveBeenCalledOnce();
 	});
@@ -163,7 +216,9 @@ describe("Send-now chooser routing", () => {
 
 		expect(fakeThis.session.prompt).toHaveBeenCalledWith("read this now", { streamingBehavior: "steer" });
 		expect(editor.addToHistory).toHaveBeenCalledWith("read this now");
-		expect(editor.setText).toHaveBeenCalledWith("");
+		// The composer was already emptied at open time; confirming does not touch it.
+		expect(editor.setText).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("");
 		expect(fakeThis.sendNowChooser).toBeUndefined(); // torn down
 		// Steer into an active turn → positive mid-turn feedback.
 		expect(fakeThis.showStatus).toHaveBeenCalledWith("Will be read at the agent's next step");
@@ -180,7 +235,7 @@ describe("Send-now chooser routing", () => {
 		expect(fakeThis.showStatus).not.toHaveBeenCalled();
 	});
 
-	test("Cancel closes the chooser, leaves the text, queues nothing", () => {
+	test("Cancel hands the draft back to the composer and queues nothing", () => {
 		const { fakeThis, editor, unsub } = createChooserThis();
 		fakeThis.openSendNowChooser.call(fakeThis, "never mind");
 		editor.setText.mockClear();
@@ -192,7 +247,7 @@ describe("Send-now chooser routing", () => {
 
 		expect(result).toEqual({ consume: true });
 		expect(fakeThis.session.prompt).not.toHaveBeenCalled();
-		expect(editor.setText).not.toHaveBeenCalledWith(""); // text left intact
+		expect(editor.getText()).toBe("never mind"); // draft returned, intact
 		expect(unsub).toHaveBeenCalledOnce();
 		expect(fakeThis.sendNowChooser).toBeUndefined();
 	});
@@ -223,13 +278,16 @@ describe("Send-now chooser routing", () => {
 		expect(fakeThis.sendNowChooser.getSelection()).toBe("queue");
 	});
 
-	test("a printable key closes the chooser and passes through to the composer", () => {
-		const { fakeThis, unsub } = createChooserThis();
+	test("a printable key restores the draft and passes through to the composer", () => {
+		const { fakeThis, editor, unsub } = createChooserThis();
 		fakeThis.openSendNowChooser.call(fakeThis, "typing resumes");
 
 		const result = fakeThis.handleSendNowChooserKey.call(fakeThis, "x");
 
-		expect(result).toBeUndefined(); // not consumed → editor inserts "x"
+		expect(result).toBeUndefined(); // not consumed → editor inserts "x" after the draft
+		// The restore runs BEFORE the key reaches the editor (global listeners fire
+		// first), so typing continues on the draft instead of on an empty composer.
+		expect(editor.getText()).toBe("typing resumes");
 		expect(unsub).toHaveBeenCalledOnce();
 		expect(fakeThis.sendNowChooser).toBeUndefined();
 	});
@@ -257,34 +315,42 @@ describe("Send-now chooser routing", () => {
 		expect(fakeThis.showStatus).not.toHaveBeenCalled();
 	});
 
-	// Fix 14: a turn abort can run restoreQueuedMessagesToEditor() while the chooser
-	// is open, replacing the composer with the restored queue. Confirm must send the
-	// LIVE editor text, not the stale open-time snapshot (which would drop the queue
-	// and the setText("") would then destroy it).
-	test("confirm sends the live editor text after an abort restored the queue (no data loss)", async () => {
+	// Fix 14 (revised): a turn abort can run restoreQueuedMessagesToEditor() while the
+	// chooser is open, filling the now-empty composer with the restored queue. The two
+	// texts belong to different decisions: the draft goes where the user chose, the
+	// restored queue stays in the composer for them to deal with. Neither is lost, and
+	// neither is silently swapped for the other.
+	test("confirm sends the draft and leaves an abort-restored queue in the composer", async () => {
 		const { fakeThis, editor } = createChooserThis();
-		fakeThis.openSendNowChooser.call(fakeThis, "D"); // snapshot = just "D"
-		// Turn abort restored queued "C" and combined it with the in-composer draft "D".
-		editor.setText("C\n\nD");
+		fakeThis.openSendNowChooser.call(fakeThis, "D");
+		editor.setText("C"); // turn abort restored queued "C" into the empty composer
 		editor.setText.mockClear();
 		// Send now highlighted.
 		await fakeThis.confirmSendNowChooser.call(fakeThis);
 
-		// The full restored text goes out — not the "D" snapshot — and nothing is lost.
-		expect(fakeThis.session.prompt).toHaveBeenCalledWith("C\n\nD", { streamingBehavior: "steer" });
-		expect(editor.addToHistory).toHaveBeenCalledWith("C\n\nD");
+		expect(fakeThis.session.prompt).toHaveBeenCalledWith("D", { streamingBehavior: "steer" });
+		expect(editor.addToHistory).toHaveBeenCalledWith("D");
+		expect(editor.getText()).toBe("C"); // restored queue untouched
 		expect(fakeThis.sendNowChooser).toBeUndefined(); // torn down
 	});
 
-	test("confirm with an emptied composer cancels instead of sending an empty prompt", async () => {
+	test("cancelling after an abort restored the queue appends the draft instead of clobbering it", () => {
 		const { fakeThis, editor } = createChooserThis();
-		fakeThis.openSendNowChooser.call(fakeThis, "will vanish");
-		editor.setText(""); // editor emptied from under the chooser
-		editor.setText.mockClear();
+		fakeThis.openSendNowChooser.call(fakeThis, "D");
+		editor.setText("C"); // restored queue landed in the composer meanwhile
+
+		fakeThis.handleSendNowChooserKey.call(fakeThis, KEY.escape);
+
+		expect(editor.getText()).toBe("C\n\nD"); // same separator the restore path uses
+		expect(fakeThis.session.prompt).not.toHaveBeenCalled();
+	});
+
+	test("confirm with a blank draft cancels instead of sending an empty prompt", async () => {
+		const { fakeThis } = createChooserThis();
+		fakeThis.openSendNowChooser.call(fakeThis, "   ");
 		await fakeThis.confirmSendNowChooser.call(fakeThis);
 
 		expect(fakeThis.session.prompt).not.toHaveBeenCalled();
-		expect(editor.setText).not.toHaveBeenCalledWith(""); // no send-path reset ran
 		expect(fakeThis.sendNowChooser).toBeUndefined(); // torn down (implicit Cancel)
 	});
 
@@ -299,8 +365,10 @@ describe("Send-now chooser routing", () => {
 
 		// Not consumed → Enter flows through to the focused picker instead of confirming.
 		expect(result).toBeUndefined();
-		// Chooser torn down (implicit Cancel); nothing was sent as a steer.
+		// Chooser torn down (implicit Cancel); nothing was sent as a steer, and the
+		// draft is waiting in the composer once the picker is done.
 		expect(fakeThis.session.prompt).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("draft for the composer");
 		expect(unsub).toHaveBeenCalledOnce();
 		expect(fakeThis.sendNowChooser).toBeUndefined();
 	});
@@ -351,6 +419,34 @@ describe("Send-now chooser routing", () => {
 
 		expect(queueCompactionMessage).toHaveBeenCalledWith("later, after compaction", "followUp");
 		expect(fakeThis.session.prompt).not.toHaveBeenCalled();
+	});
+
+	// The compaction queue path runs the REAL queueCompactionMessage, which clears
+	// the composer for ordinary submits — but the chooser's draft never lived
+	// there, so a composer refilled mid-chooser (abort → restoreQueuedMessagesToEditor)
+	// must survive the confirm. Same contract as the non-compaction path's test above.
+	test("confirming during compaction sends the draft and leaves an abort-restored queue in the composer", async () => {
+		const { fakeThis, editor } = createChooserThis({
+			session: {
+				isCompacting: true,
+				isStreaming: false,
+				isFusing: false,
+				prompt: vi.fn().mockResolvedValue(undefined),
+			},
+			// Real queue path: pushes, writes history, clears the composer, repaints.
+			queueCompactionMessage: proto("queueCompactionMessage"),
+			compactionQueuedMessages: [],
+			persistPendingFollowUps: vi.fn(),
+		});
+		fakeThis.openSendNowChooser.call(fakeThis, "D");
+		editor.setText("C"); // turn abort restored queued "C" into the empty composer
+
+		await fakeThis.confirmSendNowChooser.call(fakeThis); // Send now → steer
+
+		expect(fakeThis.compactionQueuedMessages).toEqual([{ text: "D", mode: "steer" }]);
+		expect(editor.addToHistory).toHaveBeenCalledWith("D");
+		expect(editor.getText()).toBe("C"); // restored queue untouched
+		expect(fakeThis.sendNowChooser).toBeUndefined(); // chooser torn down
 	});
 });
 

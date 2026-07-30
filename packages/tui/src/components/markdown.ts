@@ -365,8 +365,14 @@ export class Markdown implements Component {
 			return this.cachedLines;
 		}
 
+		// Padding is taken out of the width budget, never added on top of it: the
+		// margins below are appended unconditionally, so a `paddingX` wider than
+		// half the terminal used to emit lines wider than `width`. See the same
+		// clamp in ./text.ts.
+		const pad = Math.max(0, Math.min(this.paddingX, Math.floor((width - 1) / 2)));
+
 		// Calculate available width for content (subtract horizontal padding)
-		const contentWidth = Math.max(1, width - this.paddingX * 2);
+		const contentWidth = Math.max(1, width - pad * 2);
 
 		// Don't render anything if there's no actual text
 		if (!this.text || this.text.trim() === "") {
@@ -395,8 +401,8 @@ export class Markdown implements Component {
 		// flat pipeline. During streaming, only the trailing (mutating) token
 		// misses the cache — the old code re-lexed AND re-rendered the entire
 		// buffer on every appended token (O(n²) per streamed message).
-		const leftMargin = " ".repeat(this.paddingX);
-		const rightMargin = " ".repeat(this.paddingX);
+		const leftMargin = " ".repeat(pad);
+		const rightMargin = " ".repeat(pad);
 		const bgFn = this.defaultTextStyle?.bgColor;
 
 		// The per-token line cache is keyed by token.raw, which fully determines a
@@ -445,9 +451,13 @@ export class Markdown implements Component {
 			// render `proseMaxColumns + paddingX` columns wide, so a 120-col cap at
 			// paddingX=1 actually drew 121). Right margin is trailing whitespace and
 			// does not count. Floor at 1 so an absurd padding can't zero the content.
-			const capContentWidth = Math.max(1, this.proseMaxColumns - this.paddingX);
+			// These must charge the CLAMPED `pad` (see above), not `paddingX`: with a
+			// cap + background on a terminal narrower than 2*paddingX+1 the raw value
+			// would push effWidth past `width` — the exact overrun the clamp exists
+			// to prevent (the margins below are already built from `pad`).
+			const capContentWidth = Math.max(1, this.proseMaxColumns - pad);
 			const effContentWidth = capProse ? Math.min(contentWidth, capContentWidth) : contentWidth;
-			const effWidth = capProse ? effContentWidth + this.paddingX * 2 : width;
+			const effWidth = capProse ? effContentWidth + pad * 2 : width;
 			const cacheKey = this.getTokenCacheKey(token, effWidth, nextTokenType, deferCodeHighlight);
 			let tokenLines = prevTokenCache?.get(cacheKey) ?? nextTokenCache.get(cacheKey);
 			if (!tokenLines) {

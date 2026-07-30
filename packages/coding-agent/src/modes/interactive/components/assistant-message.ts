@@ -30,15 +30,37 @@ const THINKING_BREATH_MS = HEARTBEAT_CYCLE_MS;
 const THINKING_BREATH_BUCKETS = 16;
 
 // Streaming smoothing (on by default): instead of painting each provider burst
-// whole, the trailing block's text is revealed at a steady rate off the shared
-// animation ticker. The cursor catches up to the streamed backlog in
-// ~REVEAL_CATCHUP_FRAMES frames so it never lags far behind on long bursts,
-// while a slow drip still advances at least REVEAL_MIN_STEP chars/frame and a big
-// burst is capped to REVEAL_MAX_STEP so it eases in instead of snapping.
-const REVEAL_CATCHUP_FRAMES = 8; // ~130ms to absorb a burst at 60fps
+// whole, the trailing block's text is revealed off the shared animation ticker.
+//
+// The drain law is `arrival rate + backlog / REVEAL_CATCHUP_FRAMES` per frame.
+// Both terms matter, and the first one is the correction that makes the second
+// mean what it says:
+//
+// - The **arrival term** pays for the text still to come. Without it the drain
+//   was `backlog/8` alone, which equals the arrival rate only at a NON-ZERO
+//   backlog — so the cursor settled into a permanent trail of `rate × 130ms` of
+//   text rather than converging. Measured before this term existed: 30 chars
+//   behind at 310 chars/s, 95 behind at 890 chars/s, i.e. ~150ms of standing
+//   latency at every rate, plus that whole backlog dumped in ONE frame at
+//   message_end (stopReason reveals everything) — a 60-char pop at the exact
+//   moment the reader is at the end of the answer.
+// - The **backlog term** is the smoothing proper: a burst decays with a ~8-frame
+//   (~130ms) time constant on top of the arrival rate, so a chunk eases in
+//   instead of snapping, and the backlog converges to zero once the burst is
+//   absorbed.
+//
+// REVEAL_MIN_STEP keeps a slow drip moving; REVEAL_MAX_STEP caps the other end so
+// a pathological burst still eases rather than snapping.
+const REVEAL_CATCHUP_FRAMES = 8; // ~130ms burst time-constant at 60fps
 const REVEAL_MIN_STEP = 1;
 const REVEAL_MAX_STEP = 48; // ~3000 cps at 62fps — above any model's emit rate
 const REVEAL_FRAME_MS = 16;
+/**
+ * Weight of the newest sample in the arrival-rate EMA (chars per 16ms frame).
+ * Low enough that one jittery inter-delta gap can't spike the drain, high enough
+ * that the estimate tracks a model that changes pace mid-answer within ~10 frames.
+ */
+const REVEAL_RATE_ALPHA = 0.25;
 /**
  * Provider deltas at or below this size render immediately (single-token snappy).
  * Larger bursts ease in via the ticker — was 80, which snapped multi-word chunks
@@ -263,6 +285,14 @@ export class AssistantMessageComponent extends Container {
 		() => this.breathT,
 		() => theme.getThinkingBorderColor(this.thinkingLevel),
 	);
+	/**
+	 * True while some OTHER surface already says the model is thinking — in
+	 * practice the footer working loader, which owns that state for the whole
+	 * turn (spinner, elapsed clock, token chips, reasoning preview). The
+	 * in-transcript label would then be a second copy of the same fact, so it
+	 * stands down and only speaks when the footer is not there to.
+	 */
+	private readonly isThinkingShownElsewhere: () => boolean;
 	// Fingerprint of the last built child-tree layout. When a stream delta only
 	// grows text inside existing blocks, patchContent() updates markdown in place
 	// instead of contentContainer.clear() + full rebuild.
@@ -284,6 +314,7 @@ export class AssistantMessageComponent extends Container {
 		smoothing = false,
 		readingColumns: number = DEFAULT_ASSISTANT_READING_COLUMNS,
 		thinkingLevel: ThinkingLevel = "off",
+		isThinkingShownElsewhere: () => boolean = () => false,
 	) {
 		super();
 
@@ -292,6 +323,7 @@ export class AssistantMessageComponent extends Container {
 		this.markdownTheme = markdownTheme;
 		this.hiddenThinkingLabel = hiddenThinkingLabel;
 		this.ui = ui;
+		this.isThinkingShownElsewhere = isThinkingShownElsewhere;
 		this.smoothing = smoothing;
 		// >0 caps prose to that many columns; 0 / non-positive = full width (no cap).
 		this.readingColumns = readingColumns > 0 ? readingColumns : 0;
@@ -588,6 +620,10 @@ export class AssistantMessageComponent extends Container {
 			}
 		}
 		const hasVisibleContent = lastVisibleIndex !== -1;
+		// Last block of ANY kind (tool calls included) — the live-thinking check
+		// below needs "is the model still on this thought?", which a tool call
+		// arriving after it answers with no.
+		const lastBlockIndex = message.content.length - 1;
 		let sawLiveThinking = false;
 
 		// No leading blank line: WorkGroup already emits none (see the spacing
@@ -637,7 +673,24 @@ export class AssistantMessageComponent extends Container {
 					// `!message.stopReason` keeps the breath from re-arming once the turn
 					// settles/aborts (otherwise an aborted thinking-only turn leaks a
 					// forever-running ticker that pins the component).
-					const live = i === lastVisibleIndex && !!this.ui && !this.isDeliverable && !message.stopReason;
+					//
+					// Two further conditions, both about not lying:
+					//   - `i === lastBlockIndex` — the thought must be the message's LAST
+					//     block, not just the last *visible* one. A thinking block followed
+					//     by a tool call is finished reasoning: the model is running the
+					//     tool now, and a label still breathing "Thinking…" over it reads
+					//     as a live thought that isn't happening.
+					//   - `!isThinkingShownElsewhere()` — the footer loader owns this state
+					//     for the whole turn; two "Thinking…" on one screen (one of them
+					//     with no clock, no spinner, no preview) reads as a rendering
+					//     artifact, which is exactly what it is.
+					const live =
+						i === lastVisibleIndex &&
+						i === lastBlockIndex &&
+						!!this.ui &&
+						!this.isDeliverable &&
+						!message.stopReason &&
+						!this.isThinkingShownElsewhere();
 					if (live) {
 						sawLiveThinking = true;
 						this.startThinkingBreath();
@@ -808,9 +861,13 @@ export class AssistantMessageComponent extends Container {
 			this.revealedChars = 0;
 			this.lastRevealTarget = 0;
 			this.lastRevealTickAt = 0;
+			this.arrivalEma = 0;
+			this.arrivalSamples = 0;
+			this.lastDeltaAt = 0;
 		}
 		const target = this.blockTextLength(message, idx);
 		const burst = Math.max(0, target - this.lastRevealTarget);
+		if (burst > 0) this.observeArrival(burst, performance.now());
 		// Incremental small deltas (typical token cadence) pass through immediately;
 		// the first paint of a block and large bursts still ease in over a few frames.
 		if (burst > 0 && burst <= REVEAL_SNAP_THROUGH_CHARS && !newRevealBlock) {
@@ -830,8 +887,54 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	/**
+	 * Chars per frame the drain must sustain just to hold station against the
+	 * incoming stream, as an EMA over observed deltas. Zero until two deltas have
+	 * been seen (and reset per reveal block), which is exactly right: with no
+	 * arrival estimate the law degrades to the pure backlog term.
+	 */
+	private arrivalEma = 0;
+	/** Samples folded into `arrivalEma`, for the bias correction below. */
+	private arrivalSamples = 0;
+	/** Timestamp of the last observed target growth, for the rate estimate. */
+	private lastDeltaAt = 0;
+
+	/** Fold one observed delta into the arrival-rate estimate. */
+	private observeArrival(burst: number, now: number): void {
+		if (this.lastDeltaAt <= 0) {
+			this.lastDeltaAt = now;
+			return; // first delta of the block: no interval to measure yet
+		}
+		const frames = Math.max(1, (now - this.lastDeltaAt) / REVEAL_FRAME_MS);
+		this.lastDeltaAt = now;
+		// Capped at the per-frame ceiling the step itself respects: several deltas
+		// flushed inside one frame (a buffered proxy stream draining at once) are not
+		// evidence of a sustained rate, and an uncapped sample would let one flush
+		// pin the estimate high for the following frames.
+		const instant = Math.min(REVEAL_MAX_STEP, burst / frames);
+		this.arrivalEma = this.arrivalEma * (1 - REVEAL_RATE_ALPHA) + instant * REVEAL_RATE_ALPHA;
+		this.arrivalSamples++;
+	}
+
+	/**
+	 * Arrival rate in chars per frame, bias-corrected. A raw EMA seeded at zero
+	 * under-reports until it has ~1/α samples, which at the head of a message is
+	 * the standing-backlog bug in miniature: the first few deltas of every answer
+	 * would open with the trail this law exists to remove. Dividing out the
+	 * accumulated weight (the Adam correction) makes the estimate unbiased from
+	 * the very first sample while keeping the smoothing for later ones.
+	 */
+	private arrivalPerFrame(): number {
+		if (this.arrivalSamples === 0) return 0;
+		const weight = 1 - (1 - REVEAL_RATE_ALPHA) ** this.arrivalSamples;
+		return this.arrivalEma / weight;
+	}
+
 	private computeRevealStep(backlog: number, frameCount: number): number {
-		const perFrame = Math.min(REVEAL_MAX_STEP, Math.max(REVEAL_MIN_STEP, Math.ceil(backlog / REVEAL_CATCHUP_FRAMES)));
+		// Arrival + backlog decay. See the constants block for why the arrival term
+		// is what makes the backlog converge instead of plateauing.
+		const raw = this.arrivalPerFrame() + backlog / REVEAL_CATCHUP_FRAMES;
+		const perFrame = Math.min(REVEAL_MAX_STEP, Math.max(REVEAL_MIN_STEP, Math.ceil(raw)));
 		return Math.min(backlog, perFrame * frameCount);
 	}
 
@@ -915,6 +1018,9 @@ export class AssistantMessageComponent extends Container {
 		this.revealedChars = Number.POSITIVE_INFINITY;
 		this.lastRevealTarget = 0;
 		this.lastRevealTickAt = 0;
+		this.arrivalEma = 0;
+		this.arrivalSamples = 0;
+		this.lastDeltaAt = 0;
 		this.pauseReveal();
 	}
 

@@ -200,6 +200,47 @@ function countFiles(matches: AstGrepRewriteMatch[]): number {
 	return set.size;
 }
 
+/** A file this edit rewrote, with its own line delta. */
+export interface AstEditFileDelta {
+	/** cwd-relative, matching how every other tool reports a path. */
+	path: string;
+	added: number;
+	removed: number;
+}
+
+/**
+ * Per-file line deltas for an applied rewrite.
+ *
+ * `path` alone cannot describe what an ast-edit touched: it is optional, defaults
+ * to the whole cwd, and `globs` can spread a single call across a package. The
+ * matches, though, name their file and carry both sides of the rewrite, so the
+ * accounting is exact — and it is the only form a per-file consumer (the turn
+ * ledger) can use at all.
+ *
+ * Derived from the PRE-apply match set, which is also the only place it exists:
+ * after `--update-all` the rewritten code no longer matches the pattern.
+ *
+ * Exported for tests: the surrounding tool needs a real `ast-grep` binary, while
+ * this is the part with the arithmetic worth pinning.
+ */
+export function fileDeltas(matches: AstGrepRewriteMatch[], cwd: string): AstEditFileDelta[] {
+	const byFile = new Map<string, AstEditFileDelta>();
+	for (const m of matches) {
+		if (typeof m.file !== "string" || m.file.length === 0) continue;
+		const path = relFile(m.file, cwd);
+		let entry = byFile.get(path);
+		if (!entry) {
+			entry = { path, added: 0, removed: 0 };
+			byFile.set(path, entry);
+		}
+		const before = (m.lines || m.text || "").replace(/\r/g, "").trimEnd();
+		const after = (m.replacement || "").replace(/\r/g, "").trimEnd();
+		if (before.length > 0) entry.removed += before.split("\n").length;
+		if (after.length > 0) entry.added += after.split("\n").length;
+	}
+	return [...byFile.values()];
+}
+
 /** Absolute paths of files an ast-edit apply will touch (for the mutation queue). */
 function matchAbsolutePaths(matches: AstGrepRewriteMatch[], cwd: string): string[] {
 	const paths: string[] = [];
@@ -440,7 +481,11 @@ export function createAstEditToolDefinition(
 			const text = reportedFromCli || `Applied ${replacementCount} replacement(s) in ${fileCount} file(s).`;
 			return {
 				content: [{ type: "text" as const, text }],
-				details: { replacementCount, fileCount },
+				// `files` is emitted ONLY here, on the path that actually wrote to disk.
+				// dry-run and preview return the same shape minus this field on purpose:
+				// a consumer that treats it as "what changed" (the turn ledger) must not
+				// count a rewrite that was merely proposed.
+				details: { replacementCount, fileCount, files: fileDeltas(matches, cwd) },
 			};
 		},
 		renderCall(args, theme, context) {

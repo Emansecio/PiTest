@@ -13,6 +13,7 @@ import {
 	getCapabilities,
 	isImageLine,
 	isSixelForcedOff,
+	isSixelLine,
 	parseSixelDeviceAttributes,
 	setCellDimensions,
 	setSixelSupport,
@@ -40,6 +41,32 @@ const ANSI_ESCAPE_PATTERN = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\
 const CONTROL_PATTERN = /[\x00-\x1f\x7f]/g;
 const SPACES_PATTERN = /\s+/g;
 const UNKNOWN_RENDER_FAULT = "unknown error";
+// Floor for a cell size DERIVED from the window-pixel-size reply. A terminal that
+// answers CSI 14 t in characters rather than pixels (or one padded oddly enough to
+// divide down to a couple of pixels) would otherwise hand every pixel→row
+// conversion a nonsense scale; below these we keep the built-in guess, still
+// flagged unmeasured, and the sixel pets stay on their cell fallback.
+const MIN_PLAUSIBLE_CELL_HEIGHT_PX = 6;
+const MIN_PLAUSIBLE_CELL_WIDTH_PX = 3;
+// Ceiling for the same DERIVED cell size. A cell this tall is past any real font
+// on any DPI, so a division landing here means the reply was not the text area we
+// assumed (a terminal reporting the whole window, or the screen). Overshooting is
+// the dangerous direction — sprite heights are computed FROM the cell, so a cell
+// twice its true size draws twice as far down as the rows it reserved.
+const MAX_PLAUSIBLE_CELL_HEIGHT_PX = 128;
+const MAX_PLAUSIBLE_CELL_WIDTH_PX = 64;
+// A monospace cell is taller than it is wide, in a narrow band — roughly 0.4–0.7
+// in practice. This ratio check is what catches a derivation that is wrong
+// STRUCTURALLY rather than merely large: padding counted on one axis only, or a
+// reply in characters where we expected pixels, skews the two axes apart while
+// each stays individually plausible. Deliberately loose on both sides so an
+// unusual-but-real font is never rejected.
+const MIN_PLAUSIBLE_CELL_RATIO = 0.25;
+const MAX_PLAUSIBLE_CELL_RATIO = 1;
+// Debounce for re-querying the cell size after a resize. Long enough that dragging
+// a window border coalesces into one query, short enough that the stale cell size
+// is only briefly live. See scheduleCellSizeRequery.
+const CELL_SIZE_REQUERY_DEBOUNCE_MS = 150;
 
 // Dev-only render guard. When enabled, each component's rendered lines are
 // checked against `width` *at the component boundary*, throwing an error that
@@ -582,6 +609,10 @@ export class TUI extends Container {
 	private maxLinesRendered = 0; // Track terminal's working area (max lines ever rendered)
 	private previousViewportTop = 0; // Track previous viewport top for resize-aware cursor moves
 	private fullRedrawCount = 0;
+	// True once CSI 16 t answered with a real cell size. Makes the derived CSI 14 t
+	// fallback yield, whichever order the two replies arrive in.
+	private cellSizeExact = false;
+	private cellSizeRequeryTimer: NodeJS.Timeout | undefined;
 	private stopped = false;
 	private renderFault: RenderFault | null = null;
 	private renderFaultClearTimer: NodeJS.Timeout | undefined;
@@ -855,6 +886,12 @@ export class TUI extends Container {
 				// Termux toggles height for the soft keyboard and is handled differentially
 				// below, so leave its path untouched.
 				if (!isTermuxSession()) this.previousWidth = -1;
+				// A resize can BE a font-size change (Ctrl+scroll, Ctrl+±, a profile
+				// switch): same window, different cell, new row/column count. The cell
+				// size recorded at startup is then stale while still flagged as
+				// measured, and everything that converts pixels into rows — the sixel
+				// pets — sizes itself against a cell that no longer exists. Re-ask.
+				this.scheduleCellSizeRequery();
 				this.requestRender();
 			},
 		);
@@ -873,6 +910,28 @@ export class TUI extends Container {
 		};
 	}
 
+	/**
+	 * Re-ask the terminal for its cell size after a resize, debounced so dragging a
+	 * border coalesces into a single query instead of one per SIGWINCH.
+	 *
+	 * The reply is handled by the same consumers as the startup query, so a font
+	 * change simply overwrites the recorded cell. Note the CSI 14 t fallback DERIVES
+	 * the cell from the current row/column count — one more reason to let the resize
+	 * settle first, since a mid-drag reply would divide by geometry already stale.
+	 *
+	 * Unref'd: a pending re-query must never hold the process open.
+	 */
+	private scheduleCellSizeRequery(): void {
+		if (this.stopped) return;
+		if (this.cellSizeRequeryTimer) clearTimeout(this.cellSizeRequeryTimer);
+		this.cellSizeRequeryTimer = setTimeout(() => {
+			this.cellSizeRequeryTimer = undefined;
+			if (this.stopped) return;
+			this.queryCellSize();
+		}, CELL_SIZE_REQUERY_DEBOUNCE_MS);
+		this.cellSizeRequeryTimer.unref?.();
+	}
+
 	private queryCellSize(): void {
 		// Cell size is used for both image rendering AND mapping the pet sixel to a
 		// cell footprint, so query it whenever images OR sixel are (possibly) live.
@@ -882,6 +941,13 @@ export class TUI extends Container {
 		// Query terminal for cell size in pixels: CSI 16 t
 		// Response format: CSI 6 ; height ; width t
 		this.terminal.write("\x1b[16t");
+		// Fallback for terminals that answer window-size but not cell-size (Windows
+		// Terminal among them): CSI 14 t reports the text area in pixels, which
+		// divided by the reported rows/columns yields the cell. Without either
+		// answer the pets fall back to cells — a guessed cell size cannot be
+		// converted into rows safely (see areCellDimensionsMeasured).
+		// Response format: CSI 4 ; height ; width t
+		this.terminal.write("\x1b[14t");
 	}
 
 	/**
@@ -918,6 +984,10 @@ export class TUI extends Container {
 			this.renderFaultClearTimer = undefined;
 		}
 		this.clearMouseIdleTimer();
+		if (this.cellSizeRequeryTimer) {
+			clearTimeout(this.cellSizeRequeryTimer);
+			this.cellSizeRequeryTimer = undefined;
+		}
 		// Move cursor to the end of the content to prevent overwriting/artifacts on exit.
 		// Guard the reposition writes: a synchronous EPIPE on a half-dead pipe here must
 		// not skip the cursor/raw-mode restoration below.
@@ -1142,6 +1212,11 @@ export class TUI extends Container {
 			return;
 		}
 
+		// Same, for the window-pixel-size fallback the cell size is derived from.
+		if (this.consumeWindowPixelSizeResponse(data)) {
+			return;
+		}
+
 		// Consume the DA1 (device attributes) sixel probe response.
 		if (this.consumeDeviceAttributesResponse(data)) {
 			return;
@@ -1344,8 +1419,56 @@ export class TUI extends Container {
 			return true;
 		}
 
+		this.cellSizeExact = true;
 		setCellDimensions({ widthPx, heightPx });
 		// Invalidate all components so images re-render with correct dimensions.
+		this.invalidate();
+		this.requestRender();
+		return true;
+	}
+
+	/**
+	 * Parse a CSI 14 t reply (text area size in pixels) and DERIVE the cell size
+	 * from it, for terminals that report window geometry but not cell geometry.
+	 * Yields to an exact CSI 16 t answer whenever one arrives — the derived value
+	 * is a division and inherits any rounding the terminal applies to its own
+	 * padding, so it is only ever a fallback.
+	 *
+	 * Returns `true` only when `data` really was that reply, so unrelated input
+	 * falls through to the normal dispatch untouched.
+	 */
+	private consumeWindowPixelSizeResponse(data: string): boolean {
+		// Response format: ESC [ 4 ; height ; width t
+		const match = data.match(/^\x1b\[4;(\d+);(\d+)t$/);
+		if (!match) {
+			return false;
+		}
+		if (this.cellSizeExact) return true;
+
+		const areaHeightPx = parseInt(match[1], 10);
+		const areaWidthPx = parseInt(match[2], 10);
+		const rows = this.terminal.rows;
+		const columns = this.terminal.columns;
+		if (areaHeightPx <= 0 || areaWidthPx <= 0 || rows <= 0 || columns <= 0) {
+			return true;
+		}
+		const heightPx = Math.floor(areaHeightPx / rows);
+		const widthPx = Math.floor(areaWidthPx / columns);
+		// A degenerate division (1×1 "cells" from a terminal reporting characters
+		// instead of pixels) would make every pixel→row conversion nonsense. Keep
+		// the built-in guess — and keep it flagged as unmeasured — instead.
+		if (heightPx < MIN_PLAUSIBLE_CELL_HEIGHT_PX || widthPx < MIN_PLAUSIBLE_CELL_WIDTH_PX) {
+			return true;
+		}
+		if (heightPx > MAX_PLAUSIBLE_CELL_HEIGHT_PX || widthPx > MAX_PLAUSIBLE_CELL_WIDTH_PX) {
+			return true;
+		}
+		const ratio = widthPx / heightPx;
+		if (ratio < MIN_PLAUSIBLE_CELL_RATIO || ratio > MAX_PLAUSIBLE_CELL_RATIO) {
+			return true;
+		}
+
+		setCellDimensions({ widthPx, heightPx });
 		this.invalidate();
 		this.requestRender();
 		return true;
@@ -2019,6 +2142,40 @@ export class TUI extends Container {
 		this.renderFaultClearTimer.unref?.();
 	}
 
+	/**
+	 * Hard invariant: the LAST line of a frame must never carry a sixel.
+	 *
+	 * A sixel line is opaque to this renderer — `isImageLine` exempts it from
+	 * measuring and clamping, and the row accounting simply trusts that whatever
+	 * the component emitted lands the cursor back where it started. That trust
+	 * survives one thing being true: the drawing stays inside rows the frame
+	 * already owns. Bottom-most row, no row below to absorb a pixel of overflow,
+	 * and the terminal scrolls to make space — silently, since a scroll is a
+	 * terminal-side event this renderer cannot observe. From then on every
+	 * `previousLines` index is off by the number of scrolls, and each repaint of a
+	 * live line (a spinner, an elapsed clock) prints one row lower than the last:
+	 * the stacked-"Thinking…" corruption.
+	 *
+	 * Sixel only, not every image line: kitty/iTerm2 placements are addressed in
+	 * cells and tracked explicitly (ids, deletes, `expandLastChangedForKittyImages`),
+	 * so the bottom row is a perfectly good place for them. Only the pixel-addressed
+	 * protocol can overshoot its rows — see {@link isSixelLine}.
+	 *
+	 * Components are expected to keep a spare row under their sprite (see the pets'
+	 * `*_SIXEL_ROWS` vs. drawn height). This is the backstop for the one that does
+	 * not: drop the drawing rather than corrupt the frame. Returns the SAME array
+	 * in the overwhelmingly common case — the copy only happens when the guard
+	 * actually fires, so `lines` (possibly a Container's memoized flatten cache) is
+	 * never mutated in place.
+	 */
+	private guardTrailingImageLine(lines: string[]): string[] {
+		const last = lines.length - 1;
+		if (last < 0 || !isSixelLine(lines[last])) return lines;
+		const guarded = lines.slice();
+		guarded[last] = "";
+		return guarded;
+	}
+
 	private renderFaultLines(width: number, now: number): string[] {
 		if (this.renderFault === null) return [];
 		if (this.renderFault.expiresAt <= now) {
@@ -2107,6 +2264,8 @@ export class TUI extends Container {
 		if (this.overlayStack.length > 0) {
 			newLines = this.compositeOverlays(newLines, width, height);
 		}
+
+		newLines = this.guardTrailingImageLine(newLines);
 
 		// Extract cursor position before applying line resets (marker must be found
 		// first). The marker strip rides along out-of-band as (row, replacement) and

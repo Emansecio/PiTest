@@ -48,6 +48,16 @@ describe("substituteTarget", () => {
 	it("JSON-stringifies object targets", () => {
 		expect(substituteTarget("Review {{target}}", { path: "a.ts" })).toBe('Review {"path":"a.ts"}');
 	});
+
+	it("treats `$` patterns in the target as literal text", () => {
+		// Regression: with a replacement STRING, `String.replace` expands `$&`,
+		// "$`", `$'` and `$$` — so a scout target carrying any of them rewrote
+		// itself and the reviewer was pointed at something that never existed.
+		expect(substituteTarget("Review {{target}} now", "src/a$&b.ts")).toBe("Review src/a$&b.ts now");
+		expect(substituteTarget("Review {{target}} now", "cost is $'")).toBe("Review cost is $' now");
+		expect(substituteTarget("Review {{target}} now", "a$`b")).toBe("Review a$`b now");
+		expect(substituteTarget("Review {{target}} now", "a$$b")).toBe("Review a$$b now");
+	});
 });
 
 describe("runFanout", () => {

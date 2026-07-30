@@ -61,15 +61,23 @@ export class Text implements Component {
 		// Replace tabs with 3 spaces
 		const normalizedText = this.text.replace(/\t/g, "   ");
 
+		// Padding comes out of the width budget, so it cannot exceed it. The old
+		// `Math.max(1, width - paddingX*2)` floored the CONTENT at one column but
+		// still added both margins unconditionally, emitting `1 + 2*paddingX`
+		// columns — wider than `width` on a very narrow terminal, which trips the
+		// renderer's width assertion (and is only survivable because
+		// `TUI.clampLineToWidth` truncates it downstream).
+		const pad = Math.max(0, Math.min(this.paddingX, Math.floor((width - 1) / 2)));
+
 		// Calculate content width (subtract left/right margins)
-		const contentWidth = Math.max(1, width - this.paddingX * 2);
+		const contentWidth = Math.max(1, width - pad * 2);
 
 		// Wrap text (this preserves ANSI codes but does NOT pad)
 		const wrappedLines = wrapTextWithAnsi(normalizedText, contentWidth);
 
 		// Add margins and background to each line
-		const leftMargin = " ".repeat(this.paddingX);
-		const rightMargin = " ".repeat(this.paddingX);
+		const leftMargin = " ".repeat(pad);
+		const rightMargin = " ".repeat(pad);
 		const contentLines: string[] = [];
 
 		for (const line of wrappedLines) {

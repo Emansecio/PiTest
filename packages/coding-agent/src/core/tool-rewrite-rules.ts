@@ -538,28 +538,69 @@ const tier2Rules: ToolRewriteRule[] = [
 	},
 ];
 
+/**
+ * Title of one entry in a batched todo call, accepting both spellings: Pit's
+ * `subject` and Claude Code's TodoWrite `content`. Returns undefined when the
+ * entry carries neither, which is how the batch rule declines to reshape a call
+ * it cannot faithfully translate.
+ */
+function todoBatchTitle(entry: unknown): string | undefined {
+	if (!entry || typeof entry !== "object") return undefined;
+	const e = entry as Record<string, unknown>;
+	for (const key of ["subject", "content"]) {
+		const value = e[key];
+		if (typeof value === "string" && value.trim() !== "") return value;
+	}
+	return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Tier 3 — pre-flight blocks
 // ---------------------------------------------------------------------------
 
 const tier3Rules: ToolRewriteRule[] = [
 	{
-		// todo({ todos: [...] }) / todo({ items: [...] }) — the Claude Code
-		// TodoWrite batch shape against a single-action schema. The biggest
-		// fingerprint in the corpus (8x+ over 4 sessions): the validation error
-		// does not teach the correct format, so the model re-guesses. Block with
-		// a copy-pasteable one-item-per-call recipe instead of auto-expanding
-		// (expansion would fabricate ids/ordering the model never asked for).
-		id: "todo-batch-not-supported",
+		// todo({ todos: [...] }) — the Claude Code TodoWrite batch shape, the biggest
+		// fingerprint in the corpus (8x+ over 4 sessions). This used to be a hard
+		// block that sent the model back to one call per item; the todo tool now HAS
+		// a whole-list action, so the reach for a batch is the RIGHT instinct and gets
+		// absorbed onto `set` instead of refused. The old objection to expanding
+		// ("fabricates ids/ordering") no longer applies: `set` replaces the list, ids
+		// are optional, and the order is whatever the caller sent.
+		//
+		// Only fires when the call still needs normalising — an already-correct
+		// todo({ action: "set", items: [...] }) does not match. Entries must all carry
+		// a usable title, otherwise the call falls through to the tool's own
+		// index-naming error rather than being silently reshaped.
+		id: "todo-batch-to-set",
 		appliesTo: "todo",
 		matcher: (c) => {
 			const args = c.arguments as Record<string, unknown>;
-			return Array.isArray(args.todos) || Array.isArray(args.items);
+			const batch = Array.isArray(args.todos) ? args.todos : Array.isArray(args.items) ? args.items : undefined;
+			if (!batch) return false;
+			const needsNormalising = Array.isArray(args.todos) || args.action !== "set";
+			return needsNormalising && batch.every((entry) => todoBatchTitle(entry) !== undefined);
 		},
 		action: {
-			tier: "block",
-			reason: () =>
-				'This todo tool takes ONE item per call, not a batch. For each item call: todo({ action: "create", subject: "<title>", activeForm: "<doing...>" }) — then todo({ action: "update", id: <id>, status: "in_progress"|"completed" }) to progress it. Call todo({ action: "list" }) to see current ids.',
+			tier: "auto",
+			rewrite: (c) => {
+				const args = { ...(c.arguments as Record<string, unknown>) };
+				const batch = (Array.isArray(args.todos) ? args.todos : (args.items as unknown[])) ?? [];
+				delete args.todos;
+				args.action = "set";
+				args.items = batch.map((entry) => {
+					const e = (entry ?? {}) as Record<string, unknown>;
+					const item: Record<string, unknown> = { subject: todoBatchTitle(e) };
+					if (typeof e.id === "number" && Number.isFinite(e.id)) item.id = e.id;
+					if (typeof e.description === "string") item.description = e.description;
+					if (typeof e.activeForm === "string") item.activeForm = e.activeForm;
+					if (e.status === "pending" || e.status === "in_progress" || e.status === "completed") {
+						item.status = e.status;
+					}
+					return item;
+				});
+				return { ...c, arguments: args };
+			},
 		},
 	},
 	{

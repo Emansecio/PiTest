@@ -8,8 +8,9 @@
  * recent sessions (`↳ title (age)`). No horizontal rule, no "Welcome to Pit".
  *
  * Motion (unless {@link StartupScreenData.reducedMotion}): the block reveals one
- * unit at a time (~110 ms apart) and the pet blinks once about a second after
- * the reveal settles. `tick(now)` advances that state from the shared TUI
+ * unit at a time (~110 ms apart), the pet blinks once about a second after the
+ * reveal settles, then gives a single small glance DOWN toward the editor it is
+ * about to perch on. `tick(now)` advances that state from the shared TUI
  * ticker; `isSettled()` lets the host drop the animation subscription. A short
  * window (`rows < COMPACT_ROWS`) drops the big pet and top-anchors a compact
  * block.
@@ -24,10 +25,13 @@
  */
 
 import {
+	areCellDimensionsMeasured,
 	type Component,
+	fitSixelHeightPx,
 	getCellDimensions,
 	getSixelSupport,
 	type PetColors,
+	type PetParams,
 	renderPetCells,
 	renderPetSixel,
 	truncateToWidth,
@@ -74,6 +78,13 @@ const MAX_COL_WIDTH = 96;
 const COMPACT_ROWS = 20;
 /** Sixel pet footprint (rows); width derives from the 2:1 canvas aspect. */
 const PET_SIXEL_ROWS = 6;
+/**
+ * Rows the sprite actually draws into. The reservation keeps one spare row under
+ * it so band rounding or a slightly-off cell size overflows into blank space
+ * instead of a row the frame does not own — the same slack the composer perch
+ * depends on (see pet-companion.ts's PET_PERCH_SIXEL_ROWS for the full why).
+ */
+const PET_SIXEL_DRAW_ROWS = PET_SIXEL_ROWS - 1;
 const PET_ASPECT = 2;
 /** Cell-fallback pet footprint. */
 const PET_CELL_COLS = 30;
@@ -86,6 +97,15 @@ const BLINK_DELAY_AFTER_REVEAL_MS = 700;
 const BLINK_DURATION_MS = 130;
 const BLINK_K_OPEN = 1;
 const BLINK_K_CLOSED = 0.08;
+/**
+ * The settle glance: a beat after the blink reopens, the eyes sweep down toward
+ * the editor (positive `eyeShiftY` = down, same convention as PetMood's
+ * `watching`) and drift back. One shot, sine-eased, then the screen settles and
+ * the host unsubscribes — the hero stays static, going quiet on its own.
+ */
+const GAZE_DELAY_AFTER_BLINK_MS = 160;
+const GAZE_DURATION_MS = 520;
+const GAZE_PEAK_Y = 0.05;
 
 function centerLine(line: string, width: number): string {
 	const w = visibleWidth(line);
@@ -100,6 +120,9 @@ export class StartupScreen implements Component {
 	private visibleUnits: number;
 	private blinkK = BLINK_K_OPEN;
 	private blinkDone: boolean;
+	// The one-shot down-glance toward the editor, played after the blink.
+	private settleGazeY = 0;
+	private gazeDone: boolean;
 	// Layout plan (width-independent), recomputed on setData().
 	private showPet: boolean;
 	private unitCount: number;
@@ -110,6 +133,7 @@ export class StartupScreen implements Component {
 		this.showPet = plan.showPet;
 		this.unitCount = plan.unitCount;
 		this.blinkDone = data.reducedMotion;
+		this.gazeDone = data.reducedMotion;
 		this.visibleUnits = data.reducedMotion ? this.unitCount : 1;
 	}
 
@@ -132,6 +156,7 @@ export class StartupScreen implements Component {
 		if (data.reducedMotion) {
 			this.visibleUnits = this.unitCount;
 			this.blinkDone = true;
+			this.gazeDone = true;
 		} else if (revealWasComplete) {
 			// Late-arriving sessions after the reveal settled: show them at once
 			// rather than re-animating the whole block.
@@ -141,9 +166,9 @@ export class StartupScreen implements Component {
 		}
 	}
 
-	/** True once the reveal is complete and the single blink has fired. */
+	/** True once the reveal, the single blink and the settle glance have all played. */
 	isSettled(): boolean {
-		return this.visibleUnits >= this.unitCount && this.blinkDone;
+		return this.visibleUnits >= this.unitCount && this.blinkDone && this.gazeDone;
 	}
 
 	/**
@@ -170,9 +195,20 @@ export class StartupScreen implements Component {
 			}
 		}
 
-		const dirty = newVisible !== this.visibleUnits || newBlink !== this.blinkK;
+		let newGaze = 0;
+		if (this.blinkDone && !this.gazeDone) {
+			const p = (elapsed - (blinkStart + BLINK_DURATION_MS + GAZE_DELAY_AFTER_BLINK_MS)) / GAZE_DURATION_MS;
+			if (p >= 1) {
+				this.gazeDone = true;
+			} else if (p > 0) {
+				newGaze = Math.sin(p * Math.PI) * GAZE_PEAK_Y;
+			}
+		}
+
+		const dirty = newVisible !== this.visibleUnits || newBlink !== this.blinkK || newGaze !== this.settleGazeY;
 		this.visibleUnits = newVisible;
 		this.blinkK = newBlink;
+		this.settleGazeY = newGaze;
 		return dirty;
 	}
 
@@ -266,55 +302,78 @@ export class StartupScreen implements Component {
 	}
 
 	/**
-	 * Build the pet block (already left-padded to center). Sixel when supported,
-	 * half-block cells otherwise. Returns a fixed number of lines so the reveal
-	 * below it stays put.
+	 * Build the pet block (already left-padded to center). Sixel when supported
+	 * AND the terminal has reported its cell size, half-block cells otherwise.
+	 * Returns a fixed number of lines so the reveal below it stays put.
+	 *
+	 * The cell-size condition is what keeps the sprite inside its reservation: its
+	 * height is authored in rows and emitted in pixels, so an unmeasured cell turns
+	 * that conversion into a guess that can draw over rows this block does not own.
 	 */
 	private buildPetUnit(width: number): string[] {
 		const colors = this.data.petColors;
-		const blinkK = this.blinkK;
-		if (getSixelSupport()) {
-			return this.buildPetSixelLines(width, colors, blinkK);
+		const params: PetParams = { blinkK: this.blinkK, eyeShiftY: this.settleGazeY };
+		if (getSixelSupport() && areCellDimensionsMeasured()) {
+			return this.buildPetSixelLines(width, colors, params);
 		}
-		return this.buildPetCellLines(width, colors, blinkK);
+		return this.buildPetCellLines(width, colors, params);
 	}
 
-	private buildPetCellLines(width: number, colors: PetColors, blinkK: number): string[] {
+	private buildPetCellLines(width: number, colors: PetColors, params: PetParams): string[] {
 		const cols = Math.min(width, PET_CELL_COLS);
-		const cells = renderPetCells(cols, PET_CELL_ROWS, { blinkK, colors });
+		const cells = renderPetCells(cols, PET_CELL_ROWS, { ...params, colors });
 		const pad = " ".repeat(Math.max(0, Math.floor((width - cols) / 2)));
 		return cells.map((line) => pad + line);
 	}
 
 	/**
-	 * Sixel pet as `PET_SIXEL_ROWS` lines: `PET_SIXEL_ROWS - 1` blank rows plus a
-	 * final line carrying the image. That last line, when the renderer rewrites it
-	 * (blink), self-clears ALL reserved rows before redrawing:
+	 * Sixel pet as `PET_CELL_ROWS` lines — the SAME height the cell fallback
+	 * renders, so the unit never changes size when the sprite flips modes
+	 * mid-session (the cell-size answer lands asynchronously, usually right as
+	 * the welcome paints; an 8→6 line swap re-anchored the whole reveal). The
+	 * drawing keeps its smaller `PET_SIXEL_ROWS` reservation bottom-anchored:
+	 * `PET_CELL_ROWS - 1` blank rows plus a final line carrying the image. That
+	 * last line, when the renderer rewrites it (blink), self-clears ALL reserved
+	 * rows before redrawing:
 	 *
 	 *   ESC 7            save cursor at the bottom row (its own row)
-	 *   ESC[2K           clear the bottom row
-	 *   (ESC[1A ESC[2K)× walk up clearing every reserved row → cursor at top row
+	 *   per row:         ESC[2K + paint petCols blanks + CUB back (see below)
+	 *   (ESC[1A …)×      walk up clearing every reserved row → cursor at top row
 	 *   <sixel>          draw the transparent image downward from the top row
 	 *   ESC 8            restore to the bottom row
 	 *
 	 * The self-clear matters because a transparent sixel does not erase pixels it
 	 * does not touch; without clearing, a shrinking-eye blink would leave ghosts in
 	 * the rows above (the differential renderer only clears the one line it
-	 * rewrites). DECSC/DECRC also pin the cursor to the bottom row so the
-	 * renderer's row accounting stays exact regardless of sixel scrolling mode.
+	 * rewrites). And EL alone does NOT clear: xterm keeps graphics displayed over
+	 * an `\x1b[2K`-erased line (only ED, whole-line ops, or WRITTEN text erase
+	 * them), and with P2=1 the next frame's untouched pixels keep the PREVIOUS
+	 * frame's silhouette — the poses would accumulate. Painting blank text across
+	 * the sprite's column span erases the underlying pixels on xterm, and on
+	 * cell-attached terminals (foot, WezTerm) the written blanks replace the
+	 * image cells outright. DECSC/DECRC also pin the cursor to the bottom row so
+	 * the renderer's row accounting stays exact regardless of sixel scrolling
+	 * mode — which holds as long as the drawing stays inside the reservation,
+	 * hence the spare row {@link PET_SIXEL_DRAW_ROWS} leaves at the bottom, and
+	 * the band quantization {@link fitSixelHeightPx} applies so the last band is
+	 * never a partial one a terminal would round up into the row below.
 	 */
-	private buildPetSixelLines(width: number, colors: PetColors, blinkK: number): string[] {
+	private buildPetSixelLines(width: number, colors: PetColors, params: PetParams): string[] {
 		const cell = getCellDimensions();
-		const heightPx = PET_SIXEL_ROWS * cell.heightPx;
+		const heightPx = fitSixelHeightPx(PET_SIXEL_DRAW_ROWS * cell.heightPx);
 		const widthPx = Math.round(heightPx * PET_ASPECT);
 		const petCols = Math.ceil(widthPx / Math.max(1, cell.widthPx));
 		const leftPad = Math.max(0, Math.floor((width - petCols) / 2));
-		const sixel = renderPetSixel(widthPx, heightPx, { blinkK, colors });
+		const sixel = renderPetSixel(widthPx, heightPx, { ...params, colors });
 
 		const lines: string[] = [];
-		for (let i = 0; i < PET_SIXEL_ROWS - 1; i++) lines.push("");
-		const clearUp = "\x1b[1A\x1b[2K".repeat(PET_SIXEL_ROWS - 1);
-		lines.push(`${" ".repeat(leftPad)}\x1b7\x1b[2K${clearUp}${sixel}\x1b8`);
+		// Leading blanks pad the unit out to PET_CELL_ROWS (the cell fallback's
+		// height — the mode-switch invariant), with the sprite's own reservation
+		// anchored at the bottom where it always was.
+		for (let i = 0; i < PET_CELL_ROWS - 1; i++) lines.push("");
+		const eraseRow = `\x1b[2K${" ".repeat(petCols)}\x1b[${petCols}D`;
+		const clearUp = `${eraseRow}${`\x1b[1A${eraseRow}`.repeat(PET_SIXEL_ROWS - 1)}`;
+		lines.push(`${" ".repeat(leftPad)}\x1b7${clearUp}${sixel}\x1b8`);
 		return lines;
 	}
 }

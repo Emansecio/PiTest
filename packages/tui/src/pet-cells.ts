@@ -12,7 +12,7 @@
  * rectangle around itself.
  */
 
-import { type PetColors, type PetParams, petCoverage, type Rgb, shadePet } from "./pet-geometry.ts";
+import { type PetColors, type PetParams, type Rgb, shadePetWithCoverage } from "./pet-geometry.ts";
 
 export interface RenderPetCellsOptions extends PetParams {
 	colors: PetColors;
@@ -52,12 +52,13 @@ function samplePixel(
 		for (let sx = 0; sx < ss; sx++) {
 			const x = ((i + (sx + 0.5) / ss) / W) * 2 - 1;
 			const y = (j + (sy + 0.5) / ss) / H - 0.5;
-			const c = shadePet(x, y, params, colors);
-			r += c[0];
-			g += c[1];
-			b += c[2];
-			const cov = petCoverage(x, y, params);
-			alpha += Math.max(cov.stroke, cov.eye);
+			// One evaluation, both results: `shadePet` + `petCoverage` ran the same
+			// SDFs twice per sample.
+			const { color, stroke, eye } = shadePetWithCoverage(x, y, params, colors);
+			r += color[0];
+			g += color[1];
+			b += color[2];
+			alpha += Math.max(stroke, eye);
 		}
 	}
 	return { alpha: alpha / n, color: [r / n, g / n, b / n] };
@@ -73,7 +74,10 @@ export function renderPetCells(cols: number, rows: number, options: RenderPetCel
 	const rowCount = Math.max(1, Math.floor(rows));
 	const H = rowCount * 2;
 	const ss = Math.max(1, Math.floor(options.supersample ?? 3));
-	const params: PetParams = { blinkK: options.blinkK, eyeShift: options.eyeShift };
+	// The options object IS a superset of PetParams — pass it through rather than
+	// re-listing fields, so a new animation channel never silently gets dropped
+	// here while the sixel path animates it.
+	const params: PetParams = options;
 	const colors = options.colors;
 
 	const lines: string[] = [];

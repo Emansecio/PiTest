@@ -57,7 +57,21 @@ export const CACHE_KEEPALIVE_LONG_INTERVAL_MS = 3_300_000;
  */
 export const CACHE_KEEPALIVE_LONG_MAX_PINGS = 2;
 
-/** Minimum wire prefix (system prompt + tools + messages) worth keeping alive. */
+/**
+ * Floor on the wire prefix (system prompt + tools + messages) worth keeping alive.
+ *
+ * This is a triviality guard, NOT a "big conversation" gate, and the distinction
+ * matters because the real static prefix already clears it on its own: `npm run
+ * bench:prompt-size` reports ~16.7k wire tokens before a single turn exists. So
+ * in any real session this passes immediately — which is the intended economics,
+ * not an oversight. A ping costs one cache READ (~0.1× input) and saves a cache
+ * WRITE (1.25× short / 2.0× long) of that whole prefix on the next turn, so it
+ * pays for itself well below the static prefix size; raising the floor to
+ * "discriminate" would just decline a trade that is already favourable.
+ *
+ * What it still excludes: hosts with a stub prompt and no tools — headless
+ * probes, tests, embedded uses — where there is no prefix worth a request.
+ */
 export const CACHE_KEEPALIVE_MIN_WIRE_TOKENS = 15_000;
 
 /**

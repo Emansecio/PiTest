@@ -163,3 +163,65 @@ describe("TodoManager CRUD", () => {
 		expect(fresh.id).toBe(1);
 	});
 });
+
+describe("TodoManager.set (whole-list rewrite)", () => {
+	it("carries known ids forward, assigns new ones, and drops omitted todos", () => {
+		const mgr = new TodoManager();
+		mgr.create({ subject: "First" }); // #1
+		mgr.create({ subject: "Second" }); // #2
+
+		const out = mgr.set([
+			{ id: 2, subject: "Second", status: "completed" },
+			{ subject: "Third", status: "in_progress", activeForm: "Doing third" },
+		]);
+
+		expect(out.map((t) => [t.id, t.subject, t.status])).toEqual([
+			[2, "Second", "completed"],
+			[3, "Third", "in_progress"],
+		]);
+		// #1 was omitted from the rewrite, so it is gone.
+		expect(mgr.get(1)).toBeUndefined();
+		expect(mgr.list()).toHaveLength(2);
+	});
+
+	it("defaults status to pending and clears the list on an empty rewrite", () => {
+		const mgr = new TodoManager();
+		expect(mgr.set([{ subject: "Only" }])[0]?.status).toBe("pending");
+		expect(mgr.set([])).toEqual([]);
+		expect(mgr.isEmpty()).toBe(true);
+	});
+
+	it("never collapses two entries that cite the same id", () => {
+		const mgr = new TodoManager();
+		mgr.create({ subject: "First" }); // #1
+		const out = mgr.set([
+			{ id: 1, subject: "First" },
+			{ id: 1, subject: "Accidental duplicate" },
+		]);
+		expect(out).toHaveLength(2);
+		expect(new Set(out.map((t) => t.id)).size).toBe(2);
+	});
+
+	it("ignores an unknown id instead of resurrecting it", () => {
+		const mgr = new TodoManager();
+		const out = mgr.set([{ id: 99, subject: "Ghost" }]);
+		expect(out[0]?.id).not.toBe(99);
+		expect(mgr.get(99)).toBeUndefined();
+	});
+});
+
+describe("TodoManager.hasOpenWork", () => {
+	it("is true for an all-pending list — the case hasInProgress misses", () => {
+		const mgr = new TodoManager();
+		mgr.create({ subject: "Pending only" });
+		expect(mgr.hasInProgress()).toBe(false);
+		expect(mgr.hasOpenWork()).toBe(true);
+	});
+
+	it("is false once every todo is completed", () => {
+		const mgr = new TodoManager();
+		const a = mgr.create({ subject: "Done soon" });
+		mgr.update({ id: a.id, status: "completed" });
+		expect(mgr.hasOpenWork()).toBe(false);
+	});
+});

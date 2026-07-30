@@ -716,7 +716,14 @@ async function runSpawned(
 				// Lifecycle telemetry is best-effort; never fail the run because a TUI
 				// or event sink threw while consuming progress.
 			}
-			if (turnCount >= maxTurns) {
+			// Turn cap, but only for a run that still intends to continue. This
+			// handler fires on EVERY turn_end — including the terminal one, which has
+			// already produced the final answer. Aborting there threw away finished
+			// work: the run was recorded `cancelled`, the parent got an error plus a
+			// resume hint for a task that was done, and `max_turns: 1` could never
+			// succeed at all. A turn that called no tool ends the run on its own, so
+			// there is nothing left to cap.
+			if (turnCount >= maxTurns && lastTool !== undefined) {
 				controller.abort(new Error(`aborted: turn cap (${maxTurns}) reached`));
 			}
 		}

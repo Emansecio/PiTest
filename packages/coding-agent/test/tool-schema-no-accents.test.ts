@@ -132,7 +132,7 @@ describe("string-literal schema fields use Type.Enum (compact, not anyOf)", () =
 				"request",
 			],
 		},
-		{ tool: "todo", field: "action", values: ["create", "update", "list", "get", "delete", "clear"] },
+		{ tool: "todo", field: "action", values: ["set", "create", "update", "list", "get", "delete", "clear"] },
 		{ tool: "todo", field: "status", values: ["pending", "in_progress", "completed"] },
 		{ tool: "web_search", field: "provider", values: ["auto", "brave", "tavily", "jina", "perplexity", "exa"] },
 		{ tool: "eval", field: "lang", values: ["python", "javascript"] },

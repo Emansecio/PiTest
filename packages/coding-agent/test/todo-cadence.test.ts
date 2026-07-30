@@ -122,27 +122,27 @@ describe("classifyTodoTurn", () => {
 describe("TodoCadenceTracker", () => {
 	it("increments while work is open and the todo is untouched", () => {
 		const t = new TodoCadenceTracker();
-		expect(t.observe({ hasInProgress: true, touchedTodo: false })).toBe(1);
-		expect(t.observe({ hasInProgress: true, touchedTodo: false })).toBe(2);
+		expect(t.observe({ hasOpenWork: true, touchedTodo: false })).toBe(1);
+		expect(t.observe({ hasOpenWork: true, touchedTodo: false })).toBe(2);
 		expect(t.staleTurns).toBe(2);
 	});
 
 	it("resets when the todo is touched", () => {
 		const t = new TodoCadenceTracker();
-		t.observe({ hasInProgress: true, touchedTodo: false });
-		t.observe({ hasInProgress: true, touchedTodo: false });
-		expect(t.observe({ hasInProgress: true, touchedTodo: true })).toBe(0);
+		t.observe({ hasOpenWork: true, touchedTodo: false });
+		t.observe({ hasOpenWork: true, touchedTodo: false });
+		expect(t.observe({ hasOpenWork: true, touchedTodo: true })).toBe(0);
 	});
 
 	it("resets when there is no open work", () => {
 		const t = new TodoCadenceTracker();
-		t.observe({ hasInProgress: true, touchedTodo: false });
-		expect(t.observe({ hasInProgress: false, touchedTodo: false })).toBe(0);
+		t.observe({ hasOpenWork: true, touchedTodo: false });
+		expect(t.observe({ hasOpenWork: false, touchedTodo: false })).toBe(0);
 	});
 
 	it("reset() zeroes the streak", () => {
 		const t = new TodoCadenceTracker();
-		t.observe({ hasInProgress: true, touchedTodo: false });
+		t.observe({ hasOpenWork: true, touchedTodo: false });
 		t.reset();
 		expect(t.staleTurns).toBe(0);
 	});
@@ -227,5 +227,60 @@ describe("buildTodoCadenceReminder", () => {
 		const out = buildTodoCadenceReminder({ items, staleItem: items[1], reason: "stale" });
 		expect(out.toLowerCase()).not.toContain("auto");
 		expect(out.toLowerCase()).not.toContain("automatically");
+	});
+});
+
+describe("classifyTodoTurn — shell writes count as mutations", () => {
+	function bashTurn(command: string): AssistantMessage {
+		const msg = assistantWithToolCalls([{ id: "a", name: "bash" }]);
+		(msg.content[0] as { arguments: unknown }).arguments = { command };
+		return msg;
+	}
+
+	it.each([
+		["sed -i 's/a/b/' src/x.ts", true],
+		["cat > src/x.ts <<'EOF'\nbody\nEOF", true],
+		["echo hi >> notes.md", true],
+		["mkdir -p build && touch build/.keep", true],
+		["npm test 2>&1 | tail -5", false],
+		["ls -la > /dev/null", false],
+		["grep -rn 'todo' src | head", false],
+	])("%s -> mutated=%s", (command, expected) => {
+		expect(classifyTodoTurn(bashTurn(command), [result("a", false)]).mutated).toBe(expected);
+	});
+
+	it("does not count a failed shell write", () => {
+		expect(classifyTodoTurn(bashTurn("sed -i 's/a/b/' missing.ts"), [result("a", true)]).mutated).toBe(false);
+	});
+});
+
+describe("decideTodoCadenceReminder — gives up once ignored", () => {
+	const triggered = {
+		enabled: true,
+		threshold: 3,
+		staleTurns: 5,
+		mutatedWithoutTodo: false,
+		lastFiredAt: 0,
+		now: 100_000,
+		cooldownMs: 30_000,
+	};
+
+	it("reminds while the streak is below the cap", () => {
+		expect(decideTodoCadenceReminder({ ...triggered, ignoredStreak: 1 }).action).toBe("remind");
+	});
+
+	it("gives up at the cap instead of nagging every drifting turn", () => {
+		const out = decideTodoCadenceReminder({ ...triggered, ignoredStreak: 2 });
+		expect(out.action).toBe("give-up");
+		// A give-up must not stamp the cooldown: it did not spend a reminder.
+		expect(out.nextLastFiredAt).toBe(triggered.lastFiredAt);
+	});
+
+	it("honours an explicit maxIgnored", () => {
+		expect(decideTodoCadenceReminder({ ...triggered, ignoredStreak: 1, maxIgnored: 1 }).action).toBe("give-up");
+	});
+
+	it("stays silent when nothing triggered, however high the streak", () => {
+		expect(decideTodoCadenceReminder({ ...triggered, staleTurns: 0, ignoredStreak: 9 }).action).toBe("none");
 	});
 });

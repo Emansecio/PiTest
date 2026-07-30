@@ -477,9 +477,13 @@ describe("createBranchedSession", () => {
 			const newFile = session.createBranchedSession(id1);
 			expect(newFile).toBeDefined();
 
-			// The branched path has no assistant, so the file should not exist yet
-			// (deferred to _persist on first assistant, matching newSession() contract)
-			expect(existsSync(newFile!)).toBe(false);
+			// The branched path carries a user message, so the fork is durable at once
+			// (see isDurableEntry: a prompt is worth a file — the crash window used to
+			// stretch across the whole first turn). What this test actually guards is
+			// the de-duplication below, and an early write makes that the harder case:
+			// later entries must come from the async queue, never re-serialized from
+			// the entry list a second time.
+			expect(existsSync(newFile!)).toBe(true);
 
 			// Simulate extension adding entry before assistant (like preset on turn_start)
 			session.appendCustomEntry("preset-state", { name: "plan" });

@@ -129,7 +129,14 @@ describe("compactionLoaderLabel", () => {
 
 	test("the event rebinds Esc before painting the spinner", () => {
 		const effects = decideCompactionStart({ reason: "manual" }, { interruptKey: "esc" });
-		expect(kinds(effects)).toEqual(["terminal-progress", "bind-compaction-escape", "compaction-loader", "render"]);
+		expect(kinds(effects)).toEqual([
+			"terminal-progress",
+			"bind-compaction-escape",
+			"compaction-loader",
+			"pet-mood",
+			"render",
+		]);
+		expect(find(effects, "pet-mood")?.mood).toBe("digesting");
 	});
 });
 
@@ -193,32 +200,55 @@ describe("decideFusionMember / decideFusionStage", () => {
 });
 
 describe("subagent events", () => {
-	test("start is a muted status line", () => {
+	test("start is a sticky muted status line", () => {
 		expect(decideSubagentStart({ handle: "explorer" })).toEqual([
-			{ kind: "status", text: "◐ subagent 'explorer' started", tone: "muted" },
+			{
+				kind: "status",
+				text: "◐ Agent “explorer” started",
+				tone: "muted",
+				level: "sticky",
+				segments: [{ text: "◐ Agent " }, { text: "“explorer”", tone: "text" }, { text: " started" }],
+			},
 		]);
 	});
 
 	test("progress appends the last tool only when there is one", () => {
 		expect(decideSubagentProgress({ handle: "e", turn: 2, lastTool: "read" })[0]).toMatchObject({
-			text: "◐ subagent 'e' · turn 2 · read",
+			text: "◐ Agent “e” · turn 2 · read",
+			level: "sticky",
 		});
 		expect(decideSubagentProgress({ handle: "e", turn: 2 })[0]).toMatchObject({
-			text: "◐ subagent 'e' · turn 2",
+			text: "◐ Agent “e” · turn 2",
 		});
 	});
 
 	test("completion tones success vs failure and omits empty metadata", () => {
 		expect(decideSubagentComplete({ handle: "e", status: "done" })[0]).toEqual({
 			kind: "status",
-			text: "✓ subagent 'e' finished",
+			text: "✓ Agent “e” finished",
 			tone: "success",
+			level: "info",
+			segments: [{ text: "✓ Agent " }, { text: "“e”", tone: "text" }, { text: " finished" }],
 		});
-		expect(decideSubagentComplete({ handle: "e", status: "error", turns: 1 })[0]).toEqual({
-			kind: "status",
-			text: "✗ subagent 'e' failed · 1 turns",
+		expect(decideSubagentComplete({ handle: "e", status: "error", turns: 1 })[0]).toMatchObject({
+			// Singular counts do not pluralize.
+			text: "✗ Agent “e” failed · 1 turn",
 			tone: "warning",
 		});
+	});
+
+	test("the agent's name always renders in the primary text color", () => {
+		for (const effect of [
+			...decideSubagentStart({ handle: "e" }),
+			...decideSubagentProgress({ handle: "e", turn: 1 }),
+			...decideSubagentComplete({ handle: "e", status: "done" }),
+		]) {
+			if (effect.kind !== "status") continue;
+			const named = effect.segments?.find((s) => s.text === "“e”");
+			expect(named?.tone).toBe("text");
+			// The plain `text` stays the concatenation of the segments.
+			expect(effect.segments?.map((s) => s.text).join("")).toBe(effect.text);
+		}
 	});
 });
 
@@ -230,7 +260,8 @@ describe("auto retry", () => {
 			delayMs: 8000,
 			errorMessage: "429 rate limit exceeded",
 		});
-		expect(kinds(effects)).toEqual(["bind-retry-escape", "retry-loader", "render"]);
+		expect(kinds(effects)).toEqual(["bind-retry-escape", "retry-loader", "pet-mood", "render"]);
+		expect(find(effects, "pet-mood")?.mood).toBe("waiting");
 		const loader = find(effects, "retry-loader");
 		expect(loader?.reason).toBeTruthy();
 		expect(retryLoaderMessage(loader as never, 8, "esc")).toContain("Retrying (2/5) in 8s… (esc to cancel)");
@@ -245,8 +276,10 @@ describe("auto retry", () => {
 
 	test("a cancelled retry is a muted status, not sticky error red", () => {
 		const effects = decideAutoRetryEnd({ success: false, attempt: 2, cancelled: true });
-		expect(kinds(effects)).toEqual(["cleanup-retry-ui", "status", "render"]);
+		expect(kinds(effects)).toEqual(["cleanup-retry-ui", "pet-mood", "status", "render"]);
 		expect(find(effects, "status")).toEqual({ kind: "status", text: "Retry cancelled", tone: "dim" });
+		// The user called it off — no error shake, just back to rest.
+		expect(find(effects, "pet-mood")?.mood).toBe("idle");
 	});
 
 	test("a failed retry reports the attempt count with the right plural", () => {
@@ -259,8 +292,16 @@ describe("auto retry", () => {
 		expect(find(decideAutoRetryEnd({ success: false, attempt: 3 }), "error")?.text).toContain("Unknown error");
 	});
 
-	test("a successful retry only cleans up", () => {
-		expect(kinds(decideAutoRetryEnd({ success: true, attempt: 2 }))).toEqual(["cleanup-retry-ui", "render"]);
+	test("a successful retry cleans up and puts the pet back to work", () => {
+		const effects = decideAutoRetryEnd({ success: true, attempt: 2 });
+		expect(kinds(effects)).toEqual(["cleanup-retry-ui", "pet-mood", "render"]);
+		expect(find(effects, "pet-mood")?.mood).toBe("thinking");
+	});
+
+	test("a retry that gave up for good plays the error tell", () => {
+		expect(find(decideAutoRetryEnd({ success: false, attempt: 3, finalError: "boom" }), "pet-mood")?.mood).toBe(
+			"error",
+		);
 	});
 });
 

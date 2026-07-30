@@ -45,14 +45,36 @@ export interface ImageRenderOptions {
 let cachedCapabilities: TerminalCapabilities | null = null;
 
 // Default cell dimensions - updated by TUI when terminal responds to query
-let cellDimensions: CellDimensions = { widthPx: 9, heightPx: 18 };
+const DEFAULT_CELL_DIMENSIONS: CellDimensions = { widthPx: 9, heightPx: 18 };
+let cellDimensions: CellDimensions = DEFAULT_CELL_DIMENSIONS;
+// False while `cellDimensions` is still the built-in guess. Callers that convert
+// a pixel footprint back into terminal ROWS (the sixel pets) must know the
+// difference: an unmeasured cell makes that conversion a guess, and a sprite that
+// guesses too tall overruns its reserved rows.
+let cellDimensionsMeasured = false;
 
 export function getCellDimensions(): CellDimensions {
 	return cellDimensions;
 }
 
+/**
+ * True once the terminal has actually reported its cell size (CSI 16 t, or the
+ * window-size CSI 14 t fallback). While false, {@link getCellDimensions} is the
+ * built-in guess and pixel→row arithmetic built on it cannot be trusted.
+ */
+export function areCellDimensionsMeasured(): boolean {
+	return cellDimensionsMeasured;
+}
+
 export function setCellDimensions(dims: CellDimensions): void {
 	cellDimensions = dims;
+	cellDimensionsMeasured = true;
+}
+
+/** Restore the built-in guess and forget the measurement (tests). */
+export function resetCellDimensions(): void {
+	cellDimensions = DEFAULT_CELL_DIMENSIONS;
+	cellDimensionsMeasured = false;
 }
 
 export function detectCapabilities(): TerminalCapabilities {
@@ -181,6 +203,22 @@ const ITERM2_PREFIX = "\x1b]1337;File=";
 // Sixel DCS introducer. The pet sixel line wraps the sequence in cursor
 // save/restore, so the DCS may sit mid-line — matched by the slow path below.
 const SIXEL_PREFIX = "\x1bP";
+
+/**
+ * True when a line carries a SIXEL image, specifically.
+ *
+ * Worth separating from {@link isImageLine} because the protocols differ in how
+ * much they can be reasoned about. Kitty and iTerm2 placements are addressed in
+ * CELLS — the caller states rows and columns, and (with `C=1`) the cursor does
+ * not move — so the renderer can account for them exactly. A sixel is addressed
+ * in device PIXELS and converted to rows by the terminal, using its own cell
+ * geometry and 6-pixel band rounding; how far down it actually reaches is not
+ * knowable here. That difference is what makes a bottom-row sixel dangerous
+ * while a bottom-row kitty placement is fine.
+ */
+export function isSixelLine(line: string): boolean {
+	return line.includes(SIXEL_PREFIX);
+}
 
 export function isImageLine(line: string): boolean {
 	// Fast path: sequence at line start (single-row images)

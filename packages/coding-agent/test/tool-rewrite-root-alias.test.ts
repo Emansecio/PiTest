@@ -46,25 +46,45 @@ describe("root -> path alias rewrite", () => {
 	});
 });
 
-describe("todo batch-format block", () => {
+describe("todo batch-format absorption", () => {
 	const registry = createDefaultToolRewriteRegistry();
 
-	it("blocks todo({todos:[...]}) with a one-item-per-call recipe", () => {
+	it("maps the TodoWrite todos[] shape onto action:set", () => {
 		const outcome = registry.apply(
-			fauxToolCall("todo", { todos: [{ content: "a", status: "pending" }, { content: "b" }] }),
+			fauxToolCall("todo", {
+				todos: [
+					{ content: "a", status: "completed" },
+					{ content: "b", activeForm: "doing b", status: "in_progress" },
+				],
+			}),
 		);
-		expect(outcome.kind).toBe("rejected");
-		if (outcome.kind !== "rejected") return;
-		expect(outcome.ruleId).toBe("todo-batch-not-supported");
-		expect(outcome.error).toContain('action: "create"');
-		expect(outcome.error).toContain('action: "list"');
+		expect(outcome.kind).toBe("rewritten");
+		if (outcome.kind !== "rewritten") return;
+		expect(outcome.ruleIds).toContain("todo-batch-to-set");
+		expect(outcome.call.arguments).toEqual({
+			action: "set",
+			items: [
+				{ subject: "a", status: "completed" },
+				{ subject: "b", activeForm: "doing b", status: "in_progress" },
+			],
+		});
 	});
 
-	it("blocks the items[] batch alias too", () => {
-		const outcome = registry.apply(fauxToolCall("todo", { items: [{ subject: "a" }] }));
-		expect(outcome.kind).toBe("rejected");
-		if (outcome.kind !== "rejected") return;
-		expect(outcome.ruleId).toBe("todo-batch-not-supported");
+	it("supplies the missing action for a bare items[] batch", () => {
+		const outcome = registry.apply(fauxToolCall("todo", { items: [{ subject: "a", id: 3 }] }));
+		expect(outcome.kind).toBe("rewritten");
+		if (outcome.kind !== "rewritten") return;
+		expect(outcome.call.arguments).toEqual({ action: "set", items: [{ subject: "a", id: 3 }] });
+	});
+
+	it("leaves an already-correct set call untouched", () => {
+		const outcome = registry.apply(fauxToolCall("todo", { action: "set", items: [{ subject: "a" }] }));
+		expect(outcome.kind).toBe("pass");
+	});
+
+	it("does not reshape a batch whose entries have no usable title", () => {
+		const outcome = registry.apply(fauxToolCall("todo", { items: [{ subject: "a" }, { note: "b" }] }));
+		expect(outcome.kind).toBe("pass");
 	});
 
 	it("lets a valid single-action todo call pass", () => {

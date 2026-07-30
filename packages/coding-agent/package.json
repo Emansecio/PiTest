@@ -1,6 +1,6 @@
 {
 	"name": "@pit/coding-agent",
-	"version": "0.75.4",
+	"version": "0.90.0",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"type": "module",
 	"piConfig": {
@@ -47,9 +47,9 @@
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"dependencies": {
-		"@pit/agent-core": "^0.75.4",
-		"@pit/ai": "^0.75.4",
-		"@pit/tui": "^0.75.4",
+		"@pit/agent-core": "^0.90.0",
+		"@pit/ai": "^0.90.0",
+		"@pit/tui": "^0.90.0",
 		"@scalar/openapi-parser": "^0.28.8",
 		"@silvia-odwyer/photon-node": "^0.3.4",
 		"chalk": "^5.5.0",

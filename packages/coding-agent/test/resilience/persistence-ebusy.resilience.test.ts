@@ -106,22 +106,27 @@ describe("resilience: appendFileSync EBUSY → retry absorbs the lock → no his
 		// Windows can briefly exceed the 10s default while a handle is released.
 	}, 60_000);
 
-	it("(1) EBUSY twice then success: the complete batch (header + entries) lands and io.retry is recorded", () => {
+	it("(1) EBUSY twice then success: the complete batch (header + entries) lands and io.retry is recorded", async () => {
 		const sessionFile = join(tempDir, "ebusy.jsonl");
 		writeFileSync(sessionFile, `${JSON.stringify(header("res-ebusy", "/tmp"))}\n`, "utf8");
 
 		const mgr = SessionManager.open(sessionFile);
-		mgr.appendMessage({ role: "user", content: "durable user line", timestamp: Date.now() });
 
-		// The next real flush (header + user + assistant batch) hits 2 transient
-		// EBUSY failures before succeeding on the 3rd attempt.
+		// The synchronous flush this retry loop guards fires on the session's first
+		// durable entry — the user's prompt (see isDurableEntry) — so the lock is
+		// armed before it, not before the answer.
 		appendFailuresRemaining = 2;
 		appendFailureCode = "EBUSY";
 
 		// (a-recovery) the write eventually completes — the retry absorbs the lock.
-		expect(() => mgr.appendMessage(makeAssistantMessage("durable assistant reply"))).not.toThrow();
+		expect(() =>
+			mgr.appendMessage({ role: "user", content: "durable user line", timestamp: Date.now() }),
+		).not.toThrow();
 		// 2 failed attempts + 1 success on the same batch.
 		expect(appendAttempts).toBe(3);
+
+		mgr.appendMessage(makeAssistantMessage("durable assistant reply"));
+		await mgr.flushWrites();
 
 		// (a) no history loss: the FULL batch is durable on disk, header included.
 		const content = readFileSync(sessionFile, "utf8");
@@ -149,14 +154,15 @@ describe("resilience: appendFileSync EBUSY → retry absorbs the lock → no his
 		expect(retryEvents.map((e) => e.context?.attempt)).toEqual([1, 2]);
 	});
 
-	it("(1b) a clean flush (no lock) loses nothing and records ZERO io.retry", () => {
+	it("(1b) a clean flush (no lock) loses nothing and records ZERO io.retry", async () => {
 		const sessionFile = join(tempDir, "clean.jsonl");
 		writeFileSync(sessionFile, `${JSON.stringify(header("res-clean", "/tmp"))}\n`, "utf8");
 
 		const mgr = SessionManager.open(sessionFile);
-		mgr.appendMessage({ role: "user", content: "clean user line", timestamp: Date.now() });
 		// No failures armed → a single successful attempt for the batch.
+		mgr.appendMessage({ role: "user", content: "clean user line", timestamp: Date.now() });
 		expect(() => mgr.appendMessage(makeAssistantMessage("clean assistant reply"))).not.toThrow();
+		await mgr.flushWrites();
 
 		const content = readFileSync(sessionFile, "utf8");
 		expect(content).toContain("clean user line");

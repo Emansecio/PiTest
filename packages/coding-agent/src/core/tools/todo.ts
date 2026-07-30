@@ -13,12 +13,31 @@ import { getCurrentTodoManager, type TodoItem } from "../todo/todo-manager.ts";
 import { getTextOutput } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
-const TODO_ACTIONS = ["create", "update", "list", "get", "delete", "clear"] as const;
+const TODO_ACTIONS = ["set", "create", "update", "list", "get", "delete", "clear"] as const;
 const TODO_STATUSES = ["pending", "in_progress", "completed"] as const;
+
+const todoItemSchema = Type.Object(
+	{
+		id: Type.Optional(Type.Number({ description: "Existing todo id to carry forward. Omit to create a new one." })),
+		subject: Type.String({ description: "Short outcome-focused title." }),
+		description: Type.Optional(Type.String({ description: "Optional longer detail." })),
+		activeForm: Type.Optional(
+			Type.String({ description: "Present-continuous label shown while in_progress, e.g. 'Writing tests'." }),
+		),
+		status: Type.Optional(Type.Enum(TODO_STATUSES, { description: "Defaults to pending." })),
+	},
+	{ additionalProperties: false },
+);
 
 const todoSchema = Type.Object(
 	{
 		action: Type.Enum(TODO_ACTIONS, { description: "Operation to perform on the todo list." }),
+		items: Type.Optional(
+			Type.Array(todoItemSchema, {
+				description:
+					"Whole list, in order (required for set). Replaces the current list — an omitted todo is deleted.",
+			}),
+		),
 		id: Type.Optional(Type.Number({ description: "Todo id (required for update/get/delete)." })),
 		subject: Type.Optional(Type.String({ description: "Short outcome-focused title (required for create)." })),
 		description: Type.Optional(Type.String({ description: "Optional longer detail." })),
@@ -67,10 +86,10 @@ export function createTodoToolDefinition(
 		name: "todo",
 		label: "todo",
 		description:
-			"Track multi-step work as a todo list. Actions: create (needs subject), update (needs id; set status/activeForm), list (optional status filter), get (needs id), delete (needs id), clear. Mark one todo in_progress at a time and completed as soon as it is done.",
+			"Track multi-step work as a todo list. Prefer `set`: it takes the whole list in `items` and replaces it, so any number of changes costs ONE call — send every todo you want to keep, each with its `id`. Other actions: create (needs subject), update (needs id), list (optional status filter), get (needs id), delete (needs id), clear. Keep exactly one todo in_progress at a time and mark it completed as soon as it is done.",
 		promptSnippet: "Plan and track multi-step work as todos",
 		promptGuidelines: [
-			"Keep the todo list current: mark exactly one item in_progress before you start it, and completed as soon as it is done — do not batch completions.",
+			'Keep the todo list current with `todo{action:"set"}` in the SAME turn as the work — one call rewrites the whole list, so closing the item you just finished and opening the next one costs a single call. Never batch the bookkeeping to the end.',
 		],
 		parameters: todoSchema,
 		async execute(_toolCallId: string, input: TodoToolInput) {
@@ -78,6 +97,16 @@ export function createTodoToolDefinition(
 			if (!mgr) return fail(input.action, "Todo list is unavailable in this session.");
 
 			switch (input.action) {
+				case "set": {
+					if (!input.items) return fail("set", "set requires `items` (the whole list, in order).");
+					const bad = input.items.findIndex((t) => !t.subject?.trim());
+					if (bad >= 0) return fail("set", `set requires a non-empty \`subject\` on every item (index ${bad}).`);
+					const tasks = mgr.set(input.items);
+					return {
+						content: [{ type: "text" as const, text: summarize(tasks) }],
+						details: { action: "set" as const, tasks },
+					};
+				}
 				case "create": {
 					if (!input.subject?.trim()) return fail("create", "create requires a `subject`.");
 					const item = mgr.create({

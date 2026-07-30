@@ -326,6 +326,43 @@ function estimateAssembledTokens(ctx: CompactionController): { tokens: number; t
 	return { tokens: estimate.tokens, trailingTokens: estimate.trailingTokens };
 }
 
+/**
+ * Context size immediately after a compaction swap — the `B` in "Compacted A → B".
+ *
+ * Must NOT go through {@link estimateContextTokens} here. That estimator anchors
+ * on the last assistant message carrying provider usage, and compaction keeps the
+ * recent turns, so the surviving anchor is a message whose usage measured the
+ * PRE-compaction context. Anchoring on it reports the old, large size as the new
+ * one: the headline then claims the compaction reclaimed almost nothing, while the
+ * footer — which already sidesteps the latch with a structural estimate until the
+ * next provider response lands (see AgentSession's post-compaction CTX branch) —
+ * shows the real drop. Same event, two numbers, and the smaller one is wrong.
+ *
+ * Structural measurement over the new message list fixes that. It is compared
+ * against a `tokensBefore` that IS usage-anchored, so the surface has to match:
+ * once a presend surface exists, the provider's input count included the system
+ * prompt and tool schemas, and the comparison only holds if this side counts them
+ * too. Before the first presend there is no anchor on either side and both are
+ * messages-only.
+ */
+function measurePostCompactionTokens(ctx: CompactionController, messages: AgentMessage[]): number {
+	const surface = ctx.lastWireSurface;
+	// Same per-model calibration the footer applies to its structural estimate, so
+	// the two agree to the token rather than to the ballpark.
+	const modelId = ctx.host.model?.id;
+	if (!surface) {
+		return estimateWireTokens(messages, { systemPromptChars: 0, tools: [], modelId, structuralOnly: true })
+			.messageTokens;
+	}
+	return estimateWireTokens(messages, {
+		systemPromptChars: surface.systemPrompt.length,
+		systemPromptText: surface.systemPrompt,
+		tools: surface.tools,
+		modelId,
+		structuralOnly: true,
+	}).tokens;
+}
+
 export function maybePruneStaleToolOutputs(ctx: CompactionController, contextTokens: number): void {
 	if (isTruthyEnvFlag(process.env.PIT_NO_PROACTIVE_PRUNE)) return;
 	const floorRaw = Number(process.env.PIT_PROACTIVE_PRUNE_FLOOR);
@@ -966,6 +1003,16 @@ export async function executeCompactionPipeline(
 
 	if (extensionCompaction) {
 		({ summary, firstKeptEntryId, tokensBefore, details } = extensionCompaction);
+		// A PRECOMPUTED result carries the token count from the moment it was
+		// computed, but `tokensAfter` below is measured now — up to the speculative
+		// slot's staleness budget (25% of the hard threshold) of growth happened in
+		// between, and reporting the two together made the banner and the
+		// compaction_end telemetry understate the span they claim to describe.
+		// A summary handed over by an EXTENSION keeps its own number: that path
+		// never went through this `preparation`.
+		if (!fromExtension) {
+			tokensBefore = preparation.tokensBefore;
+		}
 	} else {
 		const result = await compact(
 			preparation,
@@ -1000,9 +1047,7 @@ export async function executeCompactionPipeline(
 	);
 	const sessionContext = ctx.host.sessionManager.buildSessionContext();
 	ctx.host.agent.state.messages = sessionContext.messages;
-	// Measured AFTER the swap, off the same estimator the footer's CTX gauge uses,
-	// so the reported delta matches what the user is about to see there.
-	const tokensAfter = estimateContextTokens(sessionContext.messages).tokens;
+	const tokensAfter = measurePostCompactionTokens(ctx, sessionContext.messages);
 
 	// P2: a compaction was just applied (real or precomputed) — any speculative
 	// slot is now stale (its anchor no longer matches). Abort/drop it.

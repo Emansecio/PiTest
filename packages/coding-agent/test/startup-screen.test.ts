@@ -1,5 +1,12 @@
 import { stripVTControlCharacters } from "node:util";
-import { type PetColors, resetSixelSupport, setSixelSupport, visibleWidth } from "@pit/tui";
+import {
+	type PetColors,
+	resetCellDimensions,
+	resetSixelSupport,
+	setCellDimensions,
+	setSixelSupport,
+	visibleWidth,
+} from "@pit/tui";
 import { afterEach, beforeAll, describe, expect, test } from "vitest";
 import { StartupScreen, type StartupScreenData } from "../src/modes/interactive/components/startup-screen.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
@@ -10,6 +17,7 @@ beforeAll(() => {
 
 afterEach(() => {
 	resetSixelSupport();
+	resetCellDimensions();
 });
 
 const PET_COLORS: PetColors = {
@@ -125,6 +133,7 @@ describe("StartupScreen", () => {
 
 	test("sixel path emits a cursor-pinned, self-clearing transparent image block", () => {
 		setSixelSupport(true);
+		setCellDimensions({ widthPx: 10, heightPx: 20 });
 		const lines = new StartupScreen(makeData({ recentSessions: [] })).render(80);
 		const petLine = lines.find((l) => l.includes("\x1bP"));
 		expect(petLine).toBeDefined();
@@ -133,6 +142,61 @@ describe("StartupScreen", () => {
 		expect(petLine).toContain("\x1b8"); // DECRC restore cursor
 		expect(petLine).toContain("\x1b[2K"); // self-clear reserved rows
 		expect(petLine!.endsWith("\x1b8")).toBe(true); // restore is last
+	});
+
+	/**
+	 * Same invariant the composer perch is held to: the hero's reservation is in
+	 * rows, the drawing is in pixels, and a terminal that rounds an image up to
+	 * whole 6px bands must still land inside those rows. The hero sits at the TOP of
+	 * the frame, so an overflow here does not scroll the screen the way the perch
+	 * can — but it would draw over the identity block below it, and the arithmetic
+	 * being right is the point either way.
+	 */
+	test("the hero sprite fits its reservation for every plausible cell height", () => {
+		const BAND = 6;
+		// PET_SIXEL_ROWS = 6, of which 5 are drawn into (one row of slack).
+		const DRAW_ROWS = 5;
+		for (const heightPx of [6, 7, 11, 13, 16, 17, 19, 20, 23, 29, 32, 37, 40, 64]) {
+			setSixelSupport(true);
+			setCellDimensions({ widthPx: Math.max(3, Math.round(heightPx * 0.5)), heightPx });
+			const lines = new StartupScreen(makeData({ recentSessions: [] })).render(80);
+			const petLine = lines.find((l) => l.includes("\x1bP"));
+			expect(petLine, `cell ${heightPx}px: expected a sixel hero`).toBeDefined();
+
+			const declared = Number(petLine!.match(/"1;1;\d+;(\d+)/)![1]);
+			const bandRounded = Math.ceil(declared / BAND) * BAND;
+			expect(bandRounded, `cell ${heightPx}px: band-rounded ${bandRounded}px`).toBeLessThanOrEqual(
+				DRAW_ROWS * heightPx,
+			);
+			resetCellDimensions();
+		}
+	});
+
+	test("cell and sixel pet units render at the SAME height (no mode-switch layout jump)", () => {
+		// The cell-size answer lands asynchronously: the welcome painted in cells at
+		// PET_CELL_ROWS, then flipped to a sixel block of PET_SIXEL_ROWS — the whole
+		// reveal below re-anchored mid-animation. The sixel unit now pads out to the
+		// cell unit's height, bottom-anchoring the smaller sprite.
+		setSixelSupport(true);
+		const cells = new StartupScreen(makeData({ recentSessions: [] })).render(80);
+		setCellDimensions({ widthPx: 10, heightPx: 20 });
+		const sixel = new StartupScreen(makeData({ recentSessions: [] })).render(80);
+		// Compare the pet unit alone: everything above the identity line.
+		const unitHeight = (lines: string[]) => lines.findIndex((l) => stripVTControlCharacters(l).includes("pit v"));
+		expect(unitHeight(cells)).toBeGreaterThan(0);
+		expect(unitHeight(sixel)).toBe(unitHeight(cells));
+		// And the sprite is still there, anchored at the unit's bottom row.
+		expect(sixel.some((l) => l.includes("\x1bP"))).toBe(true);
+	});
+
+	test("sixel stands down until the terminal reports its cell size", () => {
+		// The sprite's height is authored in rows and emitted in pixels; without a
+		// measured cell that conversion is a guess, and a guess that runs tall draws
+		// over rows the block does not own.
+		setSixelSupport(true);
+		const lines = new StartupScreen(makeData({ recentSessions: [] })).render(80);
+		expect(lines.some((l) => l.includes("\x1bP"))).toBe(false);
+		expect(lines.join("")).toMatch(/[▀▄]/); // cell fallback drew instead
 	});
 
 	test("blink dips the pet mid-window then reopens", () => {
@@ -145,5 +209,21 @@ describe("StartupScreen", () => {
 		const open = screen.render(80).join("");
 		expect(blinking).not.toEqual(open);
 		expect(screen.isSettled()).toBe(true);
+	});
+
+	test("after the blink the pet glances down toward the editor, then settles static", () => {
+		setSixelSupport(false); // keep the comparison on the deterministic cell path
+		const screen = new StartupScreen(makeData({ reducedMotion: false, recentSessions: [] }));
+		screen.tick(0);
+		// 3 units → revealDone 220ms → blink [920, 1050) → glance [1210, 1730).
+		screen.tick(1100); // blink over, glance not yet begun
+		const resting = screen.render(80).join("");
+		screen.tick(1400); // mid-glance (p ≈ 0.37 → eyes near the dip's peak)
+		const glancing = screen.render(80).join("");
+		screen.tick(1800); // glance finished — the screen is now final
+		const settled = screen.render(80).join("");
+		expect(glancing).not.toEqual(resting); // a visible, one-shot beat
+		expect(settled).toEqual(resting); // deterministic: exactly back to the resting frame
+		expect(screen.isSettled()).toBe(true); // …so the host unsubscribes right after
 	});
 });

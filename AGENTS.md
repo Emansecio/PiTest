@@ -5,9 +5,8 @@ and coding agents working in this repository. Pit loads this file automatically 
 startup when run from the repo root (disable with `--no-context-files`).
 
 > Terminology: see [CONTEXT.md](CONTEXT.md) for the authoritative glossary
-> (Mode, Permission, Orchestration, Fusion, Todo, Plan, Channel, Role). Harness
-> implementation concepts and the Architectural Invariants live in
-> [docs/CONTEXT.md](docs/CONTEXT.md). Do not redefine those terms here.
+> (Mode, Permission, Orchestration, Fusion, Todo, Plan, Channel, Role). Do not
+> redefine those terms here.
 
 ## Contribution rules
 
@@ -49,15 +48,13 @@ Monorepo (npm workspaces). Four packages:
 
 Turn flow: user input → `agent-session.ts` → `agent-loop.ts` → tool dispatch/execution
 → compaction check → provider call. Behavioral features live in built-in extensions,
-not inline in `agent-session.ts` (see [docs/CONTEXT.md](docs/CONTEXT.md)
-"Architectural Invariants").
+not inline in `agent-session.ts`.
 
 ## Documentation layout
 
-- `docs/adr/` — architecture decision records.
 - `docs/agents/` — agent-facing maps (`already-built`, prevention layers, workflow).
-- `docs/optimization/` — active context-economy inventory / backlog.
-- `docs/CONTEXT.md`, `docs/token-economy-tuning.md`, `docs/RELEASING.md` — harness glossary, `PIT_*` flags, release process.
+- `docs/proposals/` — design proposals.
+- `docs/token-economy-tuning.md` — `PIT_*` token-economy tuning flags.
 - `Taxonomia.md` — product/architecture area map (linked from README).
 - Package user docs live under `packages/*/docs/` (especially `packages/coding-agent/docs/`).
 

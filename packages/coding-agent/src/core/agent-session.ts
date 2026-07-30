@@ -659,6 +659,8 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	private _orchestration: Orchestration = "solo";
 	// In-flight Fusion turn (panel fan-out + judge + writer). Aborted by interrupt().
 	private _fusionAbort: AbortController | undefined = undefined;
+	// Resolved when the current Fusion turn clears its controller. See setFusionAbort.
+	private _fusionSettled: { promise: Promise<void>; resolve: () => void } | undefined = undefined;
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: string[] = [];
@@ -1793,7 +1795,30 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	}
 
 	setFusionAbort(value: AbortController | undefined): void {
+		// Keep a settle signal alongside the controller so callers can WAIT for the
+		// Fusion turn rather than only cancel it. A Fusion turn holds the session for
+		// minutes with `isStreaming === false`, so anything that decides "am I allowed
+		// to start a turn?" by looking at the streaming flag alone needs this.
+		if (value !== undefined && this._fusionSettled === undefined) {
+			let resolve!: () => void;
+			const promise = new Promise<void>((r) => {
+				resolve = r;
+			});
+			this._fusionSettled = { promise, resolve };
+		} else if (value === undefined && this._fusionSettled !== undefined) {
+			this._fusionSettled.resolve();
+			this._fusionSettled = undefined;
+		}
 		this._fusionAbort = value;
+	}
+
+	/**
+	 * Resolves when the in-flight Fusion turn finishes (however it ends — success,
+	 * abort, or throw; the fusion runner clears the controller in a `finally`).
+	 * Resolves immediately when no Fusion turn is running.
+	 */
+	async awaitFusionSettled(): Promise<void> {
+		await this._fusionSettled?.promise;
 	}
 
 	get userInterrupted(): boolean {
@@ -5625,6 +5650,14 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	 * - Not streaming + triggerTurn: appends to state/session, starts new turn
 	 * - Not streaming + no trigger: appends to state/session, no turn
 	 *
+	 * FUSION IS A FOURTH STATE, and the one this used to get wrong. A Fusion turn
+	 * owns the session for minutes with `isStreaming === false`, so every branch
+	 * below read "idle" and acted on it: `triggerTurn` started a second, concurrent
+	 * agent turn against the same `agent.state.messages` the Fusion writer is
+	 * building, and a steer meant for the running turn degraded into a loose append
+	 * in the middle of it. Extensions and timers are exactly the callers that hit
+	 * this, because they fire on wall-clock, not on turn boundaries.
+	 *
 	 * @param message Custom message with customType, content, display, details
 	 * @param options.triggerTurn If true and not streaming, triggers a new LLM turn
 	 * @param options.deliverAs Delivery mode: "steer", "followUp", or "nextTurn"
@@ -5647,6 +5680,19 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 			timestamp: Date.now(),
 		} satisfies CustomMessage<T>;
 		if (options?.deliverAs === "nextTurn") {
+			this._pendingNextTurnMessages.push(appMessage);
+		} else if (this.isFusing && options?.triggerTurn) {
+			// The caller asked for a turn; give it one AFTER Fusion hands the session
+			// back, not alongside it. Waiting is the honest reading of the request —
+			// dropping it would lose the message, and running it now would interleave
+			// two writers into one message list.
+			await this.awaitFusionSettled();
+			await this._runAgentPrompt(appMessage);
+		} else if (this.isFusing && options?.deliverAs) {
+			// A steer/follow-up cannot reach a Fusion turn — its members are separate
+			// CLIs with no steering channel. Delivering it with the next turn keeps the
+			// caller's intent (influence a turn); the old fallthrough turned it into a
+			// loose transcript note instead, which influences nothing.
 			this._pendingNextTurnMessages.push(appMessage);
 		} else if (this.isStreaming) {
 			if (options?.deliverAs === "followUp") {

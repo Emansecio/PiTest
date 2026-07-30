@@ -20,18 +20,27 @@
 import type { AgentSessionEvent } from "../../core/agent-session-events.ts";
 import { formatElapsed } from "../../core/goal/goal-manager.ts";
 import type { FusionLiveMember } from "./components/fusion-live.ts";
+import type { PetMoodState } from "./components/pet-mood.ts";
 import { workingPhaseLabel } from "./components/tool-activity.ts";
 import { classifyRetryReason } from "./retry-reason.ts";
 
 /** Theme colour token used to paint an ephemeral status line. */
 export type StatusTone = "dim" | "muted" | "success" | "warning";
 
+/**
+ * One colored span of a status line. `tone` LOCAL to the segment (`"text"` =
+ * the primary text color); a segment WITHOUT a tone inherits the line's
+ * `tone`. Keeping this declarative leaves the decisions pure — the terminal is
+ * what maps tones to theme colors.
+ */
+export type StatusSegment = { text: string; tone?: StatusTone | "text" };
+
 /** Fusion panel stage, mirrored from the `fusion_stage` event. */
 export type FusionStageName = "brief" | "panel" | "judge" | "verify" | "writer";
 
-/** Pet mood the turn view can ask for. Transient moods (done/error) are decided
- * elsewhere; the events migrated here only ever ask for the two work moods. */
-export type PetMoodName = "thinking" | "working";
+/** Pet mood the turn view can ask for. The mascot's own state machine owns the
+ * transitions; the view only names the mood a lifecycle event implies. */
+export type PetMoodName = PetMoodState;
 
 /**
  * A single thing the view should do. Deliberately data-only (no closures, no
@@ -51,8 +60,10 @@ export type TurnViewEffect =
 	| { kind: "pet-mood"; mood: PetMoodName }
 	/** Gearbox anomaly: leave the smol role for this step. */
 	| { kind: "gearbox-upshift"; reason: string }
-	/** Ephemeral status line. */
-	| { kind: "status"; text: string; tone: StatusTone }
+	/** Ephemeral status line. `level: "sticky"` keeps it until host-clear (work of
+	 * unknown duration); `segments`, when present, render with per-span colors
+	 * while `text` stays the plain concatenation. */
+	| { kind: "status"; text: string; tone: StatusTone; level?: "info" | "sticky"; segments?: StatusSegment[] }
 	/** Sticky error line. */
 	| { kind: "error"; text: string }
 	/** Permanent warning line appended to the transcript. */
@@ -176,6 +187,9 @@ export function decideCompactionStart(
 		// Keep editor active; submissions are queued during compaction.
 		{ kind: "bind-compaction-escape" },
 		{ kind: "compaction-loader", label: compactionLoaderLabel(event.reason, state.interruptKey) },
+		// Compaction is neither thinking nor tool work — the pet chews on the
+		// context with its own slow circular gaze so the wait reads as progress.
+		{ kind: "pet-mood", mood: "digesting" },
 		{ kind: "render" },
 	];
 }
@@ -231,32 +245,66 @@ export function decideFusionStage(event: EventOf<"fusion_stage">): TurnViewEffec
 // subagent_*
 // ---------------------------------------------------------------------------
 
+/*
+ * Subagent lifecycle reads like the activity stack speaks — "Agent", capitalized
+ * like the `Delegating`/`Agent N` rows — with a stable visual grammar: the icon
+ * and verb carry the state color, the agent's name always renders in the primary
+ * text color (it is the one thing worth finding in the band), and mechanics
+ * (turn counter, tool, token/turn totals) retreat to `dim`. Lifecycle lines are
+ * STICKY while the subagent lives: with an unknown run ahead of them, an
+ * auto-dismissing "started" would make a long quiet agent look finished.
+ */
+function subagentName(handle: string): string {
+	return `“${handle}”`;
+}
+
+function subagentEffect(
+	icon: string,
+	event: { handle: string },
+	verb: string,
+	meta: string,
+): Extract<TurnViewEffect, { kind: "status" }> {
+	const name = subagentName(event.handle);
+	const segments: StatusSegment[] = [{ text: `${icon} Agent ` }, { text: name, tone: "text" }];
+	if (verb) segments.push({ text: ` ${verb}` });
+	if (meta) segments.push({ text: meta, tone: "dim" });
+	return {
+		kind: "status",
+		text: `${icon} Agent ${name}${verb ? ` ${verb}` : ""}${meta}`,
+		tone: "muted",
+		level: "sticky",
+		segments,
+	};
+}
+
 export function decideSubagentStart(event: Pick<EventOf<"subagent_start">, "handle">): TurnViewEffect[] {
-	return [{ kind: "status", text: `◐ subagent '${event.handle}' started`, tone: "muted" }];
+	return [subagentEffect("◐", event, "started", "")];
 }
 
 export function decideSubagentProgress(
 	event: Pick<EventOf<"subagent_progress">, "handle" | "turn" | "lastTool">,
 ): TurnViewEffect[] {
 	const tool = event.lastTool ? ` · ${event.lastTool}` : "";
-	return [{ kind: "status", text: `◐ subagent '${event.handle}' · turn ${event.turn}${tool}`, tone: "muted" }];
+	return [subagentEffect("◐", event, "", ` · turn ${event.turn}${tool}`)];
 }
 
 export function decideSubagentComplete(
 	event: Pick<EventOf<"subagent_complete">, "handle" | "status" | "turns" | "totalTokens">,
 ): TurnViewEffect[] {
 	const meta: string[] = [];
-	if (event.turns !== undefined) meta.push(`${event.turns} turns`);
+	if (event.turns !== undefined) meta.push(`${event.turns} ${event.turns === 1 ? "turn" : "turns"}`);
 	if (event.totalTokens !== undefined) meta.push(`${event.totalTokens.toLocaleString()} tok`);
-	const suffix = meta.length > 0 ? ` · ${meta.join(" · ")}` : "";
 	const done = event.status === "done";
-	return [
-		{
-			kind: "status",
-			text: done ? `✓ subagent '${event.handle}' finished${suffix}` : `✗ subagent '${event.handle}' failed${suffix}`,
-			tone: done ? "success" : "warning",
-		},
-	];
+	const effect = subagentEffect(
+		done ? "✓" : "✗",
+		event,
+		done ? "finished" : "failed",
+		meta.length > 0 ? ` · ${meta.join(" · ")}` : "",
+	);
+	// A terminal state is a report, not a process: flat tone, auto-dismiss.
+	effect.tone = done ? "success" : "warning";
+	effect.level = "info";
+	return [effect];
 }
 
 // ---------------------------------------------------------------------------
@@ -290,6 +338,8 @@ export function decideAutoRetryStart(
 			delayMs: event.delayMs,
 			reason: classifyRetryReason(event.errorMessage),
 		},
+		// Nothing is running during the backoff — the pet waits it out too.
+		{ kind: "pet-mood", mood: "waiting" },
 		{ kind: "render" },
 	];
 }
@@ -298,6 +348,9 @@ export function decideAutoRetryEnd(
 	event: Pick<EventOf<"auto_retry_end">, "success" | "attempt" | "finalError" | "cancelled">,
 ): TurnViewEffect[] {
 	const effects: TurnViewEffect[] = [{ kind: "cleanup-retry-ui" }];
+	// The wait is over either way: back to reasoning when the retry took, or the
+	// shake tell when it gave up for good (a user cancel gets neither).
+	effects.push({ kind: "pet-mood", mood: event.success ? "thinking" : event.cancelled ? "idle" : "error" });
 	if (!event.success) {
 		if (event.cancelled) {
 			// The user asked for this — muted status with normal TTL, not sticky

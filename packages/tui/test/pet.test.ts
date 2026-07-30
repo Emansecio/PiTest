@@ -6,7 +6,7 @@
 import assert from "node:assert";
 import { afterEach, describe, it } from "node:test";
 import { renderPetCells } from "../src/pet-cells.js";
-import { mixRgb, type PetColors, petCoverage, shadePet } from "../src/pet-geometry.js";
+import { mixRgb, type PetColors, petCoverage, shadePet, toLocalPoint } from "../src/pet-geometry.js";
 import { encodeSixel, renderPetSixel, SIXEL_INTRO } from "../src/sixel.js";
 import {
 	getSixelSupport,
@@ -60,6 +60,49 @@ describe("pet-geometry", () => {
 		const centered = petCoverage(-0.24, -0.02, { blinkK: 1, eyeShift: 0 });
 		const shifted = petCoverage(-0.24, -0.02, { blinkK: 1, eyeShift: 0.1 });
 		assert.notEqual(centered.eye, shifted.eye);
+	});
+
+	it("eyeShiftY moves the eyes vertically and eyeScale resizes them", () => {
+		const centered = petCoverage(-0.24, -0.02, { blinkK: 1 });
+		// A point below the eye is only covered once the gaze drops.
+		const below = { x: -0.24, y: 0.22 };
+		assert.ok(petCoverage(below.x, below.y, { blinkK: 1 }).eye < 0.5, "point starts outside the eye");
+		assert.ok(
+			petCoverage(below.x, below.y, { blinkK: 1, eyeShiftY: 0.15 }).eye > 0.5,
+			"looking down should cover the point below",
+		);
+		// Widening the eye covers a point the resting eye misses.
+		assert.ok(petCoverage(-0.24, -0.14, { blinkK: 1 }).eye < 0.5);
+		assert.ok(petCoverage(-0.24, -0.14, { blinkK: 1, eyeScale: 1.5 }).eye > 0.5);
+		assert.equal(centered.eye, petCoverage(-0.24, -0.02, { blinkK: 1, eyeScale: 1 }).eye);
+	});
+
+	it("toLocalPoint inverts the body transform", () => {
+		// Translation: a bob down moves the sample point up in the pet's frame.
+		assert.deepEqual(toLocalPoint(0, 0, { blinkK: 1, bobY: 0.1 }), { x: 0, y: -0.1 });
+		assert.deepEqual(toLocalPoint(0.2, 0, { blinkK: 1, bobX: 0.2 }), { x: 0, y: 0 });
+		// Rotation: a quarter turn maps +x onto -y.
+		const rotated = toLocalPoint(1, 0, { blinkK: 1, tilt: Math.PI / 2 });
+		assert.ok(Math.abs(rotated.x) < 1e-9, `expected x≈0, got ${rotated.x}`);
+		assert.ok(Math.abs(rotated.y + 1) < 1e-9, `expected y≈-1, got ${rotated.y}`);
+		// Squash widens x and shortens y — the inverse divides by those factors.
+		const squashed = toLocalPoint(0.5, 0.5, { blinkK: 1, squash: 0.25 });
+		assert.ok(squashed.x < 0.5 && squashed.y > 0.5);
+		// Beyond the clamp the transform stops growing (the shape can never invert).
+		assert.deepEqual(
+			toLocalPoint(0.5, 0.5, { blinkK: 1, squash: 5 }),
+			toLocalPoint(0.5, 0.5, { blinkK: 1, squash: 0.45 }),
+		);
+	});
+
+	it("the body transform moves the silhouette without redrawing it", () => {
+		// The head's top edge at rest…
+		const edge = { x: 0, y: -0.33 };
+		assert.ok(petCoverage(edge.x, edge.y, { blinkK: 1 }).stroke > 0.5);
+		// …is no longer at that point once the body lifts, but is found 0.1 higher.
+		const lifted = { blinkK: 1, bobY: -0.1 };
+		assert.ok(petCoverage(edge.x, edge.y, lifted).stroke < 0.5, "edge should have moved away");
+		assert.ok(petCoverage(edge.x, edge.y - 0.1, lifted).stroke > 0.5, "edge should be found at the new height");
 	});
 
 	it("is deterministic", () => {
@@ -123,6 +166,35 @@ describe("encodeSixel", () => {
 		assert.ok(out.includes("#1"), "opaque color present");
 		assert.ok(!/#2[?~!A-Za-z]/.test(out.replace("#2;2;", "")), "transparent color has no pixel data");
 	});
+
+	/**
+	 * The band separator is a graphics NEW-LINE: one after the last band opens a
+	 * sixth empty band, and a terminal that sizes the image by its content rather
+	 * than by the raster attributes hands those 6 px back as extra height. On a
+	 * sprite authored in whole terminal rows that lone band is the difference
+	 * between fitting its reservation and drawing into the row below it.
+	 */
+	it("separates bands without a trailing graphics new-line", () => {
+		const idx = new Uint8Array(1 * 18); // exactly three 6-row bands
+		idx.fill(1);
+		const out = encodeSixel(1, 18, idx, [
+			[0, 0, 0],
+			[255, 255, 255],
+		]);
+		const data = out.slice(0, -2); // drop the ST
+		assert.equal((data.match(/-/g) ?? []).length, 2, "three bands need two separators");
+		assert.ok(!data.endsWith("-"), "no graphics new-line after the final band");
+	});
+
+	it("emits no separator at all for a single band", () => {
+		const idx = new Uint8Array(1 * 6);
+		idx.fill(1);
+		const out = encodeSixel(1, 6, idx, [
+			[0, 0, 0],
+			[255, 255, 255],
+		]);
+		assert.ok(!out.includes("-"), `single band needs no separator: ${JSON.stringify(out)}`);
+	});
 });
 
 describe("renderPetSixel", () => {
@@ -143,6 +215,13 @@ describe("renderPetSixel", () => {
 		const open = renderPetSixel(40, 20, { blinkK: 1, colors: COLORS });
 		const blink = renderPetSixel(40, 20, { blinkK: 0.08, colors: COLORS });
 		assert.notEqual(open, blink);
+	});
+
+	it("forwards the body channels to the shader", () => {
+		const rest = renderPetSixel(60, 30, { blinkK: 1, colors: COLORS });
+		for (const moved of [{ bobY: 0.08 }, { bobX: 0.08 }, { tilt: 0.2 }, { squash: 0.2 }]) {
+			assert.notEqual(renderPetSixel(60, 30, { blinkK: 1, colors: COLORS, ...moved }), rest, JSON.stringify(moved));
+		}
 	});
 });
 
@@ -165,6 +244,12 @@ describe("renderPetCells", () => {
 		const a = renderPetCells(24, 6, { blinkK: 1, colors: COLORS });
 		const b = renderPetCells(24, 6, { blinkK: 1, colors: COLORS });
 		assert.deepEqual(a, b);
+	});
+
+	it("forwards the body channels to the shader", () => {
+		const rest = renderPetCells(24, 6, { blinkK: 1, colors: COLORS });
+		const lifted = renderPetCells(24, 6, { blinkK: 1, colors: COLORS, bobY: -0.1 });
+		assert.notDeepEqual(lifted, rest);
 	});
 });
 

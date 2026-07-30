@@ -26,7 +26,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
-import { splitSystemPromptOnDynamic } from "../types.ts";
+import { formatDynamicPromptEnvBlock, splitSystemPromptOnDynamic } from "../types.ts";
 import { createClientCache } from "../utils/client-cache.ts";
 import { type ConnectGuard, createConnectGuard } from "../utils/connect-guard.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
@@ -48,6 +48,25 @@ import {
 	resolvePromptCacheKey,
 } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
+
+/**
+ * Anthropic SDK APIError.message is `"${status} ${JSON.stringify(body)}"` when
+ * the body has no string `error.message` (e.g. "529 {\"type\":\"error\",...}").
+ * Surface a short, human-readable line instead of dumping the raw JSON blob.
+ */
+function formatAnthropicError(error: unknown): string {
+	if (error && typeof error === "object" && "status" in error) {
+		const apiError = error as { status?: number; error?: { error?: { type?: string; message?: string } } };
+		const body = apiError.error?.error;
+		if (body?.message) {
+			return apiError.status
+				? `${apiError.status} ${body.type ? `(${body.type}) ` : ""}${body.message}`
+				: body.message;
+		}
+		if (apiError.status) return `${apiError.status} error`;
+	}
+	return error instanceof Error ? error.message : JSON.stringify(error);
+}
 
 function getCacheControl(
 	model: Model<"anthropic-messages">,
@@ -793,7 +812,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				stripStreamingScratch(block);
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
+			output.errorMessage = formatAnthropicError(error);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		} finally {
@@ -1011,6 +1030,43 @@ function createClient(
 	return { client, isOAuthToken: false };
 }
 
+/**
+ * Move the per-turn dynamic system suffix to the END of the last user message.
+ *
+ * Splitting it into its own `system` block (no `cache_control` of its own) keeps
+ * the SYSTEM breakpoint valid, but `system` sits inside the prefix of every
+ * breakpoint further down the payload — the last-user-message one and the
+ * compaction-summary one both cache everything above them. A suffix that changes
+ * every turn (grounded context, frequent files, todos, the date) therefore
+ * diverged that prefix and re-billed the whole replayed history as cache writes.
+ *
+ * Appending instead of prepending is what makes this work here: `convertMessages`
+ * has already pinned `cache_control` on the last block, so the relocated suffix
+ * lands *after* the breakpoint — cached prefix ends at the end of the history,
+ * and the volatile tail is the only thing paid for at full price. (The Responses
+ * providers prepend because their caches are automatic prefix caches with no
+ * breakpoint to sit behind; see `applyDynamicPromptRelocation`.)
+ *
+ * Returns false when there is no user message to carry the block, in which case
+ * the caller keeps the suffix in `system` — correct, just not cache-optimal.
+ */
+function relocateDynamicSuffix(messages: MessageCreateParamsStreaming["messages"], dynamicPart: string): boolean {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (message.role !== "user") continue;
+		const block = { type: "text" as const, text: sanitizeSurrogates(formatDynamicPromptEnvBlock(dynamicPart)) };
+		if (typeof message.content === "string") {
+			message.content = [{ type: "text", text: message.content }, block];
+		} else if (Array.isArray(message.content)) {
+			message.content.push(block);
+		} else {
+			return false;
+		}
+		return true;
+	}
+	return false;
+}
+
 export function buildParams(
 	model: Model<"anthropic-messages">,
 	context: Context,
@@ -1048,7 +1104,7 @@ export function buildParams(
 				text: sanitizeSurrogates(staticPart),
 				...(cacheControl ? { cache_control: cacheControl } : {}),
 			});
-			if (dynamicPart) {
+			if (dynamicPart && !relocateDynamicSuffix(params.messages, dynamicPart)) {
 				params.system.push({ type: "text", text: sanitizeSurrogates(dynamicPart) });
 			}
 		}
@@ -1062,7 +1118,7 @@ export function buildParams(
 				...(cacheControl ? { cache_control: cacheControl } : {}),
 			},
 		];
-		if (dynamicPart) {
+		if (dynamicPart && !relocateDynamicSuffix(params.messages, dynamicPart)) {
 			params.system.push({ type: "text", text: sanitizeSurrogates(dynamicPart) });
 		}
 	}
@@ -1077,7 +1133,10 @@ export function buildParams(
 
 	if (context.tools && context.tools.length > 0) {
 		const compat = getAnthropicCompat(model);
-		const wireTools = [...context.tools].sort((a, b) => a.name.localeCompare(b.name));
+		// NOT sorted: see the append-only rationale on `convertTools` below. Callers
+		// keep activation append-only precisely so the cached prefix survives a new
+		// tool; name-sorting here would splice it into the middle and undo that.
+		const wireTools = context.tools;
 		params.tools = convertTools(
 			wireTools,
 			isOAuthToken,

@@ -34,7 +34,7 @@
 		"scenario=long-reasoning serialize_prose_chars": 17416,
 		"scenario=long-reasoning serialize_delta_chars": 7158,
 		"wire_tool_desc_chars": 2520,
-		"wire_tool_param_chars": 17302,
+		"wire_tool_param_chars": 17564,
 		"fusion_brief_tokens": 59,
 		"fusion_panel_tokens": 3550,
 		"fusion_judge_tokens": 4594,

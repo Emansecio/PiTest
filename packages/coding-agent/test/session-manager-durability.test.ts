@@ -2,7 +2,6 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { SessionHeader } from "../src/core/session-manager.js";
 
 // Controllable fs mock. The SUT imports from "fs"; we wrap appendFileSync,
 // renameSync and writeFileSync with counters so individual tests can arm
@@ -72,10 +71,6 @@ function makeAssistantMessage(text: string) {
 		stopReason: "stop" as const,
 		timestamp: Date.now(),
 	};
-}
-
-function header(id: string, cwd: string): SessionHeader {
-	return { type: "session", id, version: 3, timestamp: new Date(0).toISOString(), cwd };
 }
 
 function tmpFiles(dir: string): string[] {
@@ -208,21 +203,26 @@ describe("FU2: appendWithRetry absorbs transient EBUSY/EPERM in _persist", () =>
 		}
 	});
 
-	it("succeeds when the append throws EBUSY twice then completes (retry absorbs the lock)", () => {
-		const sessionFile = join(tempDir, "ebusy.jsonl");
-		writeFileSync(sessionFile, `${JSON.stringify(header("fu2-ebusy", "/tmp"))}\n`, "utf8");
+	it("succeeds when the append throws EBUSY twice then completes (retry absorbs the lock)", async () => {
+		// The synchronous initial flush is what appendWithRetry guards, and it now
+		// fires on the first durable entry — the user's prompt (see isDurableEntry). A
+		// session opened from a file that already carries a header is past that point
+		// and would exercise the async drain instead.
+		const mgr = SessionManager.create("/tmp", tempDir);
+		const sessionFile = mgr.getSessionFile();
+		if (!sessionFile) throw new Error("expected a session file");
 
-		const mgr = SessionManager.open(sessionFile);
-		mgr.appendMessage({ role: "user", content: "before flush", timestamp: Date.now() });
-
-		// The FIRST real append (initial flush: header + user + assistant) hits 2
-		// transient EBUSY failures before succeeding on the 3rd attempt.
+		// The FIRST real append (initial flush: header + user) hits 2 transient EBUSY
+		// failures before succeeding on the 3rd attempt.
 		appendFailuresRemaining = 2;
 		appendFailureCode = "EBUSY";
 
-		expect(() => mgr.appendMessage(makeAssistantMessage("assistant reply"))).not.toThrow();
+		expect(() => mgr.appendMessage({ role: "user", content: "before flush", timestamp: Date.now() })).not.toThrow();
 		// 2 failed attempts + 1 success.
 		expect(appendAttempts).toBe(3);
+
+		mgr.appendMessage(makeAssistantMessage("assistant reply"));
+		await mgr.flushWrites();
 
 		// The write completed: full history is durable on disk.
 		const content = readFileSync(sessionFile, "utf8");
@@ -231,17 +231,15 @@ describe("FU2: appendWithRetry absorbs transient EBUSY/EPERM in _persist", () =>
 	});
 
 	it("propagates after exhausting retries (3 EPERM) and keeps flushed=false for the next attempt", () => {
-		const sessionFile = join(tempDir, "ebusy-exhaust.jsonl");
-		writeFileSync(sessionFile, `${JSON.stringify(header("fu2-exhaust", "/tmp"))}\n`, "utf8");
-
-		const mgr = SessionManager.open(sessionFile);
-		mgr.appendMessage({ role: "user", content: "user line", timestamp: Date.now() });
+		const mgr = SessionManager.create("/tmp", tempDir);
+		const sessionFile = mgr.getSessionFile();
+		if (!sessionFile) throw new Error("expected a session file");
 
 		// More failures than the retry budget (3) → the error must propagate.
 		appendFailuresRemaining = 5;
 		appendFailureCode = "EPERM";
 
-		expect(() => mgr.appendMessage(makeAssistantMessage("never lands"))).toThrow();
+		expect(() => mgr.appendMessage({ role: "user", content: "user line", timestamp: Date.now() })).toThrow();
 		// Exactly the retry budget was consumed.
 		expect(appendAttempts).toBe(3);
 		// flushed stays false so the next attempt re-emits the full batch (A6 invariant).
@@ -256,16 +254,12 @@ describe("FU2: appendWithRetry absorbs transient EBUSY/EPERM in _persist", () =>
 	});
 
 	it("does NOT retry on a hard error (ENOSPC) — propagates immediately", () => {
-		const sessionFile = join(tempDir, "enospc.jsonl");
-		writeFileSync(sessionFile, `${JSON.stringify(header("fu2-enospc", "/tmp"))}\n`, "utf8");
-
-		const mgr = SessionManager.open(sessionFile);
-		mgr.appendMessage({ role: "user", content: "user line", timestamp: Date.now() });
+		const mgr = SessionManager.create("/tmp", tempDir);
 
 		appendFailuresRemaining = 5;
 		appendFailureCode = "ENOSPC";
 
-		expect(() => mgr.appendMessage(makeAssistantMessage("no space"))).toThrow();
+		expect(() => mgr.appendMessage({ role: "user", content: "user line", timestamp: Date.now() })).toThrow();
 		// Hard error → single attempt, no retry loop.
 		expect(appendAttempts).toBe(1);
 	});

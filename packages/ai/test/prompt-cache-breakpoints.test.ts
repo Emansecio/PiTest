@@ -134,7 +134,7 @@ describe("M3 - cache breakpoint sits on the LAST tool", () => {
 		expect(params.tools?.[2].cache_control).toEqual({ type: "ephemeral" });
 	});
 
-	it("anthropic: only the last name-sorted tool carries cache_control", () => {
+	it("anthropic: caller tool order is preserved and the last tool carries cache_control", () => {
 		const model: Model<"anthropic-messages"> = {
 			id: "claude-sonnet-5",
 			name: "Claude Sonnet",
@@ -155,18 +155,33 @@ describe("M3 - cache breakpoint sits on the LAST tool", () => {
 
 		const params = buildAnthropicParams(model, context, false);
 		const tools = params.tools as Array<{ name: string; cache_control?: CacheControl }>;
-		expect(tools.map((t) => t.name)).toEqual(["alpha", "beta", "gamma"]);
+		// Caller order is preserved — NOT name-sorted. Sorting put a newly activated
+		// tool in the middle of the array, which invalidates the tools block and
+		// everything cached behind it; activation is append-only precisely so the
+		// prefix survives. The breakpoint still rides the last tool of that order.
+		expect(tools.map((t) => t.name)).toEqual(["gamma", "alpha", "beta"]);
 		expect(tools[0].cache_control).toBeUndefined();
 		expect(tools[1].cache_control).toBeUndefined();
 		expect(tools[2].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
 
-		// Anthropic keeps its native split: static part pinned, dynamic unpinned,
-		// and no <env> relocation on this route (byte-identical M1-wise).
+		// The dynamic suffix leaves `system` on this route too. Keeping it as an
+		// unpinned second system block protected the SYSTEM breakpoint but not the
+		// ones below it: the last-user-message and compaction breakpoints cache
+		// everything above them, `system` included, so a suffix that changes every
+		// turn re-billed the whole history. Relocated to the tail of the last user
+		// message it sits BEHIND those breakpoints instead.
 		const system = params.system as Array<{ text: string; cache_control?: CacheControl }>;
+		expect(system).toHaveLength(1);
 		expect(system[0].text).toBe(STATIC_PART);
 		expect(system[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
-		expect(system[1].text).toBe(DYNAMIC_PART);
-		expect(system[1].cache_control).toBeUndefined();
-		expect(JSON.stringify(params)).not.toContain("<env>");
+
+		const lastMessage = params.messages[params.messages.length - 1];
+		const blocks = lastMessage.content as Array<{ type: string; text?: string; cache_control?: CacheControl }>;
+		const envBlock = blocks[blocks.length - 1];
+		expect(envBlock.text).toContain(DYNAMIC_PART);
+		expect(envBlock.text).toContain("<env>");
+		// Behind the breakpoint: the cached prefix ends before the volatile tail.
+		expect(envBlock.cache_control).toBeUndefined();
+		expect(blocks.some((b) => b.cache_control)).toBe(true);
 	});
 });

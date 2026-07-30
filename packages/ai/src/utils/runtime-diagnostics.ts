@@ -44,6 +44,12 @@ export type DiagnosticCategory =
 	// `count` carries the consecutive-failure run; the session escalates to a
 	// visible warning once it crosses a small threshold.
 	| "session.persist_failed"
+	// A compaction entry's `firstKeptEntryId` matched no entry on the session path,
+	// so the kept-history anchor was lost (migrated session, dropped entry, edited
+	// file). The context builder fails SAFE — it keeps the full pre-compaction
+	// history rather than emitting none — and records this so the divergence is
+	// visible instead of showing up as context that quietly went missing.
+	| "session.compaction_anchor_missing"
 	| "error.isolated"
 	| "limit.evicted"
 	| "input.truncated"
@@ -99,6 +105,9 @@ export type DiagnosticCategory =
 	// An under-specified mutating prompt got the ask-before-you-wander
 	// `<clarify_first>` directive appended for this turn (clarify nudge).
 	| "quality.clarify"
+	// The todo list drifted from the work: either a sync reminder fired, or the
+	// reminder was ignored enough times that it gave up (ruleId distinguishes).
+	| "quality.todo-cadence"
 	| "lsp.manager-overwrite"
 	// A verification-gate failure was classified by whether its failing files were
 	// edited this turn (cross-file escape). `mechanism` carries the classification,

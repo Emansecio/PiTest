@@ -1,6 +1,6 @@
 import type { AssistantMessage } from "@pit/ai";
 import { type TUI, visibleWidth } from "@pit/tui";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	AssistantMessageComponent,
 	appendRevealCaret,
@@ -194,6 +194,110 @@ describe("assistant message streaming smoothing", () => {
 		let guard = 0;
 		while (tui.animating && guard++ < 1000) tui.tick(guard * 16);
 		expect(stripAnsi(comp.render(120).join("\n"))).toContain("WORLD"); // settled & complete
+	});
+});
+
+/**
+ * The drain law must track the incoming rate, not just decay the backlog. With
+ * the pure `backlog / CATCHUP_FRAMES` law the drain equalled the arrival rate
+ * only at a NON-ZERO backlog, so the cursor settled into a permanent trail of
+ * `rate × 130ms` of text (measured: 30 chars behind at ~310 chars/s, ~95 at
+ * ~890 chars/s) and dumped that whole trail in one frame at message_end.
+ *
+ * These drive a steady stream on a fake clock — `syncReveal` samples
+ * `performance.now()` for the arrival estimate, so the deltas must be spaced on
+ * the SAME clock the ticker is driven with, or the estimate sees every delta as
+ * arriving in the same frame.
+ */
+describe("assistant message reveal keeps station with the stream", () => {
+	const TOKEN_COUNT = 5; // chars per delta = TOKEN_COUNT * 6 = 30
+	const DELTA_GAP_MS = 90; // ~330 chars/s, a realistic mid-rate stream
+	const DELTAS = 24;
+
+	beforeAll(() => {
+		initTheme("dark");
+		process.env.TERM = "xterm-256color";
+		delete process.env.PIT_NO_MOTION;
+		delete process.env.PIT_REDUCED_MOTION;
+	});
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	interface StreamRun {
+		/** Tail token of every delta still hidden when the NEXT delta landed. */
+		stragglers: string[];
+		/** Tail token still hidden when the stream stopped — what settling would dump. */
+		hiddenAtSettle: string[];
+		firstDeltaTail: string;
+		comp: AssistantMessageComponent;
+		tui: ControllableTui;
+	}
+
+	function streamAndCollectStragglers(): StreamRun {
+		const tui = new ControllableTui();
+		const comp = build(tui, true);
+		let text = "";
+		const stragglers: string[] = [];
+		let previousTail: string | null = null;
+		let firstDeltaTail = "";
+
+		for (let d = 0; d < DELTAS; d++) {
+			// Advance the shared clock a delta-gap, ticking the reveal each frame.
+			for (let elapsed = 0; elapsed < DELTA_GAP_MS; elapsed += 16) {
+				vi.advanceTimersByTime(16);
+				tui.tick(performance.now());
+			}
+			// The previous delta's tail should already be on screen by now.
+			if (previousTail !== null && !rendered(comp).includes(previousTail)) {
+				stragglers.push(previousTail);
+			}
+			const tokens: string[] = [];
+			for (let t = 0; t < TOKEN_COUNT; t++) {
+				tokens.push(`w${String(d * TOKEN_COUNT + t).padStart(4, "0")}`);
+			}
+			text += `${tokens.join(" ")} `;
+			previousTail = tokens[tokens.length - 1];
+			if (d === 0) firstDeltaTail = previousTail;
+			comp.updateContent(textMsg(text));
+		}
+
+		// Drain the final gap, then settle. Whatever is still hidden here is what
+		// message_end would dump into a single frame.
+		for (let elapsed = 0; elapsed < DELTA_GAP_MS; elapsed += 16) {
+			vi.advanceTimersByTime(16);
+			tui.tick(performance.now());
+		}
+		const beforeSettle = rendered(comp);
+		const hiddenAtSettle = previousTail !== null && !beforeSettle.includes(previousTail) ? [previousTail] : [];
+		return { stragglers, hiddenAtSettle, firstDeltaTail, comp, tui };
+	}
+
+	it("shows each delta before the next one arrives (no standing backlog)", () => {
+		const { stragglers, firstDeltaTail } = streamAndCollectStragglers();
+		// Under the old law EVERY delta was still partly hidden when its successor
+		// landed — the trail never cleared, at any rate.
+		//
+		// The block's OPENING delta is the one legitimate exception: it is the first
+		// text of a new message, so there is no earlier delta to measure an interval
+		// against and the arrival term is still zero. That delta eases in on the pure
+		// backlog law, which is the deliberate materialize-in at the head of an
+		// answer. Everything after it must keep station.
+		expect(stragglers.filter((tail) => tail !== firstDeltaTail)).toEqual([]);
+	});
+
+	it("has nothing left to dump when the message settles", () => {
+		const { hiddenAtSettle, comp, tui } = streamAndCollectStragglers();
+		expect(hiddenAtSettle).toEqual([]);
+		// And settling is therefore a no-op for the visible text, not a pop.
+		const before = rendered(comp);
+		comp.updateContent(textMsg(`${before.trim()} `, "end_turn"));
+		expect(tui.animating).toBe(false);
 	});
 });
 

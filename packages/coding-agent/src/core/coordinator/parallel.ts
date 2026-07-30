@@ -87,7 +87,14 @@ export async function spawnAll(
 	tasks: ParallelTask[],
 	options: SpawnAllOptions,
 ): Promise<ParallelTaskResult[]> {
-	const concurrency = options.concurrency ?? resolveMaxSubagentConcurrency();
+	// Clamped, not just defaulted: the model picks `concurrency` and the schema
+	// advertises no ceiling, but slots beyond the cap are REJECTED once the wait
+	// queue fills — not queued. An over-eager fan-out lost real tasks to
+	// "subagent queue full" instead of simply running them a few at a time.
+	const concurrency = Math.max(
+		1,
+		Math.min(options.concurrency ?? Number.POSITIVE_INFINITY, resolveMaxSubagentConcurrency()),
+	);
 	const base = options.base;
 
 	return mapWithConcurrency(tasks, concurrency, async (task, index) => {

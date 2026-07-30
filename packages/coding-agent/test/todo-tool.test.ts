@@ -73,3 +73,43 @@ describe("todo tool", () => {
 		expect((res.details as TodoToolDetails).error).toContain("unavailable");
 	});
 });
+
+describe("todo tool — set action", () => {
+	it("rewrites the whole list in one call and echoes the result", async () => {
+		const mgr = new TodoManager();
+		setCurrentTodoManager(mgr);
+		const def = createTodoToolDefinition("/tmp");
+
+		await runExec(def, { action: "create", subject: "Investigate" });
+		const out = await runExec(def, {
+			action: "set",
+			items: [
+				{ id: 1, subject: "Investigate", status: "completed" },
+				{ subject: "Implement", status: "in_progress", activeForm: "Implementing" },
+			],
+		});
+
+		const details = out.details as TodoToolDetails;
+		expect(details.action).toBe("set");
+		expect(details.tasks.map((t) => t.status)).toEqual(["completed", "in_progress"]);
+		expect(text(out)).toContain("✓ #1 Investigate");
+		expect(text(out)).toContain("◐ #2 Implement (Implementing)");
+	});
+
+	it("rejects a set without items", async () => {
+		setCurrentTodoManager(new TodoManager());
+		const out = await runExec(createTodoToolDefinition("/tmp"), { action: "set" });
+		expect(out.isError).toBe(true);
+		expect(text(out)).toContain("set requires `items`");
+	});
+
+	it("rejects an item with a blank subject and names the index", async () => {
+		setCurrentTodoManager(new TodoManager());
+		const out = await runExec(createTodoToolDefinition("/tmp"), {
+			action: "set",
+			items: [{ subject: "Fine" }, { subject: "  " }],
+		});
+		expect(out.isError).toBe(true);
+		expect(text(out)).toContain("index 1");
+	});
+});

@@ -1,11 +1,14 @@
 /**
  * Ephemeral status above the editor (not transcript).
  *
- * info / warning auto-dismiss; error stays until the host clears (submit, etc.).
+ * info / warning auto-dismiss; sticky and error stay until the host clears
+ * (submit, a replacing status, etc.). `sticky` exists for lines that document
+ * ongoing work whose duration is unknown (a running subagent): an auto-dismiss
+ * would make it look like the thing it reports stopped existing.
  * Pure timer + kind controller — host supplies paint/clear side effects.
  */
 
-export type EphemeralStatusKind = "info" | "warning" | "error";
+export type EphemeralStatusKind = "info" | "warning" | "error" | "sticky";
 
 export const EPHEMERAL_INFO_TTL_MS = 3500;
 export const EPHEMERAL_WARNING_TTL_MS = 6000;
@@ -31,6 +34,7 @@ function ttlFor(kind: EphemeralStatusKind): number | null {
 		case "warning":
 			return EPHEMERAL_WARNING_TTL_MS;
 		case "error":
+		case "sticky":
 			return null;
 	}
 }

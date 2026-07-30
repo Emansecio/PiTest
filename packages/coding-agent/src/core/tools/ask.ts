@@ -12,12 +12,12 @@
  */
 
 import type { AgentTool } from "@pit/agent-core";
-import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
 import { truncateWithEllipsis } from "../../utils/surrogate.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentUserInputBus, type UserInputBus } from "../user-input-bus.ts";
 import { applyKeyAliases, coerceJsonArrayField } from "./argument-prep.ts";
+import { AskLineBlock, renderAskCallLines, renderAskResultLines } from "./ask-render.ts";
 import { getTextOutput, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -96,6 +96,12 @@ export interface AskToolDetails {
 	response: AskResponse | null;
 	recommended?: string;
 	cancelled: boolean;
+}
+
+/** Shared renderer state for one ask row: the call line needs to know whether
+ * the result has landed, and only renderResult can tell it. */
+interface AskRenderState {
+	answered?: boolean;
 }
 
 export interface AskToolOptions {
@@ -320,39 +326,42 @@ export function createAskToolDefinition(
 				},
 			};
 		},
+		// Both renderers lay out against the real render width (see ask-render.ts);
+		// the state key keeps a re-render with unchanged content free.
 		renderCall(args, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			const rawQuestion = str(args?.question);
-			const question = rawQuestion ? trimToMax(rawQuestion, 80) : "(missing)";
-			text.setText(`${theme.fg("toolTitle", theme.bold("ask"))} ${theme.fg("accent", question)}`);
-			return text;
+			const prev = context.lastComponent;
+			const block = prev instanceof AskLineBlock ? prev : new AskLineBlock("", () => []);
+			const question = str(args?.question);
+			const header = str(args?.header);
+			// Answered asks demote the question to context — the answer below it is
+			// what the scrollback is for. The flag rides the shared renderer state
+			// because only renderResult knows the ask has settled.
+			const answered = (context.state as AskRenderState | undefined)?.answered === true;
+			block.setState(`${answered ? "a" : "p"} ${header} ${question}`, (width) =>
+				renderAskCallLines(args, theme, width, answered),
+			);
+			return block;
 		},
 		renderResult(result, _options, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			// Styled closure for the interaction: ✓ + the chosen answer (the call
-			// line above already shows the question). Falls back to the raw text
-			// output for shapes without structured details (e.g. auto-answers).
+			const prev = context.lastComponent;
+			const block = prev instanceof AskLineBlock ? prev : new AskLineBlock("", () => []);
 			const details = result.details as AskToolDetails | undefined;
-			const response = details?.response;
-			if (details?.cancelled) {
-				text.setText(theme.fg("muted", "✗ cancelled"));
-				return text;
+			// Auto-answers and listener-less runs carry no structured details, so the
+			// raw text payload stays the fallback.
+			const fallback = details?.response ? "" : getTextOutput(result, context.showImages);
+			const state = context.state as AskRenderState | undefined;
+			if (state && state.answered !== true) {
+				state.answered = true;
+				// The call line above rendered before the answer landed, so it still
+				// reads as pending. One repaint on the transition fixes it; the guard
+				// keeps this from looping. (HTML export renders each row once and never
+				// revisits it, so there the question keeps its pending tone.)
+				context.invalidate();
 			}
-			if (response?.kind === "selection" && response.selections.length > 0) {
-				const check = theme.fg("success", "✓");
-				const picked = theme.fg("toolOutput", response.selections.join(", "));
-				const note = response.comment ? theme.fg("dim", ` — ${response.comment}`) : "";
-				text.setText(`${check} ${picked}${note}`);
-				return text;
-			}
-			if (response?.kind === "freeform" && response.text.trim()) {
-				const check = theme.fg("success", "✓");
-				text.setText(`${check} ${theme.fg("toolOutput", truncateWithEllipsis(response.text.trim(), 200))}`);
-				return text;
-			}
-			const output = getTextOutput(result, context.showImages).trim();
-			text.setText(output ? theme.fg("toolOutput", output) : "");
-			return text;
+			block.setState(JSON.stringify([details ?? null, fallback]), (width) =>
+				renderAskResultLines(details, fallback, theme, width),
+			);
+			return block;
 		},
 	};
 }

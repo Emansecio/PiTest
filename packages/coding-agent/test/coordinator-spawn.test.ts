@@ -353,6 +353,19 @@ describe("spawnSubagent (faux model)", () => {
 		expect(record?.error).toMatch(/timeout after 10ms/);
 	});
 
+	it("turn cap: keeps the answer when the capped turn is the one that finished", async () => {
+		// Regression: the cap fired on EVERY turn_end, including the terminal one
+		// that had already produced the answer — so the run was aborted, recorded
+		// `cancelled`, and `max_turns: 1` could never succeed.
+		const rig = newRig({ tools: [makeTool("read")] });
+		rig.faux.setResponses([fauxAssistantMessage("the answer is 42")]);
+
+		const result = await spawnSubagent(rig.deps, { prompt: "one shot", taskName: "one-shot", maxTurns: 1 });
+
+		expect(result.output).toContain("the answer is 42");
+		expect(rig.registry.list().find((r) => r.prompt === "one shot")?.status).not.toBe("cancelled");
+	});
+
 	it("turn cap: aborts with an informative reason naming the cap and marks cancelled", async () => {
 		const rig = newRig({ tools: [makeTool("read")] });
 		// Every turn calls a tool and never finalizes, so the loop only ends when

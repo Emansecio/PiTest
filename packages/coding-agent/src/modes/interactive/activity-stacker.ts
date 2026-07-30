@@ -19,6 +19,15 @@ const TURN_EXCHANGE_TOOLS = new Set(["ask", "resolve"]);
  * tight — a blank divides bursts only where agent narration intervenes, so narration
  * gets breathing room without double-spacing a long tool run.
  *
+ * WHERE THAT BLANK GOES is the whole point: narration ANNOUNCES the work that
+ * follows it ("Agora o CSS da tela de entrada:" → the group that edits the CSS),
+ * so the blank belongs BEFORE the narration, separating it from the previous
+ * group. It used to be armed for the next activity block instead, which put the
+ * gap between a narration and its own group and glued that group to the NEXT
+ * narration — every pair read shifted by one, against the proximity rule. Cost is
+ * identical (one blank per narration that follows activity); only the grouping
+ * changes. First narration of a turn gets none: nothing precedes it to separate.
+ *
  * ask/resolve are turn exchanges, not activity: placeCall returns false so the
  * caller renders them as their own turn block.
  */
@@ -28,7 +37,9 @@ export class ActivityStacker {
 	private current: WorkGroupComponent | null = null;
 	// Per-turn sequence for unnamed `task` agents (reset on reset()).
 	private taskOrdinal = 0;
-	private gapBeforeNextActivity = false;
+	// True once this narration→activity stretch has emitted an activity block, i.e.
+	// there is something above for the NEXT narration to be separated from.
+	private activitySinceDivide = false;
 	/** When true, activity spinners hold still so the working loader owns motion. */
 	private spinnersFrozen = false;
 	private readonly isFrozen = (): boolean => this.spinnersFrozen;
@@ -44,11 +55,8 @@ export class ActivityStacker {
 	}
 
 	private appendActivity(component: Component): void {
-		if (this.gapBeforeNextActivity) {
-			this.addToChat(new Spacer(1));
-			this.gapBeforeNextActivity = false;
-		}
 		this.addToChat(component);
+		this.activitySinceDivide = true;
 	}
 
 	/** Place a tool call into the current work phase, opening one if needed. Returns
@@ -56,7 +64,9 @@ export class ActivityStacker {
 	placeCall(exec: ToolExecutionComponent): boolean {
 		if (TURN_EXCHANGE_TOOLS.has(exec.getToolName())) {
 			this.seal();
-			this.gapBeforeNextActivity = false;
+			// The caller renders this as its own turn block, whose shell brings its
+			// own leading blank — nothing here to separate the next narration from.
+			this.activitySinceDivide = false;
 			return false;
 		}
 		if (!this.current) {
@@ -69,17 +79,23 @@ export class ActivityStacker {
 		return true;
 	}
 
-	/** Agent text or abort splits the burst: seal the open phase and leave a gap so
-	 * the next real activity block has one leading blank. */
+	/**
+	 * Agent text (or an abort) splits the burst: seal the open phase and, when
+	 * there is activity above, emit the blank that separates it from the narration
+	 * the caller is about to append. Callers invoke this immediately before adding
+	 * that text block, which is what makes "emit now" the right timing.
+	 */
 	divide(): void {
 		this.seal();
-		this.gapBeforeNextActivity = true;
+		if (!this.activitySinceDivide) return;
+		this.addToChat(new Spacer(1));
+		this.activitySinceDivide = false;
 	}
 
 	/** New turn / history rebuild: seal the open phase and restart agent numbering. */
 	reset(): void {
 		this.seal();
-		this.gapBeforeNextActivity = false;
+		this.activitySinceDivide = false;
 		this.taskOrdinal = 0;
 	}
 

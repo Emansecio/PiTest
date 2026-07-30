@@ -4,6 +4,14 @@ import { eastAsianWidth } from "get-east-asian-width";
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 /**
+ * Columns a literal tab occupies. Single source of truth for every path that
+ * measures or slices text — they used to disagree, which is how a tabbed line
+ * could measure narrower than it drew.
+ */
+const TAB_COLUMNS = 3;
+const TAB_SPACES = " ".repeat(TAB_COLUMNS);
+
+/**
  * Get the shared grapheme segmenter instance.
  */
 export function getSegmenter(): Intl.Segmenter {
@@ -138,7 +146,7 @@ function truncateFragmentToWidth(text: string, maxWidth: number): { text: string
 		}
 
 		if (text[i] === "\t") {
-			if (width + 3 > maxWidth) {
+			if (width + TAB_COLUMNS > maxWidth) {
 				break;
 			}
 			if (pendingAnsi) {
@@ -146,7 +154,7 @@ function truncateFragmentToWidth(text: string, maxWidth: number): { text: string
 				pendingAnsi = "";
 			}
 			result += "\t";
-			width += 3;
+			width += TAB_COLUMNS;
 			i++;
 			continue;
 		}
@@ -205,6 +213,15 @@ function finalizeTruncatedResult(
  * check to avoid running the RGI_Emoji regex unnecessarily.
  */
 function graphemeWidth(segment: string): number {
+	// Tab BEFORE the zero-width test, which would otherwise claim it: `\t` is a
+	// control character, and answering 0 for it made this function disagree with
+	// `visibleWidth` (which expands tabs to spaces first) and with
+	// `truncateToWidth` (which handles them itself). The two consumers that hand
+	// raw text to the segmenter — `sliceWithWidth` and `extractSegments` — then
+	// under-measured every tabbed line, so a slice asked to fit N columns came
+	// back wider, and the overlay compositor's final "never exceed the terminal
+	// width" clamp silently passed a line that did.
+	if (segment === "\t") return TAB_COLUMNS;
 	// Zero-width clusters
 	if (zeroWidthRegex.test(segment)) {
 		return 0;
@@ -276,7 +293,7 @@ export function visibleWidth(str: string): number {
 	// Normalize: tabs to 3 spaces, strip ANSI escape codes
 	let clean = str;
 	if (str.includes("\t")) {
-		clean = clean.replace(/\t/g, "   ");
+		clean = clean.replace(/\t/g, TAB_SPACES);
 	}
 	if (clean.includes("\x1b")) {
 		const parts: string[] = [];
@@ -897,6 +914,14 @@ function breakLongWord(word: string, width: number, tracker: AnsiCodeTracker): s
 
 		const graphemeWidth = visibleWidth(grapheme);
 
+		// A grapheme wider than the entire line can never be placed. The line break
+		// below assumes the grapheme fits once the line is empty, so a 2-column CJK
+		// glyph against a 1-column budget was pushed anyway — emitting a line wider
+		// than `width`, which the renderer treats as fatal. There is no rendering at
+		// this width that both fits and shows it, so drop it rather than break the
+		// frame. (Also avoids the empty line the break would have pushed first.)
+		if (graphemeWidth > width) continue;
+
 		if (currentWidth + graphemeWidth > width) {
 			// Add specific reset for underline only (preserves background)
 			const lineEndReset = tracker.getLineEndReset();
@@ -1022,7 +1047,7 @@ export function truncateToWidth(text: string, maxWidth: number, ellipsis: string
 			}
 
 			if (text[i] === "\t") {
-				if (keepContiguousPrefix && keptWidth + 3 <= targetWidth) {
+				if (keepContiguousPrefix && keptWidth + TAB_COLUMNS <= targetWidth) {
 					if (pendingAnsi) {
 						result += pendingAnsi;
 						pendingAnsi = "";

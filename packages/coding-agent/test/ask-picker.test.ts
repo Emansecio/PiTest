@@ -121,6 +121,19 @@ describe("ask picker", () => {
 		}
 	});
 
+	it("hard-breaks a long token without dropping characters", () => {
+		// Regression: the break sliced by the truncated string's raw length, which
+		// counts the four code units of `truncateToWidth`'s trailing reset as text.
+		// A URL wrapped in the card came out as `https://appaample.com/elility/…`
+		// — silently corrupted, in the one place the user reads to decide.
+		const url = "https://appai.example.com/eligibility/AAAA-BBBB-CCCC-DDDD-EEEE-FFFF-GGGG";
+		const rendered = drive(makeReq({ question: url })).render(40);
+		// Strip the card's side borders and padding, then glue the rows back into
+		// the original token.
+		const glued = rendered.replace(/[│\s]/g, "");
+		expect(glued).toContain(url);
+	});
+
 	it("reveals the full option label when the terminal becomes wide enough", () => {
 		const label = "Completo — executar as três camadas e preservar todo o contexto necessário na opção";
 		const p = drive(makeReq({ options: [{ label }] }));

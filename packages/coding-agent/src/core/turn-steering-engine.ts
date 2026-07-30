@@ -1,5 +1,5 @@
 import type { AgentMessage, ToolErrorHintRule } from "@pit/agent-core";
-import type { ToolResultMessage } from "@pit/ai";
+import { recordDiagnostic, type ToolResultMessage } from "@pit/ai";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { sliceSafe } from "../utils/surrogate.ts";
 import { buildCrossErrorReminder, CrossErrorTracker, decideCrossErrorReminder } from "./cross-error.js";
@@ -121,6 +121,13 @@ export class TurnSteeringEngine {
 	// _stagnation (NOT reset per prompt).
 	private readonly _todoCadence = new TodoCadenceTracker();
 	private _lastTodoCadenceReminderAt = 0;
+	// Reminders fired since the model last touched the todo list, plus the latch
+	// that scores the outstanding one and the once-per-edge give-up flag. See
+	// TODO_CADENCE_MAX_IGNORED: a steer ignored twice stops firing and hands the
+	// signal to telemetry instead of paying context on every drifting turn.
+	private _todoCadenceIgnored = 0;
+	private _todoCadenceAwaitingSync = false;
+	private _todoCadenceGaveUp = false;
 	// Todo-first safety net: non-todo work actions taken in the current prompt, plus a
 	// one-shot latch so the nudge fires at most once per prompt. Both reset in prompt().
 	private _promptWorkActions = 0;
@@ -642,8 +649,19 @@ export class TurnSteeringEngine {
 		const cfg = this.deps.settingsManager.getToolFeedbackSettings().todoCadenceReminder;
 		if (!cfg.enabled) return;
 		const { touchedTodo, mutated } = classifyTodoTurn(message, toolResults);
-		const hasInProgress = this.deps.todo.hasInProgress();
-		const staleTurns = this._todoCadence.observe({ hasInProgress, touchedTodo });
+		// Score the OUTSTANDING reminder before deciding on a new one: if one was
+		// fired and the model still did not touch the list this turn, it went
+		// unheeded. Touching the list clears the streak, so a session that starts
+		// complying gets its reminders back.
+		if (touchedTodo) {
+			this._todoCadenceIgnored = 0;
+			this._todoCadenceAwaitingSync = false;
+		} else if (this._todoCadenceAwaitingSync) {
+			this._todoCadenceIgnored++;
+			this._todoCadenceAwaitingSync = false;
+		}
+		const hasOpenWork = this.deps.todo.hasOpenWork();
+		const staleTurns = this._todoCadence.observe({ hasOpenWork, touchedTodo });
 		const mutatedWithoutTodo = mutated && !touchedTodo && !this.deps.todo.isEmpty();
 		const decision = decideTodoCadenceReminder({
 			enabled: cfg.enabled,
@@ -653,13 +671,38 @@ export class TurnSteeringEngine {
 			lastFiredAt: this._lastTodoCadenceReminderAt,
 			now: Date.now(),
 			cooldownMs: cfg.cooldownMs,
+			ignoredStreak: this._todoCadenceIgnored,
 		});
 		if (decision.action === "none") return;
+		const reason = mutatedWithoutTodo ? "mutated" : "stale";
+		if (decision.action === "give-up") {
+			// Record once per give-up edge, not on every turn that keeps drifting.
+			if (!this._todoCadenceGaveUp) {
+				this._todoCadenceGaveUp = true;
+				recordDiagnostic({
+					category: "quality.todo-cadence",
+					level: "warn",
+					source: "turn-steering",
+					context: {
+						ruleId: "todo-cadence-gave-up",
+						note: `ignored=${this._todoCadenceIgnored} reason=${reason} stale=${staleTurns}`,
+					},
+				});
+			}
+			return;
+		}
+		this._todoCadenceGaveUp = false;
 		this._lastTodoCadenceReminderAt = decision.nextLastFiredAt;
+		this._todoCadenceAwaitingSync = true;
 		const items = this.deps.todo.list();
 		const staleItem = items.find((t) => t.status === "in_progress");
-		const reason = mutatedWithoutTodo ? "mutated" : "stale";
 		const content = buildTodoCadenceReminder({ items, staleItem, reason });
+		recordDiagnostic({
+			category: "quality.todo-cadence",
+			level: "info",
+			source: "turn-steering",
+			context: { ruleId: "todo-cadence-reminder", note: `reason=${reason} stale=${staleTurns}` },
+		});
 		this._fireReminder("pi.todo-cadence-reminder", content, {
 			deliverAs: "steer",
 			display: false,

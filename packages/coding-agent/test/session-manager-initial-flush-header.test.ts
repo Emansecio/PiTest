@@ -73,7 +73,7 @@ describe("H22: initial flush never duplicates a pre-existing header", () => {
 		}
 	});
 
-	it("empty/corrupt-file recovery: a completed turn writes exactly one header", () => {
+	it("empty/corrupt-file recovery: a completed turn writes exactly one header", async () => {
 		const sessionFile = join(tempDir, "corrupt.jsonl");
 		// A corrupt file whose first line is not a valid session header:
 		// loadEntriesFromFile returns [] → setSessionFile rewrites a fresh header on
@@ -86,6 +86,9 @@ describe("H22: initial flush never duplicates a pre-existing header", () => {
 
 		mgr.appendMessage({ role: "user", content: "hello", timestamp: Date.now() });
 		mgr.appendMessage(makeAssistantMessage("hi there"));
+		// The prompt takes the synchronous initial flush; the answer rides the async
+		// drain that turn boundaries settle.
+		await mgr.flushWrites();
 
 		// The initial flush appended the batch. Before the fix it re-appended the
 		// header (the batch starts with fileEntries[0], the header already on disk).
@@ -93,11 +96,11 @@ describe("H22: initial flush never duplicates a pre-existing header", () => {
 		expect(readFileSync(sessionFile, "utf8")).toContain("hi there");
 	});
 
-	it("v1 migration of an assistant-less session: no duplicate header AND no duplicated user message", () => {
+	it("v1 migration of an assistant-less session: no duplicate header AND no duplicated user message", async () => {
 		const sessionFile = join(tempDir, "v1.jsonl");
 		// v1 header (no version) + a bare user entry (no id/parentId), no assistant.
 		// Opening migrates v1→v3 → _rewriteFile writes header+user to disk
-		// (flushed=true, _hasAssistantMessage=false). The next turn's initial flush
+		// (flushed=true, no durable entry seen yet). The next turn's initial flush
 		// re-appended header+user before the fix → header AND user line duplicated.
 		const v1Header = { type: "session", id: "v1-sess", timestamp: new Date(0).toISOString(), cwd: "/tmp" };
 		const v1User = { type: "message", message: { role: "user", content: "original user line" } };
@@ -108,6 +111,7 @@ describe("H22: initial flush never duplicates a pre-existing header", () => {
 
 		mgr.appendMessage({ role: "user", content: "second user line", timestamp: Date.now() });
 		mgr.appendMessage(makeAssistantMessage("assistant reply"));
+		await mgr.flushWrites();
 
 		expect(countHeaders(sessionFile)).toBe(1);
 		const users = userTexts(sessionFile);
@@ -117,12 +121,13 @@ describe("H22: initial flush never duplicates a pre-existing header", () => {
 		expect(readFileSync(sessionFile, "utf8")).toContain("assistant reply");
 	});
 
-	it("brand-new session writes header + turn exactly once (no regression on the create-append path)", () => {
+	it("brand-new session writes header + turn exactly once (no regression on the create-append path)", async () => {
 		const mgr = SessionManager.create("/tmp", tempDir);
 		const sessionFile = mgr.getSessionFile();
 		if (!sessionFile) throw new Error("expected a session file");
 		mgr.appendMessage({ role: "user", content: "u1", timestamp: Date.now() });
 		mgr.appendMessage(makeAssistantMessage("a1"));
+		await mgr.flushWrites();
 		expect(countHeaders(sessionFile)).toBe(1);
 		expect(userTexts(sessionFile)).toEqual(["u1"]);
 	});
@@ -145,27 +150,24 @@ describe("H24: persist-failure counting surfaces silent disk/memory divergence",
 	});
 
 	it("counts consecutive synchronous initial-flush failures and resets after a success", () => {
-		const sessionFile = join(tempDir, "count.jsonl");
-		const header = {
-			type: "session",
-			id: "count-sess",
-			version: 3,
-			timestamp: new Date(0).toISOString(),
-			cwd: "/tmp",
-		};
-		writeFileSync(sessionFile, `${JSON.stringify(header)}\n`, "utf8");
-
-		const mgr = SessionManager.open(sessionFile);
+		// A session whose file does not exist yet: the first durable entry (the user's
+		// prompt — see isDurableEntry) takes the synchronous initial flush, which is
+		// the write this test counts failures of. Opening a session that already has a
+		// header on disk is past that point and routes straight to the async drain.
+		const mgr = SessionManager.create("/tmp", tempDir);
+		const sessionFile = mgr.getSessionFile();
+		if (!sessionFile) throw new Error("expected a session file");
 		expect(mgr.getConsecutivePersistFailures()).toBe(0);
-
-		mgr.appendMessage({ role: "user", content: "u", timestamp: Date.now() });
 
 		// Point at a path inside a non-existent directory so the initial flush throws
 		// ENOENT — same failure shape as a full disk / AV lock the handler swallows.
+		// Broken BEFORE the first message: the initial flush is triggered by the first
+		// durable entry, which is the user's prompt (see isDurableEntry).
 		(mgr as unknown as { sessionFile: string }).sessionFile = join(tempDir, "nope", "count.jsonl");
-		expect(() => mgr.appendMessage(makeAssistantMessage("a"))).toThrow();
+		expect(() => mgr.appendMessage({ role: "user", content: "u", timestamp: Date.now() })).toThrow();
 		expect(mgr.getConsecutivePersistFailures()).toBe(1);
 
+		// Still unflushed, so the next append retries the whole batch — and fails again.
 		expect(() => mgr.appendMessage(makeAssistantMessage("a2"))).toThrow();
 		expect(mgr.getConsecutivePersistFailures()).toBe(2);
 

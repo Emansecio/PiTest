@@ -83,14 +83,15 @@ describe("full-turn work-phase layout snapshot", () => {
 
 		// --- assert component sequence ---
 		const names = chat.map((c) => c.constructor.name);
-		// Activity blocks stack tight. The agent-text boundary is symmetric: the
-		// AssistantMessage brings its leading blank and the stacker adds one before
-		// the next real activity block.
+		// Activity blocks stack tight, and the blank sits BEFORE each narration that
+		// follows activity — narration announces the group under it, so the two read
+		// as one unit and the blank separates that unit from the previous one.
 		expect(names).toEqual([
 			"WorkGroupComponent",
-			"AssistantMessageComponent",
 			"Spacer",
+			"AssistantMessageComponent",
 			"WorkGroupComponent",
+			"Spacer",
 			"AssistantMessageComponent",
 		]);
 

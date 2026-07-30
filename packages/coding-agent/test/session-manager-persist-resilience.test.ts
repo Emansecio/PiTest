@@ -70,18 +70,18 @@ describe("SessionManager _persist resilience (Fix 1)", () => {
 
 		const mgr = SessionManager.open(sessionFile);
 
-		// Accumulate user history BEFORE the first assistant message. None of these
-		// are persisted yet (no assistant message has been seen), so they live only
-		// in the initial flush batch.
-		mgr.appendMessage({ role: "user", content: "first user line", timestamp: Date.now() });
-		mgr.appendMessage({ role: "user", content: "second user line", timestamp: Date.now() });
-
 		// Point the session file at a path inside a non-existent directory so the
 		// VERY FIRST flush (header + all accumulated entries) throws ENOENT, exactly
-		// like an AV/indexer lock (EBUSY/EPERM) or full disk (ENOSPC) would.
+		// like an AV/indexer lock (EBUSY/EPERM) or full disk (ENOSPC) would. Broken
+		// before any message: the initial flush fires on the first durable entry,
+		// which is the user's prompt (see isDurableEntry), not on the answer.
 		const brokenFile = join(tempDir, "does-not-exist-dir", "session.jsonl");
 		(mgr as unknown as { sessionFile: string }).sessionFile = brokenFile;
 
+		// Accumulate user history against the broken path; every append retries the
+		// whole undrained batch, so they all throw and nothing reaches disk.
+		expect(() => mgr.appendMessage({ role: "user", content: "first user line", timestamp: Date.now() })).toThrow();
+		expect(() => mgr.appendMessage({ role: "user", content: "second user line", timestamp: Date.now() })).toThrow();
 		expect(() => mgr.appendMessage(makeAssistantMessage("assistant reply"))).toThrow();
 
 		// After the failed write, flushed must still be false so the next attempt

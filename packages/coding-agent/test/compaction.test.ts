@@ -200,6 +200,34 @@ describe("Token calculation", () => {
 		const usage = createMockUsage(0, 0, 0, 0);
 		expect(calculateContextTokens(usage)).toBe(0);
 	});
+
+	it("counts image blocks on a user message, not just on tool results", () => {
+		// Regression: the user branch only summed `text` blocks, so a pasted
+		// screenshot (or an `--image` attachment) weighed zero against the overflow
+		// guard while carrying megabytes of base64 into the context.
+		const data = "A".repeat(60_000);
+		const withImage: AgentMessage[] = [
+			{ role: "user", content: [{ type: "image", data, mimeType: "image/png" }], timestamp: 1 } as never,
+		];
+		const textOnly: AgentMessage[] = [
+			{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: 1 } as never,
+		];
+
+		const imageTokens = estimateContextTokens(withImage).tokens;
+		expect(imageTokens).toBeGreaterThan(estimateContextTokens(textOnly).tokens + 100);
+		// And it agrees with the tool-result branch, which already counted images.
+		const asToolResult: AgentMessage[] = [
+			{
+				role: "toolResult",
+				content: [{ type: "image", data, mimeType: "image/png" }],
+				toolCallId: "t",
+				toolName: "x",
+				isError: false,
+				timestamp: 1,
+			} as never,
+		];
+		expect(imageTokens).toBe(estimateContextTokens(asToolResult).tokens);
+	});
 });
 
 describe("getLastAssistantUsage", () => {

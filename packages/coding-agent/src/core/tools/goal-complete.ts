@@ -41,6 +41,52 @@ export interface GoalCompleteToolDetails {
 
 export interface GoalCompleteToolOptions {}
 
+/**
+ * One refusal per goal, per gate — the bound that makes R9/R10 terminate.
+ *
+ * A gate that can refuse the SAME goal indefinitely is a doom-loop generator: when
+ * the model cannot clear the condition (a self-review finding it believes is a
+ * false positive, an impacted file it already judged safe), every `goal_complete`
+ * hits the same wall and the goal never ends. That is the failure mode the R7 gate
+ * produced, and it is why comparable harnesses bound their completion policy
+ * instead of blocking on it — zero's `completion_policy.go` caps its continue
+ * nudges (`maxContinueNudges`) and then accepts the turn. A completion policy has
+ * to be designed to terminate.
+ *
+ * So each gate spends exactly one refusal per goal: the first call surfaces the
+ * concrete list, and a second call completes even if the condition still stands.
+ * The refusal already told the model what to check; from there the judgment is
+ * the model's, and a warn-level diagnostic records that the gate was waived.
+ *
+ * R8 (a backgrounded check still running) is deliberately NOT bounded: it clears
+ * on its own the moment the job exits, so it cannot wedge a goal.
+ */
+const selfReviewRefusedGoals = new Set<string>();
+const impactRefusedGoals = new Set<string>();
+
+/**
+ * Spend this goal's single refusal for one gate. Returns true when the gate may
+ * refuse (first time for this goal), false once it is spent and the gate must
+ * fall through to completion.
+ */
+function spendGateRefusal(spent: Set<string>, goalId: string): boolean {
+	if (spent.has(goalId)) return false;
+	spent.add(goalId);
+	return true;
+}
+
+/** Drop a finished goal's refusal bookkeeping so the sets track only live goals. */
+function forgetGateRefusals(goalId: string): void {
+	selfReviewRefusedGoals.delete(goalId);
+	impactRefusedGoals.delete(goalId);
+}
+
+/** Test seam: clear the per-goal refusal ledger between cases. */
+export function _resetGoalCompleteGateStateForTest(): void {
+	selfReviewRefusedGoals.clear();
+	impactRefusedGoals.clear();
+}
+
 /** Cap on seeds shown per R10 bullet line before folding the rest into "+N". */
 const R10_SEEDS_CAP = 2;
 /** Cap on covering-test paths shown in the R10 "run them" line before folding into "+N more". */
@@ -131,24 +177,34 @@ export function createGoalCompleteToolDefinition(
 			// with the concrete findings — same shape as the R7/R8 refusals above.
 			const reviewFindings = getCurrentSelfReviewFindings();
 			if (reviewFindings.length > 0) {
-				const list = reviewFindings
-					.map((f) => `  • [${f.file}] ${f.claim}\n    evidence: ${f.evidence}`)
-					.join("\n");
+				if (spendGateRefusal(selfReviewRefusedGoals, goal.id)) {
+					const list = reviewFindings
+						.map((f) => `  • [${f.file}] ${f.claim}\n    evidence: ${f.evidence}`)
+						.join("\n");
+					recordDiagnostic({
+						category: "quality.self-review",
+						level: "warn",
+						source: "goal-complete",
+						context: { ruleId: "review-blocked-done", note: `high findings=${reviewFindings.length}` },
+					});
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `Not completing the goal — a self-review of your changes found unresolved high-severity problems. Fix these (or explain why each is a false positive), then call goal_complete again:\n${list}`,
+							},
+						],
+						details: { completed: false, objective: goal.objective },
+					};
+				}
+				// Refusal already spent for this goal — the model saw the findings and came
+				// back anyway. Let it through and record that the gate was waived.
 				recordDiagnostic({
 					category: "quality.self-review",
 					level: "warn",
 					source: "goal-complete",
-					context: { ruleId: "review-blocked-done", note: `high findings=${reviewFindings.length}` },
+					context: { ruleId: "review-gate-waived", note: `high findings=${reviewFindings.length}` },
 				});
-				return {
-					content: [
-						{
-							type: "text" as const,
-							text: `Not completing the goal — a self-review of your changes found unresolved high-severity problems. Fix these (or explain why each is a false positive), then call goal_complete again:\n${list}`,
-						},
-					],
-					details: { completed: false, objective: goal.objective },
-				};
 			}
 			// R10: the native import graph (Fase 2, `built-ins/impact-extension.ts`)
 			// found direct dependents of this turn's edits that were never read,
@@ -156,33 +212,44 @@ export function createGoalCompleteToolDefinition(
 			// list — same shape as the R7/R8/R9 refusals above.
 			const unreviewedImpact = getCurrentUnreviewedImpact();
 			if (unreviewedImpact.length > 0) {
-				const shown = unreviewedImpact.slice(0, 10);
-				const list = shown
-					.map(
-						(e) =>
-							`  • ${e.path}${e.seeds.length > 0 ? ` (impacted by: ${formatImpactedBySeeds(e.seeds)})` : ""}`,
-					)
-					.join("\n");
-				const more =
-					unreviewedImpact.length > shown.length ? `\n  +${unreviewedImpact.length - shown.length} more` : "";
-				const testsLine = formatCoveringTestsLine(getCurrentCoveringTests());
+				if (spendGateRefusal(impactRefusedGoals, goal.id)) {
+					const shown = unreviewedImpact.slice(0, 10);
+					const list = shown
+						.map(
+							(e) =>
+								`  • ${e.path}${e.seeds.length > 0 ? ` (impacted by: ${formatImpactedBySeeds(e.seeds)})` : ""}`,
+						)
+						.join("\n");
+					const more =
+						unreviewedImpact.length > shown.length ? `\n  +${unreviewedImpact.length - shown.length} more` : "";
+					const testsLine = formatCoveringTestsLine(getCurrentCoveringTests());
+					recordDiagnostic({
+						category: "quality.impact-guard",
+						level: "warn",
+						source: "goal-complete",
+						context: { ruleId: "impact-blocked-done", note: `unreviewed=${unreviewedImpact.length}` },
+					});
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `Not completing the goal — the import graph shows ${unreviewedImpact.length} file(s) that depend on what you changed and were never reviewed this turn. Read them (or run lsp diagnostics on them) to confirm they still work, then call goal_complete again:\n${list}${more}${testsLine}`,
+							},
+						],
+						details: { completed: false, objective: goal.objective },
+					};
+				}
+				// Refusal already spent for this goal — the model saw the list and came back
+				// anyway. Let it through and record that the gate was waived.
 				recordDiagnostic({
 					category: "quality.impact-guard",
 					level: "warn",
 					source: "goal-complete",
-					context: { ruleId: "impact-blocked-done", note: `unreviewed=${unreviewedImpact.length}` },
+					context: { ruleId: "impact-gate-waived", note: `unreviewed=${unreviewedImpact.length}` },
 				});
-				return {
-					content: [
-						{
-							type: "text" as const,
-							text: `Not completing the goal — the import graph shows ${unreviewedImpact.length} file(s) that depend on what you changed and were never reviewed this turn. Read them (or run lsp diagnostics on them) to confirm they still work, then call goal_complete again:\n${list}${more}${testsLine}`,
-						},
-					],
-					details: { completed: false, objective: goal.objective },
-				};
 			}
 			const summary = input.summary?.trim();
+			forgetGateRefusals(goal.id);
 			mgr.complete(summary);
 			return {
 				content: [

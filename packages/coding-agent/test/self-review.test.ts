@@ -15,7 +15,10 @@ import {
 	setCurrentSelfReviewFindings,
 } from "../src/core/self-review.ts";
 import type { SupervisionLevel } from "../src/core/supervision-thermostat.ts";
-import { createGoalCompleteToolDefinition } from "../src/core/tools/goal-complete.js";
+import {
+	_resetGoalCompleteGateStateForTest,
+	createGoalCompleteToolDefinition,
+} from "../src/core/tools/goal-complete.js";
 import type { TurnRiskTotals } from "../src/core/turn-risk.ts";
 
 function totals(over: Partial<TurnRiskTotals>): TurnRiskTotals {
@@ -326,8 +329,28 @@ describe("goal_complete R9 (unresolved high self-review findings)", () => {
 
 	afterEach(() => {
 		clearCurrentSelfReviewFindings();
+		_resetGoalCompleteGateStateForTest();
 		setCurrentGoalManager(undefined);
 		resetRuntimeDiagnostics();
+	});
+
+	it("refuses at most once per goal — a second call completes with findings unchanged", async () => {
+		const mgr = new GoalManager();
+		mgr.start("ship it", {});
+		setCurrentGoalManager(mgr);
+
+		setCurrentSelfReviewFindings([highFinding({ claim: "unhandled null", evidence: "cfg.value" })]);
+		expect((await complete("c1", "done")).details?.completed).toBe(false);
+
+		// Findings still registered — the model came back without clearing them (it may
+		// consider them false positives). The gate has spent its one refusal, so the
+		// goal terminates instead of looping on the same wall.
+		const ok = await complete("c2", "done");
+		expect(ok.details?.completed).toBe(true);
+		expect(mgr.get()?.status).toBe("complete");
+
+		const waived = getRuntimeDiagnostics().recent.find((e) => e.context?.ruleId === "review-gate-waived");
+		expect(waived?.category).toBe("quality.self-review");
 	});
 
 	it("refuses completion while high findings are registered, then completes once cleared", async () => {

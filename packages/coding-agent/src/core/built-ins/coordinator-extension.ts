@@ -1555,7 +1555,13 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					// result details surface, so persist and cite that same key.
 					const readHandle = result.record.taskName;
 					outputStore.put(readHandle, result.output);
-					let text = gated ? gated.text : formatSpawnResult(result, resultSchema, readHandle);
+					// Both branches go through the digest. The gated one carries the judge's
+					// accepted text, which is the FULL subagent output — skipping the cap
+					// here dumped it whole into the parent's context, and only on the tasks
+					// expensive enough to deserve a judge in the first place.
+					let text = gated
+						? digestWithPointer(gated.text, readHandle)
+						: formatSpawnResult(result, resultSchema, readHandle);
 					const gateDetails: GateDetails | undefined = gated?.gate;
 					if (interrupted) {
 						text = `${text}\n\n[subagent ended on an error turn — resume with task({op:"resume", name:"${runHandle}"})]`;

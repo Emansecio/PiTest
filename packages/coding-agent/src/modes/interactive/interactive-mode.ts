@@ -40,12 +40,15 @@ import type {
 	Terminal,
 } from "@pit/tui";
 import {
+	areCellDimensionsMeasured,
 	Cheatsheet,
 	CombinedAutocompleteProvider,
 	type Component,
 	Container,
 	fuzzyFilter,
+	getCellDimensions,
 	getKeybindings,
+	getSixelSupport,
 	isKittyProtocolActive,
 	Loader,
 	type LoaderIndicatorOptions,
@@ -53,6 +56,7 @@ import {
 	matchesKey,
 	type PetColors,
 	ProcessTerminal,
+	SideBySide,
 	SPINNER_FRAME_MS,
 	Spacer,
 	setKeybindings,
@@ -197,6 +201,7 @@ import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/
 import { OverthinkSteerMessageComponent } from "./components/overthink-steer-message.ts";
 import { PendingUserMessageComponent } from "./components/pending-user-message.ts";
 import { createPetCompanion, PET_COMPANION_MIN_COLS, type PetCompanion } from "./components/pet-companion.ts";
+import type { PetMoodState } from "./components/pet-mood.ts";
 import { RewindSelectorComponent } from "./components/rewind-selector.ts";
 import { SendNowChooser } from "./components/send-now-chooser.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
@@ -210,6 +215,7 @@ import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TtsrSteerMessageComponent } from "./components/ttsr-steer-message.ts";
 import { TurnDoneMessageComponent } from "./components/turn-done-message.ts";
+import { countDiffLines, type TurnFileEntry, TurnFilesComponent } from "./components/turn-files.ts";
 import { TurnRule } from "./components/turn-rule.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
@@ -373,6 +379,24 @@ const DOUBLE_ESC_HOTKEY_LABELS: Record<"fork" | "tree" | "none", string> = {
 
 /** Tools that may change the working tree — refresh git diff stats after success. */
 const MUTATING_TOOLS_FOR_DIFF_REFRESH = new Set(["edit", "edit_v2", "write", "bash", "ast_edit", "code"]);
+
+/**
+ * Ledger tools that write exactly the file their `path` argument names, so the
+ * call itself identifies the row. Everything outside this set has to report its
+ * own files (see `details.files` in recordTurnFile).
+ */
+const SINGLE_FILE_LEDGER_TOOLS = new Set(["edit", "edit_v2", "write", "code"]);
+/**
+ * Tools whose success means "this file now differs" — the turn's file ledger
+ * (right rail). `bash` is deliberately absent: it mutates through commands we
+ * cannot attribute to a path, and the footer's working-tree delta already covers
+ * that blind spot at the repo level.
+ */
+const TURN_LEDGER_TOOLS = new Set([...SINGLE_FILE_LEDGER_TOOLS, "ast_edit"]);
+/** Columns the right rail reserves on a wide terminal. */
+const TURN_RAIL_COLS = 34;
+/** Terminal width below which the rail stands down and the band is one column. */
+const TURN_RAIL_MIN_COLS = 160;
 
 // Theme preview cycles fast (holding an arrow key in the settings selector) —
 // debounce the full transcript recolor so each keystroke doesn't pay for a
@@ -666,6 +690,13 @@ export class InteractiveMode {
 
 	// Live "above editor" todo overlay (auto-hides when there are no todos).
 	private todoOverlay: TodoOverlay | undefined;
+	// Right rail: the current turn's file ledger. Insertion-ordered by first
+	// touch, so re-editing a file accumulates in place instead of jumping to the
+	// end. Cleared when a new turn starts (agent_start), NOT at agent_end — the
+	// ledger has to survive the turn it describes, or it would blank exactly when
+	// you look at it.
+	private turnFiles: TurnFilesComponent | undefined;
+	private turnFileLedger = new Map<string, TurnFileEntry>();
 	// Live "above editor" goal panel (sits ABOVE the todo overlay; auto-hides
 	// when no goal is active; lingers briefly on complete then vanishes).
 	private goalOverlay: GoalOverlay | undefined;
@@ -739,6 +770,12 @@ export class InteractiveMode {
 	private sendNowChooserContainer!: Container;
 	private sendNowChooser: SendNowChooser | undefined = undefined;
 	private sendNowChooserUnsub: (() => void) | undefined = undefined;
+	// The draft the open chooser is deciding about. While the chooser is up the
+	// composer is EMPTY — the chooser already shows the message, and a second copy
+	// blinking in the input box read as "still typing AND already sent". This field
+	// is that message's only home until it is sent or handed back to the composer
+	// (see restoreSendNowDraft).
+	private sendNowChooserDraft: string | undefined = undefined;
 
 	// Custom footer from extension (undefined = use built-in footer)
 	private customFooter: (Component & { dispose?(): void }) | undefined = undefined;
@@ -1095,7 +1132,18 @@ export class InteractiveMode {
 		this.goalOverlay = createGoalOverlay(this.session);
 		this.ui.addChild(this.goalOverlay);
 		this.todoOverlay = createTodoOverlay(this.session);
-		this.ui.addChild(this.todoOverlay);
+		// Wide terminals lay the live band out in two columns: todos keep the left,
+		// the turn's file ledger takes the dead space on the right. Narrow ones (or
+		// PIT_NO_RAIL, or a turn that changed nothing) render the todo overlay alone,
+		// byte-identical to before.
+		this.turnFiles = new TurnFilesComponent();
+		this.ui.addChild(
+			new SideBySide(this.todoOverlay, this.turnFiles, {
+				rightWidth: TURN_RAIL_COLS,
+				minWidth: TURN_RAIL_MIN_COLS,
+				enabled: () => !isTruthyEnvFlag(process.env.PIT_NO_RAIL),
+			}),
+		);
 		this.renderWidgets(); // Initialize with default spacer
 		this.ui.addChild(this.widgetContainerAbove);
 		// Sits directly above the composer frame so the chooser reads as part of the
@@ -2351,6 +2399,81 @@ export class InteractiveMode {
 		this.clearStatusContainer();
 	}
 
+	/** New turn: the ledger describes one turn, so it starts empty at each one. */
+	private resetTurnFileLedger(): void {
+		if (this.turnFileLedger.size === 0) return;
+		this.turnFileLedger.clear();
+		this.turnFiles?.setEntries([]);
+	}
+
+	/**
+	 * Fold a settled write/edit into the turn's file ledger.
+	 *
+	 * Two shapes of report, because the tools genuinely differ:
+	 *
+	 * - Single-file tools (`edit`, `write`, `code`) name their file in `args.path`.
+	 *   `edit` reports a diff we can count; `write` reports none (it replaced the
+	 *   whole file), so it lands as a touch with no counters rather than a lie
+	 *   about how much changed.
+	 * - `ast_edit` rewrites a MATCH SET, not a path: its `path` is optional,
+	 *   defaults to the whole cwd, and `globs` can spread one call across a
+	 *   package. Reading `args.path` there produces either nothing or a row for
+	 *   `.` — the tool's real output is the per-file deltas it now reports in
+	 *   `details.files`, which is also emitted only on the branch that wrote to
+	 *   disk (a dry-run must not enter a ledger of what changed).
+	 *
+	 * A file touched repeatedly accumulates in its original slot.
+	 */
+	private recordTurnFile(toolName: string, component: ToolExecutionComponent): void {
+		if (!this.turnFiles || !TURN_LEDGER_TOOLS.has(toolName)) return;
+		const details = component.getResultDetails() as { diff?: unknown; files?: unknown } | undefined;
+		// The args fallback is for single-file tools ONLY. A multi-file tool that
+		// reported nothing reported nothing — falling back to its `path` there is
+		// how a dry-run ends up in a ledger of what this turn changed.
+		const entries =
+			this.reportedTurnFiles(details) ??
+			(SINGLE_FILE_LEDGER_TOOLS.has(toolName) ? this.argsTurnFile(component, details) : []);
+		if (entries.length === 0) return;
+		for (const entry of entries) {
+			const existing = this.turnFileLedger.get(entry.path);
+			if (existing) {
+				existing.added += entry.added;
+				existing.removed += entry.removed;
+			} else {
+				this.turnFileLedger.set(entry.path, { ...entry });
+			}
+		}
+		this.turnFiles.setEntries([...this.turnFileLedger.values()]);
+		this.ui.requestRender();
+	}
+
+	/** Per-file deltas a tool reported itself, or null when it reported none. */
+	private reportedTurnFiles(details: { files?: unknown } | undefined): TurnFileEntry[] | null {
+		if (!Array.isArray(details?.files)) return null;
+		const entries: TurnFileEntry[] = [];
+		for (const raw of details.files) {
+			if (!raw || typeof raw !== "object") continue;
+			const { path, added, removed } = raw as { path?: unknown; added?: unknown; removed?: unknown };
+			if (typeof path !== "string" || path.trim().length === 0) continue;
+			entries.push({
+				path: path.trim(),
+				added: typeof added === "number" ? added : 0,
+				removed: typeof removed === "number" ? removed : 0,
+			});
+		}
+		return entries;
+	}
+
+	/** The single-file fallback: the path the call named, counted from its diff. */
+	private argsTurnFile(component: ToolExecutionComponent, details: { diff?: unknown } | undefined): TurnFileEntry[] {
+		const args = component.getArgs() as { path?: unknown } | undefined;
+		const path = typeof args?.path === "string" ? args.path.trim() : "";
+		if (!path) return [];
+		const diff = typeof details?.diff === "string" ? details.diff : undefined;
+		const { added, removed } = countDiffLines(diff);
+		return [{ path, added, removed }];
+	}
+
 	private getWorkingLoaderElapsedMs(): number {
 		const loader = this.loadingAnimation as { getElapsedMs?: unknown } | undefined;
 		if (typeof loader?.getElapsedMs !== "function") {
@@ -2472,6 +2595,8 @@ export class InteractiveMode {
 		if (this.userInputPauseDepth === 1) {
 			this.userInputPauseMessage = message;
 			this.applyUserInputPause(true);
+			// The ball is in the user's court — the pet stops working and stares.
+			this.petCompanion?.setMood("alert");
 		}
 		let released = false;
 		return () => {
@@ -2481,8 +2606,26 @@ export class InteractiveMode {
 			if (this.userInputPauseDepth === 0) {
 				this.userInputPauseMessage = null;
 				this.applyUserInputPause(false);
+				// Decision made: resume the turn's mood, or settle if it already ended.
+				this.petCompanion?.setMood(this.resumedTurnMood());
 			}
 		};
+	}
+
+	/**
+	 * The mood to hand back to a turn that was interrupted by something and is now
+	 * resuming — a permission prompt answered, a compaction finished.
+	 *
+	 * Mirrors the rule `tool_execution_end` applies: a tool still in flight means
+	 * WORKING, and only an empty `pendingTools` drops back to the calmer thinking
+	 * scan. Asking `isBusy` alone gets the common case backwards, because the
+	 * usual reason a turn pauses for the user IS a tool — permission is asked for
+	 * one that is already pending, and granting it leaves the tool running while
+	 * the pet quietly claims the agent went back to reading.
+	 */
+	private resumedTurnMood(): PetMoodState {
+		if (this.pendingTools.size > 0) return "working";
+		return this.session.isBusy ? "thinking" : "idle";
 	}
 
 	private applyUserInputPause(paused: boolean): void {
@@ -3186,6 +3329,7 @@ export class InteractiveMode {
 			this.deferredTurnDone = null;
 			this.stopWorkingLoader();
 			this.showStatus("Interrupted");
+			this.petCompanion?.setMood("startled");
 			this.armInterruptWatchdog();
 			return;
 		}
@@ -3224,6 +3368,8 @@ export class InteractiveMode {
 					this.deferredTurnDone = null;
 					this.stopWorkingLoader();
 					this.showStatus("Interrupted");
+					// Esc mid-turn: the pet jumps, then wobbles back to idle.
+					this.petCompanion?.setMood("startled");
 					this.armInterruptWatchdog();
 				} else {
 					void this.promptInterruptChoice(interruptible);
@@ -3286,6 +3432,9 @@ export class InteractiveMode {
 			if (wasBashMode !== this.isBashMode) {
 				this.updateEditorBorderColor();
 			}
+			// The pet leans in over a composer with text in it and settles back when
+			// it empties. Ambient — a keystroke never pulls it out of a live turn.
+			this.petCompanion?.setAmbientMood(text.length > 0 ? "watching" : "idle");
 		};
 
 		// Handle clipboard image paste (triggered on Ctrl+V)
@@ -3834,6 +3983,12 @@ export class InteractiveMode {
 		});
 	}
 
+	/** Theme painter for one segment of a status line; "text" is the primary color. */
+	private statusSegmentPainter(tone: StatusTone | "text"): (text: string) => string {
+		if (tone === "text") return (text) => theme.fg("text", text);
+		return this.statusTonePainter(tone);
+	}
+
 	/** Theme painter for a `TurnViewEffect` status tone. */
 	private statusTonePainter(tone: StatusTone): (text: string) => string {
 		switch (tone) {
@@ -3885,9 +4040,16 @@ export class InteractiveMode {
 				case "gearbox-upshift":
 					this.gearboxForceUpshift(effect.reason);
 					break;
-				case "status":
-					this.showStatus(effect.text, this.statusTonePainter(effect.tone));
+				case "status": {
+					// Segmented lines arrive pre-colored span by span (identity painter);
+					// plain ones take the line-wide tone. `level` maps to the TTL policy.
+					const text = effect.segments
+						? effect.segments.map((s) => this.statusSegmentPainter(s.tone ?? effect.tone)(s.text)).join("")
+						: effect.text;
+					const paint = effect.segments ? (line: string) => line : this.statusTonePainter(effect.tone);
+					this.showStatus(text, paint, effect.level ?? "info");
 					break;
+				}
 				case "error":
 					this.showError(effect.text);
 					break;
@@ -4008,6 +4170,7 @@ export class InteractiveMode {
 				this.turnOutputTokens = 0;
 				this.streamingAttached = false;
 				this.petTurnErrored = false;
+				this.resetTurnFileLedger();
 				// Reuse the loader created at submit (gap-morto) so the elapsed clock
 				// starts at Enter without a reset/flicker; build one only if missing
 				// (e.g. a continuation turn after a prior loader was cleared).
@@ -4079,6 +4242,9 @@ export class InteractiveMode {
 							this.settingsManager.getStreamingSmoothing(),
 							this.settingsManager.getAssistantReadingColumns(),
 							this.session.thinkingLevel,
+							// While the footer loader is up it IS the thinking indicator;
+							// the transcript label would only duplicate it.
+							() => !!this.loadingAnimation,
 						);
 						this.streamingMessage = event.message;
 						// Grouped mode defers chat attach until visible prose exists.
@@ -4264,6 +4430,10 @@ export class InteractiveMode {
 					if (!event.isError && MUTATING_TOOLS_FOR_DIFF_REFRESH.has(event.toolName)) {
 						this.footerDataProvider.scheduleWorkingTreeRefresh();
 					}
+					// Read the args off the live component (the event carries only the
+					// result) before it leaves `pendingTools` above — this is the last
+					// point where call and result are both in hand.
+					if (!event.isError) this.recordTurnFile(event.toolName, component);
 					// Mirror of tool_execution_start: with no cancellable tools left,
 					// the hint goes back to the plain "esc to interrupt".
 					this.refreshLoaderTrailingSuffix();
@@ -4336,6 +4506,9 @@ export class InteractiveMode {
 
 			case "compaction_end": {
 				this.setTerminalProgress(false);
+				// Done chewing: back to whatever the turn is actually doing (a mid-turn
+				// compaction can land with a tool still pending), or rest if it ended.
+				this.petCompanion?.setMood(this.resumedTurnMood());
 				if (this.autoCompactionEscapeHandler) {
 					this.defaultEditor.onEscape = this.autoCompactionEscapeHandler;
 					this.autoCompactionEscapeHandler = undefined;
@@ -4566,11 +4739,17 @@ export class InteractiveMode {
 	 *
 	 * Back-to-back calls update the same line instead of stacking rows.
 	 * Info/custom-colored lines auto-dismiss after a short TTL (see
-	 * {@link EphemeralStatusController}); errors stay sticky until clear.
+	 * {@link EphemeralStatusController}); `level: "sticky"` keeps the line until
+	 * host-clear (work of unknown duration, e.g. a running subagent); errors
+	 * stay sticky until clear.
 	 */
-	private showStatus(message: string, color: (text: string) => string = (text) => theme.fg("dim", text)): void {
+	private showStatus(
+		message: string,
+		color: (text: string) => string = (text) => theme.fg("dim", text),
+		level: "info" | "sticky" = "info",
+	): void {
 		this.ephemeralPaintColor = color;
-		this.ephemeralStatus.show(message, "info");
+		this.ephemeralStatus.show(message, level);
 	}
 
 	private paintEphemeralStatus(message: string, kind: EphemeralStatusKind): void {
@@ -4644,10 +4823,15 @@ export class InteractiveMode {
 	 * chat already holds prior content — never before the first message. Works for
 	 * both the live and rebuild paths because both funnel through addMessageToChat
 	 * with a chatContainer that starts empty (fresh submit clears the empty-state
-	 * hint first; a rebuild clears the whole container). */
-	private maybeAddTurnRule(): void {
-		if (this.chatContainer.children.length === 0) return;
+	 * hint first; a rebuild clears the whole container).
+	 *
+	 * Returns whether the rule went in, so the user block that follows can drop its
+	 * own leading blank: the rule already renders `["", "─"]`, and the shell's blank
+	 * on top of that spent three rows to say "new turn" where two say it better. */
+	private maybeAddTurnRule(): boolean {
+		if (this.chatContainer.children.length === 0) return false;
 		this.chatContainer.addChild(new TurnRule(this.settingsManager.getAssistantReadingColumns()));
+		return true;
 	}
 
 	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void {
@@ -4727,13 +4911,11 @@ export class InteractiveMode {
 					// here so both the live message_start path and the history rebuild path
 					// (renderSessionContext → addMessageToChat) emit identical separators;
 					// mid-turn steers above return before reaching it.
-					this.maybeAddTurnRule();
-					// External `Spacer(1)` removed (Leva 2 Spacer cleanup).
-					// `UserMessageComponent` still wraps content in
-					// `Box(1,1, userMsgBg)` whose `paddingY=1` keeps a 1-row
-					// bg gap at the top, providing visual separation from the
-					// preceding block until the component itself migrates to
-					// `MessageShell`.
+					const ruled = this.maybeAddTurnRule();
+					// The rule owns the separation when it is there (blank + hairline);
+					// the user block then starts flush against it instead of adding a
+					// third row. Without a rule (first turn, mid-turn steer) the shell's
+					// own leading blank is the separation.
 					const skillBlock = parseSkillBlock(textContent);
 					if (skillBlock) {
 						// Render skill block (collapsible)
@@ -4750,6 +4932,8 @@ export class InteractiveMode {
 								this.getMarkdownThemeWithSettings(),
 								this.settingsManager.getAssistantReadingColumns(),
 							);
+							// The skill block sits between the rule and this message, so
+							// the shell's own blank is the separation here.
 							this.chatContainer.addChild(userComponent);
 						}
 					} else {
@@ -4758,6 +4942,7 @@ export class InteractiveMode {
 							this.getMarkdownThemeWithSettings(),
 							this.settingsManager.getAssistantReadingColumns(),
 						);
+						userComponent.setNoLeadingGap(ruled);
 						this.chatContainer.addChild(userComponent);
 					}
 					if (options?.populateHistory) {
@@ -4970,6 +5155,7 @@ export class InteractiveMode {
 			this.deferredTurnDone = null;
 			this.stopWorkingLoader();
 			this.showStatus("Interrupted");
+			this.petCompanion?.setMood("startled");
 			this.showCtrlCHint();
 			this.armInterruptWatchdog();
 			return;
@@ -5323,18 +5509,28 @@ export class InteractiveMode {
 
 	/**
 	 * Open the inline [Send now] [Queue] [Cancel] chooser for a message submitted
-	 * while the agent is working. The editor already cleared its own buffer in
-	 * submitValue(), so we re-seat `text` in the composer — that keeps it visible
-	 * (and intact for Cancel/implicit-cancel) without a duplicate copy of the text
-	 * to reconcile. Focus stays on the editor; a global input listener routes the
-	 * chooser's navigation/confirm/cancel keys and lets everything else fall
-	 * through to the composer.
+	 * while the agent is working.
+	 *
+	 * The message lives in ONE place at a time: the chooser holds it while the
+	 * decision is open (composer empty), and {@link restoreSendNowDraft} hands it
+	 * back the moment the chooser closes without sending. It used to be re-seated
+	 * in the composer as well, which showed the same sentence twice — pending
+	 * decision above, apparently-still-being-typed below.
+	 *
+	 * Focus stays on the editor; a global input listener routes the chooser's
+	 * navigation/confirm/cancel keys and lets everything else fall through to the
+	 * composer (an implicit Cancel that resumes typing on the restored draft).
 	 */
 	private openSendNowChooser(text: string): void {
 		// A prior chooser should never linger; tear it down before opening a new one.
 		if (this.sendNowChooser) this.closeSendNowChooser();
 		this.sendNowChooser = new SendNowChooser(text);
-		this.editor.setText(text);
+		this.sendNowChooserDraft = text;
+		// The chooser IS the message's on-screen home now: submitValue() already
+		// emptied the composer, and re-seating the text there would show the same
+		// message twice — once as a pending decision, once as if it were still being
+		// typed. Every path that closes without sending hands the draft back.
+		this.editor.setText("");
 		this.sendNowChooserContainer.clear();
 		this.sendNowChooserContainer.addChild(new Spacer(1));
 		this.sendNowChooserContainer.addChild(this.sendNowChooser);
@@ -5358,8 +5554,7 @@ export class InteractiveMode {
 		// composer) and let the key fall through untouched. Without this, Enter here
 		// would confirm the chooser and steer the draft instead of answering the picker.
 		if (!this.defaultEditor.focused) {
-			this.closeSendNowChooser();
-			this.ui.requestRender();
+			this.cancelSendNowChooser();
 			return undefined;
 		}
 		if (matchesKey(data, "left")) {
@@ -5380,10 +5575,11 @@ export class InteractiveMode {
 			this.cancelSendNowChooser();
 			return { consume: true };
 		}
-		// Implicit Cancel: close the chooser but keep the text (already in the
-		// composer) and let this keystroke reach the editor.
-		this.closeSendNowChooser();
-		this.ui.requestRender();
+		// Implicit Cancel: hand the draft back to the composer and let this keystroke
+		// reach the editor — it lands AFTER the restored text, so typing simply
+		// continues where the chooser interrupted it (global listeners run before the
+		// focused component, so the restore is already applied when the key arrives).
+		this.cancelSendNowChooser();
 		return undefined;
 	}
 
@@ -5402,17 +5598,18 @@ export class InteractiveMode {
 			this.cancelSendNowChooser();
 			return;
 		}
-		// The composer is the source of truth for what gets sent — NOT a snapshot taken
-		// when the chooser opened. A turn abort can run restoreQueuedMessagesToEditor()
-		// while the chooser is open, replacing the composer with the restored queue
-		// (e.g. "C\n\nD"). Sending a stale open-time snapshot would deliver only that
-		// snapshot AND the setText("") below would then destroy the restored text — data
-		// loss. Read the live editor instead. (SendNowChooser keeps its own copy for the
-		// preview, so no field mirror is needed here.)
-		const text = (this.editor.getExpandedText?.() ?? this.editor.getText()).trim();
+		// The draft the chooser is deciding about is what gets sent — the composer is
+		// empty by design while the chooser is up, and anything that DID land there
+		// meanwhile belongs to someone else. Concretely: a turn abort can run
+		// restoreQueuedMessagesToEditor() mid-chooser, filling the composer with the
+		// restored queue ("C\n\nD"); confirming must deliver the user's decided message
+		// and leave that restored text alone, not swap one for the other.
+		// `submitValue()` already expanded paste markers before handing us this text,
+		// so it is the complete message, not a preview.
+		const text = (this.sendNowChooserDraft ?? "").trim();
 		if (!text) {
-			// The editor was emptied from under the chooser → nothing to send; treat as
-			// Cancel so nothing is queued and no empty prompt is dispatched.
+			// Nothing to send (empty draft) → treat as Cancel: nothing queued, no empty
+			// prompt dispatched.
 			this.cancelSendNowChooser();
 			return;
 		}
@@ -5428,11 +5625,21 @@ export class InteractiveMode {
 		// compaction finishes, so the draft reaches the same destination it would have
 		// if the chooser had never existed.
 		if (this.session.isCompacting) {
+			// queueCompactionMessage owns the normal submit path and unconditionally
+			// clears the composer on its way in — right for a typed submit, WRONG
+			// here: the chooser's draft never lived in the composer, so whatever is
+			// staged there (concretely: a mid-chooser abort ran
+			// restoreQueuedMessagesToEditor, refilling it with the rescued queue)
+			// is not ours to discard. Snapshot and re-seat it around the queue.
+			const staged = this.editor.getText();
 			this.queueCompactionMessage(text, mode);
+			if (staged.trim()) this.editor.setText(staged);
 			return;
 		}
 
-		this.editor.setText("");
+		// No setText("") here: the composer was emptied when the chooser opened, and
+		// whatever may have landed in it since (a mid-chooser abort restoring the
+		// queue) is not ours to discard.
 		this.editor.addToHistory?.(text);
 
 		let behavior: "steer" | "followUp" = mode;
@@ -5457,10 +5664,26 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	/** Close the chooser, leaving the text intact in the composer. */
+	/** Close the chooser and hand the draft back to the composer, intact. */
 	private cancelSendNowChooser(): void {
+		this.restoreSendNowDraft();
 		this.closeSendNowChooser();
 		this.ui.requestRender();
+	}
+
+	/**
+	 * Return the chooser's draft to the composer. Normally the composer is empty
+	 * (the chooser emptied it when it opened), so this is a plain restore. If
+	 * something else landed there meanwhile — a turn abort running
+	 * `restoreQueuedMessagesToEditor()` while the chooser was open — the draft is
+	 * APPENDED with the same blank-line separator that path uses, so neither text
+	 * is lost and the user decides what to do with both.
+	 */
+	private restoreSendNowDraft(): void {
+		const draft = this.sendNowChooserDraft;
+		if (!draft) return;
+		const current = this.editor.getText();
+		this.editor.setText(current.trim() ? `${current}\n\n${draft}` : draft);
 	}
 
 	/** Tear down the chooser UI + input listener. Does not touch the editor text. */
@@ -5468,6 +5691,7 @@ export class InteractiveMode {
 		this.sendNowChooserUnsub?.();
 		this.sendNowChooserUnsub = undefined;
 		this.sendNowChooser = undefined;
+		this.sendNowChooserDraft = undefined;
 		this.sendNowChooserContainer.clear();
 	}
 
@@ -6239,10 +6463,10 @@ export class InteractiveMode {
 	private showSelector(create: (done: () => void) => { component: Component; focus: Component }): void {
 		// A selector is about to take focus from the composer. Any open Send-now
 		// chooser must not linger behind it (and its listener must not intercept the
-		// selector's keys), so tear it down now — an implicit Cancel that leaves the
-		// draft in the composer. The listener's own focus guard is the fallback for
-		// focus-stealing paths that do not route through showSelector (e.g. overlays).
-		if (this.sendNowChooser) this.closeSendNowChooser();
+		// selector's keys), so tear it down now — an implicit Cancel that hands the
+		// draft back to the composer. The listener's own focus guard is the fallback
+		// for focus-stealing paths that do not route through showSelector (overlays).
+		if (this.sendNowChooser) this.cancelSendNowChooser();
 		// Blocks the turn on the user (selector in place of the editor) → freeze the clock.
 		const releaseWait = this.beginUserInputWait(this.userWaitMessage);
 		const done = () => {
@@ -8413,6 +8637,11 @@ Customize: \`${keybindingsPath}\` — \`/reload\` to apply.
 		const debugData = [
 			`Debug output at ${new Date().toISOString()}`,
 			`Terminal: ${width}x${height}`,
+			// Answers "why is the pet drawn in cells?" in one line: the sprite needs
+			// BOTH sixel capability and a cell size the terminal actually reported,
+			// since its height is authored in rows and emitted in pixels.
+			`Graphics: sixel=${getSixelSupport()} cell=${getCellDimensions().widthPx}x${getCellDimensions().heightPx}px` +
+				` (${areCellDimensionsMeasured() ? "measured" : "assumed — pets stay on cells"})`,
 			`Total lines: ${allLines.length}`,
 			"",
 			"=== All rendered lines with visible widths ===",

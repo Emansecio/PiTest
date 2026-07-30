@@ -39,6 +39,7 @@ export {
 	type SelectListTruncatePrimaryContext,
 } from "./components/select-list.ts";
 export { type SettingItem, SettingsList, type SettingsListTheme } from "./components/settings-list.ts";
+export { SideBySide, type SideBySideOptions } from "./components/side-by-side.ts";
 export { Spacer } from "./components/spacer.ts";
 export { Text } from "./components/text.ts";
 export { TruncatedText } from "./components/truncated-text.ts";
@@ -93,8 +94,10 @@ export {
 export {
 	type EncodeSixelOptions,
 	encodeSixel,
+	fitSixelHeightPx,
 	type RenderPetSixelOptions,
 	renderPetSixel,
+	SIXEL_BAND_HEIGHT,
 	SIXEL_INTRO,
 } from "./sixel.ts";
 // Input buffering for batch splitting
@@ -103,6 +106,7 @@ export { StdinBuffer, type StdinBufferEventMap, type StdinBufferOptions } from "
 export { ProcessTerminal, type Terminal } from "./terminal.ts";
 export {
 	allocateImageId,
+	areCellDimensionsMeasured,
 	type CellDimensions,
 	calculateImageRows,
 	deleteAllKittyImages,
@@ -124,10 +128,12 @@ export {
 	type ImageRenderOptions,
 	imageFallback,
 	isSixelForcedOff,
+	isSixelLine,
 	isSixelSupportKnown,
 	parseSixelDeviceAttributes,
 	renderImage,
 	resetCapabilitiesCache,
+	resetCellDimensions,
 	resetSixelSupport,
 	setCapabilities,
 	setCellDimensions,

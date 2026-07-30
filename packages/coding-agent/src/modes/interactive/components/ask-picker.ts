@@ -69,7 +69,12 @@ function wrapPlain(text: string, width: number): string[] {
 	const pushHardBroken = (token: string): void => {
 		let rest = token;
 		while (visibleWidth(rest) > width) {
-			const chunk = truncateToWidth(rest, width, "");
+			// `truncateToWidth` closes its output with `\x1b[0m` so a clipped span
+			// cannot leak its style into the rest of the row. Those four code units
+			// are not text: slicing by the raw length ate four characters of the
+			// token at every break, silently corrupting the long URLs and ids shown
+			// in the very card the user reads to decide.
+			const chunk = truncateToWidth(rest, width, "").replace(/\x1b\[0m$/, "");
 			if (!chunk) break;
 			out.push(chunk);
 			// Drop the visible prefix we just emitted (ANSI-free path for ask text).

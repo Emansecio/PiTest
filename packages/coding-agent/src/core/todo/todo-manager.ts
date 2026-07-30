@@ -40,6 +40,18 @@ export interface UpdateTodoInput {
 	status?: TodoStatus;
 }
 
+/**
+ * One entry of a whole-list rewrite ({@link TodoManager.set}). `id` carries an
+ * existing todo forward; omitting it creates a new one.
+ */
+export interface SetTodoItemInput {
+	id?: number;
+	subject: string;
+	description?: string;
+	activeForm?: string;
+	status?: TodoStatus;
+}
+
 const SUBJECT_MAX = 200;
 
 const STATUS_GLYPH: Record<TodoStatus, string> = { completed: "✓", in_progress: "◐", pending: "○" };
@@ -118,6 +130,49 @@ export class TodoManager {
 		return { ...item };
 	}
 
+	/**
+	 * Rewrite the whole list in one shot — the cheap path for staying in sync.
+	 *
+	 * `create`/`update` cost one tool call per transition, so the price of an
+	 * honest list grows with the number of items and the model starts batching
+	 * (measured across 42 real sessions: a median of 17 tool-carrying turns between
+	 * todo touches). `set` makes that price constant: advancing the list is always
+	 * exactly one call, whatever changed.
+	 *
+	 * Entries carrying a known `id` keep it — their identity survives, so an item
+	 * the user is watching does not get renumbered on every rewrite. Unknown or
+	 * absent ids are assigned fresh. Order is the caller's; the list is replaced,
+	 * not merged, so an omitted item is deleted.
+	 */
+	set(items: SetTodoItemInput[]): TodoItem[] {
+		const knownIds = new Set(this.items.map((t) => t.id));
+		// An id may be carried forward at most once. Claim the set up front, then let
+		// the first entry citing an id consume the claim: a list that repeats an id
+		// (a model slip) yields two distinct todos instead of collapsing into one.
+		const claimed = new Set<number>();
+		for (const input of items) {
+			if (input.id !== undefined && knownIds.has(input.id)) claimed.add(input.id);
+		}
+		const next: TodoItem[] = [];
+		for (const input of items) {
+			const carriedId =
+				input.id !== undefined && knownIds.has(input.id) && claimed.has(input.id) ? input.id : undefined;
+			if (carriedId !== undefined) claimed.delete(carriedId);
+			next.push({
+				id: carriedId ?? this.nextId++,
+				subject: clampSubject(input.subject),
+				description: input.description?.trim() || undefined,
+				activeForm: input.activeForm?.trim() || undefined,
+				status: input.status ?? "pending",
+			});
+		}
+		this.items = next;
+		const maxId = next.reduce((m, t) => Math.max(m, t.id), 0);
+		this.nextId = Math.max(this.nextId, maxId + 1);
+		this.markChanged();
+		return next.map((t) => ({ ...t }));
+	}
+
 	delete(id: number): boolean {
 		const before = this.items.length;
 		this.items = this.items.filter((t) => t.id !== id);
@@ -142,6 +197,18 @@ export class TodoManager {
 
 	hasInProgress(): boolean {
 		return this.items.some((t) => t.status === "in_progress");
+	}
+
+	/**
+	 * True when any todo is still open (pending OR in_progress).
+	 *
+	 * The drift detector keys on this rather than {@link hasInProgress}: measured
+	 * over 42 real sessions, 38% of todos never pass through `in_progress` at all —
+	 * they jump pending → completed. Gating staleness on an in_progress item made
+	 * the detector blind on exactly those lists, which are the ones drifting most.
+	 */
+	hasOpenWork(): boolean {
+		return this.items.some((t) => t.status !== "completed");
 	}
 
 	serialize(): TodoState {
@@ -195,10 +262,12 @@ export class TodoManager {
 			"<todos>",
 			`Current task list (${open} open of ${this.items.length}):`,
 			...itemLines,
-			"Keep it current with the `todo` tool:",
-			"- Mark exactly one todo in_progress at a time before you start it, with a short present-continuous activeForm.",
-			"- Mark a todo completed immediately when it is done — do not batch completions.",
-			"- Add new todos as you discover follow-up work; keep subjects short and outcome-focused.",
+			'Keep it current with `todo{action:"set"}` — one call rewrites the whole list, so advancing it costs',
+			"the same whether one item changed or five. Send every item you want to keep, each with its `id`.",
+			"- Update it in the SAME turn as the work, not in a batch afterwards: close what you just finished and",
+			"  open the next item in one `set` call.",
+			"- Exactly one item in_progress at a time, with a short present-continuous activeForm.",
+			"- Add newly discovered follow-up work as you find it; keep subjects short and outcome-focused.",
 			"</todos>",
 		].join("\n");
 	}
