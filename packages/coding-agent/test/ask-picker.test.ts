@@ -325,3 +325,84 @@ describe("ask picker", () => {
 		expect(plain).toMatch(/↑↓ \(21\/30\)/);
 	});
 });
+
+describe("ask picker mouse", () => {
+	beforeAll(() => {
+		initTheme(undefined, false);
+	});
+
+	const leftPress = (overrides: Record<string, unknown> = {}) =>
+		({
+			type: "press",
+			button: "left",
+			wheel: undefined,
+			x: 1,
+			y: 1,
+			shift: false,
+			ctrl: false,
+			alt: false,
+			raw: "",
+			...overrides,
+		}) as never;
+
+	/** Picker-local row of the rendered line containing `label` (ANSI stripped). */
+	function rowOf(component: { render: (w: number) => string[] }, label: string): number {
+		const rows = component.render(80).map(stripAnsi);
+		const row = rows.findIndex((l) => l.includes(label));
+		expect(row).toBeGreaterThan(-1);
+		return row;
+	}
+
+	function driveMouse(req: AskOptionsRequest) {
+		let result: AskPickerResolveResult | null = null;
+		const { component } = createAskPicker(req, (r) => {
+			result = r;
+		});
+		const target = component as unknown as {
+			render: (w: number) => string[];
+			handleInput?: (data: string) => void;
+			onMouse: (ev: never, row: number, col: number) => boolean;
+		};
+		return { target, result: () => result };
+	}
+
+	it("single-select: clicking an option row confirms it", () => {
+		const { target, result } = driveMouse(makeReq({}));
+		expect(target.onMouse(leftPress(), rowOf(target, "Beta"), 4)).toBe(true);
+		expect(result()).toEqual({ picked: ["Beta"], cancelled: false });
+	});
+
+	it("multi-select: clicks toggle checkboxes; Enter confirms the set", () => {
+		const { target, result } = driveMouse(makeReq({ allowMultiple: true }));
+		expect(target.onMouse(leftPress(), rowOf(target, "Alpha"), 4)).toBe(true);
+		expect(target.onMouse(leftPress(), rowOf(target, "Gamma"), 4)).toBe(true);
+		expect(result()).toBeNull(); // clicks toggle, they don't submit
+		target.handleInput?.(ENTER);
+		expect(result()).toEqual({ picked: ["Alpha", "Gamma"], cancelled: false });
+	});
+
+	it("clicking the freeform row opens the text field", () => {
+		const { target, result } = driveMouse(makeReq({ options: [{ label: "Alpha" }], allowFreeform: true }));
+		expect(target.onMouse(leftPress(), rowOf(target, "custom answer"), 4)).toBe(true);
+		for (const ch of "typed") target.handleInput?.(ch);
+		target.handleInput?.(ENTER);
+		expect(result()).toEqual({ picked: [], freeformText: "typed", cancelled: false });
+	});
+
+	it("declines clicks on the question and non-option rows", () => {
+		const { target, result } = driveMouse(makeReq({}));
+		expect(target.onMouse(leftPress(), rowOf(target, "Which one?"), 4)).toBe(false);
+		const rows = target.render(80).map(stripAnsi);
+		expect(target.onMouse(leftPress(), rows.length - 1, 4)).toBe(false); // hint line
+		expect(result()).toBeNull();
+	});
+
+	it("declines releases, drags and non-left presses", () => {
+		const { target, result } = driveMouse(makeReq({}));
+		const row = rowOf(target, "Alpha");
+		expect(target.onMouse(leftPress({ type: "release" }), row, 4)).toBe(false);
+		expect(target.onMouse(leftPress({ type: "drag" }), row, 4)).toBe(false);
+		expect(target.onMouse(leftPress({ button: "right" }), row, 4)).toBe(false);
+		expect(result()).toBeNull();
+	});
+});

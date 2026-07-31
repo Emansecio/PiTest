@@ -998,6 +998,46 @@ describe("ToolExecutionComponent parity", () => {
 		expect(state.skippedHint).toBe(10);
 	});
 
+	test("does not duplicate the result when renderResult invalidates from inside its own render pass", () => {
+		// Mirrors the ask tool: on the pending → answered transition, renderResult
+		// calls context.invalidate() synchronously so the call line can repaint.
+		// Re-entering updateDisplay mid-rebuild used to mount the result twice.
+		let invalidated = false;
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderCall: (_args, _theme, context) => {
+				const answered = (context.state as { answered?: boolean }).answered === true;
+				return new Text(answered ? "question (answered)" : "question (pending)", 0, 0);
+			},
+			renderResult: (_result, _options, _theme, context) => {
+				const state = context.state as { answered?: boolean };
+				if (!invalidated && state.answered !== true) {
+					state.answered = true;
+					invalidated = true;
+					context.invalidate();
+				}
+				return new Text("the answer", 0, 0);
+			},
+		};
+
+		const component = new ToolExecutionComponent(
+			"ask",
+			"tool-ask-reentrant",
+			{ question: "pick one" },
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult({ content: [{ type: "text", text: "Selected: x" }], details: {}, isError: false }, false);
+
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered.match(/the answer/g)?.length ?? 0).toBe(1);
+		// The queued full pass also repaints the call line with the settled state.
+		expect(rendered).toContain("question (answered)");
+		expect(rendered.match(/question/g)?.length ?? 0).toBe(1);
+	});
+
 	test("fallback renderer collapses multi-line [hint] blocks on tool errors", () => {
 		const component = new ToolExecutionComponent(
 			"mcp_tool",
@@ -1029,5 +1069,81 @@ describe("ToolExecutionComponent parity", () => {
 		component.setResultExpanded(true);
 		const expanded = stripAnsi(component.render(120).join("\n"));
 		expect(expanded).toContain("second hint line");
+	});
+});
+
+describe("ToolExecutionComponent mouse", () => {
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
+	const leftPress = (overrides: Record<string, unknown> = {}) =>
+		({
+			type: "press",
+			button: "left",
+			wheel: undefined,
+			x: 1,
+			y: 1,
+			shift: false,
+			ctrl: false,
+			alt: false,
+			raw: "",
+			...overrides,
+		}) as never;
+
+	function makeComponent() {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderCall: () => new Text("custom call", 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-1",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult(
+			{
+				content: [{ type: "text", text: Array.from({ length: 40 }, (_, i) => `line-${i}`).join("\n") }],
+				details: {},
+				isError: false,
+			},
+			false,
+		);
+		return component;
+	}
+
+	test("clicking the call title toggles the expanded output; clicking again collapses", () => {
+		const component = makeComponent();
+		const rows = component.render(120).map(stripAnsi);
+		// Shell layout: row 0 leading blank, row 1 the call title.
+		const titleRow = rows.findIndex((l) => l.includes("custom call"));
+		expect(titleRow).toBe(1);
+		expect(rows.join("\n")).not.toContain("line-39"); // collapsed preview
+
+		expect(component.onMouse(leftPress(), titleRow, 3)).toBe(true);
+		expect(stripAnsi(component.render(120).join("\n"))).toContain("line-39");
+
+		expect(component.onMouse(leftPress(), titleRow, 3)).toBe(true);
+		expect(stripAnsi(component.render(120).join("\n"))).not.toContain("line-39");
+	});
+
+	test("body rows and the leading blank are declined — text selection stays native", () => {
+		const component = makeComponent();
+		const before = stripAnsi(component.render(120).join("\n"));
+		expect(component.onMouse(leftPress(), 0, 3)).toBe(false); // leading blank
+		expect(component.onMouse(leftPress(), 4, 3)).toBe(false); // output body
+		expect(stripAnsi(component.render(120).join("\n"))).toBe(before);
+	});
+
+	test("declines drags, releases and right presses on the title row", () => {
+		const component = makeComponent();
+		component.render(120);
+		expect(component.onMouse(leftPress({ type: "release" }), 1, 3)).toBe(false);
+		expect(component.onMouse(leftPress({ type: "drag" }), 1, 3)).toBe(false);
+		expect(component.onMouse(leftPress({ button: "right" }), 1, 3)).toBe(false);
 	});
 });

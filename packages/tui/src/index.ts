@@ -30,7 +30,12 @@ export {
 	SPINNER_FRAME_MS,
 	SPINNER_FRAMES,
 } from "./components/loader.ts";
-export { type DefaultTextStyle, Markdown, type MarkdownTheme } from "./components/markdown.ts";
+export {
+	type DefaultTextStyle,
+	Markdown,
+	type MarkdownTheme,
+	setMarkdownFileLinkBase,
+} from "./components/markdown.ts";
 export {
 	type SelectItem,
 	SelectList,

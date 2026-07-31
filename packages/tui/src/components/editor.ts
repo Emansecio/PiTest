@@ -2320,6 +2320,18 @@ export class Editor implements Component, Focusable, MouseTarget {
 		const cellCol = localCol - this.lastPaddingX;
 
 		if (ev.type === "press") {
+			// Right-click copies the active selection. With SGR tracking on the
+			// terminal hands right presses to the app instead of running its own
+			// copy action, so the editor supplies the behavior users expect from a
+			// terminal: selection → right-click → clipboard (via the same
+			// copySelection hook the keybinding uses). No selection → declined, so
+			// the press stays inert rather than moving the caret.
+			if (ev.button === "right") {
+				const selected = this.getSelectedText();
+				if (!selected) return false;
+				this.copySelection?.(selected);
+				return true;
+			}
 			if (ev.button !== "left") return false;
 			const textRow = localRow - headerLines;
 			if (textRow < 0) return false; // press on the rule / scroll indicator

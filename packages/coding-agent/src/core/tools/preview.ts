@@ -21,7 +21,13 @@ import { resolvePreviewTarget } from "../preview/preview-server.ts";
 import { getTextOutput } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
-export interface PreviewToolOptions {}
+export interface PreviewToolOptions {
+	/**
+	 * Hard ceiling in ms for the whole render (navigate → settle → screenshot).
+	 * Overridable for tests; production uses {@link TOTAL_TIMEOUT_MS}.
+	 */
+	totalTimeoutMs?: number;
+}
 
 export interface PreviewToolDetails {
 	ok: boolean;
@@ -38,6 +44,11 @@ type Manager = NonNullable<ReturnType<typeof getCurrentChromeDevtoolsManager>>;
 const SETTLE_DEFAULT_MS = 400;
 const READY_TIMEOUT_MS = 8000;
 const READY_POLL_MS = 120;
+// Hard ceiling for the whole render. settle() is bounded, but navigate/screenshot
+// are raw CDP round-trips: a stuck tab or an open native dialog can hold them —
+// and with them the turn's step boundary — hostage indefinitely (observed: a
+// 12-minute hang). Generous enough for a slow dev server + fullPage capture.
+const TOTAL_TIMEOUT_MS = 30_000;
 
 const previewSchema = Type.Object(
 	{
@@ -84,6 +95,36 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
 	});
 }
 
+/**
+ * Settle with `promise`, but reject as soon as `signal` aborts — even when the
+ * underlying call cannot observe the signal (getConn's WS connect inside
+ * `navigate({newTab})` takes no signal at all). The orphaned promise is left to
+ * settle in the background; its handlers are attached, so it never surfaces as
+ * an unhandled rejection.
+ */
+function underSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+	return new Promise<T>((resolvePromise, rejectPromise) => {
+		const onAbort = () =>
+			rejectPromise(signal.reason instanceof Error ? signal.reason : new Error("Request was aborted"));
+		if (signal.aborted) {
+			onAbort();
+			promise.catch(() => {});
+			return;
+		}
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(
+			(value) => {
+				signal.removeEventListener("abort", onAbort);
+				resolvePromise(value);
+			},
+			(err) => {
+				signal.removeEventListener("abort", onAbort);
+				rejectPromise(err);
+			},
+		);
+	});
+}
+
 /** Wait for document.readyState === "complete" (bounded), then an extra settle. */
 async function settle(mgr: Manager, extraMs: number, signal: AbortSignal | undefined): Promise<void> {
 	const deadline = Date.now() + READY_TIMEOUT_MS;
@@ -120,7 +161,7 @@ function buildSummary(
 
 export function createPreviewToolDefinition(
 	cwd: string,
-	_options?: PreviewToolOptions,
+	options?: PreviewToolOptions,
 ): ToolDefinition<typeof previewSchema, PreviewToolDetails> {
 	return {
 		name: "preview",
@@ -146,10 +187,17 @@ export function createPreviewToolDefinition(
 			} catch (err) {
 				return fail((err as Error).message);
 			}
+			// Every CDP call below runs under one total deadline: whichever of them
+			// hangs, the tool fails with a clear timeout instead of holding the turn.
+			// The signal makes the CDP layer bail fast where it can; the underSignal
+			// wrapper guarantees the deadline even where it can't (see its docs).
+			const timeoutMs = options?.totalTimeoutMs ?? TOTAL_TIMEOUT_MS;
+			const deadline = AbortSignal.timeout(timeoutMs);
+			const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
 			try {
-				await mgr.navigate({ url: resolved.url, newTab: true }, signal);
-				await settle(mgr, input.waitMs ?? SETTLE_DEFAULT_MS, signal);
-				const shot = await mgr.screenshot({ fullPage: input.fullPage }, signal);
+				await underSignal(mgr.navigate({ url: resolved.url, newTab: true }, combined), combined);
+				await settle(mgr, input.waitMs ?? SETTLE_DEFAULT_MS, combined);
+				const shot = await underSignal(mgr.screenshot({ fullPage: input.fullPage }, combined), combined);
 				const consoleErrors = mgr.readConsole({ level: "error", limit: 20 });
 				const network = mgr.readNetwork({ limit: 100 });
 				const failures = network.filter((e) => typeof e.status === "number" && e.status >= 400);
@@ -166,6 +214,14 @@ export function createPreviewToolDefinition(
 					},
 				};
 			} catch (err) {
+				// A user abort also aborts `combined`; only the deadline firing alone
+				// counts as a timeout — never convert the user's own abort into one.
+				if (deadline.aborted && !signal?.aborted) {
+					return fail(
+						`Preview timed out after ${Math.round(timeoutMs / 1000)}s — Chrome did not respond ` +
+							`(stuck tab or open dialog?). Close it and retry, or check the page manually.`,
+					);
+				}
 				return fail((err as Error).message);
 			} finally {
 				await resolved.server?.close();
@@ -185,5 +241,5 @@ export function createPreviewToolDefinition(
 	};
 }
 
-export const createPreviewTool = (cwd: string, _o?: PreviewToolOptions): AgentTool<typeof previewSchema> =>
-	wrapToolDefinition(createPreviewToolDefinition(cwd));
+export const createPreviewTool = (cwd: string, options?: PreviewToolOptions): AgentTool<typeof previewSchema> =>
+	wrapToolDefinition(createPreviewToolDefinition(cwd, options));

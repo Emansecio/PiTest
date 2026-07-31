@@ -678,6 +678,10 @@ export class TUI extends Container {
 		preFocus: Component | null;
 		hidden: boolean;
 		focusOrder: number;
+		/** Screen rect (0-based viewport rows/cols) of the last composited frame,
+		 * recorded by compositeOverlays so consumeMouse can route clicks INTO the
+		 * overlay instead of swallowing them. Undefined until first composite. */
+		lastRect?: { row: number; col: number; w: number; h: number };
 	}[] = [];
 	/** Cached overlay entry whose component === focusedComponent. Kept in sync by setFocus(). */
 	private focusedOverlay: (typeof this.overlayStack)[number] | null = null;
@@ -694,7 +698,20 @@ export class TUI extends Container {
 	// the same wheel gesture; we get out of its way for the rest of the scroll.
 	private mouseSuspended = false;
 	private mouseIdleResumeTimer: ReturnType<typeof setTimeout> | undefined;
-	private static readonly MOUSE_IDLE_RESUME_MS = 500;
+	// Pointer capture for the active press gesture. A component that CLAIMS a
+	// press owns every subsequent drag/release until the button lifts — routed by
+	// the press-time origin, never re-hit-tested — so a drag-selection survives
+	// the pointer wobbling off the component (the row above the composer, the
+	// footer below). Without this, off-component drags silently vanish and the
+	// selection freezes, then jumps when the pointer crosses back.
+	private mouseCapture: { target: Component & MouseTarget; originRow: number; originCol: number } | null = null;
+	// While suspended, every physical click goes to the emulator instead of us —
+	// a scroll-then-click on the composer inside this window is a DEAD click
+	// (nothing resumes tracking but a keypress or this timer). 300ms keeps the
+	// native-scroll escape hatch intact (each wheel tick re-arms the timer, so it
+	// only fires after the gesture actually pauses) while roughly halving the
+	// dead-click window the old 500ms left behind.
+	private static readonly MOUSE_IDLE_RESUME_MS = 300;
 
 	constructor(terminal: Terminal, showHardwareCursor?: boolean) {
 		super();
@@ -1293,10 +1310,56 @@ export class TUI extends Container {
 			this.autoSuspendMouse();
 			return;
 		}
-		// A capturing modal owns the screen; routing clicks into overlay rects is a
-		// later phase. Swallow press/drag/release so they neither move an invisible
-		// editor cursor nor steal focus from the modal.
-		if (this.hasCapturingOverlay()) return;
+		// Active pointer capture: every drag/release of the gesture goes to the
+		// component that claimed the press, translated by the press-time origin —
+		// NOT re-hit-tested — so a drag-selection keeps extending even while the
+		// pointer is off the component. Screen-space origin: stable for the
+		// duration of a gesture (the frame does not reflow under a held button).
+		if (this.mouseCapture && (ev.type === "drag" || ev.type === "release")) {
+			const { target, originRow, originCol } = this.mouseCapture;
+			if (ev.type === "release") this.mouseCapture = null;
+			if (target.onMouse(ev, ev.y - 1 - originRow, ev.x - 1 - originCol)) {
+				this.requestInputRender();
+			}
+			return;
+		}
+		// A press always starts a fresh gesture; a stale capture (release swallowed
+		// by a suspend, or lost mid-stream) must not leak into it.
+		if (ev.type === "press") this.mouseCapture = null;
+		// A capturing modal owns the screen. Clicks INSIDE its composited rect are
+		// routed down its component tree (so a SelectList in an overlay is as
+		// clickable as one inline); everything else — outside the rect, unclaimed
+		// by the overlay's components, drags/releases it declined — is swallowed,
+		// preserving modal semantics: a click can never reach the editor or steal
+		// focus from the modal underneath it.
+		if (this.hasCapturingOverlay()) {
+			const top = this.getTopmostVisibleOverlay();
+			const rect = top?.lastRect;
+			if (!top || !rect) return;
+			const screenRow = ev.y - 1;
+			const screenCol = ev.x - 1;
+			const inside =
+				screenRow >= rect.row &&
+				screenRow < rect.row + rect.h &&
+				screenCol >= rect.col &&
+				screenCol < rect.col + rect.w;
+			if (!inside) return;
+			const hit = this.descendToMouseTarget(top.component, screenRow - rect.row);
+			if (hit?.target.onMouse(ev, hit.localRow, screenCol - rect.col)) {
+				// A claimed press captures the pointer for the rest of the gesture.
+				if (ev.type === "press") {
+					this.mouseCapture = {
+						target: hit.target,
+						originRow: screenRow - hit.localRow,
+						originCol: rect.col,
+					};
+				}
+				// Focus stays with the overlay (setFocus on a subcomponent would desync
+				// focusedOverlay bookkeeping); just repaint on the keystroke fast path.
+				this.requestInputRender();
+			}
+			return;
+		}
 		const hit = this.hitTest(ev.x, ev.y);
 		if (!hit || !hit.target.onMouse(ev, hit.localRow, hit.localCol)) {
 			// An unclaimed PRESS (transcript, blank area) means the user wants the
@@ -1306,6 +1369,15 @@ export class TUI extends Container {
 			// release tail from a claimed gesture must not kill tracking mid-turn.
 			if (ev.type === "press") this.autoSuspendMouse();
 			return;
+		}
+		// A claimed press captures the pointer: drags/release of this gesture are
+		// routed straight to this target by origin translation (see above).
+		if (ev.type === "press") {
+			this.mouseCapture = {
+				target: hit.target,
+				originRow: ev.y - 1 - hit.localRow,
+				originCol: ev.x - 1 - hit.localCol,
+			};
 		}
 		// Handled: focus the clicked target (if focusable) and repaint on the same
 		// fast path keystrokes use.
@@ -1331,26 +1403,38 @@ export class TUI extends Container {
 		// (the frame the click was reported against), NOT previousViewportTop, which
 		// the diff path nudges for cursor tracking.
 		const viewportTop = Math.max(0, this.previousLines.length - this.terminal.rows);
-		let localRow = viewportTop + (y - 1);
+		const localRow = viewportTop + (y - 1);
 		const localCol = x - 1;
 		if (localRow < 0 || localCol < 0) return null;
-		// The root is the TUI itself (a MouseHitContainer via Container). Resolve its
-		// child first, then walk down — every node below the root is a plain
-		// Component, so the descent never has to type `this` as Component.
-		let hit = this.hitTestChild(localRow);
-		if (!hit) return null;
-		localRow -= hit.childStart;
-		let node: Component = hit.child;
-		// Bounded descent: each step lands on a target or moves strictly deeper. The
-		// tree depth is tiny; the cap only guards against a pathological cycle.
+		// The root is the TUI itself (a MouseHitContainer via Container). Resolve
+		// its child first — the TUI is not itself a Component — then walk down.
+		const rootHit = this.hitTestChild(localRow);
+		if (!rootHit) return null;
+		const hit = this.descendToMouseTarget(rootHit.child, localRow - rootHit.childStart);
+		return hit ? { target: hit.target, localRow: hit.localRow, localCol } : null;
+	}
+
+	/**
+	 * Walk from `root` down the live component tree to the deepest MouseTarget
+	 * rendering `localRow` (in root-local row space). Shared by the base-content
+	 * hitTest and the overlay click routing, which differ only in how they pick
+	 * the root and translate the starting row. Bounded descent: each step lands
+	 * on a target or moves strictly deeper; the cap only guards a pathological cycle.
+	 */
+	private descendToMouseTarget(
+		root: Component,
+		localRow: number,
+	): { target: Component & MouseTarget; localRow: number } | null {
+		let node: Component = root;
+		let row = localRow;
 		for (let depth = 0; depth < 64; depth++) {
 			if (isMouseTarget(node)) {
-				return { target: node, localRow, localCol };
+				return { target: node, localRow: row };
 			}
 			if (!isMouseHitContainer(node)) return null;
-			hit = node.hitTestChild(localRow);
+			const hit = node.hitTestChild(row);
 			if (!hit) return null;
-			localRow -= hit.childStart;
+			row -= hit.childStart;
 			node = hit.child;
 		}
 		return null;
@@ -1668,6 +1752,10 @@ export class TUI extends Container {
 			// Get final row/col with actual overlay height
 			const { row, col } = this.resolveOverlayLayout(options, overlayLines.length, termWidth, termHeight);
 
+			// Mouse routing reads this rect: overlay line i lands on screen row
+			// `row + i` (idx - viewportStart below), so the rect is already in the
+			// same 0-based screen space consumeMouse translates clicks into.
+			entry.lastRect = { row, col, w: width, h: overlayLines.length };
 			rendered.push({ overlayLines, row, col, w: width });
 			minLinesNeeded = Math.max(minLinesNeeded, row + overlayLines.length);
 		}

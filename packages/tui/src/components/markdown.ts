@@ -1,3 +1,5 @@
+import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { Marked, type Token, Tokenizer, type Tokens, type TokensList } from "marked";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
 import type { Component } from "../tui.ts";
@@ -72,6 +74,43 @@ const markdownParser = new Marked();
 markdownParser.setOptions({
 	tokenizer: new StrictStrikethroughTokenizer(),
 });
+
+// ---------------------------------------------------------------------------
+// Clickable file paths in codespans (OSC 8).
+// Models reference files as `src/foo.ts:12` inline code; when the host app
+// declares a base directory, codespans that look like file paths render as
+// file:// hyperlinks so the terminal's own Ctrl+click opens them — no mouse
+// tracking involved, works even while tracking is suspended.
+// ---------------------------------------------------------------------------
+
+let fileLinkBaseDir: string | undefined;
+
+/**
+ * Declare the directory relative codespan paths resolve against (typically the
+ * session cwd). Undefined disables file-path linking for relative paths;
+ * absolute paths still link.
+ */
+export function setMarkdownFileLinkBase(baseDir: string | undefined): void {
+	fileLinkBaseDir = baseDir;
+}
+
+// A codespan qualifies as a file path only when it cannot plausibly be
+// anything else: no spaces or glob/shell metacharacters, at least one path
+// separator (bare filenames like `foo.ts` stay plain — too many false hits),
+// a real extension, and an optional trailing `:line[:col]`. Conservative by
+// design: a miss renders as plain code, a false positive is a dead link.
+const FILE_PATH_CODESPAN_REGEX =
+	/^((?:[A-Za-z]:[\\/]|\/|\.{1,2}[\\/])?[\w.-]+(?:[\\/][\w.-]+)+\.[A-Za-z0-9]{1,8})(?::\d+(?::\d+)?)?$/;
+
+/** file:// href for a path-like codespan, or undefined when it doesn't qualify. */
+function fileLinkHref(codespanText: string): string | undefined {
+	const match = FILE_PATH_CODESPAN_REGEX.exec(codespanText.trim());
+	if (!match?.[1]) return undefined;
+	const filePath = match[1];
+	if (path.isAbsolute(filePath)) return pathToFileURL(filePath).href;
+	if (!fileLinkBaseDir) return undefined;
+	return pathToFileURL(path.join(fileLinkBaseDir, filePath)).href;
+}
 
 /** Result of scanning a text for ``` fence markers: total count plus the loop's exit state. */
 interface FenceScanState {
@@ -1202,9 +1241,12 @@ export class Markdown implements Component {
 					break;
 				}
 
-				case "codespan":
-					result += this.theme.code(token.text) + stylePrefix;
+				case "codespan": {
+					const styledCode = this.theme.code(token.text);
+					const fileHref = getCapabilities().hyperlinks ? fileLinkHref(token.text) : undefined;
+					result += (fileHref ? hyperlink(styledCode, fileHref) : styledCode) + stylePrefix;
 					break;
+				}
 
 				case "link": {
 					const linkText = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);

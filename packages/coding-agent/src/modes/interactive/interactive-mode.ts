@@ -50,6 +50,7 @@ import {
 	getKeybindings,
 	getSixelSupport,
 	isKittyProtocolActive,
+	isMouseSequence,
 	Loader,
 	type LoaderIndicatorOptions,
 	Markdown,
@@ -60,6 +61,7 @@ import {
 	SPINNER_FRAME_MS,
 	Spacer,
 	setKeybindings,
+	setMarkdownFileLinkBase,
 	Text,
 	TruncatedText,
 	TUI,
@@ -2022,6 +2024,9 @@ export class InteractiveMode {
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footer.setDensity(this.settingsManager.getFooterDensity());
 		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
+		// Path-looking codespans in assistant markdown resolve against the session
+		// cwd and render as OSC 8 file:// hyperlinks (terminal-native Ctrl+click).
+		setMarkdownFileLinkBase(this.sessionManager.getCwd());
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 		this.ui.setShowHardwareCursor(this.settingsManager.getShowHardwareCursor());
 		// Apply the mouse-tracking intent. This runs after ui.start() (via
@@ -5525,6 +5530,10 @@ export class InteractiveMode {
 		// A prior chooser should never linger; tear it down before opening a new one.
 		if (this.sendNowChooser) this.closeSendNowChooser();
 		this.sendNowChooser = new SendNowChooser(text);
+		// A click on a button (routed by the TUI hit-test to the chooser's onMouse,
+		// which already moved the highlight there) confirms exactly like Enter would —
+		// confirmSendNowChooser reads the selection, so it also owns the Cancel case.
+		this.sendNowChooser.onAction = () => void this.confirmSendNowChooser();
 		this.sendNowChooserDraft = text;
 		// The chooser IS the message's on-screen home now: submitValue() already
 		// emptied the composer, and re-seating the text there would show the same
@@ -5546,6 +5555,12 @@ export class InteractiveMode {
 	 */
 	private handleSendNowChooserKey(data: string): { consume?: boolean } | undefined {
 		if (!this.sendNowChooser) return undefined;
+		// Mouse reports are not keys. Global listeners see the raw SGR sequence
+		// BEFORE the TUI decodes and hit-tests it, so treating it like "any other
+		// key" made every click an implicit Cancel — closing the chooser before the
+		// click could reach its onMouse. Let it flow through untouched: the mouse
+		// router will deliver it to whichever component is actually under the cursor.
+		if (isMouseSequence(data)) return undefined;
 		// This listener runs BEFORE the focused component (tui global input listeners
 		// fire first), so it may only claim keys while the default composer actually
 		// holds focus. If a picker/selector/overlay stole focus while the chooser was
@@ -5584,8 +5599,9 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Confirm the highlighted action. Send now → steer (immediate reading at the
-	 * next step boundary); Queue → followUp. The Fusion degrade is decided HERE,
+	 * Confirm the highlighted action. Send now → steer, plus cancellation of any
+	 * in-flight tools so the step boundary that reads it arrives immediately;
+	 * Queue → followUp. The Fusion degrade is decided HERE,
 	 * not at open time, because a Fusion turn has no step boundary to inject into —
 	 * so a steer would sit undrained. If the agent went idle while the chooser was
 	 * open, session.prompt() ignores the streamingBehavior and starts a fresh turn.
@@ -5655,9 +5671,28 @@ export class InteractiveMode {
 		const steersActiveTurn = behavior === "steer" && this.session.isStreaming;
 
 		await this.session.prompt(text, { streamingBehavior: behavior });
+
+		// Send now must mean NOW. The steer above is only read at the next step
+		// boundary, and a long or hung tool (observed: a 12-minute preview) holds
+		// that boundary hostage while the message sits queued. Cancel the in-flight
+		// tools — per-tool, the turn stays alive — so their results come back
+		// aborted, the boundary arrives immediately, and the model reads the message
+		// with the cancellation in the same context. Ordering matters: the steer is
+		// already queued, so the freed boundary cannot slip past an empty queue.
+		let cancelledTools = 0;
+		if (steersActiveTurn) {
+			for (const tool of this.getInterruptiblePendingTools()) {
+				if (this.session.cancelTool(tool.id)) cancelledTools++;
+			}
+		}
+
 		this.updatePendingMessagesDisplay();
 		if (degradedFromFusion) {
 			this.showStatus("Fusion turn — delivered at end of turn");
+		} else if (cancelledTools > 0) {
+			this.showStatus(
+				`Cancelled ${cancelledTools} running tool${cancelledTools === 1 ? "" : "s"} — reading your message now`,
+			);
 		} else if (steersActiveTurn) {
 			this.showStatus("Will be read at the agent's next step");
 		}

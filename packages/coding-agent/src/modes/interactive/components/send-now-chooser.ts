@@ -5,7 +5,9 @@
  *
  *   ▌ <message preview…>  ▸ Send now ◷ Queue ✕ Cancel  ←/→ ⏎
  *
- * - Send now  → deliver for immediate reading in the current turn (steer).
+ * - Send now  → deliver for immediate reading in the current turn (steer). Tools
+ *               still running are cancelled so the step boundary — and with it
+ *               the message — arrives now, not after a long tool finishes.
  * - Queue     → the previous behavior (followUp), delivered after the turn.
  * - Cancel    → close and return the text intact to the composer.
  *
@@ -29,14 +31,18 @@
  *    the boundaries between the three groups (preview · buttons · hint), which is
  *    what makes the single space inside the group read as "these belong together".
  *
- * The component is purely presentational: it holds the highlighted index and the
- * message text, and renders a single content line. Navigation and confirmation
- * are driven externally by interactive-mode's input listener, which keeps focus
- * on the editor so printable keystrokes flow straight through to it (an implicit
- * Cancel that keeps editing fluid). See `interactive-mode.ts`.
+ * The component holds the highlighted index and the message text, and renders a
+ * single content line. Keyboard navigation and confirmation are driven
+ * externally by interactive-mode's input listener, which keeps focus on the
+ * editor so printable keystrokes flow straight through to it (an implicit
+ * Cancel that keeps editing fluid). Mouse is the one input the component owns:
+ * it is a `MouseTarget`, so the TUI's hit-test routes a click on one of its
+ * buttons here, which selects that button and fires `onAction` — the listener
+ * cannot do this, because it only sees the raw SGR sequence, not where it
+ * landed. See `interactive-mode.ts`.
  */
 
-import { type Component, truncateToWidth, visibleWidth } from "@pit/tui";
+import { type Component, type MouseEvent, type MouseTarget, truncateToWidth, visibleWidth } from "@pit/tui";
 import { theme } from "../theme/theme.ts";
 
 export type SendNowSelection = "send" | "queue" | "cancel";
@@ -70,10 +76,21 @@ const NAV_HINT = "←/→ ⏎";
 /** Gap between the preview, the button row and the nav hint. */
 const GAP = "  ";
 
-export class SendNowChooser implements Component {
+export class SendNowChooser implements Component, MouseTarget {
 	/** Index into ACTIONS of the highlighted action; opens on "Send now". */
 	private index = 0;
 	private readonly text: string;
+	// Column span [start, end) of each button in the last rendered frame, parallel
+	// to ACTIONS. Spans depend on the render width (the preview yields space), so
+	// they are recomputed every render and consumed by onMouse for hit-testing.
+	private buttonSpans: { start: number; end: number }[] = [];
+
+	/**
+	 * Fired when a mouse press lands on a button (which also becomes the
+	 * highlighted selection). Wired by interactive-mode to the same confirm path
+	 * Enter uses, so a click and a keyboard confirm are indistinguishable.
+	 */
+	onAction: ((selection: SendNowSelection) => void) | undefined = undefined;
 
 	constructor(text: string) {
 		this.text = text.replace(/\s+/g, " ").trim();
@@ -117,8 +134,32 @@ export class SendNowChooser implements Component {
 		const fixed = 2 + visibleWidth(buttons) + visibleWidth(hint);
 		const available = width - fixed - GAP.length;
 		const previewWidth = available >= PREVIEW_MIN ? Math.min(PREVIEW_MAX, available) : 0;
-		const preview =
-			previewWidth > 0 ? `${theme.fg("muted", truncateToWidth(this.text, previewWidth, "…"))}${GAP}` : "";
+		// The preview's ACTUAL width can be shorter than its budget (short message),
+		// so the button spans below must measure the truncated text, not the budget.
+		const previewText = previewWidth > 0 ? truncateToWidth(this.text, previewWidth, "…") : "";
+		const preview = previewText ? `${theme.fg("muted", previewText)}${GAP}` : "";
+		let col = 2 + (previewText ? visibleWidth(previewText) + GAP.length : 0);
+		this.buttonSpans = ACTIONS.map((action) => {
+			const start = col;
+			col += 2 + visibleWidth(action.label); // glyph + space + label
+			const span = { start, end: col };
+			col += 1; // single space joining the buttons
+			return span;
+		});
 		return [truncateToWidth(`${marker} ${preview}${buttons}${hint}`, width, "…")];
+	}
+
+	/**
+	 * Left-press on a button selects it and fires {@link onAction}. Anything else
+	 * (other buttons/rows, the preview, drags, releases) is declined so the TUI's
+	 * unclaimed-press escape hatch — native terminal selection — keeps working.
+	 */
+	onMouse(ev: MouseEvent, _localRow: number, localCol: number): boolean {
+		if (ev.type !== "press" || ev.button !== "left") return false;
+		const hit = this.buttonSpans.findIndex((span) => localCol >= span.start && localCol < span.end);
+		if (hit === -1) return false;
+		this.index = hit;
+		this.onAction?.(ACTIONS[hit]?.key ?? "cancel");
+		return true;
 	}
 }

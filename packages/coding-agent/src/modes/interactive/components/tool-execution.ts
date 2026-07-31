@@ -1,5 +1,15 @@
 import { performance } from "node:perf_hooks";
-import { type Component, Container, getCapabilities, Image, SPINNER_FRAMES, Spacer, Text, type TUI } from "@pit/tui";
+import {
+	type Component,
+	Container,
+	getCapabilities,
+	Image,
+	type MouseEvent,
+	SPINNER_FRAMES,
+	Spacer,
+	Text,
+	type TUI,
+} from "@pit/tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
 import { allToolNames, createToolDefinition, type ToolName } from "../../../core/tools/index.ts";
 import { buildCappedToolOutput, getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
@@ -98,6 +108,13 @@ export class ToolExecutionComponent extends MessageShell {
 	private abortedCache: boolean | null = null;
 	/** When unchanged, partial result updates patch the result renderer in place. */
 	private lastStructuralKey = "";
+	// Re-entrancy guard: a renderer may call context.invalidate() from inside its
+	// own render pass (the ask tool does, when the answer first lands). Re-entering
+	// updateDisplay mid-rebuild would mount the in-flight result component twice —
+	// the inner pass adds its own copy, then the outer pass resumes and adds
+	// another. Queue the request and run one extra full pass instead.
+	private inUpdateDisplay = false;
+	private updateDisplayQueued = false;
 
 	constructor(
 		toolName: string,
@@ -325,6 +342,24 @@ export class ToolExecutionComponent extends MessageShell {
 		this.updateDisplay();
 	}
 
+	/**
+	 * Left-press on the CALL TITLE line toggles this tool's expanded output —
+	 * the per-component mouse counterpart of the global Ctrl+O. Only the title
+	 * row claims the click: body rows stay unclaimed so native terminal text
+	 * selection over tool output keeps working. Declined entirely when a parent
+	 * activity row owns the header (activityChild) or in self-render passthrough
+	 * mode, where this shell contributes no rows of its own.
+	 */
+	onMouse(ev: MouseEvent, localRow: number, _localCol: number): boolean {
+		if (ev.type !== "press" || ev.button !== "left") return false;
+		if (this.activityChild) return false;
+		const titleRow = this.firstContentRow();
+		if (titleRow === null || localRow !== titleRow) return false;
+		this.setExpanded(!(this.expanded || this.resultExpanded));
+		this.ui.requestRender();
+		return true;
+	}
+
 	/** Expand only the result body (error auto-preview). Leaves the call title compact. */
 	setResultExpanded(expanded: boolean): void {
 		if (this.resultExpanded === expanded) return;
@@ -428,6 +463,27 @@ export class ToolExecutionComponent extends MessageShell {
 	}
 
 	private updateDisplay(): void {
+		if (this.inUpdateDisplay) {
+			// Invalidated from inside a renderer: the tree is mid-rebuild, so touching
+			// it now would duplicate children. Force a full rebuild afterwards — the
+			// invalidation may affect siblings the patch path would skip (the ask
+			// tool's call line repaints from pending to answered this way).
+			this.updateDisplayQueued = true;
+			this.lastStructuralKey = "";
+			return;
+		}
+		this.inUpdateDisplay = true;
+		try {
+			do {
+				this.updateDisplayQueued = false;
+				this.updateDisplayNow();
+			} while (this.updateDisplayQueued);
+		} finally {
+			this.inUpdateDisplay = false;
+		}
+	}
+
+	private updateDisplayNow(): void {
 		// Per Leva 2: state is reflected in the gutter color, not in a bg fill.
 		// pending → muted gray, success → green, error → red. The pending → final
 		// switch eases the color (P5) rather than snapping; see refreshGutterState.

@@ -20,6 +20,8 @@ import {
 	getKeybindings,
 	Input,
 	type KeyId,
+	type MouseEvent,
+	type MouseTarget,
 	matchesKey,
 	truncateToWidth,
 	visibleWidth,
@@ -115,8 +117,15 @@ function wrapPlain(text: string, width: number): string[] {
  * so the frame (borders, cardBg, padding) is byte-identical to the other
  * selectors.
  */
-class AskPicker implements Component, Focusable {
+class AskPicker implements Component, Focusable, MouseTarget {
 	focused = false;
+
+	// Body-row → list-row map of the last rendered frame (option index, or the
+	// synthetic freeform row). Only clickable rows are present — question,
+	// description connectors, scroll info and the comment preview never map.
+	// Body coordinates: the Card adds one top-border row and two chrome columns
+	// (border + padding) before the body, so onMouse subtracts those.
+	private readonly rowToListRow = new Map<number, number>();
 
 	private readonly req: AskOptionsRequest;
 	private readonly onResolve: (answer: AskPickerResolveResult) => void;
@@ -311,6 +320,33 @@ class AskPicker implements Component, Focusable {
 	}
 
 	/**
+	 * Left-press on an option row. Single-select: click = highlight + confirm, one
+	 * gesture. Multi-select: click TOGGLES the checkbox (like Space) — an instant
+	 * confirm would make picking a second option impossible, so Enter still owns
+	 * the submit. The freeform row opens the text field. Declined while typing
+	 * (freeform/comment mode) and on every non-option row, so text selection over
+	 * the question stays native.
+	 */
+	onMouse(ev: MouseEvent, localRow: number, _localCol: number): boolean {
+		if (ev.type !== "press" || ev.button !== "left") return false;
+		if (this.mode !== "list" || this.settled) return false;
+		// Card chrome: one top-border row above the body.
+		const listRow = this.rowToListRow.get(localRow - 1);
+		if (listRow === undefined) return false;
+		this.index = listRow;
+		if (listRow === this.freeformRow) {
+			this.enterFreeform();
+		} else if (this.allowMultiple) {
+			if (this.checked.has(listRow)) this.checked.delete(listRow);
+			else this.checked.add(listRow);
+		} else {
+			this.confirmList();
+		}
+		this.hooks.onRequestRender?.();
+		return true;
+	}
+
+	/**
 	 * Header block INSIDE the card: optional scope chip, then the question —
 	 * always, in both inline and overlay modes. The transcript's `ask …` call
 	 * line may be scrolled away or truncated; the card is what the user is
@@ -363,6 +399,7 @@ class AskPicker implements Component, Focusable {
 		for (let i = startIndex; i < endIndex; i++) {
 			const opt = this.options[i];
 			if (!opt) continue;
+			this.rowToListRow.set(lines.length, i);
 			const focused = i === this.index && this.mode === "list";
 			const cursor = selectionCursor(focused);
 			const box = this.checkboxPrefix(i);
@@ -398,6 +435,7 @@ class AskPicker implements Component, Focusable {
 			const active = this.index === this.freeformRow && this.mode === "list";
 			// Breathing room separates the synthetic row from the model's options.
 			if (this.options.length > 0) lines.push("");
+			this.rowToListRow.set(lines.length, this.freeformRow);
 			const head = `${selectionCursor(active)}${FREEFORM_ROW_LABEL}`;
 			const styled = active ? defaultTheme.fg("accent", head) : defaultTheme.fg("muted", head);
 			lines.push(paintSelectedRow(styled, width, active));
@@ -406,6 +444,7 @@ class AskPicker implements Component, Focusable {
 
 	/** Body (inside the card) for the current mode. */
 	private renderBody(width: number): string[] {
+		this.rowToListRow.clear();
 		const lines: string[] = [];
 		this.renderQuestion(width, lines);
 

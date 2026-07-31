@@ -1,6 +1,7 @@
 import { fuzzyFilter } from "../fuzzy.ts";
 import { getKeybindings } from "../keybindings.ts";
-import type { Component } from "../tui.ts";
+import type { MouseEvent } from "../keys.ts";
+import type { Component, MouseTarget } from "../tui.ts";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 import { Input } from "./input.ts";
 
@@ -42,11 +43,16 @@ export interface SettingsListOptions {
 	enableSearch?: boolean;
 }
 
-export class SettingsList implements Component {
+export class SettingsList implements Component, MouseTarget {
 	private items: SettingItem[];
 	private filteredItems: SettingItem[];
 	private theme: SettingsListTheme;
 	private selectedIndex = 0;
+	// Rendered row → display-item index for the last frame. Only setting rows are
+	// present; interleaved rows (search input, group headers, scroll info,
+	// description, hint) never map, so clicks on them are declined. Rebuilt every
+	// render because scroll position, filtering and grouping all move the rows.
+	private readonly rowToItem = new Map<number, number>();
 	private maxVisible: number;
 	private onChange: (id: string, newValue: string) => void;
 	private onCancel: () => void;
@@ -111,6 +117,7 @@ export class SettingsList implements Component {
 	}
 
 	render(width: number): string[] {
+		this.rowToItem.clear();
 		// If submenu is active, render it instead
 		if (this.submenuComponent) {
 			return this.submenuComponent.render(width);
@@ -166,6 +173,7 @@ export class SettingsList implements Component {
 			}
 			prevGroup = item.group;
 
+			this.rowToItem.set(lines.length, i);
 			const isSelected = i === this.selectedIndex;
 			const prefix = isSelected ? this.theme.cursor : "  ";
 			const prefixWidth = visibleWidth(prefix);
@@ -212,6 +220,26 @@ export class SettingsList implements Component {
 		this.addHintLine(lines, width);
 
 		return lines;
+	}
+
+	/**
+	 * Left-press on a setting row selects and activates it — the exact
+	 * highlight-then-Enter sequence in one gesture (cycle values, or open the
+	 * submenu). With a submenu open its component owns the rendered rows, so the
+	 * event is delegated verbatim (rows align 1:1 — render() returns the
+	 * submenu's lines from row 0). Non-setting rows are declined.
+	 */
+	onMouse(ev: MouseEvent, localRow: number, localCol: number): boolean {
+		if (this.submenuComponent) {
+			const submenu = this.submenuComponent as Partial<MouseTarget>;
+			return typeof submenu.onMouse === "function" ? submenu.onMouse(ev, localRow, localCol) : false;
+		}
+		if (ev.type !== "press" || ev.button !== "left") return false;
+		const itemIndex = this.rowToItem.get(localRow);
+		if (itemIndex === undefined) return false;
+		this.selectedIndex = itemIndex;
+		this.activateItem();
+		return true;
 	}
 
 	handleInput(data: string): void {

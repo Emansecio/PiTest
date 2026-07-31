@@ -63,10 +63,10 @@ Type `/` in the editor to open command completion. Extensions can register custo
 You can submit messages while the agent is still working:
 
 - **Enter** opens an inline chooser `[Send now] [Queue] [Cancel]`:
-  - **Send now** (default) steers the message into the current turn — read at the next step boundary without interrupting anything. During a Fusion turn it degrades to a queued follow-up (no step boundary to inject into).
+  - **Send now** (default) steers the message into the current turn for immediate reading: any tools still running are cancelled (their results come back aborted; the turn itself stays alive), so the next step boundary — and your message — arrives right away instead of waiting out a long tool. During a Fusion turn it degrades to a queued follow-up (no step boundary to inject into).
   - **Queue** delivers it as a follow-up after the agent finishes all work.
   - **Cancel** (or Esc, or just start typing) closes the chooser and keeps your text in the composer.
-  - Navigate with ←/→/Tab; confirm with Enter. Set `PIT_NO_SEND_NOW=1` to disable the chooser and have Enter queue a follow-up directly (legacy behavior).
+  - Navigate with ←/→/Tab; confirm with Enter. With mouse mode on (`/mouse`), clicking a button confirms it directly. Set `PIT_NO_SEND_NOW=1` to disable the chooser and have Enter queue a follow-up directly (legacy behavior).
 - **Alt+Enter** queues a follow-up message directly (no chooser), delivered after the agent finishes all work.
 - **Escape** aborts and restores queued messages to the editor.
 - **Alt+Up** retrieves queued messages back to the editor.
@@ -74,6 +74,18 @@ You can submit messages while the agent is still working:
 On Windows Terminal, Alt+Enter is fullscreen by default. Remap it as described in [Terminal setup](terminal-setup.md) if you want pit to receive the shortcut.
 
 Configure delivery in [Settings](settings.md) with `steeringMode` and `followUpMode`.
+
+## Mouse
+
+Mouse support is on by default (toggle with `/mouse`; `PIT_NO_MOUSE=1` is a hard kill-switch). With it on, a click can do everything its keyboard counterpart does:
+
+- **Composer**: click places the cursor; drag selects; double-click selects a word.
+- **Pickers and selectors** (`/model`, `/settings`, `/theme`, `/config`, the `ask` picker, …): clicking an item selects and confirms it in one gesture — submenus included. In multi-select `ask` prompts a click toggles the checkbox (Enter still submits).
+- **Overlays**: clicks inside a modal overlay reach its contents; clicks outside are swallowed (the modal keeps focus).
+- **Tool output**: clicking a tool's call title toggles its expanded output (the per-tool counterpart of Ctrl+O). Body lines stay unclaimed so you can still select output text natively.
+- **File paths**: path-like inline code in assistant messages (e.g. `src/foo.ts:12`) renders as an OSC 8 `file://` hyperlink — open it with your terminal's own Ctrl+click, even with `/mouse` off.
+
+Native terminal text selection stays available: the mouse wheel hands scrollback to the terminal, and a click on unclaimed content (transcript prose, blank areas) briefly suspends tracking so the next drag selects natively. Shift+drag always bypasses tracking.
 
 ## Sessions
 

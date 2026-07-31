@@ -1,7 +1,7 @@
 import { fuzzyFilter } from "../fuzzy.ts";
 import { getKeybindings, type Keybinding } from "../keybindings.ts";
-import { type KeyId, matchesKey } from "../keys.ts";
-import type { Component } from "../tui.ts";
+import { type KeyId, type MouseEvent, matchesKey } from "../keys.ts";
+import type { Component, MouseTarget } from "../tui.ts";
 import { truncateToWidth, visibleWidth } from "../utils.ts";
 
 const DEFAULT_PRIMARY_COLUMN_WIDTH = 32;
@@ -102,7 +102,7 @@ export interface SelectListLayoutOptions {
 	digitSelect?: boolean;
 }
 
-export class SelectList implements Component {
+export class SelectList implements Component, MouseTarget {
 	private items: SelectItem[] = [];
 	private filteredItems: SelectItem[] = [];
 	private selectedIndex: number = 0;
@@ -110,6 +110,11 @@ export class SelectList implements Component {
 	private theme: SelectListTheme;
 	private layout: SelectListLayoutOptions;
 	private cachedColumnWidth?: { length: number; firstValue: string; width: number };
+	// First filtered index and item-row count of the last rendered frame, so
+	// onMouse can translate a clicked row back to the item it showed. The rows
+	// AFTER the items (scroll info, key hint) are not items and never match.
+	private lastRenderStartIndex = 0;
+	private lastRenderItemRows = 0;
 
 	public onSelect?: (item: SelectItem) => void;
 	public onCancel?: () => void;
@@ -155,6 +160,7 @@ export class SelectList implements Component {
 
 		// If no items match filter, show message
 		if (this.filteredItems.length === 0) {
+			this.lastRenderItemRows = 0;
 			lines.push(this.theme.noMatch(`  ${this.layout.emptyText ?? "No matches"}`));
 			return lines;
 		}
@@ -170,6 +176,8 @@ export class SelectList implements Component {
 			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.filteredItems.length - this.maxVisible),
 		);
 		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredItems.length);
+		this.lastRenderStartIndex = startIndex;
+		this.lastRenderItemRows = endIndex - startIndex;
 
 		// Render visible items
 		for (let i = startIndex; i < endIndex; i++) {
@@ -215,6 +223,24 @@ export class SelectList implements Component {
 		const truncated = truncateToWidth(hint, width - 2, "…");
 		// Below a tiny floor the hint is unreadable; suppress rather than show "…".
 		return visibleWidth(truncated) >= 6 ? truncated : "";
+	}
+
+	/**
+	 * Left-press on an item row selects AND confirms it — one click does what
+	 * highlight-then-Enter (or a digit quick-select) does, matching every other
+	 * clickable affordance. Rows below the items (scroll info, key hint) and
+	 * non-press events are declined so unclaimed-press handling (native terminal
+	 * selection) keeps working there.
+	 */
+	onMouse(ev: MouseEvent, localRow: number, _localCol: number): boolean {
+		if (ev.type !== "press" || ev.button !== "left") return false;
+		if (localRow < 0 || localRow >= this.lastRenderItemRows) return false;
+		this.selectedIndex = this.lastRenderStartIndex + localRow;
+		const item = this.filteredItems[this.selectedIndex];
+		if (!item) return false;
+		this.notifySelectionChange();
+		this.onSelect?.(item);
+		return true;
 	}
 
 	handleInput(keyData: string): void {

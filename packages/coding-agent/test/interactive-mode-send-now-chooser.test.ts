@@ -49,6 +49,7 @@ function createChooserThis(overrides: Record<string, any> = {}): any {
 		sendNowChooserUnsub: undefined,
 		sendNowChooserContainer: { clear: vi.fn(), addChild: vi.fn() },
 		session: { isStreaming: true, isFusing: false, prompt: vi.fn().mockResolvedValue(undefined) },
+		getInterruptiblePendingTools: () => [] as Array<{ id: string; name: string }>,
 		updatePendingMessagesDisplay: vi.fn(),
 		showStatus: vi.fn(),
 		ui: { requestRender: vi.fn(), addInputListener: vi.fn(() => unsub) },
@@ -134,6 +135,66 @@ describe("SendNowChooser component", () => {
 			const line = new SendNowChooser("some reasonably long pending message").render(width)[0] ?? "";
 			expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 		}
+	});
+});
+
+// A decoded SGR left-press the TUI mouse router would hand to onMouse.
+function leftPress(): any {
+	return { type: "press", button: "left", x: 1, y: 1, shift: false, ctrl: false, alt: false, raw: "\x1b[<0;1;1M" };
+}
+
+/** Visible column of `label` in the chooser's rendered line (ANSI stripped). */
+function columnOf(chooser: SendNowChooser, width: number, label: string): number {
+	const plain = (chooser.render(width)[0] ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+	const col = plain.indexOf(label);
+	expect(col).toBeGreaterThan(-1);
+	return col;
+}
+
+describe("SendNowChooser mouse", () => {
+	test("a left press on each button, where it is actually rendered, selects and fires it", () => {
+		for (const [text, width] of [
+			["refactor the parser so it handles nested templates", 80], // long preview
+			["hi", 80], // short preview — spans must shift left with it
+			["refactor the parser", 46], // preview dropped entirely
+		] as const) {
+			for (const [label, key] of [
+				["▸ Send now", "send"],
+				["◷ Queue", "queue"],
+				["✕ Cancel", "cancel"],
+			] as const) {
+				const chooser = new SendNowChooser(text);
+				const fired: string[] = [];
+				chooser.onAction = (selection) => fired.push(selection);
+				const handled = chooser.onMouse(leftPress(), 0, columnOf(chooser, width, label));
+				expect(handled).toBe(true);
+				expect(chooser.getSelection()).toBe(key);
+				expect(fired).toEqual([key]);
+			}
+		}
+	});
+
+	test("a press outside the buttons (marker/preview) is declined and fires nothing", () => {
+		const chooser = new SendNowChooser("refactor the parser so it handles nested templates");
+		const fired: string[] = [];
+		chooser.onAction = (selection) => fired.push(selection);
+		chooser.render(80);
+		// Column 0 is the ▌ gutter marker; column 3 lands inside the preview text.
+		expect(chooser.onMouse(leftPress(), 0, 0)).toBe(false);
+		expect(chooser.onMouse(leftPress(), 0, 3)).toBe(false);
+		expect(fired).toEqual([]);
+		expect(chooser.getSelection()).toBe("send"); // highlight untouched
+	});
+
+	test("drags, releases and non-left presses are declined", () => {
+		const chooser = new SendNowChooser("hello");
+		const fired: string[] = [];
+		chooser.onAction = (selection) => fired.push(selection);
+		const col = columnOf(chooser, 80, "▸ Send now");
+		expect(chooser.onMouse({ ...leftPress(), type: "release" }, 0, col)).toBe(false);
+		expect(chooser.onMouse({ ...leftPress(), type: "drag" }, 0, col)).toBe(false);
+		expect(chooser.onMouse({ ...leftPress(), button: "right" }, 0, col)).toBe(false);
+		expect(fired).toEqual([]);
 	});
 });
 
@@ -224,6 +285,74 @@ describe("Send-now chooser routing", () => {
 		expect(fakeThis.showStatus).toHaveBeenCalledWith("Will be read at the agent's next step");
 	});
 
+	// The 12-minute-preview bug: a steer is only read at the next step boundary,
+	// so a long or hung tool held "Send now" hostage — the message sat queued
+	// while the user watched nothing happen. Send now must mean NOW: cancel the
+	// in-flight tools (per-tool, the turn stays alive) right after queueing the
+	// steer, so the boundary arrives immediately and the message is read.
+	test("confirming Send now cancels in-flight tools so the steer lands immediately", async () => {
+		const cancelTool = vi.fn((_id: string) => true);
+		const prompt = vi.fn().mockResolvedValue(undefined);
+		const { fakeThis } = createChooserThis({
+			session: { isStreaming: true, isFusing: false, prompt, cancelTool },
+			getInterruptiblePendingTools: () => [
+				{ id: "tool-1", name: "preview" },
+				{ id: "tool-2", name: "bash" },
+			],
+		});
+		fakeThis.openSendNowChooser.call(fakeThis, "stop and read this");
+		await fakeThis.confirmSendNowChooser.call(fakeThis);
+
+		expect(prompt).toHaveBeenCalledWith("stop and read this", { streamingBehavior: "steer" });
+		expect(cancelTool.mock.calls.map((c) => c[0])).toEqual(["tool-1", "tool-2"]);
+		// The steer must be queued BEFORE the tools are cancelled — cancelling first
+		// could let the turn reach (or cross) the boundary with nothing queued yet.
+		const promptOrder = prompt.mock.invocationCallOrder[0] ?? Number.NaN;
+		for (const order of cancelTool.mock.invocationCallOrder) expect(order).toBeGreaterThan(promptOrder);
+		expect(fakeThis.showStatus).toHaveBeenCalledWith("Cancelled 2 running tools — reading your message now");
+	});
+
+	test("confirming Send now with no tools in flight keeps the boundary wording", async () => {
+		const cancelTool = vi.fn(() => true);
+		const { fakeThis } = createChooserThis({
+			session: { isStreaming: true, isFusing: false, prompt: vi.fn().mockResolvedValue(undefined), cancelTool },
+		});
+		fakeThis.openSendNowChooser.call(fakeThis, "nothing to cancel");
+		await fakeThis.confirmSendNowChooser.call(fakeThis);
+
+		expect(cancelTool).not.toHaveBeenCalled();
+		expect(fakeThis.showStatus).toHaveBeenCalledWith("Will be read at the agent's next step");
+	});
+
+	test("confirming Queue never cancels in-flight tools", async () => {
+		const cancelTool = vi.fn(() => true);
+		const { fakeThis } = createChooserThis({
+			session: { isStreaming: true, isFusing: false, prompt: vi.fn().mockResolvedValue(undefined), cancelTool },
+			getInterruptiblePendingTools: () => [{ id: "tool-1", name: "bash" }],
+		});
+		fakeThis.openSendNowChooser.call(fakeThis, "later please");
+		fakeThis.sendNowChooser.next(); // move to Queue
+		await fakeThis.confirmSendNowChooser.call(fakeThis);
+
+		expect(cancelTool).not.toHaveBeenCalled();
+	});
+
+	test("a tool that already finished is not counted in the cancel status", async () => {
+		// cancelTool returns false when the tool completed between render and click.
+		const cancelTool = vi.fn((id: string) => id === "tool-1");
+		const { fakeThis } = createChooserThis({
+			session: { isStreaming: true, isFusing: false, prompt: vi.fn().mockResolvedValue(undefined), cancelTool },
+			getInterruptiblePendingTools: () => [
+				{ id: "tool-1", name: "preview" },
+				{ id: "tool-2", name: "bash" },
+			],
+		});
+		fakeThis.openSendNowChooser.call(fakeThis, "count honestly");
+		await fakeThis.confirmSendNowChooser.call(fakeThis);
+
+		expect(fakeThis.showStatus).toHaveBeenCalledWith("Cancelled 1 running tool — reading your message now");
+	});
+
 	test("confirming Queue routes to followUp", async () => {
 		const { fakeThis } = createChooserThis();
 		fakeThis.openSendNowChooser.call(fakeThis, "later please");
@@ -276,6 +405,60 @@ describe("Send-now chooser routing", () => {
 		expect(fakeThis.sendNowChooser.getSelection()).toBe("cancel");
 		expect(fakeThis.handleSendNowChooserKey.call(fakeThis, KEY.left)).toEqual({ consume: true });
 		expect(fakeThis.sendNowChooser.getSelection()).toBe("queue");
+	});
+
+	// The bug this guards: global input listeners see the raw SGR sequence BEFORE
+	// the TUI decodes it, and the listener's any-other-key branch turned every
+	// click into an implicit Cancel — closing the chooser before the click could
+	// reach its onMouse, so "Send now" was unclickable.
+	test("a mouse sequence flows through without cancelling the chooser", () => {
+		const { fakeThis, editor, unsub } = createChooserThis();
+		fakeThis.openSendNowChooser.call(fakeThis, "click me");
+
+		const result = fakeThis.handleSendNowChooserKey.call(fakeThis, "\x1b[<0;34;52M");
+
+		expect(result).toBeUndefined(); // not consumed → the mouse router decodes it
+		expect(fakeThis.sendNowChooser).toBeInstanceOf(SendNowChooser); // still open
+		expect(editor.getText()).toBe(""); // draft NOT restored — no implicit Cancel
+		expect(unsub).not.toHaveBeenCalled();
+		expect(fakeThis.session.prompt).not.toHaveBeenCalled();
+	});
+
+	test("clicking Send now confirms via onAction and routes to steer", async () => {
+		const { fakeThis } = createChooserThis();
+		fakeThis.openSendNowChooser.call(fakeThis, "read this now");
+
+		const chooser = fakeThis.sendNowChooser as SendNowChooser;
+		const handled = chooser.onMouse(leftPress(), 0, columnOf(chooser, 80, "▸ Send now"));
+		expect(handled).toBe(true);
+		await new Promise((resolve) => setTimeout(resolve, 0)); // confirm is async
+
+		expect(fakeThis.session.prompt).toHaveBeenCalledWith("read this now", { streamingBehavior: "steer" });
+		expect(fakeThis.sendNowChooser).toBeUndefined(); // torn down
+	});
+
+	test("clicking Queue routes to followUp", async () => {
+		const { fakeThis } = createChooserThis();
+		fakeThis.openSendNowChooser.call(fakeThis, "later please");
+
+		const chooser = fakeThis.sendNowChooser as SendNowChooser;
+		chooser.onMouse(leftPress(), 0, columnOf(chooser, 80, "◷ Queue"));
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		expect(fakeThis.session.prompt).toHaveBeenCalledWith("later please", { streamingBehavior: "followUp" });
+	});
+
+	test("clicking Cancel hands the draft back to the composer and queues nothing", async () => {
+		const { fakeThis, editor } = createChooserThis();
+		fakeThis.openSendNowChooser.call(fakeThis, "never mind");
+
+		const chooser = fakeThis.sendNowChooser as SendNowChooser;
+		chooser.onMouse(leftPress(), 0, columnOf(chooser, 80, "✕ Cancel"));
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		expect(fakeThis.session.prompt).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("never mind"); // draft returned, intact
+		expect(fakeThis.sendNowChooser).toBeUndefined();
 	});
 
 	test("a printable key restores the draft and passes through to the composer", () => {

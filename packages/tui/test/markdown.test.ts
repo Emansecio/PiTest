@@ -1,8 +1,10 @@
 import assert from "node:assert";
+import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
+import { pathToFileURL } from "node:url";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { Chalk } from "chalk";
-import { Markdown } from "../src/components/markdown.js";
+import { Markdown, setMarkdownFileLinkBase } from "../src/components/markdown.js";
 import { resetCapabilitiesCache, setCapabilities } from "../src/terminal-image.js";
 import { type Component, TUI } from "../src/tui.js";
 import { defaultMarkdownTheme } from "./test-themes.js";
@@ -1378,6 +1380,58 @@ bar`,
 				line.replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, "").replace(/\x1b\[[0-9;]*m/g, ""),
 			);
 			assert.ok(!rawPlain.join("").includes("(https://example.com)"), "URL should not appear twice");
+		});
+	});
+
+	describe("File-path codespans (OSC 8 file:// links)", () => {
+		afterEach(() => {
+			resetCapabilitiesCache();
+			setMarkdownFileLinkBase(undefined);
+		});
+
+		it("links a relative path codespan against the configured base dir, stripping :line:col", () => {
+			setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+			setMarkdownFileLinkBase("/repo");
+			const markdown = new Markdown("See `src/foo/bar.ts:12` for details", 0, 0, defaultMarkdownTheme);
+
+			const joined = markdown.render(80).join("");
+			// Same primitives the implementation uses, so the expectation is
+			// platform-correct (Windows pathToFileURL prefixes the drive letter).
+			const expected = pathToFileURL(path.join("/repo", "src/foo/bar.ts")).href;
+			assert.ok(joined.includes(`\x1b]8;;${expected}\x1b\\`), "Should link the resolved file URL");
+			// The visible text keeps the :12 suffix — only the URL drops it.
+			const plain = joined.replace(/\x1b\]8;;[^\x1b]*\x1b\\/g, "").replace(/\x1b\[[0-9;]*m/g, "");
+			assert.ok(plain.includes("src/foo/bar.ts:12"), "Visible text keeps the line suffix");
+		});
+
+		it("links absolute paths even without a base dir", () => {
+			setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+			const markdown = new Markdown("Edit `/etc/hosts/extra.conf` now", 0, 0, defaultMarkdownTheme);
+			const joined = markdown.render(80).join("");
+			const expected = pathToFileURL("/etc/hosts/extra.conf").href;
+			assert.ok(joined.includes(`\x1b]8;;${expected}\x1b\\`));
+		});
+
+		it("leaves non-path codespans, bare filenames and globs unlinked", () => {
+			setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+			setMarkdownFileLinkBase("/repo");
+			for (const snippet of ["`npm run check`", "`foo.ts`", "`**/*.ts`", "`a || b`", "`src/no-extension/dir`"]) {
+				const joined = new Markdown(`x ${snippet} y`, 0, 0, defaultMarkdownTheme).render(80).join("");
+				assert.ok(!joined.includes("]8;;file://"), `${snippet} must not become a file link`);
+			}
+		});
+
+		it("does not link relative paths when no base dir is configured", () => {
+			setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+			const joined = new Markdown("see `src/foo/bar.ts`", 0, 0, defaultMarkdownTheme).render(80).join("");
+			assert.ok(!joined.includes("]8;;file://"));
+		});
+
+		it("emits no OSC 8 when the terminal lacks hyperlink support", () => {
+			setCapabilities({ images: null, trueColor: false, hyperlinks: false });
+			setMarkdownFileLinkBase("/repo");
+			const joined = new Markdown("see `src/foo/bar.ts`", 0, 0, defaultMarkdownTheme).render(80).join("");
+			assert.ok(!joined.includes("]8;;"));
 		});
 	});
 

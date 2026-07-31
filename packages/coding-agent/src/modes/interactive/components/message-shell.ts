@@ -231,6 +231,18 @@ export class MessageShell extends Container {
 		}
 	}
 
+	/**
+	 * Row index of the first CHILD CONTENT line in the assembled output — after
+	 * the optional leading blank and, in framed mode, the top border — or null in
+	 * passthrough mode (`shellDisabled`), where the shell adds no rows of its
+	 * own. Lets subclasses map a mouse row back to their content (e.g. the tool
+	 * call title) without duplicating the shell's row accounting.
+	 */
+	protected firstContentRow(): number | null {
+		if (this.shellDisabled) return null;
+		return (this.noLeadingGap ? 0 : 1) + (this.framed ? 1 : 0);
+	}
+
 	/** Drop the memoized framed output (next render reassembles). */
 	private bustMemo(): void {
 		this.memoChildOutputs = null;

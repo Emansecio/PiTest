@@ -1,6 +1,7 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
 import { SelectList } from "../src/components/select-list.js";
+import type { MouseEvent } from "../src/keys.js";
 import { visibleWidth } from "../src/utils.js";
 
 const testTheme = {
@@ -376,5 +377,77 @@ describe("SelectList", () => {
 		assert.ok(selected.includes(marker), "selected row should use selectedBg");
 		assert.equal(visibleWidth(selected.replace(/\x1b\[[0-9;]*m/g, "")), 40);
 		assert.ok(!rendered[1].includes(marker), "unselected row should not use selectedBg");
+	});
+});
+
+/** A left mouse press; x/y are unused by onMouse (the walker passes localRow/localCol). */
+const leftPress = (overrides: Partial<MouseEvent> = {}): MouseEvent => ({
+	type: "press",
+	button: "left",
+	wheel: undefined,
+	x: 1,
+	y: 1,
+	shift: false,
+	ctrl: false,
+	alt: false,
+	raw: "",
+	...overrides,
+});
+
+describe("SelectList mouse", () => {
+	const makeItems = (n: number) => Array.from({ length: n }, (_, i) => ({ value: `item-${i}`, label: `item-${i}` }));
+
+	it("clicking an item row selects and confirms it", () => {
+		const list = new SelectList(makeItems(3), 5, testTheme);
+		const confirmed: string[] = [];
+		const changed: string[] = [];
+		list.onSelect = (item) => confirmed.push(item.value);
+		list.onSelectionChange = (item) => changed.push(item.value);
+		list.render(80);
+
+		assert.equal(list.onMouse(leftPress(), 1, 4), true);
+		assert.equal(list.getSelectedItem()?.value, "item-1");
+		assert.deepEqual(confirmed, ["item-1"]);
+		assert.deepEqual(changed, ["item-1"]);
+	});
+
+	it("maps clicked rows through the scroll window, not from item 0", () => {
+		const list = new SelectList(makeItems(10), 3, testTheme);
+		list.setSelectedIndex(5); // window centers around the selection
+		const confirmed: string[] = [];
+		list.onSelect = (item) => confirmed.push(item.value);
+		list.render(80);
+
+		// With maxVisible=3 and selection 5, the window starts at item 4.
+		assert.equal(list.onMouse(leftPress(), 0, 4), true);
+		assert.deepEqual(confirmed, ["item-4"]);
+	});
+
+	it("declines clicks below the items (scroll info / hint rows)", () => {
+		const list = new SelectList(makeItems(10), 3, testTheme);
+		const confirmed: string[] = [];
+		list.onSelect = (item) => confirmed.push(item.value);
+		const rendered = list.render(80);
+
+		// Row 3 is the scroll indicator line ("↑↓ (1/10)"), not an item.
+		assert.ok(rendered.length > 3);
+		assert.equal(list.onMouse(leftPress(), 3, 4), false);
+		assert.deepEqual(confirmed, []);
+	});
+
+	it("declines non-left presses, drags, releases, and empty lists", () => {
+		const list = new SelectList(makeItems(2), 5, testTheme);
+		const confirmed: string[] = [];
+		list.onSelect = (item) => confirmed.push(item.value);
+		list.render(80);
+
+		assert.equal(list.onMouse(leftPress({ button: "right" }), 0, 4), false);
+		assert.equal(list.onMouse(leftPress({ type: "release" }), 0, 4), false);
+		assert.equal(list.onMouse(leftPress({ type: "drag" }), 0, 4), false);
+
+		list.setFilter("zzz-no-match");
+		list.render(80);
+		assert.equal(list.onMouse(leftPress(), 0, 4), false);
+		assert.deepEqual(confirmed, []);
 	});
 });
