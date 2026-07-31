@@ -14,7 +14,7 @@ import {
 	matchGlob,
 	normalizeTargetPath,
 } from "../src/core/permissions/matcher.js";
-import { BUILTIN_SENSITIVE_PATHS } from "../src/core/permissions/types.js";
+import { BUILTIN_DANGEROUS_COMMANDS, BUILTIN_SENSITIVE_PATHS } from "../src/core/permissions/types.js";
 
 describe("permissions/matcher: globToRegExp", () => {
 	it("matches simple literal segments", () => {
@@ -174,5 +174,71 @@ describe("permissions/matcher: findMatchingCommandRule", () => {
 	it("ignores unsafe ReDoS patterns", () => {
 		expect(findMatchingCommandRule([{ pattern: "(a+)+" }], "aaaaaaaa")).toBeUndefined();
 		expect(findMatchingCommandRule([{ pattern: ".*.*" }], "xx")).toBeUndefined();
+	});
+});
+
+describe("permissions/types: BUILTIN_DANGEROUS_COMMANDS cloud/DB tier", () => {
+	// The deny-floor is a HARD block with no fire-once escape, so every rule is
+	// asserted from BOTH sides: it must catch the irreversible form AND leave the
+	// routine one alone.
+	const deny = (cmd: string) => findMatchingCommandRule(BUILTIN_DANGEROUS_COMMANDS, cmd)?.reason;
+
+	it("blocks a recursive delete of an S3 bucket ROOT, in either arg order", () => {
+		expect(deny("aws s3 rm s3://prod-assets --recursive")).toBe("Recursive delete of an S3 bucket root");
+		expect(deny("aws s3 rm --recursive s3://prod-assets")).toBe("Recursive delete of an S3 bucket root");
+		expect(deny("aws s3 rm s3://prod-assets/ --recursive")).toBe("Recursive delete of an S3 bucket root");
+	});
+
+	it("leaves a key-scoped S3 delete to the normal permission flow", () => {
+		expect(deny("aws s3 rm s3://prod-assets/logs/2026/ --recursive")).toBeUndefined();
+		expect(deny("aws s3 rm s3://prod-assets/tmp.txt")).toBeUndefined();
+	});
+
+	it("blocks force-deleting a bucket and unattended terraform destroy", () => {
+		expect(deny("aws s3 rb s3://prod-assets --force")).toBe("Force-deleting an S3 bucket");
+		expect(deny("terraform destroy -auto-approve")).toBe("Unattended terraform destroy");
+		// Interactive `terraform destroy` prompts the human itself.
+		expect(deny("terraform destroy")).toBeUndefined();
+	});
+
+	it("blocks namespace-level and cluster-wide kubectl deletes only", () => {
+		expect(deny("kubectl delete namespace prod")).toBe("Deleting a Kubernetes namespace");
+		expect(deny("kubectl -n prod delete ns staging")).toBe("Deleting a Kubernetes namespace");
+		expect(deny("kubectl delete pods --all-namespaces")).toBe("Cluster-wide kubectl delete");
+		expect(deny("kubectl delete pod api-7f9")).toBeUndefined();
+		expect(deny("kubectl get ns")).toBeUndefined();
+	});
+
+	it("blocks dropping a database through a client or dropdb", () => {
+		expect(deny('psql -h db -c "DROP DATABASE app"')).toBe("Dropping a database/schema");
+		expect(deny("dropdb app_production")).toBe("Dropping a database");
+		expect(deny('psql -c "DELETE FROM sessions"')).toBeUndefined();
+	});
+
+	it("anchors the LOCAL catastrophic rules to a command position too", () => {
+		// Regression: `grep -rn "mkfs" packages/` used to hit the deny-floor and was
+		// unblockable, because the rule matched the word anywhere on the line.
+		expect(deny('grep -rn "mkfs" packages/')).toBeUndefined();
+		expect(deny('rg "format-volume" docs/')).toBeUndefined();
+		expect(deny('echo "chmod -R 777 /"')).toBeUndefined();
+		// The real invocations still hard-block, with or without sudo.
+		expect(deny("mkfs.ext4 /dev/sda1")).toBe("Disk-destroying command");
+		expect(deny("sudo mkfs.ext4 /dev/sda1")).toBe("Disk-destroying command");
+		expect(deny("sudo dd if=/dev/zero of=/dev/sda")).toBe("Disk-destroying command");
+		expect(deny("Clear-Disk -Number 0")).toBe("Disk-destroying command (PowerShell)");
+		expect(deny("chmod -R 777 /")).toBe("Recursive world-writable on root");
+		expect(deny("format C:")).toBe("Formatting a drive");
+	});
+
+	it("anchors every new rule to a command position, so searching for the text is not blocked", () => {
+		// A hard block with no override must not fire on a grep/echo that merely
+		// CONTAINS the dangerous phrase — that would wedge routine work.
+		expect(deny('rg "dropdb" docs/')).toBeUndefined();
+		expect(deny('grep -rn "DROP DATABASE" migrations/')).toBeUndefined();
+		expect(deny('echo "kubectl delete namespace prod"')).toBeUndefined();
+		// ...but a real invocation chained after another command still is.
+		expect(deny("kubectl config use-context prod && kubectl delete namespace prod")).toBe(
+			"Deleting a Kubernetes namespace",
+		);
 	});
 });

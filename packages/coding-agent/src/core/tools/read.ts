@@ -744,10 +744,7 @@ export function createReadToolDefinition(
 		},
 		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete. Set outline:true for a symbol outline (names + line ranges) instead of file content; path also accepts pr://, issue://, and conflict:// virtual schemes to pull a GitHub PR, issue, or merge-conflict directly.
 
-Common mistakes to avoid:
-- Calling read for a directory — use "ls" instead.
-- Calling read repeatedly with the same offset — increment offset by the previous limit.
-- Re-reading a file you have already read in this session unless it was modified — the previous result is still in context.`,
+Never call read on a directory (use "ls") or twice with the same offset (increment it by the previous limit).`,
 		promptSnippet: "Read file contents",
 		promptGuidelines: ["Use read to examine files instead of cat or sed."],
 		parameters: readSchema,

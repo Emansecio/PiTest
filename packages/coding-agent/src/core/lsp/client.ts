@@ -15,6 +15,7 @@ import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { killProcessTree } from "../../utils/shell.ts";
 import { truncateWithEllipsis } from "../../utils/surrogate.ts";
 import { LruMap } from "../lru-map.ts";
+import { beginDiagnosticsBatch, endDiagnosticsBatch, notifyDiagnosticsPublished } from "./diagnostics-events.ts";
 import { applyWorkspaceEdit } from "./edits.ts";
 import { coalesceChunks } from "./frame-chunks.ts";
 import {
@@ -288,6 +289,10 @@ function onStdoutData(client: LspClient, chunk: Buffer): void {
 async function drainMessages(client: LspClient): Promise<void> {
 	if (client.isReading) return;
 	client.isReading = true;
+	// Diagnostics waiters are woken once, at the end of this drain, rather than
+	// per frame — a burst that publishes the edited file plus its package siblings
+	// must be fully routed before a waiter looks at the map (see diagnostics-events).
+	beginDiagnosticsBatch(client);
 	try {
 		if (client.pendingChunks.length > 0) {
 			client.messageBuffer = coalesceChunks(client.messageBuffer, client.pendingChunks);
@@ -312,6 +317,7 @@ async function drainMessages(client: LspClient): Promise<void> {
 		log.error("LSP message reader error", { error: String(err) });
 	} finally {
 		client.isReading = false;
+		endDiagnosticsBatch(client);
 	}
 	// A chunk may have arrived after the last parse but before the flag cleared.
 	if (client.pendingChunks.length > 0 || parseMessage(client.messageBuffer)) void drainMessages(client);
@@ -345,6 +351,11 @@ export async function routeMessage(
 				version: params.version ?? null,
 			});
 			client.diagnosticsVersion += 1;
+			// Wake anyone blocked in waitForDiagnosticsResult. Must come AFTER the
+			// store + version bump so a woken waiter observes the new state; this
+			// is the only transition that can satisfy a diagnostics wait, which is
+			// why the wait needs no polling fallback.
+			notifyDiagnosticsPublished(client);
 		} else if (notification.method === "$/progress" && notification.params) {
 			const params = notification.params as { token: string | number; value?: { kind?: string } };
 			if (params.value?.kind === "begin") {

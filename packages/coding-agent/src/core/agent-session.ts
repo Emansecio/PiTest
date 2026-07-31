@@ -92,6 +92,7 @@ import {
 	planContextPrune,
 	pressurePruneProtectTurns,
 	pruneOldToolOutputs,
+	splitSupersedePlanByCause,
 	wouldApplyOldThinkingCap,
 	wouldApplySupersedeOnly,
 	wouldPruneOldToolOutputs,
@@ -295,7 +296,8 @@ import { registerBuiltinSchemes } from "./url-schemes/index.ts";
 import { getCurrentUserInputBus } from "./user-input-bus.ts";
 import { summarizeCheckFailure } from "./verification/failure-summary.ts";
 import { functionalWebFixPrompt, runFunctionalWebCheck } from "./verification/functional-web.ts";
-import { pendingVerificationJobs } from "./verification/pending-checks.ts";
+import { decideInTurnCheckSteer, isInTurnCheckSteerDisabled } from "./verification/in-turn-check.ts";
+import { isVerificationJobCommand, pendingVerificationJobs } from "./verification/pending-checks.ts";
 import {
 	type CheckResult,
 	classifyCrossFileEscape,
@@ -929,6 +931,14 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	// writes/edits this prompt cycle), `_inVerification` guards re-entry, and
 	// `_verificationAbort` cancels an in-flight check on interrupt/dispose.
 	private _turnTouchedFiles = false;
+	// Grounding for the DEFAULT in-turn mode: did THIS cycle actually run a
+	// verification-class command? Paired with `_turnTouchedFiles`, an edit with no
+	// check is the honour-gap the corrective steer closes.
+	private _turnRanVerificationCommand = false;
+	// Unheeded in-turn corrections this session; bounded like the todo cadence so a
+	// non-complying model stops paying context for a reminder it ignores.
+	private _inTurnCheckIgnored = 0;
+	private _inInTurnCheckSteer = false;
 	// Absolute paths of files this prompt cycle modified (op !== "read"). Feeds
 	// debug-driven verify (`maybeRunDebugVerify`) so it can locate the touched
 	// test/source as a runtime repro. Reset alongside `_turnTouchedFiles`.
@@ -2544,6 +2554,16 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		// Per-turn, per-tool failure budget (complements doom-loop + cross-error):
 		// bump the by-NAME failure count for this turn and surface the remaining
 		// budget to the reflection prompt. Computed once for both error branches.
+		// In-turn grounding: a verification-class command counts as "the model
+		// verified" whether it passed or failed — a RED check is still evidence the
+		// check RAN, and its failures are the model's to fix, not a missing step.
+		// Tracked outside the error branches for exactly that reason.
+		if (event.toolName === "bash") {
+			const command = (args as { command?: unknown } | undefined)?.command;
+			if (typeof command === "string" && isVerificationJobCommand(command)) {
+				this._turnRanVerificationCommand = true;
+			}
+		}
 		const budget = event.isError ? this._steering.recordTurnToolFailure(event.toolName) : undefined;
 		if (event.isError && wasRegistryRejected) {
 			this._steering.maybeInjectToolErrorReflection(event.toolName, args, event.result, budget?.attemptsLeft);
@@ -4107,6 +4127,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		this._userInterrupted = false;
 		// Reset the per-prompt-cycle flag that arms the verification gate.
 		this._turnTouchedFiles = false;
+		this._turnRanVerificationCommand = false;
 		this._turnTouchedFilePaths.clear();
 		this._turnFixSite = undefined;
 		this._turnTouchedVisual = false;
@@ -4180,6 +4201,8 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 				// be lost (or resurface later). Jobs the first drain already gave up on
 				// are excluded via _handledCheckJobIds, so this never re-waits on them.
 				await this._awaitPendingChecksBeforeHandoff(options);
+			} else if (this.settingsManager.getVerificationSettings().mode === "in-turn") {
+				await this._runInTurnPostCycle(options);
 			}
 		} finally {
 			// Whatever verification job is STILL running when this prompt hands back
@@ -4381,11 +4404,22 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		let threshold = 0;
 
 		const prunePlan = planContextPrune(messages, protectTurns, this._pins.pinnedCanonicalPaths());
+		// The plan the supersede collapse actually applies. Identical to `prunePlan`
+		// unless cache economics vetoes the ECONOMY half (duplicate/N4), in which
+		// case it drops to the M11-only sub-plan — see _supersedePlanForCache.
+		let supersedePlan = prunePlan;
 		if (proactivePruneEnabled) {
 			const floorRaw = Number(process.env.PIT_PROACTIVE_PRUNE_FLOOR);
 			floor = proactivePruneFloor(contextWindow, Number.isFinite(floorRaw) ? floorRaw : undefined);
 			if (contextTokens <= floor) {
-				runSupersedeOnly = wouldApplySupersedeOnly(messages, protectTurns, prunePlan);
+				supersedePlan = this._supersedePlanForCache(
+					messages,
+					protectTurns,
+					prunePlan,
+					contextTokens,
+					contextWindow,
+				);
+				runSupersedeOnly = wouldApplySupersedeOnly(messages, protectTurns, supersedePlan);
 			} else {
 				threshold = adaptivePruneThreshold(contextTokens, contextWindow);
 				runToolPrune = wouldPruneOldToolOutputs(messages, threshold, protectTurns, prunePlan);
@@ -4393,9 +4427,10 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 				// the transcript forces the provider to cold-write the whole cached tail
 				// from the first pruned message on. When the reclaimed tokens don't earn
 				// that re-write back within the horizon, defer the SIZE prune — but keep
-				// the semantic supersede collapse (stale/duplicate results), which is a
-				// correction, never a size play, and must never be deferred. See
-				// prune-economics.ts + _shouldDeferToolPruneForCache.
+				// the M11 supersede collapse (a read the disk now contradicts), which is
+				// a correction, never a size play, and must never be deferred. The
+				// duplicate/N4 half IS a size play and goes through the same arithmetic
+				// (P2-6). See prune-economics.ts + _shouldDefer*/_supersedePlanForCache.
 				if (
 					runToolPrune &&
 					this._shouldDeferToolPruneForCache(
@@ -4408,7 +4443,14 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 					)
 				) {
 					runToolPrune = false;
-					runSupersedeOnly = wouldApplySupersedeOnly(messages, protectTurns, prunePlan);
+					supersedePlan = this._supersedePlanForCache(
+						messages,
+						protectTurns,
+						prunePlan,
+						contextTokens,
+						contextWindow,
+					);
+					runSupersedeOnly = wouldApplySupersedeOnly(messages, protectTurns, supersedePlan);
 				}
 			}
 		}
@@ -4450,7 +4492,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 				});
 			}
 		} else if (runSupersedeOnly) {
-			const supersedeReclaimed = applySupersedeOnly(copy, protectTurns, prunePlan);
+			const supersedeReclaimed = applySupersedeOnly(copy, protectTurns, supersedePlan);
 			if (supersedeReclaimed > 0) {
 				reclaimed += supersedeReclaimed;
 				recordDiagnostic({
@@ -4514,31 +4556,9 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		contextTokens: number,
 		contextWindow: number,
 	): boolean {
-		if (isTruthyEnvFlag(process.env.PIT_NO_PRUNE_CACHE_ECONOMICS)) return false;
-		if (contextWindow <= 0) return false;
-		const cost = this.model?.cost;
-		if (!cost) return false;
-		const cacheRead = cost.cacheRead ?? 0;
-		const cacheWrite = cost.cacheWrite ?? 0;
-		// Provider without a cache tier (write price 0/absent → e.g. codex) has no
-		// re-write penalty to weigh: never defer. (Also guarded in the helper.)
-		if (!(cacheRead > 0) || !(cacheWrite > 0)) return false;
-
-		// Occupancy from the WIRE view when available: contextTokens covers messages
-		// only, but the pressure the presend guard acts on includes system prompt +
-		// tools. Taking the max is conservative — a higher occupancy can only push us
-		// into the pressure band, where we never defer (prune wins), so wire awareness
-		// cannot cause over-deferring; without it, a big system+tools block could make
-		// a genuinely pressured window look comfortable and wrongly defer the prune.
-		const wireTokens = this.getContextUsage()?.wireTokens;
-		const occupancyTokens = typeof wireTokens === "number" && wireTokens > contextTokens ? wireTokens : contextTokens;
-		const occupancy = occupancyTokens / contextWindow;
-		// Resolve the comfortable-band boundary from the same env the mid-turn
-		// pressure guard uses (parseMidTurnPressureRatio is exported from
-		// agent-session-compaction.ts; clamp lives there). In the pressure band we
-		// never defer — short-circuit before paying for the probe.
-		const pressureRatio = parseMidTurnPressureRatio(process.env.PIT_MID_TURN_PRESSURE_RATIO);
-		if (occupancy >= pressureRatio) return false;
+		const cacheContext = this._pruneCacheEconomicsContext(contextTokens, contextWindow);
+		if (cacheContext === undefined) return false;
+		const { cacheRead, cacheWrite, occupancy, pressureRatio } = cacheContext;
 
 		// Probe the prune on a throw-away clone under an isolated store so the live
 		// deferred-output store keeps its id sequence and memory untouched.
@@ -4584,6 +4604,142 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 			},
 		});
 		return true;
+	}
+
+	/**
+	 * Cache-cost inputs shared by the two economics guards (size-prune and
+	 * supersede). `undefined` means "never defer": kill-switch on, no window, no
+	 * cache pricing (e.g. codex writes are free), or we are already in the
+	 * real-pressure band where the window matters more than the cache.
+	 *
+	 * Occupancy comes from the WIRE view when available: contextTokens covers
+	 * messages only, but the pressure the presend guard acts on includes system
+	 * prompt + tools. Taking the max is conservative — a higher occupancy can only
+	 * push us into the pressure band, where we never defer, so wire awareness
+	 * cannot cause over-deferring; without it a big system+tools block could make a
+	 * genuinely pressured window look comfortable and wrongly defer. The band
+	 * boundary comes from the same env the mid-turn pressure guard uses
+	 * (parseMidTurnPressureRatio, exported from agent-session-compaction.ts).
+	 */
+	private _pruneCacheEconomicsContext(
+		contextTokens: number,
+		contextWindow: number,
+	): { cacheRead: number; cacheWrite: number; occupancy: number; pressureRatio: number } | undefined {
+		if (isTruthyEnvFlag(process.env.PIT_NO_PRUNE_CACHE_ECONOMICS)) return undefined;
+		if (contextWindow <= 0) return undefined;
+		const cost = this.model?.cost;
+		if (!cost) return undefined;
+		const cacheRead = cost.cacheRead ?? 0;
+		const cacheWrite = cost.cacheWrite ?? 0;
+		if (!(cacheRead > 0) || !(cacheWrite > 0)) return undefined;
+		const wireTokens = this.getContextUsage()?.wireTokens;
+		const occupancyTokens = typeof wireTokens === "number" && wireTokens > contextTokens ? wireTokens : contextTokens;
+		const occupancy = occupancyTokens / contextWindow;
+		const pressureRatio = parseMidTurnPressureRatio(process.env.PIT_MID_TURN_PRESSURE_RATIO);
+		if (occupancy >= pressureRatio) return undefined;
+		return { cacheRead, cacheWrite, occupancy, pressureRatio };
+	}
+
+	/**
+	 * P2-6 — which supersede collapses may run this turn, weighed on cache cost.
+	 *
+	 * The supersede set mixes two very different things (see
+	 * `splitSupersedePlanByCause`): M11 write-invalidation is a CORRECTION — a read
+	 * the disk now contradicts — and must collapse whatever it costs; duplicate/N4
+	 * is pure ECONOMY, since the fresh copy is already in context and the stale one
+	 * misleads nobody, it only costs tokens. Collapsing a 1-3k-token duplicate in
+	 * the MIDDLE of the history cold-writes the entire cached tail behind it, which
+	 * at those sizes routinely costs more than it saves — exactly the trade
+	 * `_shouldDeferToolPruneForCache` weighs for the size-prune.
+	 *
+	 * Returns the plan the collapse should use: the full plan when the economy half
+	 * pays for itself (or there is nothing to weigh), the M11-only sub-plan when it
+	 * does not. The invalidated tail is charged only up to the FIRST M11 collapse —
+	 * everything from there on is cold-written anyway, so duplicates below it ride
+	 * for free.
+	 *
+	 * Kill-switch: PIT_NO_PRUNE_CACHE_ECONOMICS (the same flag as the size-prune
+	 * guard) restores the unconditional collapse.
+	 */
+	private _supersedePlanForCache(
+		messages: AgentMessage[],
+		protectTurns: number,
+		prunePlan: ContextPrunePlan,
+		contextTokens: number,
+		contextWindow: number,
+	): ContextPrunePlan {
+		// Fast path: nothing superseded, or M11 only — no economy half to weigh.
+		if (prunePlan.supersededIndices.size === prunePlan.supersededMutationCauses.size) return prunePlan;
+		const cacheContext = this._pruneCacheEconomicsContext(contextTokens, contextWindow);
+		if (cacheContext === undefined) return prunePlan;
+		const { mutation, economy } = splitSupersedePlanByCause(prunePlan);
+		// Cheap read-only pre-check before paying for a probe clone.
+		if (!wouldApplySupersedeOnly(messages, protectTurns, economy)) return prunePlan;
+
+		const economyProbe = this._probeSupersedeCollapse(messages, protectTurns, economy);
+		if (economyProbe.reclaimed <= 0 || economyProbe.firstIndex < 0) return prunePlan;
+		const mutationFirstIndex =
+			mutation.supersededIndices.size > 0
+				? this._probeSupersedeCollapse(messages, protectTurns, mutation).firstIndex
+				: -1;
+		// Empty slice (→ zero one-time cost) when M11 already diverges at or before
+		// the economy half's first collapse.
+		const tailEnd = mutationFirstIndex < 0 ? messages.length : mutationFirstIndex;
+		const tailTokens = estimateContextTokens(messages.slice(economyProbe.firstIndex, tailEnd)).tokens;
+		const decision = evaluatePruneCacheEconomics({
+			reclaimedTokens: economyProbe.reclaimed,
+			tailTokens,
+			occupancy: cacheContext.occupancy,
+			pressureRatio: cacheContext.pressureRatio,
+			cacheReadCostPerMTok: cacheContext.cacheRead,
+			cacheWriteCostPerMTok: cacheContext.cacheWrite,
+		});
+		if (!decision.defer) return prunePlan;
+
+		// Same category as the size-prune deferral (identical arithmetic, same
+		// kill-switch); `mechanism` + the note tell the two apart in /diagnostics.
+		recordDiagnostic({
+			category: "prune.economics-defer",
+			level: "info",
+			source: "agent-session.pruneContextForProvider",
+			context: {
+				bytes: economyProbe.reclaimed,
+				reclaimedTokens: economyProbe.reclaimed,
+				mechanism: "supersede_economy",
+				note:
+					`duplicate/N4 collapse deferred: ctx=${contextTokens}tok reclaimed=${economyProbe.reclaimed}tok ` +
+					`tail=${tailTokens}tok oneTime=$${decision.oneTimeInvalidationCostUsd.toFixed(6)} ` +
+					`gainx${PRUNE_CACHE_ECONOMICS_HORIZON_TURNS}=$${decision.recurringReadSavingsUsd.toFixed(6)} ` +
+					`occ=${cacheContext.occupancy.toFixed(3)} firstEconomy=${economyProbe.firstIndex} ` +
+					`firstMutation=${mutationFirstIndex} m11=${mutation.supersededIndices.size}`,
+			},
+		});
+		return mutation;
+	}
+
+	/**
+	 * Throw-away supersede collapse used only to measure it: reclaimed tokens and
+	 * the first index whose content diverges (where the cached tail would have to
+	 * be cold-written). Runs under an ISOLATED deferred store so the M13 bash-defer
+	 * inside the collapse never pollutes the live store's ids/memory.
+	 */
+	private _probeSupersedeCollapse(
+		messages: AgentMessage[],
+		protectTurns: number,
+		plan: ContextPrunePlan,
+	): { reclaimed: number; firstIndex: number } {
+		const probe = cloneToolResultMessagesForPrune(messages);
+		const savedStore = getCurrentDeferredOutputStore();
+		const probeStore = createDeferredOutputStore();
+		let reclaimed = 0;
+		setCurrentDeferredOutputStore(probeStore);
+		try {
+			reclaimed = applySupersedeOnly(probe, protectTurns, plan);
+		} finally {
+			setCurrentDeferredOutputStore(savedStore);
+			probeStore.dispose();
+		}
+		return { reclaimed, firstIndex: reclaimed > 0 ? firstDivergentPruneIndex(messages, probe) : -1 };
 	}
 
 	/**
@@ -4719,6 +4875,85 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		const detected = detectCheckCommand(this._cwd);
 		if (detected) return detected;
 		return detectSyntaxFallbackCommand(this._cwd, Array.from(this._turnTouchedFilePaths));
+	}
+
+	/**
+	 * The whole post-cycle surface of the DEFAULT `in-turn` mode. Deliberately thin
+	 * next to the `post-turn` pipeline: the harness runs no check, no fix loop and
+	 * no drain. It does exactly two things the honour-based prompt cannot do by
+	 * itself —
+	 *
+	 *   1. {@link _maybeSteerInTurnCheck} — record + correct once when the cycle
+	 *      edited files and ran no check at all.
+	 *   2. Self-review (Band P / P4) — on a HIGH-risk diff only. Before this, P4 was
+	 *      reachable ONLY from `post-turn`, i.e. dead code under the default mode
+	 *      it was shipped with; its own risk gate and `PIT_NO_SELF_REVIEW` kill-switch
+	 *      keep it a no-op on ordinary cycles.
+	 */
+	private async _runInTurnPostCycle(options?: PromptOptions): Promise<void> {
+		await this._maybeSteerInTurnCheck(options);
+		if (this._inVerification || !this._turnTouchedFiles) return;
+		if (this._userInterrupted || this._lastTurnAborted()) return;
+		const settings = this.settingsManager.getVerificationSettings();
+		const maxAttempts = this._recovery.getEffectiveVerificationMaxAttempts(settings.maxAttempts);
+		this._inVerification = true;
+		const abort = new AbortController();
+		this._verificationAbort = abort;
+		try {
+			// No check phase ran here, so the review starts with the FULL fix budget.
+			await this._runSelfReviewPhase(maxAttempts, 0, abort, options);
+		} finally {
+			this._inVerification = false;
+			this._verificationAbort = undefined;
+		}
+	}
+
+	/**
+	 * In-turn grounding (DEFAULT mode): correct ONE cycle that modified files and
+	 * never ran a verification-class command. The harness still runs no check
+	 * itself — it injects a single corrective turn asking the model to run it, and
+	 * records `quality.in-turn-check` so the honour-gap is measurable either way.
+	 *
+	 * Never blocks completion (no `goal_complete` veto): the model may still be
+	 * right, it just cannot claim so on an unrun check without leaving a trace.
+	 * Bounded — after `IN_TURN_CHECK_MAX_IGNORED` unheeded corrections it stops for
+	 * the session instead of paying context every turn. `PIT_NO_INTURN_CHECK_STEER=1`
+	 * restores the pure honour-based behavior.
+	 */
+	private async _maybeSteerInTurnCheck(options?: PromptOptions): Promise<void> {
+		if (this._inInTurnCheckSteer || isInTurnCheckSteerDisabled()) return;
+		const decision = decideInTurnCheckSteer({
+			touchedFiles: this._turnTouchedFiles,
+			ranCheck: this._turnRanVerificationCommand,
+			checkCommand: this._resolveInTurnCheckCommand(),
+			ignoredStreak: this._inTurnCheckIgnored,
+			aborted: this._userInterrupted || this._lastTurnAborted(),
+		});
+		if (decision.action === "none") return;
+		if (decision.action === "give-up") {
+			recordDiagnostic({
+				category: "quality.in-turn-check",
+				level: "info",
+				source: "agent-session",
+				context: { ruleId: "in-turn-check-gave-up", count: this._inTurnCheckIgnored },
+			});
+			return;
+		}
+		recordDiagnostic({
+			category: "quality.in-turn-check",
+			level: "warn",
+			source: "agent-session",
+			context: { ruleId: "in-turn-check-missing", count: this._inTurnCheckIgnored + 1 },
+		});
+		this._inInTurnCheckSteer = true;
+		try {
+			await this._promptOnce(decision.prompt, { expandPromptTemplates: false, source: options?.source });
+		} finally {
+			this._inInTurnCheckSteer = false;
+		}
+		// The corrective turn shares this cycle's flag, so a check run during it
+		// clears the streak; silence counts as unheeded and moves toward giving up.
+		this._inTurnCheckIgnored = this._turnRanVerificationCommand ? 0 : this._inTurnCheckIgnored + 1;
 	}
 
 	/**

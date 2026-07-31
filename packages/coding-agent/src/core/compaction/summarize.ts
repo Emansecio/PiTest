@@ -9,7 +9,7 @@
 
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@pit/agent-core";
 import type { AssistantMessage, Context, Message, Model, SimpleStreamOptions } from "@pit/ai";
-import { CHARS_PER_TOKEN_PROSE, completeSimple, recordDiagnostic } from "@pit/ai";
+import { CHARS_PER_TOKEN_PROSE, completeSimple, estimateStringTokens, recordDiagnostic } from "@pit/ai";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { convertToLlm } from "../messages.ts";
 import { type CacheAwareGeneration, decideCacheAwareRoute } from "./cache-aware.ts";
@@ -231,6 +231,35 @@ export function summarizationMaxTokens(model: Model<any>, reserveTokens: number,
 }
 
 /**
+ * Expected OUTPUT tokens of the summary about to be generated — the term that
+ * makes the cache-aware arithmetic honest (both routes pay for the same summary,
+ * each at its OWN model's output rate, and the session model's is typically 3-5x
+ * the sibling's; see cache-aware.ts).
+ *
+ * Two tiers, in order of evidence:
+ *  1. A PREVIOUS summary exists → its own size, clamped to the ceiling. Summaries
+ *     merge forward, so the last one is the best available predictor of the next —
+ *     the same reasoning `estimateCompactionFrameTokens` uses for the frame.
+ *  2. Nothing to go on (first compaction) → `maxTokens`, the ceiling the call
+ *     actually enforces (0.8×reserve clamped by the model's output limit). That is
+ *     an UPPER bound BY DESIGN: over-estimating inflates the session model's leg
+ *     more than the sibling's, so the uncertainty resolves toward the sibling — the
+ *     always-correct route. Under-estimating would restore exactly the
+ *     pro-cache-read bias this term exists to remove.
+ *
+ * A non-positive/non-finite ceiling (no reserve to derive one from) yields 0, which
+ * drops the output term rather than poisoning the comparison with Infinity.
+ */
+export function expectedSummaryOutputTokens(maxTokens: number, previousSummary?: string): number {
+	const ceiling = Number.isFinite(maxTokens) && maxTokens > 0 ? Math.floor(maxTokens) : 0;
+	if (previousSummary && previousSummary.length > 0) {
+		const prior = estimateStringTokens(previousSummary);
+		return ceiling > 0 ? Math.min(ceiling, prior) : prior;
+	}
+	return ceiling;
+}
+
+/**
  * Generate a summary of the conversation using the LLM.
  * If previousSummary is provided, uses the update prompt to merge.
  */
@@ -263,19 +292,50 @@ export async function generateSummary(
 		basePrompt = `${basePrompt}\n\nAdditional focus: ${customInstructions}`;
 	}
 
+	// Serialize conversation so the model doesn't try to continue it.
+	// Convert to LLM messages first (handles custom types like bashExecution, custom, etc.)
+	// A precomputed SerializedWindow (from compact()) shares this work with the
+	// verification pass; the full-prose serialization is not memoized (no reuser).
+	//
+	// Built BEFORE the cache-aware routing below because that decision has to price
+	// the text route on the payload it really sends (caps + dedup), not on the raw
+	// window. Cost of building it when the cache-read route then wins: one local
+	// serialization pass, no LLM call, no wire bytes.
+	const useDeltaSerialization =
+		previousSummary !== undefined &&
+		previousSummary.length > 0 &&
+		!isTruthyEnvFlag(process.env.PIT_NO_DELTA_SUMMARIZATION);
+	const conversationText = useDeltaSerialization
+		? (serialized?.delta ?? serializeConversationDelta(convertToLlm(currentMessages)))
+		: serializeConversation(serialized?.llm ?? convertToLlm(currentMessages));
+	const conversationTag = useDeltaSerialization ? "conversation-delta" : "conversation";
+
+	// Build the prompt with conversation wrapped in tags
+	let promptText = `<${conversationTag}>\n${conversationText}\n</${conversationTag}>\n\n`;
+	if (previousSummary) {
+		promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
+	}
+	promptText += basePrompt;
+
 	// Cache-aware route selection (PER REQUEST — see cache-aware.ts). When the
 	// session prefix is hot and the arithmetic favors it, generate the summary by
 	// re-reading that cached prefix on the SESSION model (~0.1x cacheRead) instead
 	// of serializing the window as fresh 1x text to the sibling `model`. `model`
 	// here IS the text/sibling route's model, so `model.cost` is the sibling cost;
-	// `cacheAware.sessionModel.cost` is the session cost. `sumMessageTokens` is the
-	// pure (usage-free) size of what the sibling would serialize. Kill-switch guards
-	// again here so the flag is a hard override no matter how `cacheAware` arrived.
+	// `cacheAware.sessionModel.cost` is the session cost. The sibling side is priced
+	// on `promptText` — the exact request that route issues — and BOTH sides carry
+	// the summary's output tokens, billed at their own model's output rate.
+	// Kill-switch guards again here so the flag is a hard override no matter how
+	// `cacheAware` arrived.
 	if (cacheAware && !isTruthyEnvFlag(process.env.PIT_NO_CACHE_AWARE_COMPACTION)) {
-		const siblingInputTokens = sumMessageTokens(currentMessages);
+		const siblingInputTokens = estimateStringTokens(promptText);
+		const expectedSummaryTokens = expectedSummaryOutputTokens(maxTokens, previousSummary);
 		const decision = decideCacheAwareRoute({
 			siblingInputTokens,
+			// Scope guard only: raw message tokens, the same scale as liveMessageTokens.
+			foldMessageTokens: sumMessageTokens(currentMessages),
 			cacheReadTokens: cacheAware.prefixWireTokens,
+			expectedSummaryTokens,
 			liveMessageTokens: cacheAware.liveMessageTokens,
 			siblingCost: model.cost,
 			sessionCost: cacheAware.sessionModel.cost,
@@ -286,7 +346,7 @@ export async function generateSummary(
 			level: "info",
 			source: "compaction.generateSummary",
 			context: {
-				note: `route=${decision.route} reason=${decision.reason} sibUsd=${decision.siblingCostUsd.toFixed(6)} cacheUsd=${decision.cacheReadCostUsd.toFixed(6)} sibTok=${siblingInputTokens} cacheTok=${cacheAware.prefixWireTokens} retention=${cacheAware.retention}`,
+				note: `route=${decision.route} reason=${decision.reason} sibUsd=${decision.siblingCostUsd.toFixed(6)} cacheUsd=${decision.cacheReadCostUsd.toFixed(6)} sibTok=${siblingInputTokens} cacheTok=${cacheAware.prefixWireTokens} outTok=${expectedSummaryTokens} sibOut=${model.cost?.output ?? "?"} sessOut=${cacheAware.sessionModel.cost?.output ?? "?"} retention=${cacheAware.retention}`,
 			},
 		});
 		if (decision.route === "cache-read") {
@@ -311,26 +371,6 @@ export async function generateSummary(
 			});
 		}
 	}
-
-	// Serialize conversation so the model doesn't try to continue it.
-	// Convert to LLM messages first (handles custom types like bashExecution, custom, etc.)
-	// A precomputed SerializedWindow (from compact()) shares this work with the
-	// verification pass; the full-prose serialization is not memoized (no reuser).
-	const useDeltaSerialization =
-		previousSummary !== undefined &&
-		previousSummary.length > 0 &&
-		!isTruthyEnvFlag(process.env.PIT_NO_DELTA_SUMMARIZATION);
-	const conversationText = useDeltaSerialization
-		? (serialized?.delta ?? serializeConversationDelta(convertToLlm(currentMessages)))
-		: serializeConversation(serialized?.llm ?? convertToLlm(currentMessages));
-	const conversationTag = useDeltaSerialization ? "conversation-delta" : "conversation";
-
-	// Build the prompt with conversation wrapped in tags
-	let promptText = `<${conversationTag}>\n${conversationText}\n</${conversationTag}>\n\n`;
-	if (previousSummary) {
-		promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
-	}
-	promptText += basePrompt;
 
 	return runSummarization(
 		model,

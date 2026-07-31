@@ -42,7 +42,10 @@ const AUTO_SWITCH_NOTICE = "Auto-switched to files_with_matches — use outputMo
 
 const grepSchema = Type.Object(
 	{
-		pattern: Type.String({ description: "Search pattern (regex or literal string)" }),
+		pattern: Type.String({
+			description:
+				"Search pattern in Rust regex syntax (ripgrep): escape literal `( ) [ {` or pass literal:true. Lookaround and backreferences are not supported.",
+		}),
 		path: Type.Optional(Type.String({ description: "Directory or file to search (default: current directory)" })),
 		glob: Type.Optional(Type.String({ description: "Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'" })),
 		ignoreCase: Type.Optional(Type.Boolean({ description: "Case-insensitive search (default: false)" })),
@@ -387,7 +390,11 @@ export function createGrepToolDefinition(
 		activity: "navigation",
 		label: "grep",
 		description: `Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} matches or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Long lines are truncated to ${GREP_MAX_LINE_LENGTH} chars. Set \`outputMode: "files_with_matches"\` to get just the matching file paths (cheapest — best for locating) or \`"count"\` for matches-per-file. Set \`multiline: true\` for patterns that span lines. Use \`grep\` for text, identifiers, or literal/regex string search. For structural code patterns (call sites, signatures, AST shape) use \`ast_grep\`. To find files by name use \`find\`. To jump to a symbol definition use \`symbol\`.`,
-		promptSnippet: "Search file contents for patterns (respects .gitignore)",
+		// The dialect note lives HERE and not only in the param description because
+		// the default wire schema strips param descriptions (compactToolsForProviderContext)
+		// — the snippet is the one tool-level line the model always sees.
+		promptSnippet:
+			"Search file contents for patterns (Rust regex — escape literal ( ) [ { or use literal:true; respects .gitignore)",
 		parameters: grepSchema,
 		prepareArguments: prepareWithPathAliases,
 		async execute(

@@ -257,11 +257,9 @@ export class PermissionChecker {
 				};
 			}
 		}
-		if (action.type === "write" || action.type === "read") {
-			const allowMatch = this.firstMatchingPath(this.allowPaths(), action.paths, action.toolName);
-			if (allowMatch) return { decision: "allow" };
-		}
-
+		// No `allowPaths` pass here: auto's terminal default is already `allow` and the
+		// deny checks above run first, so a match could never change the outcome. The
+		// rule list is only consulted in `checkPlan` (documented precedence step 6).
 		return { decision: "allow" };
 	}
 

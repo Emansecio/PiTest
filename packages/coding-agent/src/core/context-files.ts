@@ -2,7 +2,7 @@
  * Project context file normalization (E6, E16).
  */
 
-import { basename, dirname, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { headTailExcerpt } from "./compaction/utils.ts";
 
@@ -25,21 +25,59 @@ function dirKey(filePath: string): string {
 	return dirname(resolve(filePath)).replace(/\\/g, "/").toLowerCase();
 }
 
-/** True when the file is a short entry-point pointer to AGENTS.md (E16). */
+/** Hard ceiling: nothing this large is a pointer stub, skip the scan entirely. */
+const POINTER_MAX_CHARS = 6000;
+
+/**
+ * How much non-pointer text a CLAUDE.md may still contain and count as
+ * "essentially only a pointer". A `@AGENTS.md` import collapses to 0; a one
+ * paragraph "the rules live in AGENTS.md" stub lands well under this.
+ */
+const POINTER_RESIDUAL_MAX_CHARS = 200;
+
+/**
+ * Slightly larger residual allowance when the file ALSO states outright that
+ * AGENTS.md is canonical. The phrases are reinforcement for a stub that is a bit
+ * chattier than usual — never a licence to drop a file with a real body.
+ */
+const POINTER_RESIDUAL_MAX_CHARS_WITH_SIGNAL = 400;
+
+const POINTER_SIGNAL_PHRASES = ["single source of truth", "points here", "same rules", "lands on the"] as const;
+
+/**
+ * Length of what survives once every pointer-shaped construct is stripped:
+ * `@path` context imports, markdown links / quoted / bare mentions of AGENTS.md,
+ * and all whitespace. A pure redirect collapses to ~nothing; a CLAUDE.md that
+ * carries its own rules and merely *mentions* AGENTS.md keeps its whole body.
+ */
+function pointerResidualLength(content: string): number {
+	return content
+		.replace(/(^|[^\w@])@\S+/g, "$1")
+		.replace(/\[[^\]\n]*\]\([^)\n]*agents\.md[^)\n]*\)/gi, "")
+		.replace(/[`'"(<]?[\w./-]*agents\.md[`'">)]?/gi, "")
+		.replace(/\s+/g, "").length;
+}
+
+/**
+ * True when the file is a CLAUDE.md whose ENTIRE content is a redirect to
+ * AGENTS.md (E16) — i.e. safe for {@link dedupePointerContextFiles} to drop when
+ * the canonical AGENTS.md sits in the same directory.
+ *
+ * The criterion is residual content, not raw size: a 3 KB CLAUDE.md with real
+ * project rules that happens to say "see AGENTS.md for the glossary" is NOT a
+ * pointer and must survive — dropping it silently discards user instructions.
+ */
 export function isPointerEntryPoint(filePath: string, content: string): boolean {
 	const base = basename(filePath);
 	const baseLower = base.toLowerCase();
 	if (baseLower !== "claude.md") return false;
-	if (content.length > 6000) return false;
+	if (content.length > POINTER_MAX_CHARS) return false;
 	const lower = content.toLowerCase();
 	if (!lower.includes("agents.md")) return false;
-	if (content.length <= 3500) return true;
-	return (
-		lower.includes("single source of truth") ||
-		lower.includes("points here") ||
-		lower.includes("same rules") ||
-		lower.includes("lands on the")
-	);
+	const residual = pointerResidualLength(content);
+	if (residual <= POINTER_RESIDUAL_MAX_CHARS) return true;
+	if (residual > POINTER_RESIDUAL_MAX_CHARS_WITH_SIGNAL) return false;
+	return POINTER_SIGNAL_PHRASES.some((phrase) => lower.includes(phrase));
 }
 
 function isAgentsBasename(filePath: string): boolean {
@@ -94,7 +132,7 @@ function formatRetrievalExcerpt(content: string, filePath: string, cwd?: string)
  * project_context block because the aggregate cap (M25a) has been reached.
  * Follows the same read-hint style as {@link formatRetrievalExcerpt}.
  */
-function formatAggregatePointer(file: { path: string; content: string }, cwd?: string): string {
+export function formatAggregatePointer(file: { path: string; content: string }, cwd?: string): string {
 	const readPath =
 		cwd !== undefined
 			? relative(resolve(cwd), resolve(file.path)).replace(/\\/g, "/") || basename(file.path)
@@ -102,31 +140,78 @@ function formatAggregatePointer(file: { path: string; content: string }, cwd?: s
 	return `[Project context aggregate cap reached. Use read({ path: "${readPath}" }) to load this file (${file.content.length} chars).]`;
 }
 
+function isUnderDir(child: string, parent: string): boolean {
+	const rel = relative(parent, child);
+	return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+/**
+ * Specificity rank used to spend the aggregate budget (lower = more specific =
+ * consumes the budget first).
+ *
+ * The emission order is global → outer ancestors → cwd, so a plain in-order
+ * budget walk makes a big global/ancestral AGENTS.md starve the project's own
+ * rules — exactly the highest-value file. Rank restores intent:
+ *  0  — the cwd itself, anything below it (legacy rule files live in
+ *       `.cursor/`, `.github/`, …) and synthetic entries derived from the
+ *       project (`<project-config>`);
+ *  n  — an ancestor n directories above cwd (closer ancestor wins);
+ *  MAX — anywhere else (global agent dir, home config).
+ * Without a cwd every file ranks 0, so the walk degrades to the original order.
+ */
+function contextSpecificityRank(filePath: string, cwd?: string): number {
+	if (cwd === undefined) return 0;
+	// Synthetic, non-filesystem entries (e.g. "<project-config>") are distilled
+	// from the project itself — resolving them would point at process.cwd().
+	if (filePath.startsWith("<")) return 0;
+	const dir = dirname(resolve(filePath));
+	const root = resolve(cwd);
+	if (dir === root || isUnderDir(dir, root)) return 0;
+	if (isUnderDir(root, dir)) {
+		return relative(dir, root).split(/[\\/]/).filter(Boolean).length;
+	}
+	return Number.MAX_SAFE_INTEGER;
+}
+
 /**
  * Enforce a total char budget across all project context files (M25a).
- * Files are processed in the order they are provided. Once the cumulative
- * char count of included files would exceed {@link PROJECT_CONTEXT_AGGREGATE_MAX_CHARS}
- * the offending file — and every subsequent file — is reduced to a 1-line
- * read-pointer so the model can still discover and load them on demand.
+ *
+ * The budget is spent in specificity order ({@link contextSpecificityRank}) so
+ * the project's own rules are inlined before an ancestral or global file can
+ * consume the budget; once the cumulative char count would exceed
+ * {@link PROJECT_CONTEXT_AGGREGATE_MAX_CHARS}, the offending file — and every
+ * less specific one — is reduced to a 1-line read-pointer so the model can still
+ * discover and load them on demand. Emission order is the caller's order
+ * (global → cwd), untouched.
  */
 export function applyAggregateContextCap(
 	files: Array<{ path: string; content: string }>,
 	cwd?: string,
 ): Array<{ path: string; content: string }> {
+	const byPriority = files
+		.map((file, index) => ({ file, index, rank: contextSpecificityRank(file.path, cwd) }))
+		.sort((a, b) => a.rank - b.rank || a.index - b.index);
+
+	const pointerIndexes = new Set<number>();
 	let total = 0;
 	let capReached = false;
-	return files.map((file) => {
+	for (const { file, index } of byPriority) {
 		if (capReached) {
-			return { path: file.path, content: formatAggregatePointer(file, cwd) };
+			pointerIndexes.add(index);
+			continue;
 		}
 		const next = total + file.content.length;
 		if (next > PROJECT_CONTEXT_AGGREGATE_MAX_CHARS) {
 			capReached = true;
-			return { path: file.path, content: formatAggregatePointer(file, cwd) };
+			pointerIndexes.add(index);
+			continue;
 		}
 		total = next;
-		return file;
-	});
+	}
+
+	return files.map((file, index) =>
+		pointerIndexes.has(index) ? { path: file.path, content: formatAggregatePointer(file, cwd) } : file,
+	);
 }
 
 /**

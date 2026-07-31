@@ -38,6 +38,7 @@ import { createMcpExtension } from "./mcp-extension.ts";
 import { createMemoryExtension } from "./memory-extension.ts";
 import { createPatchAuditExtension } from "./patch-audit-extension.ts";
 import { createPermissionsExtension } from "./permissions-extension.ts";
+import { createSubtreeContextExtension } from "./subtree-context-extension.ts";
 import { createTaskRigorExtension } from "./task-rigor-extension.ts";
 
 export { createCoordinatorExtension } from "./coordinator-extension.ts";
@@ -112,6 +113,13 @@ export interface BuiltInExtensionsOptions {
 	 * via `PIT_NO_GRAPH_PREFETCH`).
 	 */
 	getWarmFileCache?: () => WarmFileCache | undefined;
+	/**
+	 * Paths of the context files loaded at boot (`ResourceLoader.getAgentsFiles()`)
+	 * — used by the subtree-context extension to avoid re-injecting a file that is
+	 * already inlined in `<project_context>`. Resolved lazily: the loader has not
+	 * run yet when extensions are bundled.
+	 */
+	getLoadedContextPaths?: () => readonly string[];
 }
 
 export interface BuiltInExtensionsResult {
@@ -200,6 +208,12 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 		// reaches the model; a warm entry only shortcuts I/O, gated on the live
 		// file stat matching exactly. Fail-open; opt out PIT_NO_GRAPH_PREFETCH.
 		createGraphPrefetchExtension({ cwd: options.cwd, getWarmFileCache: options.getWarmFileCache }),
+		// Subtree context (P1-4): boot only loads AGENTS.md from cwd's ANCESTORS, so
+		// a monorepo's `packages/foo/AGENTS.md` is invisible while working in that
+		// package. On the first file tool touching a path below cwd, injects the
+		// per-directory AGENTS.md once (E6 excerpt + M25a aggregate cap, deduped
+		// against the boot-loaded set). Fail-open; opt out PIT_NO_SUBTREE_CONTEXT.
+		createSubtreeContextExtension({ cwd: options.cwd, getLoadedContextPaths: options.getLoadedContextPaths }),
 		createHooksExtension({ settings: options.hooks, cwd: options.cwd }),
 		createMemoryExtension({ cwd: options.cwd, agentDir: options.agentDir }),
 		createMcpExtension({ settings: options.mcp, cwd: options.cwd, agentDir: options.agentDir }),

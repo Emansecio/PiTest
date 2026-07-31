@@ -88,9 +88,9 @@ export function createTodoToolDefinition(
 		description:
 			"Track multi-step work as a todo list. Prefer `set`: it takes the whole list in `items` and replaces it, so any number of changes costs ONE call — send every todo you want to keep, each with its `id`. Other actions: create (needs subject), update (needs id), list (optional status filter), get (needs id), delete (needs id), clear. Keep exactly one todo in_progress at a time and mark it completed as soon as it is done.",
 		promptSnippet: "Plan and track multi-step work as todos",
-		promptGuidelines: [
-			'Keep the todo list current with `todo{action:"set"}` in the SAME turn as the work — one call rewrites the whole list, so closing the item you just finished and opening the next one costs a single call. Never batch the bookkeeping to the end.',
-		],
+		// No promptGuidelines: WHEN to keep the list current lives in the Todo-first
+		// system-prompt guideline, HOW (set replaces the whole list, one call) lives
+		// in `description` above. A third copy here was pure duplication.
 		parameters: todoSchema,
 		async execute(_toolCallId: string, input: TodoToolInput) {
 			const mgr = getCurrentTodoManager();

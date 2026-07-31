@@ -8,7 +8,8 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { globIterate } from "glob";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
-import { isEnoent, sleep, throwIfAborted } from "./internal.ts";
+import { onDiagnosticsPublished } from "./diagnostics-events.ts";
+import { isEnoent, throwIfAborted } from "./internal.ts";
 import type {
 	CodeAction,
 	Command,
@@ -446,24 +447,55 @@ function getAcceptedDiagnostics(
 	return undefined;
 }
 
-/**
- * Poll a client's published diagnostics for `uri` until they satisfy the version
- * constraints or `timeoutMs` elapses. Throws if the signal aborts.
- */
+/** `fresh` is false when the budget expired without a qualifying publish. */
 export interface WaitForDiagnosticsResult {
 	diagnostics: Diagnostic[];
 	fresh: boolean;
 }
 
+/**
+ * True when the signal was aborted by an `AbortSignal.timeout` deadline rather
+ * than by a cancellation. Writethrough hands the wait `AbortSignal.any([caller,
+ * deadline])` where the deadline duplicates the wait's own budget, so a deadline
+ * abort is "the budget expired with no publish" — an ordinary miss the caller
+ * must see as `fresh: false` (it feeds the silence memo), NOT a thrown error.
+ * The old poll loop got this for free by sampling the signal only every 100ms:
+ * an abort inside the final tick was never observed. Waking instantly means the
+ * distinction now has to be explicit.
+ */
+function isDeadlineAbort(signal?: AbortSignal): boolean {
+	if (!signal?.aborted) return false;
+	return (signal.reason as { name?: string } | undefined)?.name === "TimeoutError";
+}
+
+/** Throw only on a genuine cancellation; a deadline expiry is not one. */
+function throwIfCancelled(signal?: AbortSignal): void {
+	if (isDeadlineAbort(signal)) return;
+	throwIfAborted(signal);
+}
+
+/**
+ * Wait for a client's published diagnostics for `uri` to satisfy the version
+ * constraints, or until `timeoutMs` elapses. Throws if the signal is cancelled
+ * (a deadline expiry is not a cancellation — see isDeadlineAbort).
+ *
+ * Woken by event, not by polling: `publishDiagnostics` arrives as a push
+ * notification and storing it (plus the `diagnosticsVersion` bump) is the ONLY
+ * transition that can satisfy the predicate below — `client.diagnostics` is
+ * otherwise only deleted, and `expectedDocumentVersion` is a number captured by
+ * the caller before the wait. So subscribing to the publish stream is exactly
+ * equivalent to the old `sleep(100)` loop, minus the ~50ms of average dead time
+ * every wait used to pay after the publish had already landed (twice per edit,
+ * on the critical path of the tool result).
+ */
 export async function waitForDiagnosticsResult(
 	client: LspClient,
 	uri: string,
 	options: WaitForDiagnosticsOptions = {},
 ): Promise<WaitForDiagnosticsResult> {
 	const { timeoutMs = 3000, signal, minVersion, expectedDocumentVersion, allowUnversioned = true } = options;
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		throwIfAborted(signal);
+
+	const evaluate = (): WaitForDiagnosticsResult | undefined => {
 		const versionOk = minVersion === undefined || client.diagnosticsVersion > minVersion;
 		const diagnostics = getAcceptedDiagnostics(
 			client.diagnostics.get(uri),
@@ -471,12 +503,82 @@ export async function waitForDiagnosticsResult(
 			allowUnversioned,
 		);
 		if (diagnostics !== undefined && versionOk) return { diagnostics, fresh: true };
-		await sleep(100);
+		return undefined;
+	};
+
+	// A non-positive budget never entered the old loop, so it never observed the
+	// abort either — it fell straight through to the final check. Preserved.
+	if (timeoutMs > 0) throwIfCancelled(signal);
+	const immediate = evaluate();
+	if (immediate) return immediate;
+	// Nothing left to wait on: no budget, or the caller's deadline already expired
+	// during setup — waiting a fresh full budget past it would blow the very
+	// latency cap writethrough combined that deadline in to enforce.
+	if (timeoutMs <= 0 || signal?.aborted) return { diagnostics: [], fresh: false };
+
+	await awaitDiagnosticsPublish(client, timeoutMs, signal, () => evaluate() !== undefined);
+
+	throwIfCancelled(signal);
+	return evaluate() ?? { diagnostics: [], fresh: false };
+}
+
+/**
+ * Block until a publish batch makes `isDone()` true, the budget expires, or the
+ * signal aborts. Every exit path removes the listener, the timer and the abort
+ * handler: a leaked waiter would live as long as the client, and a leaked abort
+ * handler accumulates on the long-lived caller signal across edits.
+ */
+async function awaitDiagnosticsPublish(
+	client: LspClient,
+	timeoutMs: number,
+	signal: AbortSignal | undefined,
+	isDone: () => boolean,
+): Promise<void> {
+	let unsubscribe: (() => void) | undefined;
+	let timer: NodeJS.Timeout | undefined;
+	let onAbort: (() => void) | undefined;
+	try {
+		await new Promise<void>((resolve) => {
+			unsubscribe = onDiagnosticsPublished(client, () => {
+				if (isDone()) resolve();
+			});
+			timer = setTimeout(resolve, timeoutMs);
+			timer.unref?.();
+			if (signal) {
+				onAbort = () => resolve();
+				signal.addEventListener("abort", onAbort, { once: true });
+			}
+		});
+	} finally {
+		unsubscribe?.();
+		if (timer) clearTimeout(timer);
+		if (signal && onAbort) signal.removeEventListener("abort", onAbort);
 	}
-	const versionOk = minVersion === undefined || client.diagnosticsVersion > minVersion;
-	const diagnostics = getAcceptedDiagnostics(client.diagnostics.get(uri), expectedDocumentVersion, allowUnversioned);
-	if (versionOk && diagnostics !== undefined) return { diagnostics, fresh: true };
-	return { diagnostics: [], fresh: false };
+}
+
+/**
+ * Wait for the NEXT publish batch from `client` (whatever its URI), capped at
+ * `timeoutMs`. Returns true when one arrived. Never throws — an abort or an
+ * empty window is a normal, non-fatal outcome for the best-effort caller.
+ *
+ * Exists because a server answers one didChange with the edited file's
+ * diagnostics and its package siblings' as SEPARATE stdout reads (~1ms apart,
+ * measured against gopls-style fakes). The edited-file wait now returns on the
+ * first of those instead of on a 100ms poll tick, so the trailing sibling
+ * publishes need an explicit — and bounded — moment to land.
+ */
+export async function waitForNextDiagnosticsPublish(
+	client: LspClient,
+	timeoutMs: number,
+	signal?: AbortSignal,
+): Promise<boolean> {
+	if (timeoutMs <= 0 || signal?.aborted) return false;
+	let published = false;
+	await awaitDiagnosticsPublish(client, timeoutMs, signal, () => {
+		published = true;
+		return true;
+	});
+	return published;
 }
 
 export async function waitForDiagnostics(

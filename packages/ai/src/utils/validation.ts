@@ -3,14 +3,21 @@ import type { TLocalizedValidationError } from "typebox/error";
 import { Value } from "typebox/value";
 import type { Tool, ToolCall } from "../types.ts";
 import {
-	coerceJsonStringArrays,
-	coerceWithJsonSchema,
-	isEmptyPlainObject,
-	isJsonSchemaObject,
-	isRecord,
-	type JsonSchemaObject,
-	schemaAllowsKind,
-} from "./validation-coerce.ts";
+	coerceToolArguments,
+	recordToolArgCoercions,
+	stripNullishOptionalArgs,
+	type ToolArgCoercionKind,
+} from "./arg-coercion.ts";
+import { coerceWithJsonSchema, isJsonSchemaObject, isRecord, type JsonSchemaObject } from "./validation-coerce.ts";
+
+// `stripNullishOptionalArgs` moved into the shared coercion table (P2-9) — it is
+// one of that table's kinds now (`null_to_undefined` / `empty_object_to_undefined`).
+// Re-exported from its historical home so standalone callers (MCP argument prep)
+// and tests keep their import path.
+export { stripNullishOptionalArgs };
+
+/** Where validation-side coercions are attributed on the diagnostics channel. */
+const COERCION_SOURCE = "ai.validateToolArguments";
 
 // The schema-validation error echoes the received arguments back to the model so
 // it can self-correct. For large-payload tools (write/edit/code/ast_edit) a
@@ -58,46 +65,6 @@ function getSubSchemaValidator(schema: JsonSchemaObject): ReturnType<typeof Comp
 	} catch {
 		return undefined;
 	}
-}
-
-/**
- * Drop optional fields whose value is a misplaced placeholder — an explicit
- * `null`, or an empty object `{}` — when the field's schema does NOT accept that
- * kind. Weak models frequently emit `null`/`{}` for an optional argument they
- * mean to omit; forwarding it trips strict validation (or, after coercion,
- * silently becomes `""`/`0`). Omitting the key is the lossless fix.
- *
- * Conservative by construction:
- *  - only touches keys DECLARED in `schema.properties` (never additionalProperties),
- *  - never touches a REQUIRED key — dropping it just trades one error for another,
- *  - never drops a value the field legitimately accepts (`null` for a nullable
- *    field, `{}` for an object field): those are intentional.
- *
- * Pure: returns the same reference when nothing is dropped, otherwise a shallow
- * clone without the dropped keys. No-op for non-object input or a schema without
- * `properties`.
- */
-export function stripNullishOptionalArgs<T>(args: T, schema: unknown): T {
-	if (!isRecord(args) || Array.isArray(args)) return args;
-	if (!isJsonSchemaObject(schema) || !schema.properties) return args;
-	const properties = schema.properties;
-	const requiredList = (schema as { required?: unknown }).required;
-	const required = new Set<string>(
-		Array.isArray(requiredList) ? requiredList.filter((k): k is string => typeof k === "string") : [],
-	);
-	let out: Record<string, unknown> | undefined;
-	for (const key of Object.keys(args)) {
-		const propSchema = properties[key];
-		if (!propSchema || required.has(key)) continue;
-		const value = args[key];
-		const drop =
-			(value === null && !schemaAllowsKind(propSchema, "null")) ||
-			(isEmptyPlainObject(value) && !schemaAllowsKind(propSchema, "object"));
-		if (!drop) continue;
-		if (!out) out = { ...args };
-		delete out[key];
-	}
-	return (out ?? args) as T;
 }
 
 function getValidator(schema: Tool["parameters"]): ReturnType<typeof Compile> {
@@ -287,7 +254,18 @@ export function validateToolCall(tools: Tool[], toolCall: ToolCall): any {
 }
 
 /**
- * Validates tool call arguments against the tool's TypeBox schema
+ * Validates tool call arguments against the tool's TypeBox schema.
+ *
+ * Since P2-9 this is strict-check + report, with ONE coercion pass in between:
+ *  1. `Check` the raw arguments — the overwhelmingly common case, no clone;
+ *  2. on failure, one pass of the SHARED coercion table (`arg-coercion.ts`) — the
+ *     same table the agent's `repairToolArguments` runs before us, so a call that
+ *     already went through the repair layer normally lands on step 1 and this pass
+ *     is a no-op rather than a second, differently-behaved coercion;
+ *  3. only if that is still not enough, the legacy aggressive fallback
+ *     (`Value.Convert` + `coerceWithJsonSchema`: null→0, true→1, 1→true, …),
+ *     counted as one `schema_convert_fallback` so nothing coerces off the books.
+ *
  * @param tool The tool definition with TypeBox schema
  * @param toolCall The tool call from the LLM
  * @returns The validated (and potentially coerced) arguments
@@ -298,22 +276,23 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
 
 	// Fast path: well-formed args from the LLM usually validate without
 	// coercion. structuredClone of a multi-KB edit payload is wasted work on
-	// the hot path. If Check passes the raw arguments, skip clone + Convert
-	// + coerceWithJsonSchema entirely.
+	// the hot path. If Check passes the raw arguments, skip clone + the table
+	// + Convert + coerceWithJsonSchema entirely.
 	if (validator.Check(toolCall.arguments)) {
 		return toolCall.arguments;
 	}
 
-	// Drop optional `null`/`{}` placeholders BEFORE coercion so they are omitted
-	// (the model's intent) rather than coerced to ""/0 by coercePrimitiveByType.
-	// Operates on the clone, so the echoed `toolCall.arguments` below still shows
-	// what the model actually sent. Then parse JSON-stringified arrays for
-	// array-typed fields (parity with the MCP loose-schema path) so Convert can
-	// coerce the parsed items.
-	const args = coerceJsonStringArrays(
-		stripNullishOptionalArgs(structuredClone(toolCall.arguments), tool.parameters),
-		tool.parameters,
-	);
+	// Step 2 — the shared table. Operates on a clone, so the echoed
+	// `toolCall.arguments` below still shows what the model actually sent.
+	const table = coerceToolArguments(structuredClone(toolCall.arguments), tool.parameters);
+	const coercions: ToolArgCoercionKind[] = [...table.coercions];
+	const args = table.args as any;
+	if (validator.Check(args)) {
+		recordToolArgCoercions(toolCall.name, coercions, COERCION_SOURCE);
+		return args;
+	}
+
+	// Step 3 — legacy aggressive fallback.
 	Value.Convert(tool.parameters, args);
 
 	if (!hasTypeBoxMetadata(tool.parameters) && isJsonSchemaObject(tool.parameters)) {
@@ -325,12 +304,16 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
 				}
 				Object.assign(args, coerced);
 			} else if (validator.Check(coerced)) {
+				coercions.push("schema_convert_fallback");
+				recordToolArgCoercions(toolCall.name, coercions, COERCION_SOURCE);
 				return coerced;
 			}
 		}
 	}
 
 	if (validator.Check(args)) {
+		coercions.push("schema_convert_fallback");
+		recordToolArgCoercions(toolCall.name, coercions, COERCION_SOURCE);
 		return args;
 	}
 

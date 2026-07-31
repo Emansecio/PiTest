@@ -1,6 +1,7 @@
 import { Type } from "typebox";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import type { Tool, ToolCall } from "../src/types.js";
+import { getToolArgCoercionStats, resetToolArgCoercionStats } from "../src/utils/arg-coercion.js";
 import { stripNullishOptionalArgs, validateToolArguments } from "../src/utils/validation.js";
 
 function createToolCallWithPlainSchema(
@@ -243,6 +244,53 @@ describe("stripNullishOptionalArgs", () => {
 			arguments: { path: "a", pattern: null },
 		};
 		expect(validateToolArguments(tool, toolCall)).toEqual({ path: "a" });
+	});
+});
+
+describe("validation coercions report into the shared repair tally (P2-9)", () => {
+	beforeEach(() => resetToolArgCoercionStats());
+
+	it("counts a shared-table coercion done by validation under its own kind", () => {
+		const tool: Tool = {
+			name: "read",
+			description: "read",
+			parameters: {
+				type: "object",
+				properties: { path: { type: "string" }, pattern: { type: "string" } },
+				required: ["path"],
+			} as Tool["parameters"],
+		};
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "t1",
+			name: "read",
+			arguments: { path: "a", pattern: null },
+		};
+		expect(validateToolArguments(tool, toolCall)).toEqual({ path: "a" });
+		const stats = getToolArgCoercionStats();
+		expect(stats.byKind.null_to_undefined).toBe(1);
+		expect(stats.byTool.read).toEqual({ null_to_undefined: 1 });
+	});
+
+	it("counts the legacy aggressive fallback as schema_convert_fallback", () => {
+		// `null` → `0` is a rule only the legacy Convert/coerceWithJsonSchema pass has.
+		const { tool, toolCall } = createToolCallWithPlainSchema({ type: "number" } as Tool["parameters"], null);
+		expect(validateToolArguments(tool, toolCall)).toEqual({ value: 0 });
+		expect(getToolArgCoercionStats().byKind.schema_convert_fallback).toBe(1);
+	});
+
+	it("records nothing on the strict fast path", () => {
+		const tool: Tool = {
+			name: "read",
+			description: "read",
+			parameters: {
+				type: "object",
+				properties: { path: { type: "string" } },
+				required: ["path"],
+			} as Tool["parameters"],
+		};
+		validateToolArguments(tool, { type: "toolCall", id: "t1", name: "read", arguments: { path: "a" } });
+		expect(getToolArgCoercionStats().total).toBe(0);
 	});
 });
 

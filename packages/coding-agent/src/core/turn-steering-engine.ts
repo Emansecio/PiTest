@@ -215,7 +215,9 @@ export class TurnSteeringEngine {
 
 	/**
 	 * Conditionally inject a doom-loop reminder when consecutive identical tool
-	 * calls reach the configured threshold. Settings-gated (off by default).
+	 * calls reach the configured threshold. Settings-gated, on by default; disable
+	 * via `toolFeedback.doomLoopReminder.enabled: false` (the settings resolver
+	 * reads `enabled !== false`).
 	 *
 	 * Each escalation tier fires once per streak (tracked by `_doomLoopFiredTier`)
 	 * while the sequence counter keeps climbing, so a persistent loop actually

@@ -32,6 +32,7 @@ export * from "./session-resources.ts";
 export * from "./stream.ts";
 export * from "./token-estimate.ts";
 export * from "./types.ts";
+export * from "./utils/arg-coercion.ts";
 export * from "./utils/diagnostics.ts";
 export * from "./utils/event-stream.ts";
 export * from "./utils/idle-timeout.ts";

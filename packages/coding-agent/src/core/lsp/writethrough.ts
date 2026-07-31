@@ -10,6 +10,7 @@
 
 import * as fs from "node:fs/promises";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
+import { LruMap } from "../lru-map.ts";
 import {
 	getOrCreateClient,
 	notifySaved,
@@ -35,6 +36,7 @@ import {
 	sortDiagnostics,
 	uriToFile,
 	waitForDiagnosticsResult,
+	waitForNextDiagnosticsPublish,
 } from "./utils.ts";
 
 // Cap a cold-boot `initialize` handshake during writethrough. Without it, a
@@ -157,6 +159,113 @@ export async function maybeFormat(
 const DEFAULT_WAIT_MS = 4000;
 const DIAGNOSTIC_MESSAGE_LIMIT = 50;
 
+// =============================================================================
+// Pre-write baseline reuse
+// =============================================================================
+
+// Every edit used to pay TWO diagnostics waits in series: one before the write
+// (to learn which diagnostics were already there) and one after. But the
+// post-write wait of edit N already produced exactly that answer — the
+// diagnostics of the bytes now on disk — so as long as nothing else touched the
+// file, edit N+1's pre-write wait is re-deriving a value we hold. The dominant
+// pattern (several edits in a row on the same file) therefore pays the pre-write
+// wait for nothing.
+//
+// This cache remembers the last post-write result per file together with the
+// file's identity at that moment; a pre-write capture whose stat still matches
+// returns it immediately and skips the wait (and the refreshFile round-trip)
+// entirely. Identity is (mtimeMs, size): the same pair `edit.ts`'s base cache
+// keys on. A same-millisecond external rewrite to the identical size would slip
+// through — the failure mode is a slightly stale baseline (a diagnostic filtered
+// or re-reported once), never a wrong file or a thrown error, which matches the
+// fail-open contract of the whole module.
+interface CachedWriteBaseline {
+	mtimeMs: number;
+	size: number;
+	/** Which servers produced it — a config reload that changes them invalidates it. */
+	servers: string;
+	diagnostics: Diagnostic[];
+}
+
+/**
+ * Identity of the server set answering for a file. A config reload can change
+ * commands/args (the silence memo and boot breaker are cleared for the same
+ * reason); comparing this keeps the cache self-invalidating instead of needing a
+ * hook from `manager.invalidateConfig` back into this module.
+ */
+function serversSignature(servers: Array<[string, ServerConfig]>): string {
+	return servers
+		.map(([name, config]) => `${name}:${config.resolvedCommand ?? config.command}:${(config.args ?? []).join(",")}`)
+		.join("|");
+}
+
+/** Bounded so a long session touching many files cannot grow this without limit. */
+const BASELINE_CACHE_CAP = 64;
+const postWriteBaselines = new LruMap<string, CachedWriteBaseline>(BASELINE_CACHE_CAP);
+
+/** PIT_NO_LSP_BASELINE_REUSE=1 restores the unconditional pre-write wait. */
+function baselineReuseDisabled(): boolean {
+	return isTruthyEnvFlag(process.env.PIT_NO_LSP_BASELINE_REUSE);
+}
+
+interface FileIdentity {
+	mtimeMs: number;
+	size: number;
+}
+
+/** Stat-derived identity, or undefined when the path does not exist / is unreadable. */
+async function readFileIdentity(absolutePath: string): Promise<FileIdentity | undefined> {
+	try {
+		const stat = await fs.stat(absolutePath);
+		return { mtimeMs: stat.mtimeMs, size: stat.size };
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * The remembered post-write diagnostics for `absolutePath`, but only while the
+ * file still carries the exact identity it had when they were collected. A
+ * mismatch drops the entry (the file moved on; the cached set is dead).
+ */
+function reusablePreWriteBaseline(
+	absolutePath: string,
+	identity: FileIdentity,
+	servers: string,
+): PreWriteDiagnosticsBaseline | undefined {
+	if (baselineReuseDisabled()) return undefined;
+	const key = fileToUri(absolutePath);
+	const entry = postWriteBaselines.get(key);
+	if (!entry) return undefined;
+	if (entry.mtimeMs !== identity.mtimeMs || entry.size !== identity.size || entry.servers !== servers) {
+		postWriteBaselines.delete(key);
+		return undefined;
+	}
+	// Copy: callers push into the baseline array they receive.
+	return { diagnostics: [...entry.diagnostics], fresh: true };
+}
+
+/**
+ * Remember a fresh post-write diagnostics set as the next pre-write baseline for
+ * the same file. Stats AFTER collection so the recorded identity is the one a
+ * subsequent capture will see. Best-effort; a failed stat simply skips caching.
+ */
+async function rememberPostWriteBaseline(
+	absolutePath: string,
+	servers: string,
+	diagnostics: Diagnostic[],
+): Promise<void> {
+	if (baselineReuseDisabled()) return;
+	const identity = await readFileIdentity(absolutePath);
+	if (!identity) return;
+	postWriteBaselines.set(fileToUri(absolutePath), { ...identity, servers, diagnostics: [...diagnostics] });
+}
+
+/** Drop all remembered baselines (config reload / dispose / test reset). */
+export function clearPostWriteBaselineCache(): void {
+	postWriteBaselines.clear();
+}
+
 function diagnosticFingerprint(diagnostic: Diagnostic): string {
 	return [
 		diagnostic.range.start.line,
@@ -187,6 +296,16 @@ function filterBaselineDiagnostics(current: Diagnostic[], baseline: Diagnostic[]
 // whatever is already in the map at collection time and NEVER add a wait for it.
 const CROSS_FILE_MAX_FILES = 3;
 const CROSS_FILE_MAX_DIAGS_PER_FILE = 2;
+
+// Package-level publishes trail the edited file's by a beat, in a separate
+// stdout read. While the edited-file wait polled on a 100ms sleep it absorbed
+// that gap for free; now that it wakes on the publish itself (~1-2ms), reading
+// the map immediately would find the siblings not yet routed and the appendix
+// would always come up empty. This is the replacement gap: bounded, paid only
+// when a fresh publish actually arrived, and released early the moment any
+// further publish lands (the sibling case — the only one that has anything to
+// surface). Still far below the ~100ms the poll tick used to cost.
+const CROSS_FILE_SETTLE_MS = 25;
 
 interface CrossFileGroup {
 	uri: string;
@@ -302,11 +421,15 @@ export async function capturePreWriteDiagnostics(
 	}
 	if (servers.length === 0) return undefined;
 
-	const exists = await fs
-		.access(absolutePath)
-		.then(() => true)
-		.catch(() => false);
-	if (!exists) return { diagnostics: [], fresh: true };
+	// One stat covers both the existence check and the reuse identity below.
+	const identity = await readFileIdentity(absolutePath);
+	if (!identity) return { diagnostics: [], fresh: true };
+
+	// N-th consecutive edit of the same untouched file: the previous write's
+	// post-write diagnostics ARE this write's pre-write baseline. Skip the whole
+	// wait (and the refreshFile that precedes it) instead of re-deriving it.
+	const reused = reusablePreWriteBaseline(absolutePath, identity, serversSignature(servers));
+	if (reused) return reused;
 
 	const uri = fileToUri(absolutePath);
 	const timeoutMs = options?.timeoutMs ?? DEFAULT_WAIT_MS;
@@ -424,9 +547,11 @@ export async function getPostWriteDiagnostics(
 			});
 			recordDiagnosticsWaitOutcome(silenceKey, result.fresh);
 			// Cross-file scan is independent of the edited-file wait outcome: read
-			// whatever proactive package-level publishes already landed in the map.
-			// No new wait is added — this is best-effort by design.
+			// whatever proactive package-level publishes landed in the map. Still
+			// best-effort — the only wait it may add is the bounded settle window
+			// above, and only after the edited file itself produced a fresh publish.
 			if (crossFileBaseline) {
+				if (result.fresh) await waitForNextDiagnosticsPublish(client, CROSS_FILE_SETTLE_MS, combined);
 				crossFileGroups.push(...collectCrossFileNewErrors(client, uri, crossFileBaseline));
 			}
 			if (!result.fresh) return;
@@ -453,6 +578,10 @@ export async function getPostWriteDiagnostics(
 
 	// Deduplicate by range + message (different servers may report the same issue).
 	const unique = dedupeDiagnostics(all);
+	// `unique` is the full post-write set for the bytes now on disk — precisely the
+	// baseline the NEXT edit of this file needs. Remember it (with the file's
+	// identity) so that edit can skip its pre-write wait.
+	await rememberPostWriteBaseline(absolutePath, serversSignature(servers), unique);
 	const baselineUnique = baselineCompared ? dedupeDiagnostics(baseline) : [];
 	const reportable = (baselineCompared ? filterBaselineDiagnostics(unique, baselineUnique) : unique).filter(
 		(d) => (d.severity ?? 1) === 1,

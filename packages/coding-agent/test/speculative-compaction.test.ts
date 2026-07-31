@@ -26,6 +26,7 @@ import {
 	CompactionController,
 	type CompactionHost,
 	clearSpeculativeCompaction,
+	compactSession,
 	consumeSpeculativeCompaction,
 	executeCompactionPipeline,
 	maybeStartSpeculativeCompaction,
@@ -33,6 +34,7 @@ import {
 	SPECULATIVE_COMPACT_RATIO,
 	type SpeculativeCompactionSlot,
 	shouldPrecomputeSpeculativeCompaction,
+	speculativeCutIsAtLeastAsDeep,
 	startSpeculativeCompaction,
 } from "../src/core/agent-session-compaction.ts";
 import { createReadGuardExtension } from "../src/core/built-ins/read-guard-extension.ts";
@@ -556,6 +558,85 @@ describe("runAutoCompaction consuming a speculative result", () => {
 		await runAutoCompaction(h.ctx, "threshold", false);
 		expect(h.streamCalls()).toBeGreaterThan(callsAfterPrecompute);
 		expect(h.ctx.speculative).toBeUndefined();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Manual /compact consuming a speculative result
+// ---------------------------------------------------------------------------
+
+describe("speculativeCutIsAtLeastAsDeep", () => {
+	const entries = [{ id: "a" }, { id: "b" }, { id: "c" }] as never;
+
+	it("accepts an equal or deeper slot cut, rejects a shallower one", () => {
+		expect(speculativeCutIsAtLeastAsDeep(entries, "b", "b")).toBe(true); // same cut
+		expect(speculativeCutIsAtLeastAsDeep(entries, "c", "b")).toBe(true); // slot folds more
+		expect(speculativeCutIsAtLeastAsDeep(entries, "a", "b")).toBe(false); // slot folds less
+	});
+
+	it("rejects unknown ids (no slot, or either id off the branch)", () => {
+		expect(speculativeCutIsAtLeastAsDeep(entries, undefined, "b")).toBe(false);
+		expect(speculativeCutIsAtLeastAsDeep(entries, "zzz", "b")).toBe(false);
+		expect(speculativeCutIsAtLeastAsDeep(entries, "c", "zzz")).toBe(false);
+	});
+});
+
+describe("compactSession (manual /compact) consuming a speculative result", () => {
+	beforeEach(() => {
+		vi.stubEnv("PIT_NO_STRUCTURAL_COMPACTION", "1");
+	});
+
+	async function precompute(h: Harness): Promise<void> {
+		await startSpeculativeCompaction(h.ctx, SETTINGS, hardThreshold() * SPECULATIVE_COMPACT_RATIO + 5_000);
+		expect(h.ctx.speculative?.result).toBeDefined();
+	}
+
+	it("applies the ready summary apply-only — no second LLM call", async () => {
+		const h = makeHarness();
+		await precompute(h);
+		const callsAfterPrecompute = h.streamCalls();
+
+		const result = await compactSession(h.ctx);
+
+		expect(h.streamCalls()).toBe(callsAfterPrecompute);
+		expect(result.summary).toContain("fake speculative summary");
+		const compactions = h.sessionManager.getEntries().filter((e) => e.type === "compaction");
+		expect(compactions).toHaveLength(1);
+		expect((compactions[0] as { summary: string }).summary).toContain("fake speculative summary");
+		expect(h.ctx.speculative).toBeUndefined();
+		// Observers still ran on the apply-only path (read-guard migration).
+		expect(h.emitted.filter((e) => e.type === "session_before_compact")).toHaveLength(1);
+	});
+
+	it("never reuses the slot when the user passed custom instructions", async () => {
+		const h = makeHarness();
+		await precompute(h);
+		const callsAfterPrecompute = h.streamCalls();
+
+		await compactSession(h.ctx, "focus on the parser bug");
+
+		// A fresh summarization ran: the precompute was generated without that focus.
+		expect(h.streamCalls()).toBeGreaterThan(callsAfterPrecompute);
+		expect(h.ctx.speculative).toBeUndefined();
+	});
+
+	it("ignores a slot whose cut is SHALLOWER than the manual one", async () => {
+		const h = makeHarness();
+		await precompute(h);
+		const callsAfterPrecompute = h.streamCalls();
+		// Rewrite the ready slot so it keeps everything from the first entry on — a
+		// far gentler fold than the usage-scaled manual cut.
+		const slot = h.ctx.speculative;
+		if (!slot?.result) throw new Error("precompute missing");
+		slot.result = { ...slot.result, firstKeptEntryId: h.entryIds[0] };
+
+		await compactSession(h.ctx);
+
+		// The shallower slot was not applied — the manual compaction paid its own call.
+		expect(h.streamCalls()).toBeGreaterThan(callsAfterPrecompute);
+		const compactions = h.sessionManager.getEntries().filter((e) => e.type === "compaction");
+		expect(compactions).toHaveLength(1);
+		expect((compactions[0] as { firstKeptEntryId: string }).firstKeptEntryId).not.toBe(h.entryIds[0]);
 	});
 });
 

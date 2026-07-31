@@ -159,18 +159,118 @@ describe("_pruneContextForProvider — cache-economics deferral", () => {
 		expect(deferCount()).toBe(0);
 	});
 
-	it("still applies the semantic supersede collapse when the size-prune is deferred", () => {
+	/**
+	 * P2-6 — a DUPLICATE (pure economy: the fresh copy is already in context) in
+	 * the middle of the history, with a huge cached tail behind it. Collapsing it
+	 * reclaims a few thousand tokens and cold-writes the whole tail.
+	 */
+	function duplicateWithHugeTailScenario(dup: string): AgentMessage[] {
+		return [
+			user("task"),
+			toolCall("read", "c1", { path: "dup.ts" }),
+			toolResult("read", "c1", dup), // [2] superseded by c2 — duplicate class
+			toolCall("read", "c2", { path: "dup.ts" }),
+			toolResult("read", "c2", "fresh"), // [4] supersedes c1
+			toolCall("read", "c3", { path: "huge.ts" }),
+			toolResult("read", "c3", blob(250_000, "HUGE_HEAD", "HUGE_TAIL")), // [6] tail the collapse invalidates
+			user("t2"),
+			user("t3"),
+		];
+	}
+
+	it("defers the DUPLICATE supersede collapse when it can't earn back the cached tail (P2-6)", () => {
 		resetRuntimeDiagnostics();
-		process.env.PIT_PROACTIVE_PRUNE_FLOOR = "1000";
 		const session = makeSession("claude-sonnet-5");
-		const superseded = blob(16_000, "DUP_HEAD", "DUP_TAIL"); // below size threshold → only supersede reclaims it
-		const big = blob(70_000, "BIG_HEAD", "BIG_TAIL"); // non-superseded size-prunable → drives the deferred prune
+		const dup = blob(16_000, "DUP_HEAD", "DUP_TAIL");
+		const messages = duplicateWithHugeTailScenario(dup);
+
+		const out = pruneWire(session, messages);
+
+		// Duplicate/N4 is a size play: below pressure it waits instead of
+		// cold-writing ~60k tokens of cached tail to reclaim ~4k.
+		expect(textAt(out, 2)).toBe(dup);
+		expect(out).toBe(messages);
+		expect(supersedeCount()).toBe(0);
+		expect(deferCount()).toBeGreaterThanOrEqual(1);
+	});
+
+	it("collapses the duplicate anyway when PIT_NO_PRUNE_CACHE_ECONOMICS=1", () => {
+		resetRuntimeDiagnostics();
+		process.env.PIT_NO_PRUNE_CACHE_ECONOMICS = "1";
+		const session = makeSession("claude-sonnet-5");
+		const dup = blob(16_000, "DUP_HEAD", "DUP_TAIL");
+		const messages = duplicateWithHugeTailScenario(dup);
+
+		const out = pruneWire(session, messages);
+
+		expect(textAt(out, 2).length).toBeLessThan(dup.length);
+		expect(textAt(out, 2)).toContain("DUP_HEAD");
+		expect(supersedeCount()).toBeGreaterThanOrEqual(1);
+		expect(deferCount()).toBe(0);
+	});
+
+	it("collapses the duplicate when the reclaim covers the invalidated tail", () => {
+		resetRuntimeDiagnostics();
+		const session = makeSession("claude-sonnet-5");
+		// The duplicate IS the tail: reclaiming ~55k tokens leaves almost nothing to
+		// cold-write, so the economy half pays for itself immediately.
+		const dup = blob(200_000, "DUP_HEAD", "DUP_TAIL");
 		const messages: AgentMessage[] = [
 			user("task"),
 			toolCall("read", "c1", { path: "dup.ts" }),
-			toolResult("read", "c1", superseded), // [2] superseded by c2
+			toolResult("read", "c1", dup), // [2] superseded by c2
 			toolCall("read", "c2", { path: "dup.ts" }),
-			toolResult("read", "c2", "fresh"), // [4] supersedes c1
+			toolResult("read", "c2", "fresh"), // [4]
+			user("t2"),
+			user("t3"),
+		];
+
+		const out = pruneWire(session, messages);
+
+		expect(textAt(out, 2).length).toBeLessThan(dup.length);
+		expect(textAt(out, 2)).toContain("DUP_HEAD");
+		expect(supersedeCount()).toBeGreaterThanOrEqual(1);
+		expect(deferCount()).toBe(0);
+	});
+
+	it("never defers the M11 write-invalidation collapse — correction, not size play", () => {
+		resetRuntimeDiagnostics();
+		const session = makeSession("claude-sonnet-5");
+		const stale = blob(16_000, "STALE_HEAD", "STALE_TAIL");
+		const messages: AgentMessage[] = [
+			user("task"),
+			toolCall("read", "c1", { path: "mutated.ts" }),
+			toolResult("read", "c1", stale), // [2] invalidated by the write below (M11)
+			toolCall("write", "c2", { path: "mutated.ts", content: "new body" }),
+			toolResult("write", "c2", "ok"), // [4] successful mutation
+			toolCall("read", "c3", { path: "huge.ts" }),
+			toolResult("read", "c3", blob(250_000, "HUGE_HEAD", "HUGE_TAIL")), // [6] huge tail — economics would veto
+			user("t2"),
+			user("t3"),
+		];
+
+		const out = pruneWire(session, messages);
+
+		// The disk contradicts this read: it collapses whatever the cache costs,
+		// with the cause marker naming the mutated path.
+		expect(textAt(out, 2).length).toBeLessThan(stale.length);
+		expect(textAt(out, 2)).toContain("STALE_HEAD");
+		expect(textAt(out, 2)).toContain("mutated.ts was modified by a later write/edit");
+		expect(supersedeCount()).toBeGreaterThanOrEqual(1);
+	});
+
+	it("still applies the M11 supersede collapse when the size-prune is deferred", () => {
+		resetRuntimeDiagnostics();
+		process.env.PIT_PROACTIVE_PRUNE_FLOOR = "1000";
+		const session = makeSession("claude-sonnet-5");
+		const stale = blob(16_000, "STALE_HEAD", "STALE_TAIL"); // below size threshold → only supersede reclaims it
+		const big = blob(70_000, "BIG_HEAD", "BIG_TAIL"); // non-superseded size-prunable → drives the deferred prune
+		const messages: AgentMessage[] = [
+			user("task"),
+			toolCall("read", "c1", { path: "mutated.ts" }),
+			toolResult("read", "c1", stale), // [2] M11-invalidated
+			toolCall("write", "c2", { path: "mutated.ts", content: "new body" }),
+			toolResult("write", "c2", "ok"), // [4]
 			toolCall("read", "c3", { path: "big.ts" }),
 			toolResult("read", "c3", big), // [6] size-prunable, non-superseded
 			user("t2"),
@@ -185,10 +285,9 @@ describe("_pruneContextForProvider — cache-economics deferral", () => {
 		expect(textAt(out, 6)).toBe(big);
 		expect(deferCount()).toBeGreaterThanOrEqual(1);
 		expect(proactiveCount()).toBe(0);
-		// …but the stale superseded read is STILL collapsed (semantic correction never defers).
-		expect(textAt(out, 2).length).toBeLessThan(superseded.length);
-		expect(textAt(out, 2)).toContain("DUP_HEAD");
-		expect(textAt(out, 4)).toBe("fresh");
+		// …but the write-invalidated read is STILL collapsed (correction never defers).
+		expect(textAt(out, 2).length).toBeLessThan(stale.length);
+		expect(textAt(out, 2)).toContain("STALE_HEAD");
 		expect(supersedeCount()).toBeGreaterThanOrEqual(1);
 	});
 });

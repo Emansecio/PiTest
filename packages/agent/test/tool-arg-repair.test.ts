@@ -304,6 +304,46 @@ describe("schema coercion — enums", () => {
 	});
 });
 
+describe("schema coercion — null / {} placeholders (was validation-only)", () => {
+	const schema = obj(
+		{
+			path: { type: "string" },
+			pattern: { type: "string" },
+			limit: { type: "number" },
+			options: { type: "object", properties: { deep: { type: "boolean" } } },
+			nullable: { type: ["string", "null"] },
+		},
+		["path"],
+	);
+
+	it("drops an optional null the schema does not accept", () => {
+		const out = repairToolArguments({ path: "a", pattern: null }, schema, TOOL);
+		expect(out.args).toEqual({ path: "a" });
+		expect(out.repairs).toEqual(["null_to_undefined"]);
+	});
+
+	it("drops an optional {} placeholder for a non-object field", () => {
+		const out = repairToolArguments({ path: "a", limit: {} }, schema, TOOL);
+		expect(out.args).toEqual({ path: "a" });
+		expect(out.repairs).toEqual(["empty_object_to_undefined"]);
+	});
+
+	it("keeps null on a required field and on a nullable field", () => {
+		expect(kinds({ path: null }, schema)).toEqual([]);
+		expect(kinds({ path: "a", nullable: null }, schema)).toEqual([]);
+	});
+
+	it("keeps {} for a field typed as object", () => {
+		expect(kinds({ path: "a", options: {} }, schema)).toEqual([]);
+	});
+
+	it("leaves a NESTED null alone (the drop is a top-level rule)", () => {
+		const nested = obj({ opts: { type: "object", properties: { deep: { type: "boolean" } } } });
+		const args = { opts: { deep: null } };
+		expect(repairToolArguments(args, nested, TOOL).args).toBe(args);
+	});
+});
+
 describe("nested coercion", () => {
 	it("coerces values inside a nested object", () => {
 		const schema = obj({

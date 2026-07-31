@@ -105,7 +105,9 @@ export default function (pi: ExtensionAPI) {
 
 		renderCall(args, theme, _context) {
 			let text = theme.fg("toolTitle", theme.bold("$ "));
-			const cmd = args.command.length > 80 ? `${args.command.slice(0, 77)}...` : args.command;
+			// `command` is absent on a background-job call (bash({jobId:"bg-1"})).
+			const command = args.command ?? "";
+			const cmd = command.length > 80 ? `${command.slice(0, 77)}...` : command;
 			text += theme.fg("accent", cmd);
 			if (args.timeout) {
 				text += theme.fg("dim", ` (timeout: ${args.timeout}s)`);

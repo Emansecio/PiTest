@@ -12,6 +12,7 @@ import {
 	recordDiagnostic,
 	streamSimple,
 	suggestClosest,
+	suggestClosestN,
 	type ToolResultMessage,
 	validateToolArguments,
 } from "@pit/ai";
@@ -1518,8 +1519,8 @@ async function executeToolCallsSequential(
 	};
 }
 
-/** Phase-1 output shared by the two parallel executors. */
-type PhaseOnePreparation = {
+/** Prepare-stage output of one call's pipeline, shared by the two parallel executors. */
+type ParallelCallPreparation = {
 	toolCall: AgentToolCall;
 	preparation: PreparedToolCall | ImmediateToolCallOutcome;
 	/** Present when a speculative run already executed this call during the stream (P1). */
@@ -1527,10 +1528,62 @@ type PhaseOnePreparation = {
 };
 
 /**
- * Phase 1 of the parallel executors: emit start, then either consume a settled
- * speculative run (replaying its buffered events in this call's normal
- * transcript position — consumption NEVER re-runs the prepare funnel, so hooks
- * with side effects fire exactly once) or run the normal prepare.
+ * Emit `tool_execution_start` for a whole (sub)batch, serially, in the ORIGINAL
+ * toolCall order, BEFORE the concurrent fan-out starts.
+ *
+ * The starts are hoisted out of the per-call pipeline on purpose: the pipeline
+ * runs prepare→execute→finalize concurrently per call (P2-8, no phase barrier),
+ * so emitting the start inside it would let a call whose prepare resolves first
+ * publish its start ahead of an earlier sibling's. Consumers (TUI ordering, JSONL
+ * readers) rely on starts appearing in the model's call order.
+ */
+async function emitParallelStarts(toolCalls: AgentToolCall[], emit: AgentEventSink): Promise<void> {
+	for (const toolCall of toolCalls) {
+		await emit({
+			type: "tool_execution_start",
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+			args: toolCall.arguments,
+		});
+	}
+}
+
+/**
+ * One call's full pipeline: prepare → execute → finalize with NO barrier between
+ * the stages, so a call whose prepare stage is expensive (a consumed P1
+ * speculation waits for the whole speculative prepare+execute to settle) never
+ * holds back a sibling's execute. `tool_execution_start` was already emitted for
+ * the whole batch by `emitParallelStarts`; the order of the events emitted INSIDE
+ * one call is unchanged.
+ */
+async function runParallelCall(
+	currentContext: AgentContext,
+	assistantMessage: AssistantMessage,
+	toolCall: AgentToolCall,
+	toolMap: Map<string, AgentTool<any>>,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+	speculation: SpeculationController | undefined,
+): Promise<FinalizedToolCallOutcome> {
+	const prepared = await prepareParallelCall(
+		currentContext,
+		assistantMessage,
+		toolCall,
+		toolMap,
+		config,
+		signal,
+		emit,
+		speculation,
+	);
+	return finalizeParallelCall(currentContext, assistantMessage, prepared, config, signal, emit);
+}
+
+/**
+ * Prepare stage of one pipeline: either consume a settled speculative run
+ * (replaying its buffered events in this call's normal transcript position —
+ * consumption NEVER re-runs the prepare funnel, so hooks with side effects fire
+ * exactly once) or run the normal prepare.
  */
 async function prepareParallelCall(
 	currentContext: AgentContext,
@@ -1541,13 +1594,7 @@ async function prepareParallelCall(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 	speculation: SpeculationController | undefined,
-): Promise<PhaseOnePreparation> {
-	await emit({
-		type: "tool_execution_start",
-		toolCallId: toolCall.id,
-		toolName: toolCall.name,
-		args: toolCall.arguments,
-	});
+): Promise<ParallelCallPreparation> {
 	const spec = speculation?.take(toolCall);
 	if (spec) {
 		const outcome = await spec.outcome;
@@ -1562,18 +1609,18 @@ async function prepareParallelCall(
 }
 
 /**
- * Phase 2 of the parallel executors: execute (unless a speculative run already
- * did) and finalize. Identical flow/emissions to the pre-P1 inline bodies.
+ * Execute + finalize stage of one pipeline: execute (unless a speculative run
+ * already did) and finalize. Identical flow/emissions to the pre-P1 inline bodies.
  */
 async function finalizeParallelCall(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
-	phaseOne: PhaseOnePreparation,
+	prepared: ParallelCallPreparation,
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<FinalizedToolCallOutcome> {
-	const { toolCall, preparation, specExecuted } = phaseOne;
+	const { toolCall, preparation, specExecuted } = prepared;
 	if (preparation.kind === "immediate") {
 		const finalized = await finalizeImmediatePreparation(toolCall, preparation, config, emit);
 		await emitToolExecutionEnd(finalized, emit);
@@ -1616,6 +1663,21 @@ async function finalizeParallelCall(
 	}
 }
 
+/**
+ * Default executor: every call in the batch runs its own prepare→execute→finalize
+ * pipeline concurrently (P2-8 — there is deliberately NO barrier between prepare
+ * and execute; the pre-P2-8 two-phase shape made a consumed speculation's execute
+ * block every sibling's execute).
+ *
+ * Deliberate invariants:
+ *   - `tool_execution_start` is emitted for the whole batch up front, in the
+ *     ORIGINAL toolCall order (`emitParallelStarts`).
+ *   - Tool-RESULT message emission is DEFERRED until every call finalized and then
+ *     replayed serially in the ORIGINAL toolCall order, so the JSONL leaf-pointer
+ *     ordering stays deterministic regardless of completion order.
+ *   - Event order INSIDE a single call is untouched (P1 replays a speculation's
+ *     buffered events identically).
+ */
 async function executeToolCallsParallel(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
@@ -1633,17 +1695,16 @@ async function executeToolCallsParallel(
 	// emitted and pair the rest on the unwind.
 	const emittedResultIds = new Set<string>();
 	try {
-		// Run preparation in parallel: emit start + prepare per tool concurrently.
-		// beforeToolCall hook (potentially IO) no longer serializes the batch.
-		const preparations = await Promise.all(
-			toolCalls.map((toolCall) =>
-				prepareParallelCall(currentContext, assistantMessage, toolCall, toolMap, config, signal, emit, speculation),
-			),
-		);
-
+		// Starts first, serially, in the model's call order (see emitParallelStarts).
+		await emitParallelStarts(toolCalls, emit);
+		// Then one full prepare→execute→finalize pipeline per call, all concurrent:
+		// no phase barrier, so neither a slow beforeToolCall hook nor a consumed P1
+		// speculation (whose prepare stage awaits the speculative EXECUTE) delays a
+		// sibling's execute. Promise.all resolves in the ORIGINAL order regardless of
+		// completion order.
 		const orderedFinalizedCalls = await Promise.all(
-			preparations.map((phaseOne) =>
-				finalizeParallelCall(currentContext, assistantMessage, phaseOne, config, signal, emit),
+			toolCalls.map((toolCall) =>
+				runParallelCall(currentContext, assistantMessage, toolCall, toolMap, config, signal, emit, speculation),
 			),
 		);
 		const messages = orderedFinalizedCalls.map(createToolResultMessage);
@@ -1677,6 +1738,12 @@ async function executeToolCallsParallel(
  * sequential tool until the concurrent siblings have settled).
  *
  * Invariants preserved from the two single-mode paths:
+ *   - The parallel subset runs one prepare→execute→finalize pipeline per call with
+ *     no phase barrier (P2-8), but still settles ENTIRELY before the first
+ *     sequential call starts — design (a) above is unaffected.
+ *   - `tool_execution_start` for the parallel subset is emitted up front in the
+ *     subset's original relative order, before its fan-out; the sequential subset
+ *     keeps emitting its own start per call as it runs.
  *   - Tool-RESULT message emission (message_start/message_end) is deferred and
  *     replayed in the ORIGINAL toolCall order, across both subsets, so the JSONL
  *     leaf-pointer ordering stays deterministic regardless of completion order.
@@ -1709,17 +1776,15 @@ async function executeToolCallsPartitioned(
 	// fan-out. Pair whatever is still missing a result on the unwind.
 	const emittedResultIds = new Set<string>();
 	try {
-		// --- Parallel-safe subset: same two-phase concurrency as executeToolCallsParallel,
-		// minus the result-message emit (deferred to the merged replay below). ---
+		// --- Parallel-safe subset: same per-call pipeline concurrency as
+		// executeToolCallsParallel, minus the result-message emit (deferred to the
+		// merged replay below). Awaiting this Promise.all is what keeps the
+		// sequential subset from starting before the parallel subset settles. ---
 		const parallelCalls = parallelIndices.map((i) => toolCalls[i]);
-		const preparations = await Promise.all(
-			parallelCalls.map((toolCall) =>
-				prepareParallelCall(currentContext, assistantMessage, toolCall, toolMap, config, signal, emit, speculation),
-			),
-		);
+		await emitParallelStarts(parallelCalls, emit);
 		const parallelFinalized = await Promise.all(
-			preparations.map((phaseOne) =>
-				finalizeParallelCall(currentContext, assistantMessage, phaseOne, config, signal, emit),
+			parallelCalls.map((toolCall) =>
+				runParallelCall(currentContext, assistantMessage, toolCall, toolMap, config, signal, emit, speculation),
 			),
 		);
 		parallelIndices.forEach((origIdx, k) => {
@@ -1892,6 +1957,26 @@ function suggestToolName(name: string, available: string[]): string | undefined 
 }
 
 /**
+ * Order the whole available-tool list by proximity to the requested name, using
+ * the same Levenshtein metric as {@link suggestToolName}. The listing is capped
+ * at {@link UNKNOWN_TOOL_MAX_LISTED}, and on a large surface (chrome_devtools_*,
+ * MCP servers) an alphabetical cut is dominated by whichever namespace sorts
+ * first, so the model rarely sees the tool it was reaching for. `maxDistance` is
+ * effectively infinite here because we are ranking, not filtering: every tool
+ * must survive so the slice is a genuine "nearest N". Ties keep the caller's
+ * (alphabetical) input order, since suggestClosestN sorts stably.
+ */
+function rankToolNamesByProximity(name: string, available: string[]): string[] {
+	if (available.length <= 1) return available;
+	return suggestClosestN(
+		name,
+		available,
+		{ maxDistance: Number.MAX_SAFE_INTEGER, prefixMinOverlap: UNKNOWN_TOOL_PREFIX_MIN_OVERLAP },
+		available.length,
+	);
+}
+
+/**
  * Optional hook to augment an unknown-tool error with a hint pointing at a
  * specialized tool that exists but is NOT in the active surface (e.g. the hidden
  * tool-discovery index in pi-coding-agent). Kept as an injected provider so this
@@ -1910,7 +1995,7 @@ export function setUnknownToolHintProvider(provider: UnknownToolHintProvider | u
 export function formatUnknownToolError(name: string, toolMap: Map<string, AgentTool<any>>): string {
 	const available = Array.from(toolMap.keys()).sort();
 	const suggestion = suggestToolName(name, available);
-	const listed = available.slice(0, UNKNOWN_TOOL_MAX_LISTED).join(", ");
+	const listed = rankToolNamesByProximity(name, available).slice(0, UNKNOWN_TOOL_MAX_LISTED).join(", ");
 	const more =
 		available.length > UNKNOWN_TOOL_MAX_LISTED ? `, … (${available.length - UNKNOWN_TOOL_MAX_LISTED} more)` : "";
 	const availableSection = available.length > 0 ? `\nAvailable tools: ${listed}${more}.` : "";

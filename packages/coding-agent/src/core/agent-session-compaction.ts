@@ -911,6 +911,30 @@ export function consumeSpeculativeCompaction(
 	return result;
 }
 
+/**
+ * Is a ready slot's cut at least as DEEP as the one this compaction just planned?
+ *
+ * `firstKeptEntryId` is the first entry that survives verbatim, so a LATER index on
+ * the branch means fewer kept entries — a deeper fold. The slot is always cut with
+ * the AUTO keep budget (window-scaled, {@link adaptiveKeepRecentTokens}); a manual
+ * `/compact` is cut with the usage-scaled `manualKeepRecentTokens`, which is
+ * normally deeper. Applying a shallower slot would silently under-deliver the
+ * user's explicit "reclaim now"; applying a deeper one reclaims at least what was
+ * asked and skips an LLM call. Either id missing from the branch → false: never
+ * gamble an explicit request on an unresolvable comparison.
+ */
+export function speculativeCutIsAtLeastAsDeep(
+	pathEntries: SessionEntry[],
+	slotFirstKeptEntryId: string | undefined,
+	plannedFirstKeptEntryId: string,
+): boolean {
+	if (!slotFirstKeptEntryId) return false;
+	const slotIndex = pathEntries.findIndex((entry) => entry.id === slotFirstKeptEntryId);
+	const plannedIndex = pathEntries.findIndex((entry) => entry.id === plannedFirstKeptEntryId);
+	if (slotIndex < 0 || plannedIndex < 0) return false;
+	return slotIndex >= plannedIndex;
+}
+
 export async function executeCompactionPipeline(
 	ctx: CompactionController,
 	options: {
@@ -1174,6 +1198,32 @@ export async function compactSession(
 		// cache-read route calls the session model, not the resolved sibling.
 		const cacheAware = buildCacheAwareGeneration(ctx, { model: ctx.host.model, apiKey, headers });
 
+		// P2 — a manual /compact may APPLY a ready speculative summary instead of
+		// paying a fresh summarization call. Two gates on top of the anchor checks in
+		// consumeSpeculativeCompaction:
+		//  - custom instructions: the precompute was generated WITHOUT them, so reusing
+		//    it would silently drop the focus the user typed. Never reuse.
+		//  - depth: the slot carries the auto (window-scaled) cut; the manual cut is
+		//    usage-scaled and usually deeper. Only a slot that folds AT LEAST as much
+		//    satisfies the explicit "reclaim now" (see speculativeCutIsAtLeastAsDeep).
+		// A rejected slot (including one still in flight — `result` undefined) is left
+		// untouched: this compaction may still be cancelled, and the pipeline clears
+		// the slot for real the moment a summary is actually applied.
+		let precomputed: CompactionResult | undefined;
+		if (!customInstructions) {
+			const slotResult = ctx.speculative?.result;
+			if (speculativeCutIsAtLeastAsDeep(pathEntries, slotResult?.firstKeptEntryId, preparation.firstKeptEntryId)) {
+				precomputed = consumeSpeculativeCompaction(ctx, undefined);
+			} else if (slotResult) {
+				recordDiagnostic({
+					category: "compaction.speculative",
+					level: "info",
+					source: "agent-session.compactSession",
+					context: { note: "manual-skip=shallower-cut" },
+				});
+			}
+		}
+
 		const compactionResult = await executeCompactionPipeline(ctx, {
 			preparation,
 			pathEntries,
@@ -1183,6 +1233,7 @@ export async function compactSession(
 			abortSignal: compactionAbort.signal,
 			customInstructions,
 			thinkingLevel: compactModel.thinkingLevel,
+			precomputed,
 			cacheAware,
 		});
 

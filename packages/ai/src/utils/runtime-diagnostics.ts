@@ -91,6 +91,17 @@ export type DiagnosticCategory =
 	| "guard.read"
 	| "guard.learned-error"
 	| "guard.intent-gate"
+	// A pre-exec guard THREW and was contained fail-open, so the call it was
+	// supposed to vet ran unvetted. Silent fail-open is indistinguishable from
+	// "guard had nothing to say", so every containment is recorded with the
+	// guard's `source`/`ruleId`, the `phase` that threw (kill-switch, gate,
+	// decide, settle) and the error message.
+	| "guard.failed"
+	// Band C grounding for the DEFAULT in-turn verification mode: a cycle modified
+	// files and ran no verification-class command. `ruleId` distinguishes the
+	// correction (`in-turn-check-missing`) from the bounded give-up
+	// (`in-turn-check-gave-up`); `count` carries the unheeded streak.
+	| "quality.in-turn-check"
 	// Corrective (Band C): a Tier-4 tool-error-hint rule fired, carrying the
 	// rule id + tool name so dead/noisy hint rules can be found from the tally.
 	| "hint.fired"
@@ -121,7 +132,13 @@ export type DiagnosticCategory =
 	// as fresh text to the cheap sibling vs re-reading the session's hot prefix on
 	// the session model (~0.1x cacheRead). `note` carries route/reason and the two
 	// estimated USD figures.
-	| "compaction.cache-aware";
+	| "compaction.cache-aware"
+	// A tool call's arguments were silently coerced before execution by the shared
+	// coercion table (`utils/arg-coercion.ts`) — from the agent's repair layer or
+	// from validateToolArguments' single fallback pass. `mechanism` carries the
+	// coercion kind, `toolName` the tool; `getToolArgCoercionStats()` is the typed
+	// aggregate view of the same events.
+	| "tool.arg-repair";
 
 export interface DiagnosticContext {
 	/** Byte size involved (cap hit, payload, buffer depth). */
@@ -135,11 +152,19 @@ export interface DiagnosticContext {
 	/** Milliseconds (timeout window, idle window). */
 	ms?: number;
 	/**
-	 * Whether a guard BLOCKED a tool call or the model OVERRODE the block by
-	 * re-issuing it (fire-once escape). Lets acceptance/override rate be measured
-	 * per guard from the diagnostics ring buffer.
+	 * Whether a guard BLOCKED a tool call, the model OVERRODE the block by
+	 * re-issuing it (fire-once escape), or the guard itself FAILED and was
+	 * contained fail-open (the call ran unvetted). Lets acceptance/override rate
+	 * be measured per guard from the diagnostics ring buffer — `failed` is kept
+	 * out of that pair on purpose, so a broken guard does not read as a verdict.
 	 */
-	outcome?: "blocked" | "overridden";
+	outcome?: "blocked" | "overridden" | "failed";
+	/**
+	 * For `outcome:"failed"`: which step of the guard ritual threw — `check`
+	 * (kill-switch, tool gate, or the guard's own decision) or `settle` (applying
+	 * an already-made verdict). Narrows a contained fault to a code path.
+	 */
+	phase?: "check" | "settle";
 	/**
 	 * Stable identifier of the specific rule/check inside the guard that fired
 	 * (e.g. an error-hint rule id, a grounding check name). Enables per-rule

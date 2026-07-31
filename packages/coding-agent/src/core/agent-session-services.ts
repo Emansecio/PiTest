@@ -255,6 +255,9 @@ export async function createAgentSessionServices(
 			onFusionNeedsSetup: () => fusionNeedsSetupRef.current?.(),
 			getReadDedupeStore: () => readDedupeStoreRef.current?.(),
 			getWarmFileCache: () => warmFileCacheRef.current?.(),
+			// Same lazy-resolution reason as getSkills: read at tool-call time, well
+			// after resourceLoader.reload() populated the boot context files.
+			getLoadedContextPaths: () => resourceLoader.getAgentsFiles().agentsFiles.map((f) => f.path),
 		});
 		builtInFactories = bundle.factories;
 		permissionChecker = bundle.permissionChecker;

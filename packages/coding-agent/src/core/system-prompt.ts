@@ -123,12 +123,15 @@ export interface BuildSystemPromptOptions {
 	 * the dynamic suffix AFTER the cache marker (like frequent-files): it is
 	 * recomputed per turn from the live prompt + map, so it must NEVER touch the
 	 * cacheable prefix. Empty string / undefined → nothing emitted (fail-open).
+	 * Gated by `contextOccupancyPercent` like frequent-files (T02): under high
+	 * occupancy the model already has this content in-transcript.
 	 */
 	groundedContext?: string;
 	/**
 	 * Wire/context occupancy percent from `getContextUsage()`. When ≥ 50, omit
-	 * `frequent_files` / hot-file outlines (model already has those paths in
-	 * transcript). `undefined` keeps legacy behavior (emit when data exists).
+	 * `frequent_files` / hot-file outlines / `groundedContext` (model already
+	 * has those paths in transcript). `undefined` keeps legacy behavior (emit
+	 * when data exists).
 	 */
 	contextOccupancyPercent?: number;
 	/**
@@ -209,9 +212,12 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		// session actually touched) wins over the boot index once it has data.
 		// See agent-session._kickoffFrequentFilesIndex.
 		// Under high occupancy the model already saw these paths in-transcript;
-		// skip the dynamic suffix block to save wire tokens (T02).
-		const emitFrequentFiles = contextOccupancyPercent === undefined || contextOccupancyPercent < 50;
-		if (emitFrequentFiles) {
+		// skip the dynamic suffix block to save wire tokens (T02). The same
+		// reasoning covers the grounded-context block below (Band P
+		// context-composer output is also just prior turns' file content
+		// restated), so both blocks share this one occupancy gate.
+		const emitOccupancyGatedContext = contextOccupancyPercent === undefined || contextOccupancyPercent < 50;
+		if (emitOccupancyGatedContext) {
 			const sessionBlock =
 				sessionFrequentFiles && sessionFrequentFiles.length > 0
 					? formatFrequentFilesForPrompt(sessionFrequentFiles)
@@ -230,8 +236,11 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			}
 		}
 		// Band P context-composer block — dynamic suffix only (after the marker),
-		// so per-turn recomputation never re-bills the cached prefix.
-		if (groundedContext && groundedContext.length > 0) {
+		// so per-turn recomputation never re-bills the cached prefix. Gated by
+		// emitOccupancyGatedContext (T02, see above): under high occupancy this
+		// is paid at full price on every request of the turn for content the
+		// model already has in-transcript.
+		if (emitOccupancyGatedContext && groundedContext && groundedContext.length > 0) {
 			parts.push(`\n\n${groundedContext}\n`);
 		}
 		// Band P / P5 conventions contract — sibling dynamic-suffix slot. Read from
@@ -363,7 +372,7 @@ export function buildToolsAndGuidelinesSection(options: {
 
 	if (!isCompact && tools.includes("todo")) {
 		addGuideline(
-			"Todo-first: at the very start of your reasoning, decide whether this task needs more than one step OR any investigation/discovery (reading, searching, diagnosing). If so, create a todo (even a single '1. Identify X') BEFORE you act, then keep it current as you go. Skip only for genuinely single-step requests.",
+			"Todo-first: at the very start of your reasoning, decide whether this task needs more than one step OR any investigation/discovery (reading, searching, diagnosing). If so, create a todo (even a single '1. Identify X') BEFORE you act, then update it in the SAME turn as the work — never batch the bookkeeping to the end. Skip only for genuinely single-step requests.",
 		);
 	}
 
@@ -455,11 +464,14 @@ export function buildToolsAndGuidelinesSection(options: {
 	if (isCompact) {
 		if (tools.includes("todo")) {
 			addGuideline(
-				"Todo-first: create a todo before any multi-step or investigative task and keep it current; skip only for single-step requests.",
+				"Todo-first: create a todo before any multi-step or investigative task and update it in the SAME turn as the work; skip only for single-step requests.",
 			);
 		}
 		addGuideline(
-			"Treat the user as an experienced professional: act directly on routine steps without asking, match the project's existing style and conventions, and say so directly if their premise is wrong or you find broken adjacent code — do not silently comply or fix without mention.",
+			"Match the project's existing style, reuse its utilities, and never import a library that is not already a dependency.",
+		);
+		addGuideline(
+			"Treat the user as an experienced professional: act directly on routine steps without asking, and say so directly if their premise is wrong or you find broken adjacent code — do not silently comply or fix without mention.",
 		);
 		addGuideline(
 			"Explore with the least tool needed (grep/find/ls or read before bash), batch independent tool calls in the same turn, and cite code as path:line.",

@@ -6,6 +6,7 @@ import {
 	__resetClaudeCodeVersionCacheForTests,
 	type ClaudeCodeVersionDeps,
 	ensureClaudeCodeVersionEnv,
+	gateModelRequestsOnClaudeCodeVersion,
 	type ResolvedClaudeBinary,
 } from "../src/core/claude-code-version.js";
 
@@ -182,5 +183,68 @@ describe("ensureClaudeCodeVersionEnv", () => {
 		await Promise.all([ensureClaudeCodeVersionEnv(slow), ensureClaudeCodeVersionEnv(slow)]);
 		expect(spawns).toBe(1);
 		expect(process.env[ENV]).toBe("2.1.170");
+	});
+
+	describe("gateModelRequestsOnClaudeCodeVersion", () => {
+		/** Stand-in for ModelRegistry: only the auth-resolution seam matters here. */
+		function fakeRegistry(onResolve: () => void) {
+			return {
+				calls: [] as string[],
+				async getApiKeyAndHeaders(model: { id: string }) {
+					onResolve();
+					this.calls.push(model.id);
+					return { ok: true as const, apiKey: "k", version: process.env[ENV] };
+				},
+			};
+		}
+
+		it("holds the first model request until the probe settles, without blocking the caller before that", async () => {
+			let releaseProbe: () => void = () => {};
+			const probeDone = new Promise<void>((resolve) => {
+				releaseProbe = resolve;
+			});
+			const ready = probeDone.then(() => {
+				process.env[ENV] = "4.5.6";
+			});
+
+			let resolvedAuth = false;
+			const registry = fakeRegistry(() => {
+				resolvedAuth = true;
+			});
+			gateModelRequestsOnClaudeCodeVersion(registry, ready);
+
+			// A request issued while the probe is in flight must not resolve auth yet
+			// (the UI, which never touches this seam, is free to paint meanwhile).
+			const pending = registry.getApiKeyAndHeaders({ id: "opus" });
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			expect(resolvedAuth).toBe(false);
+
+			releaseProbe();
+			const auth = await pending;
+			expect(auth.version).toBe("4.5.6");
+			expect(registry.calls).toEqual(["opus"]);
+		});
+
+		it("passes through once the probe has settled and is idempotent", async () => {
+			const ready = Promise.resolve();
+			const registry = fakeRegistry(() => {});
+			gateModelRequestsOnClaudeCodeVersion(registry, ready);
+			const wrapped = registry.getApiKeyAndHeaders;
+			// Double install (e.g. a runtime rebuilt on /new) must not stack wrappers.
+			gateModelRequestsOnClaudeCodeVersion(registry, ready);
+			expect(registry.getApiKeyAndHeaders).toBe(wrapped);
+
+			await expect(registry.getApiKeyAndHeaders({ id: "sonnet" })).resolves.toMatchObject({ ok: true, apiKey: "k" });
+			expect(registry.calls).toEqual(["sonnet"]);
+		});
+
+		it("still resolves requests when detection found nothing (static fallback stays)", async () => {
+			const registry = fakeRegistry(() => {});
+			// ensureClaudeCodeVersionEnv never rejects; a failed probe just leaves the env unset.
+			gateModelRequestsOnClaudeCodeVersion(registry, ensureClaudeCodeVersionEnv(deps()));
+			const auth = await registry.getApiKeyAndHeaders({ id: "haiku" });
+			expect(auth.ok).toBe(true);
+			expect(auth.version).toBeUndefined();
+		});
 	});
 });

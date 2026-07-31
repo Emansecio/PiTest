@@ -204,3 +204,50 @@ export function ensureClaudeCodeVersionEnv(deps: ClaudeCodeVersionDeps = {}): Pr
 export function __resetClaudeCodeVersionCacheForTests(): void {
 	inflight = undefined;
 }
+
+/** Marker so a registry handed to the gate twice is only wrapped once. */
+const GATE_INSTALLED = Symbol.for("pit.claudeCodeVersionGate");
+
+/**
+ * The one call every model request funnels through before hitting a provider:
+ * the session's streamFn, compaction, fusion and subagent spawn all resolve
+ * request auth here first. Typed structurally so this module stays free of the
+ * model-registry graph.
+ */
+export interface ModelRequestAuthResolver<TModel, TAuth> {
+	getApiKeyAndHeaders(model: TModel): Promise<TAuth>;
+}
+
+/**
+ * Gate model requests — and ONLY model requests — on the version probe.
+ *
+ * Boot kicks the probe off early and used to `await` it before dispatching to a
+ * mode, which on a cache miss (first boot, or the Claude Code CLI updated since)
+ * held the first TUI paint for up to ~3s per candidate command. Nothing the UI
+ * draws needs the version: only the spoofed `user-agent` on an outbound provider
+ * request does, and @pit/ai reads `PIT_CLAUDE_CODE_VERSION` fresh when it builds
+ * each request. So the wait belongs here, at the request boundary, where it
+ * overlaps the user reading the screen and typing instead of blocking the paint.
+ *
+ * Wrapping the resolver (rather than awaiting at a call site) is what keeps the
+ * gate exhaustive: every request path in the CLI goes through this method, and
+ * main.ts installs the gate inside its runtime factory, so sessions created
+ * later by /new, /resume, /fork and /import are gated too.
+ *
+ * The gate is a settled-promise await in the steady state — `ready` never
+ * rejects, and after it settles the probe has either set the env var or given up
+ * and left the provider's static fallback in place.
+ */
+export function gateModelRequestsOnClaudeCodeVersion<TModel, TAuth>(
+	registry: ModelRequestAuthResolver<TModel, TAuth>,
+	ready: Promise<void>,
+): void {
+	const marked = registry as unknown as Record<symbol, boolean>;
+	if (marked[GATE_INSTALLED]) return;
+	marked[GATE_INSTALLED] = true;
+	const resolveAuth = registry.getApiKeyAndHeaders.bind(registry);
+	registry.getApiKeyAndHeaders = async (model: TModel): Promise<TAuth> => {
+		await ready;
+		return resolveAuth(model);
+	};
+}

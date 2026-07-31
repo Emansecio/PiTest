@@ -6,11 +6,13 @@
  * passes locally then fails `npm run check` on rules the model never saw
  * (verbatim-module-syntax, quote style, indent width, strict-null creep).
  *
- * This reads the project's own `tsconfig.json` and `biome.json` (the source of
- * truth the check command enforces) and distills the few fields that actually
- * change generated code into a compact `<project_config>` block. Best-effort by
- * construction: any parse/read failure yields no block rather than throwing, so
- * a malformed config never blocks a session.
+ * This reads the project's own `tsconfig.json`, `biome.json`, Prettier config and
+ * `.editorconfig` (the sources of truth the check command enforces) and distills
+ * the few fields that actually change generated code into a compact
+ * `<project_config>` block. Best-effort by construction: any parse/read failure
+ * yields no block rather than throwing, so a malformed config never blocks a
+ * session. ESLint is deliberately out of scope — its rule surface is too large to
+ * distill into a useful handful of lines.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -248,6 +250,92 @@ function summarizeBiome(cwd: string): string[] {
 }
 
 /**
+ * Distill the Prettier options that visibly shape generated code, from
+ * `.prettierrc` / `.prettierrc.json` (JSON or JSONC) or the `prettier` key in
+ * `package.json`. YAML/JS/TS config forms are skipped — parsing them would need a
+ * dependency, and the block is advisory. Only options actually PRESENT are
+ * reported: restating a Prettier default the model already follows would just
+ * spend prompt tokens.
+ */
+function summarizePrettier(cwd: string): string[] {
+	const file = [".prettierrc", ".prettierrc.json"].map((f) => join(cwd, f)).find((p) => existsSync(p));
+	let cfg = file ? readJsonc(file) : null;
+	if (!cfg) {
+		const pkgPath = join(cwd, "package.json");
+		const pkg = existsSync(pkgPath) ? readJsonc(pkgPath) : null;
+		cfg = asRecord(pkg?.prettier) ?? null;
+	}
+	if (!cfg) return [];
+
+	const parts: string[] = [];
+	if (cfg.singleQuote === true) parts.push("single quotes");
+	else if (cfg.singleQuote === false) parts.push("double quotes");
+	if (cfg.semi === true) parts.push("semicolons required");
+	else if (cfg.semi === false) parts.push("no semicolons");
+	// `useTabs` wins over `tabWidth` when both are set — with tabs, tabWidth is only
+	// the display width and says nothing about what to emit.
+	if (cfg.useTabs === true) parts.push("tab indent");
+	else if (typeof cfg.tabWidth === "number") parts.push(`${cfg.tabWidth}-space indent`);
+	else if (cfg.useTabs === false) parts.push("space indent");
+	if (typeof cfg.trailingComma === "string") parts.push(`trailing commas: ${cfg.trailingComma}`);
+	if (typeof cfg.printWidth === "number") parts.push(`print width ${cfg.printWidth}`);
+
+	return parts.length > 0 ? [`Prettier format: ${parts.join(", ")}.`] : [];
+}
+
+/**
+ * Distill the `[*]` section of `.editorconfig`. Deliberately a minimal INI reader
+ * rather than a spec-complete one: no glob matching beyond the literal `[*]`
+ * header, no `root`/parent-directory walk, no inheritance. Unparseable lines are
+ * skipped, and a file with nothing recognizable yields no line at all.
+ */
+function summarizeEditorconfig(cwd: string): string[] {
+	const path = join(cwd, ".editorconfig");
+	if (!existsSync(path)) return [];
+	let raw: string;
+	try {
+		raw = readFileSync(path, "utf-8");
+	} catch {
+		return [];
+	}
+
+	const values = new Map<string, string>();
+	let inStarSection = false;
+	for (const line of raw.split(/\r?\n/)) {
+		const text = line.trim();
+		if (text.length === 0 || text.startsWith("#") || text.startsWith(";")) continue;
+		if (text.startsWith("[")) {
+			inStarSection = text === "[*]";
+			continue;
+		}
+		if (!inStarSection) continue;
+		const eq = text.indexOf("=");
+		if (eq <= 0) continue;
+		values.set(
+			text.slice(0, eq).trim().toLowerCase(),
+			text
+				.slice(eq + 1)
+				.trim()
+				.toLowerCase(),
+		);
+	}
+
+	const parts: string[] = [];
+	const indentStyle = values.get("indent_style");
+	const indentSize = values.get("indent_size");
+	if (indentStyle === "tab" || indentSize === "tab") parts.push("tab indent");
+	else if (indentStyle === "space") parts.push(indentSize ? `${indentSize}-space indent` : "space indent");
+	else if (indentSize) parts.push(`indent size ${indentSize}`);
+	const eol = values.get("end_of_line");
+	if (eol === "lf" || eol === "crlf" || eol === "cr") parts.push(`${eol.toUpperCase()} line endings`);
+	const finalNewline = values.get("insert_final_newline");
+	if (finalNewline === "true") parts.push("final newline required");
+	else if (finalNewline === "false") parts.push("no final newline");
+
+	return parts.length > 0 ? [`EditorConfig [*]: ${parts.join(", ")}.`] : [];
+}
+
+/**
  * Does this project's tsconfig enforce `erasableSyntaxOnly`? When true, the
  * compiler (or Node's native type-stripping) rejects emit-bearing TS syntax —
  * enums, namespaces/modules with a body, and constructor parameter properties.
@@ -297,7 +385,12 @@ export function projectEnforcesNoNestedTernary(cwd: string): boolean {
  * `<project_context>` rendering without special-casing.
  */
 export function loadProjectConfigContext(cwd: string): { path: string; content: string } | null {
-	const lines = [...summarizeTsconfig(cwd), ...summarizeBiome(cwd)];
+	const lines = [
+		...summarizeTsconfig(cwd),
+		...summarizeBiome(cwd),
+		...summarizePrettier(cwd),
+		...summarizeEditorconfig(cwd),
+	];
 	if (lines.length === 0) return null;
 	const content = `Conventions enforced by this project's check command — match them when writing or editing code so the first attempt passes:\n${lines
 		.map((l) => `- ${l}`)

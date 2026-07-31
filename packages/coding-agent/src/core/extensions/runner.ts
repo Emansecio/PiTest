@@ -349,6 +349,12 @@ export class ExtensionRunner {
 				mutating: Array<{ ext: Extension; handler: (...args: unknown[]) => Promise<unknown> }>;
 		  }
 		| undefined;
+	private _cachedToolCallPartition:
+		| {
+				sideEffect: Array<{ ext: Extension; handler: (...args: unknown[]) => Promise<unknown> }>;
+				mutating: Array<{ ext: Extension; handler: (...args: unknown[]) => Promise<unknown> }>;
+		  }
+		| undefined;
 
 	constructor(
 		extensions: Extension[],
@@ -513,6 +519,7 @@ export class ExtensionRunner {
 		this._cachedCommandLookup = undefined;
 		this._cachedBprPartition = undefined;
 		this._cachedContextPartition = undefined;
+		this._cachedToolCallPartition = undefined;
 		// Hot cache of "does any extension handle event X". Omitting it here let a
 		// handler registered via a late api.on() stay invisible after an earlier
 		// emit cached `false` for that event. Its mutating-only sibling must be
@@ -1057,41 +1064,80 @@ export class ExtensionRunner {
 		};
 	}
 
+	/**
+	 * Run the `tool_call` guard chain and return the surviving result: the FIRST
+	 * `{block}` short-circuits, otherwise the LAST non-undefined result wins.
+	 *
+	 * Handlers tagged side-effect-only (`pi.markSideEffect()`) are pure observers
+	 * — they neither block nor rewrite `event.input` — so they all run
+	 * concurrently via Promise.all instead of adding their latency to the chain.
+	 * Untagged handlers stay serial, in registration order: each may block the
+	 * call or mutate `event.input` in place (the documented way to rewrite tool
+	 * arguments, see ToolCallEventResult), so the next one must see that mutation.
+	 *
+	 * Observers are dispatched AND awaited before the mutating chain, exactly like
+	 * emitBeforeProviderRequest. Overlapping the two groups would let an observer
+	 * read `event.input` while a mutator rewrites it in place, and would make
+	 * "does an observer see a blocked call?" depend on scheduling; this way an
+	 * observer always sees the input as the caller delivered it, and every handler
+	 * has settled by the time this resolves — including on the block path.
+	 *
+	 * One handler's throw is isolated via emitError; siblings still run.
+	 */
 	async emitToolCall(event: ToolCallEvent): Promise<ToolCallEventResult | undefined> {
-		// Fast path: skip the context allocation + extension scan when no extension
-		// handles tool_call. Runs on every tool call, so the guard is worth it.
-		if (!this.hasHandlers("tool_call")) return undefined;
+		// Fast path: skip the context allocation when no extension handles
+		// tool_call. Runs on every tool call, so the guard is worth it.
+		const partition = this.getToolCallPartition();
+		if (partition.sideEffect.length === 0 && partition.mutating.length === 0) return undefined;
 		const ctx = this.createContext();
+		const piTiming = process.env.PIT_TIMING === "1";
+		const t0 = piTiming ? performance.now() : 0;
+
+		const runHandler = async (ext: Extension, handler: (...args: unknown[]) => unknown): Promise<unknown> => {
+			try {
+				return await handler(event, ctx);
+			} catch (err) {
+				this.emitError({
+					extensionPath: ext.path,
+					event: "tool_call",
+					error: err instanceof Error ? err.message : String(err),
+					stack: err instanceof Error ? err.stack : undefined,
+				});
+				return undefined;
+			}
+		};
+
+		if (partition.sideEffect.length > 0) {
+			await Promise.all(partition.sideEffect.map(({ ext, handler }) => runHandler(ext, handler)));
+		}
+		const tSideEffect = piTiming ? performance.now() : 0;
+
 		let result: ToolCallEventResult | undefined;
-
-		for (const ext of this.extensions) {
-			const handlers = ext.handlers.get("tool_call");
-			if (!handlers || handlers.length === 0) continue;
-
-			for (const handler of handlers) {
-				try {
-					const handlerResult = await handler(event, ctx);
-
-					if (handlerResult) {
-						result = handlerResult as ToolCallEventResult;
-						if (result.block) {
-							return result;
-						}
-					}
-				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: "tool_call",
-						error: message,
-						stack,
-					});
+		for (const { ext, handler } of partition.mutating) {
+			const handlerResult = (await runHandler(ext, handler)) as ToolCallEventResult | undefined;
+			if (handlerResult) {
+				result = handlerResult;
+				if (result.block) {
+					break;
 				}
 			}
 		}
 
+		if (piTiming) {
+			const total = performance.now() - t0;
+			const sideEffectMs = tSideEffect - t0;
+			console.error(
+				`  [perf] METRIC emit_tool_call_ms=${total.toFixed(1)} side_effect_ms=${sideEffectMs.toFixed(1)} mutating_ms=${(performance.now() - tSideEffect).toFixed(1)} se_n=${partition.sideEffect.length} mut_n=${partition.mutating.length}`,
+			);
+		}
+
 		return result;
+	}
+
+	private getToolCallPartition(): NonNullable<ExtensionRunner["_cachedToolCallPartition"]> {
+		if (this._cachedToolCallPartition !== undefined) return this._cachedToolCallPartition;
+		this._cachedToolCallPartition = this.partitionHandlers("tool_call");
+		return this._cachedToolCallPartition;
 	}
 
 	async emitUserBash(event: UserBashEvent): Promise<UserBashEventResult | undefined> {
@@ -1197,13 +1243,18 @@ export class ExtensionRunner {
 		return currentMessages;
 	}
 
-	private getContextPartition(): NonNullable<ExtensionRunner["_cachedContextPartition"]> {
-		if (this._cachedContextPartition !== undefined) return this._cachedContextPartition;
+	/**
+	 * Split one event's handlers into observers (tagged side-effect-only) and
+	 * mutators (everything else), preserving registration order within each group.
+	 * Callers memoize the result on a `_cached*Partition` field cleared by
+	 * {@link invalidateCaches} — never call this on a hot path unmemoized.
+	 */
+	private partitionHandlers(eventType: string): NonNullable<ExtensionRunner["_cachedBprPartition"]> {
 		type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 		const sideEffect: Array<{ ext: Extension; handler: HandlerFn }> = [];
 		const mutating: Array<{ ext: Extension; handler: HandlerFn }> = [];
 		for (const ext of this.extensions) {
-			const handlers = ext.handlers.get("context");
+			const handlers = ext.handlers.get(eventType);
 			if (!handlers || handlers.length === 0) continue;
 			for (const handler of handlers) {
 				const entry = { ext, handler: handler as HandlerFn };
@@ -1214,7 +1265,12 @@ export class ExtensionRunner {
 				}
 			}
 		}
-		this._cachedContextPartition = { sideEffect, mutating };
+		return { sideEffect, mutating };
+	}
+
+	private getContextPartition(): NonNullable<ExtensionRunner["_cachedContextPartition"]> {
+		if (this._cachedContextPartition !== undefined) return this._cachedContextPartition;
+		this._cachedContextPartition = this.partitionHandlers("context");
 		return this._cachedContextPartition;
 	}
 
@@ -1289,22 +1345,7 @@ export class ExtensionRunner {
 
 	private getBprPartition(): NonNullable<ExtensionRunner["_cachedBprPartition"]> {
 		if (this._cachedBprPartition !== undefined) return this._cachedBprPartition;
-		type HandlerFn = (...args: unknown[]) => Promise<unknown>;
-		const sideEffect: Array<{ ext: Extension; handler: HandlerFn }> = [];
-		const mutating: Array<{ ext: Extension; handler: HandlerFn }> = [];
-		for (const ext of this.extensions) {
-			const handlers = ext.handlers.get("before_provider_request");
-			if (!handlers || handlers.length === 0) continue;
-			for (const handler of handlers) {
-				const entry = { ext, handler: handler as HandlerFn };
-				if ((handler as unknown as Record<string, unknown>)[HANDLER_SIDE_EFFECT_TAG] === true) {
-					sideEffect.push(entry);
-				} else {
-					mutating.push(entry);
-				}
-			}
-		}
-		this._cachedBprPartition = { sideEffect, mutating };
+		this._cachedBprPartition = this.partitionHandlers("before_provider_request");
 		return this._cachedBprPartition;
 	}
 

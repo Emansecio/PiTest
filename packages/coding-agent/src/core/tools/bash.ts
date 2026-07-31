@@ -37,11 +37,14 @@ import {
 	effectiveBashMaxBytes,
 	formatSize,
 	type TruncationResult,
+	truncateTail,
 } from "./truncate.js";
 
 const bashSchema = Type.Object(
 	{
-		command: Type.String({ description: "Bash command to execute" }),
+		command: Type.Optional(
+			Type.String({ description: "Bash command to execute. Required, except when passing `jobId` instead." }),
+		),
 		cwd: Type.Optional(
 			Type.String({
 				description:
@@ -60,6 +63,18 @@ const bashSchema = Type.Object(
 					"Start the command in the background and return immediately with a job id (dev servers, watchers, long builds). Output up to the hand-off is returned; later output and the exit code are buffered under the id. A command that finishes (or errors) within the brief startup window returns normally instead. Preferred over `cmd &`, which yields an untracked process with no id.",
 			}),
 		),
+		jobId: Type.Optional(
+			Type.String({
+				description:
+					"Id of a background job (`bg-2`), as reported when a command was promoted to the background. Used INSTEAD of `command`: returns the output buffered since promotion plus the job's status (or kills it, with `action`).",
+			}),
+		),
+		action: Type.Optional(
+			Type.Union([Type.Literal("poll"), Type.Literal("kill")], {
+				description:
+					"What to do with `jobId`: `poll` (default) reads the buffered output and status; `kill` terminates the job. Ignored without `jobId`.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -76,6 +91,8 @@ const BASH_KEY_ALIASES = {
 	directory: "cwd",
 	workdir: "cwd",
 	working_directory: "cwd",
+	job_id: "jobId",
+	jobid: "jobId",
 } as const;
 
 export function prepareBashArguments(input: unknown): BashToolInput {
@@ -309,6 +326,60 @@ function registerBackgroundJob(job: BashBackgroundJob): void {
 		backgroundJobs.delete(victim.id);
 	}
 	backgroundJobs.set(job.id, job);
+}
+
+// Job commands reach the model twice (job listing, poll header) and can be
+// multi-line heredocs; keep the label to one bounded line.
+function clampJobCommand(command: string): string {
+	const firstLine = command.split("\n", 1)[0] ?? "";
+	const clamped = firstLine.length > 120 ? `${firstLine.slice(0, 117)}...` : firstLine;
+	return command.includes("\n") ? `${clamped} …` : clamped;
+}
+
+function describeJobState(job: BashBackgroundJob): string {
+	if (!job.exited) return "still running";
+	return job.exitCode === null
+		? "exited without an exit code (killed or signaled)"
+		: `exited with code ${job.exitCode}`;
+}
+
+/** Poll result for a tracked job: status + the output buffered since promotion. */
+function formatBackgroundJobPoll(job: BashBackgroundJob): string {
+	const startedAgo = ((Date.now() - job.startedAt) / 1000).toFixed(1);
+	const lines = [
+		`Job ${job.id} — ${describeJobState(job)} (started ${startedAgo}s ago).`,
+		`$ ${clampJobCommand(job.command)}`,
+	];
+	if (!job.ringBuffer) {
+		lines.push("(no output buffered since promotion)");
+		return lines.join("\n");
+	}
+	const truncation = truncateTail(collapseRepeatedLines(job.ringBuffer), {
+		maxLines: BASH_MAX_LINES,
+		maxBytes: effectiveBashMaxBytes(),
+	});
+	const notes: string[] = [];
+	if (job.ringTruncated) {
+		notes.push(`oldest output dropped past the ${formatSize(BASH_BG_RING_MAX_BYTES)} job buffer`);
+	}
+	if (truncation.truncated) {
+		notes.push(`showing the last ${truncation.outputLines} of ${truncation.totalLines} buffered lines`);
+	}
+	lines.push(notes.length > 0 ? `Output since promotion [${notes.join("; ")}]:` : "Output since promotion:");
+	lines.push(truncation.content);
+	return lines.join("\n");
+}
+
+/** Actionable error for a job id that is not (or no longer) tracked. */
+function formatUnknownBackgroundJob(jobId: string): string {
+	const jobs = listBashBackgroundJobs();
+	if (jobs.length === 0) {
+		return `No background job "${jobId}": this session has no tracked jobs. An id exists only after a command is promoted to the background ("promoted to background id=bg-N"), and a killed job is dropped from the registry.`;
+	}
+	const listed = jobs
+		.map((job) => `  ${job.id} (${describeJobState(job)}): ${clampJobCommand(job.command)}`)
+		.join("\n");
+	return `No background job "${jobId}". Tracked jobs:\n${listed}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -995,7 +1066,7 @@ class BashResultRenderComponent extends Container {}
  * render pass.
  */
 class BashCallRenderComponent {
-	args: { command?: string; timeout?: number } | undefined;
+	args: BashCallDisplayArgs | undefined;
 	expanded = false;
 	callState: BashRenderState | undefined;
 	private cacheKey: string | undefined;
@@ -1004,7 +1075,7 @@ class BashCallRenderComponent {
 	render(width: number): string[] {
 		const skipped = this.expanded ? 0 : (this.callState?.skippedHint ?? 0);
 		const command = str(this.args?.command);
-		const key = `${width} ${skipped} ${this.expanded ? 1 : 0} ${command ?? ""} ${this.args?.timeout ?? ""}`;
+		const key = `${width} ${skipped} ${this.expanded ? 1 : 0} ${command ?? ""} ${this.args?.timeout ?? ""} ${this.args?.jobId ?? ""} ${this.args?.action ?? ""}`;
 		if (this.cacheLines !== undefined && this.cacheKey === key) return this.cacheLines;
 
 		// Expanded, or no/invalid command: defer to the full multi-row formatter.
@@ -1068,11 +1139,19 @@ function extractFailureSuffix(text: string): { body: string; label: string } | u
 
 const BASH_TITLE_HEAD_LINES = 3;
 
-function formatBashCall(args: { command?: string; timeout?: number } | undefined, expanded: boolean): string {
+/** Raw call args a bash row may render (renderers see pre-validation input). */
+type BashCallDisplayArgs = { command?: string; timeout?: number; jobId?: string; action?: string };
+
+function formatBashCall(args: BashCallDisplayArgs | undefined, expanded: boolean): string {
 	const command = str(args?.command);
 	const timeout = args?.timeout as number | undefined;
 	const timeoutSuffix = timeout ? theme.fg("muted", ` (timeout ${timeout}s)`) : "";
 
+	// Job surface: no command to show, the id + verb is the whole call.
+	if (!command && typeof args?.jobId === "string" && args.jobId) {
+		const verb = args.action === "kill" ? "kill" : "poll";
+		return theme.fg("toolTitle", theme.bold(`${verb} ${args.jobId}`));
+	}
 	if (command === null) {
 		return theme.fg("toolTitle", theme.bold(`$ ${invalidArgText(theme)}`)) + timeoutSuffix;
 	}
@@ -1277,11 +1356,16 @@ export function createBashToolDefinition(
 	return {
 		name: "bash",
 		label: "bash",
-		activity: (args) => classifyBashCommand(args.command),
+		activity: (args) =>
+			typeof args.command === "string"
+				? classifyBashCommand(args.command)
+				: args.action === "kill"
+					? "action"
+					: "navigation",
 		description: `Execute a bash command in the current working directory. Use bash only for what no dedicated tool covers: build/test/install scripts, git, network requests, process management, shell pipelines/redirects. Prefer read/grep/find/ls/write/edit for file operations.
 
-Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BASH_MAX_BYTES / 1024}KB (whichever is hit first); full output is saved to a temp file when truncated. Pass one "command" string (join steps with " && "); each call runs in a fresh shell with no carried state. To run somewhere other than the session root, set the "cwd" parameter instead of prefixing "cd /path &&" — it keeps the command line clean. Optional timeout in seconds.`,
-		promptSnippet: "Execute bash commands (build/test/git/network only; prefer read/grep/find/ls for files)",
+Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BASH_MAX_BYTES / 1024}KB (whichever is hit first); full output is saved to a temp file when truncated. Pass one "command" string (join steps with " && "); each call runs in a fresh shell with no carried state. To run somewhere other than the session root, set the "cwd" parameter instead of prefixing "cd /path &&" — it keeps the command line clean. Optional timeout in seconds. To read or stop a background job, call this tool with "jobId" instead of "command" (add "action":"kill" to stop it) — a fresh shell cannot see those processes, so \`jobs\`/\`tail\` never will.`,
+		promptSnippet: "Execute bash commands",
 		parameters: bashSchema,
 		prepareArguments: prepareBashArguments,
 		async execute(
@@ -1291,11 +1375,67 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 				timeout,
 				cwd: cwdArg,
 				background,
-			}: { command: string; timeout?: number; cwd?: string; background?: boolean },
+				jobId,
+				action,
+			}: {
+				command?: string;
+				timeout?: number;
+				cwd?: string;
+				background?: boolean;
+				jobId?: string;
+				action?: "poll" | "kill";
+			},
 			signal?: AbortSignal,
 			onUpdate?,
 			_ctx?,
 		) {
+			const trimmedJobId = jobId?.trim();
+			// `jobId` addresses an already-running job; `command` starts a new one.
+			// Accepting both would silently drop one of the two intents.
+			if (trimmedJobId && command) {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Pass either "command" (run something) or "jobId" (read/kill background job ${trimmedJobId}), never both. Split it into two calls.`,
+						},
+					],
+					isError: true,
+					details: undefined,
+				};
+			}
+			if (trimmedJobId) {
+				const job = getBashBackgroundJob(trimmedJobId);
+				if (!job) {
+					return {
+						content: [{ type: "text" as const, text: formatUnknownBackgroundJob(trimmedJobId) }],
+						isError: true,
+						details: undefined,
+					};
+				}
+				if (action === "kill") {
+					const wasExited = job.exited;
+					const state = describeJobState(job);
+					killBashBackgroundJob(trimmedJobId);
+					const text = wasExited
+						? `Job ${job.id} had already ${state}; dropped from the registry (buffered output discarded).`
+						: `Killed job ${job.id} ($ ${clampJobCommand(job.command)}) and dropped it from the registry.`;
+					return { content: [{ type: "text" as const, text }], details: undefined };
+				}
+				return { content: [{ type: "text" as const, text: formatBackgroundJobPoll(job) }], details: undefined };
+			}
+			if (!command) {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: 'Missing "command". Pass the command to run, or "jobId" to read/kill a background job.',
+						},
+					],
+					isError: true,
+					details: undefined,
+				};
+			}
 			const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
 			const spawnContext = resolveSpawnContext(resolvedCommand, resolveBashCwd(cwd, cwdArg), spawnHook);
 			const output = new OutputAccumulator({
@@ -1453,7 +1593,7 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 					const job = getBashBackgroundJob(promotedJobId);
 					const elapsedSeconds =
 						job !== undefined ? (job.promotedAt - job.startedAt) / 1000 : resolveAutoBackgroundSeconds();
-					const status = `Command promoted to background id=${promotedJobId} after ${elapsedSeconds.toFixed(1)}s (still running). Output shown is up to promotion; the process keeps running detached and is killed on shutdown. Its later output and exit code are buffered under this id and can be recovered, and the job can be killed on demand by referencing id=${promotedJobId}.`;
+					const status = `Command promoted to background id=${promotedJobId} after ${elapsedSeconds.toFixed(1)}s (still running). Output shown is up to promotion; the process keeps running detached and is killed on shutdown. Poll later output and the exit code with bash({jobId:"${promotedJobId}"}); kill it with bash({jobId:"${promotedJobId}", action:"kill"}). A fresh shell cannot see it — \`jobs\`/\`ps\`/\`tail\` will not find this process.`;
 					return { content: [{ type: "text", text: appendStatus(outputText, status) }], details };
 				}
 				if (exitCode !== 0 && exitCode !== null) {

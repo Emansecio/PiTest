@@ -71,6 +71,62 @@ describe("applyAggregateContextCap (M25a)", () => {
 	});
 });
 
+describe("applyAggregateContextCap specificity order (P3)", () => {
+	it("spends the budget on the cwd file first; the global/ancestral one becomes the pointer", () => {
+		// Emission order is global -> ancestor -> cwd (resource-loader.ts).
+		const globalFile = {
+			path: "C:/Users/dev/.pit/AGENTS.md",
+			content: "g".repeat(PROJECT_CONTEXT_AGGREGATE_MAX_CHARS),
+		};
+		const ancestor = { path: "C:/work/AGENTS.md", content: "a".repeat(4000) };
+		const project = { path: "C:/work/proj/AGENTS.md", content: "p".repeat(2000) };
+
+		const out = applyAggregateContextCap([globalFile, ancestor, project], "C:/work/proj");
+
+		// Emission order preserved...
+		expect(out.map((f) => f.path)).toEqual([globalFile.path, ancestor.path, project.path]);
+		// ...but the project's own rules are inlined, and the ancestor too (2k+4k
+		// fits); only the oversized global file degrades to a pointer.
+		expect(out[2].content).toBe(project.content);
+		expect(out[1].content).toBe(ancestor.content);
+		expect(out[0].content).toContain("read(");
+	});
+
+	it("closer ancestors outrank farther ones", () => {
+		const far = { path: "C:/AGENTS.md", content: "f".repeat(10_000) };
+		const near = { path: "C:/work/AGENTS.md", content: "n".repeat(10_000) };
+		const project = { path: "C:/work/proj/AGENTS.md", content: "p".repeat(1000) };
+
+		const out = applyAggregateContextCap([far, near, project], "C:/work/proj");
+
+		expect(out[2].content).toBe(project.content); // cwd: always first served
+		expect(out[1].content).toBe(near.content); // 1k + 10k still fits
+		expect(out[0].content).toContain("read("); // farthest ancestor pays
+	});
+
+	it("legacy rule files under cwd and <project-config> count as project-level", () => {
+		const globalFile = { path: "C:/Users/dev/.pit/AGENTS.md", content: "g".repeat(15_000) };
+		const legacy = { path: "C:/work/proj/.cursor/rules/base.md", content: "l".repeat(1000) };
+		const config = { path: "<project-config>", content: "c".repeat(500) };
+
+		const out = applyAggregateContextCap([globalFile, legacy, config], "C:/work/proj");
+
+		expect(out[1].content).toBe(legacy.content);
+		expect(out[2].content).toBe(config.content);
+		expect(out[0].content).toContain("read(");
+	});
+
+	it("without a cwd the original in-order behavior is preserved", () => {
+		const first = { path: "C:/Users/dev/.pit/AGENTS.md", content: "g".repeat(15_000) };
+		const second = { path: "C:/work/proj/AGENTS.md", content: "p".repeat(2000) };
+
+		const out = applyAggregateContextCap([first, second]);
+
+		expect(out[0].content).toBe(first.content);
+		expect(out[1].content).toContain("read(");
+	});
+});
+
 describe("normalizeProjectContextFiles aggregate cap integration (M25a)", () => {
 	it("total content length is bounded by aggregate cap when N large files are present", () => {
 		// Each file is above the per-file inline cap so will be excerpted first,

@@ -372,10 +372,10 @@ function buildMinHeap(heap: FrequentFileStat[]): void {
  */
 export function formatFrequentFilesForPrompt(top: FrequentFileStat[]): string {
 	if (top.length === 0) return "";
-	const lines: string[] = ["<frequent_files>"];
-	lines.push(
-		"Files the agent has touched most often in this session. Prefer reading these before broad search when relevant.",
-	);
+	// Header stays ≤6 words: this block is re-sent on every request, so the
+	// full instruction sentence was paying ~25 tokens/request for framing the
+	// tag name already carries.
+	const lines: string[] = ["<frequent_files>", "Most-touched files this session:"];
 	for (const stat of top) {
 		const ops: string[] = [];
 		if (stat.readCount > 0) ops.push(`read×${stat.readCount}`);

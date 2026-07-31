@@ -671,17 +671,54 @@ describe("N5 — oversized user pastes defer to the store with a recall id", () 
 		store.dispose();
 	});
 
-	it("NEVER prunes the first user message of the session (the task statement)", () => {
+	it("does NOT prune the first user message below 3× the threshold (the task statement)", () => {
 		const store = createDeferredOutputStore();
 		setCurrentDeferredOutputStore(store);
-		const paste = giantPaste("FIRST_PASTE");
+		const paste = giantPaste("FIRST_PASTE"); // ~37k tokens — over 20k, under 60k
 		const messages = [user(paste), user("follow-up"), user("a"), user("b")];
 
+		expect(wouldPruneOldToolOutputs(messages, PRUNE_TOKEN_THRESHOLD, 2)).toBe(false);
 		const reclaimed = pruneOldToolOutputs(messages, PRUNE_TOKEN_THRESHOLD, 2, true);
 
 		expect(reclaimed).toBe(0);
 		expect(textAt(messages, 0)).toBe(paste);
 		store.dispose();
+	});
+
+	it("prunes a first user message above 3× the threshold, keeping head AND tail", () => {
+		const store = createDeferredOutputStore();
+		setCurrentDeferredOutputStore(store);
+		// ~110k tokens: a task statement wrapped around a giant paste.
+		const paste = `TASK_STATEMENT: fix the failing build\n${giantPaste("FIRST_HUGE").repeat(3)}\nFINAL_INSTRUCTION: report back`;
+		const messages = [user(paste), user("follow-up"), user("a"), user("b")];
+
+		expect(wouldPruneOldToolOutputs(messages, PRUNE_TOKEN_THRESHOLD, 2)).toBe(true);
+		const reclaimed = pruneOldToolOutputs(messages, PRUNE_TOKEN_THRESHOLD, 2, true);
+
+		expect(reclaimed).toBeGreaterThan(0);
+		const text = textAt(messages, 0);
+		expect(text.length).toBeLessThan(paste.length);
+		// The statement (head) and any closing instruction (tail) survive verbatim…
+		expect(text).toContain("TASK_STATEMENT: fix the failing build");
+		expect(text).toContain("FINAL_INSTRUCTION: report back");
+		// …with a far more generous excerpt than the ordinary 1500+800-char one.
+		expect(text.length).toBeGreaterThan(8_000);
+		// …and the full paste stays recoverable in the store.
+		const match = text.match(/recall_tool_output\(\{ id: "(d\d+)" \}\)/);
+		expect(match).not.toBeNull();
+		expect(store.get(match?.[1] ?? "")).toBe(paste);
+		store.dispose();
+	});
+
+	it("leaves an oversized first user message intact without a store (defer stays mandatory)", () => {
+		const paste = `TASK_STATEMENT\n${giantPaste("FIRST_NO_STORE").repeat(3)}`;
+		const messages = [user(paste), user("follow-up"), user("a"), user("b")];
+
+		expect(wouldPruneOldToolOutputs(messages, PRUNE_TOKEN_THRESHOLD, 2)).toBe(false);
+		const reclaimed = pruneOldToolOutputs(messages, PRUNE_TOKEN_THRESHOLD, 2, true);
+
+		expect(reclaimed).toBe(0);
+		expect(textAt(messages, 0)).toBe(paste);
 	});
 
 	it("leaves the paste intact when there is no store (defer is mandatory)", () => {

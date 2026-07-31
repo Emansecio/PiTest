@@ -283,6 +283,40 @@ describe("buildSystemPrompt", () => {
 			});
 			expect(prompt).not.toContain("<frequent_files_outline>");
 		});
+
+		test("omits groundedContext when context occupancy is at or above 50%", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+				groundedContext: "<grounded_context>\nsrc/a.ts: foo, bar\n</grounded_context>",
+				contextOccupancyPercent: 50,
+			});
+			expect(prompt).not.toContain("<grounded_context>");
+		});
+
+		test("emits groundedContext when context occupancy is below 50% or undefined", () => {
+			const promptBelow = buildSystemPrompt({
+				selectedTools: ["read"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+				groundedContext: "<grounded_context>\nsrc/a.ts: foo, bar\n</grounded_context>",
+				contextOccupancyPercent: 40,
+			});
+			expect(promptBelow).toContain("<grounded_context>");
+			expect(promptBelow).toContain("src/a.ts: foo, bar");
+
+			const promptUndefined = buildSystemPrompt({
+				selectedTools: ["read"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+				groundedContext: "<grounded_context>\nsrc/a.ts: foo, bar\n</grounded_context>",
+			});
+			expect(promptUndefined).toContain("<grounded_context>");
+		});
 	});
 
 	describe("PIT_NARRATION", () => {

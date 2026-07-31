@@ -72,6 +72,101 @@ describe("loadProjectConfigContext", () => {
 		expect(loadProjectConfigContext(dir)).toBeNull();
 	});
 
+	it("distills a .prettierrc.json", () => {
+		writeFileSync(
+			join(dir, ".prettierrc.json"),
+			JSON.stringify({ singleQuote: true, semi: false, tabWidth: 4, trailingComma: "all", printWidth: 100 }),
+		);
+		const content = loadProjectConfigContext(dir)?.content ?? "";
+		expect(content).toContain("Prettier format:");
+		expect(content).toContain("single quotes");
+		expect(content).toContain("no semicolons");
+		expect(content).toContain("4-space indent");
+		expect(content).toContain("trailing commas: all");
+		expect(content).toContain("print width 100");
+	});
+
+	it("distills a bare .prettierrc and prefers tabs over tabWidth", () => {
+		writeFileSync(join(dir, ".prettierrc"), JSON.stringify({ useTabs: true, tabWidth: 2, singleQuote: false }));
+		const content = loadProjectConfigContext(dir)?.content ?? "";
+		expect(content).toContain("tab indent");
+		expect(content).toContain("double quotes");
+		expect(content).not.toContain("2-space indent");
+	});
+
+	it("distills the prettier key from package.json", () => {
+		writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "x", prettier: { semi: true, printWidth: 80 } }));
+		const content = loadProjectConfigContext(dir)?.content ?? "";
+		expect(content).toContain("semicolons required");
+		expect(content).toContain("print width 80");
+	});
+
+	it("omits prettier options that are not set", () => {
+		writeFileSync(join(dir, ".prettierrc.json"), JSON.stringify({ singleQuote: true }));
+		const content = loadProjectConfigContext(dir)?.content ?? "";
+		expect(content).toContain("single quotes");
+		expect(content).not.toContain("indent");
+		expect(content).not.toContain("print width");
+		expect(content).not.toContain("semicolon");
+	});
+
+	it("ignores a prettier config that is not JSON (e.g. YAML) rather than throwing", () => {
+		writeFileSync(join(dir, ".prettierrc"), "singleQuote: true\nsemi: false\n");
+		expect(loadProjectConfigContext(dir)).toBeNull();
+	});
+
+	it("distills the [*] section of .editorconfig", () => {
+		writeFileSync(
+			join(dir, ".editorconfig"),
+			[
+				"root = true",
+				"",
+				"[*]",
+				"indent_style = tab",
+				"indent_size = 4",
+				"end_of_line = lf",
+				"insert_final_newline = true",
+			].join("\n"),
+		);
+		const content = loadProjectConfigContext(dir)?.content ?? "";
+		expect(content).toContain("EditorConfig [*]:");
+		expect(content).toContain("tab indent");
+		expect(content).toContain("LF line endings");
+		expect(content).toContain("final newline required");
+	});
+
+	it("reads only the [*] section of .editorconfig, not per-glob overrides", () => {
+		writeFileSync(
+			join(dir, ".editorconfig"),
+			[
+				"[*]",
+				"indent_style = space",
+				"indent_size = 2",
+				"",
+				"[*.md]",
+				"indent_style = tab",
+				"end_of_line = crlf",
+			].join("\n"),
+		);
+		const content = loadProjectConfigContext(dir)?.content ?? "";
+		expect(content).toContain("2-space indent");
+		expect(content).not.toContain("tab indent");
+		expect(content).not.toContain("CRLF");
+	});
+
+	it("ignores comments and malformed lines in .editorconfig", () => {
+		writeFileSync(
+			join(dir, ".editorconfig"),
+			["# a comment", "; another", "[*]", "this line has no equals", "= no key", "indent_style = space"].join("\n"),
+		);
+		expect(loadProjectConfigContext(dir)?.content ?? "").toContain("space indent");
+	});
+
+	it("yields no section when .editorconfig has nothing recognizable", () => {
+		writeFileSync(join(dir, ".editorconfig"), ["root = true", "[*.py]", "indent_size = 4"].join("\n"));
+		expect(loadProjectConfigContext(dir)).toBeNull();
+	});
+
 	it("inherits compilerOptions through the extends chain", () => {
 		writeFileSync(join(dir, "tsconfig.base.json"), JSON.stringify({ compilerOptions: { erasableSyntaxOnly: true } }));
 		writeFileSync(

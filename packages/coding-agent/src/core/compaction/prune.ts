@@ -33,6 +33,20 @@ export const PRUNE_TAIL_CHARS = 800;
 /** Text shorter than this cannot shrink via head+tail excerpt alone. */
 const PRUNE_MIN_SHRINK_CHARS = PRUNE_HEAD_CHARS + PRUNE_TAIL_CHARS + 64;
 
+/**
+ * N5, first-user exception. The session's FIRST user message is the task
+ * statement, so it never prunes at the normal paste threshold. But an opening
+ * message is not automatically a task statement: a 40k-token paste dropped at
+ * the top of the session rides EVERY request until compaction. Above this
+ * multiple of the normal threshold N5 applies to it too — with a far more
+ * generous excerpt, so the statement (head) and any closing instructions (tail)
+ * survive verbatim and only the bulk paste in the middle is deferred.
+ */
+const FIRST_USER_PASTE_THRESHOLD_MULTIPLIER = 3;
+const FIRST_USER_PRUNE_HEAD_CHARS = 6_000;
+const FIRST_USER_PRUNE_TAIL_CHARS = 3_000;
+const FIRST_USER_PRUNE_MIN_SHRINK_CHARS = FIRST_USER_PRUNE_HEAD_CHARS + FIRST_USER_PRUNE_TAIL_CHARS + 64;
+
 /** M11: why a read result was marked superseded — selects the collapse marker. */
 export interface SupersededMutationCause {
 	/** Path VERBATIM as the model passed it to the write/edit (never the normalized key). */
@@ -92,6 +106,41 @@ function resolveContextPrunePlan(
 	plan: ContextPrunePlan | undefined,
 ): ContextPrunePlan {
 	return plan ?? planContextPrune(messages, protectTurns);
+}
+
+/**
+ * Split a plan's supersede set by CAUSE (P2-6). `deriveSupersededIndices` mixes
+ * three classes under one Set, and they do NOT deserve the same treatment:
+ *
+ * - **mutation** — M11 write-invalidation: a read the disk now contradicts.
+ *   Collapsing it is a CORRECTION (the stale bytes actively mislead the model),
+ *   so it must run unconditionally, whatever the cache costs.
+ * - **economy** — exact duplicate + N4 (grep covered by a later full read): the
+ *   current view is already in context, so the older copy misleads nobody; it
+ *   only costs tokens. Collapsing one in the MIDDLE of the history forces the
+ *   provider to cold-write the whole cached tail, which routinely costs more
+ *   than the few thousand tokens it reclaims (see prune-economics.ts).
+ *
+ * Both returned plans share `protectFromIndex`/`pinnedIndices` and carry a
+ * disjoint partition of `supersededIndices`, so a caller can weigh the economy
+ * half against cache economics while still applying the correction half. The
+ * cause map is shared as-is: it only has entries for mutation indices, so an
+ * economy-plan lookup misses exactly as it would on a freshly built map.
+ */
+export function splitSupersedePlanByCause(plan: ContextPrunePlan): {
+	mutation: ContextPrunePlan;
+	economy: ContextPrunePlan;
+} {
+	const mutationIndices = new Set<number>();
+	const economyIndices = new Set<number>();
+	for (const i of plan.supersededIndices) {
+		if (plan.supersededMutationCauses.has(i)) mutationIndices.add(i);
+		else economyIndices.add(i);
+	}
+	return {
+		mutation: { ...plan, supersededIndices: mutationIndices },
+		economy: { ...plan, supersededIndices: economyIndices },
+	};
 }
 
 function wouldShrinkViaHeadTail(text: string): boolean {
@@ -171,6 +220,23 @@ export function headTailExcerpt(text: string): string {
 		// applicable (not JSON, or won't fit even when fully collapsed).
 		crush: (t) => crushJson(t, { targetChars: PRUNE_HEAD_CHARS + PRUNE_TAIL_CHARS }),
 		marker: (_elidedChars, middle) => `[… ~${estimateTextTokens(middle, true)} tokens elided …]`,
+	});
+}
+
+/**
+ * N5 excerpt for the FIRST user message — same shape, ~4× the head/tail budget.
+ * The opening message mixes the task statement with the paste, so the cut must
+ * be generous enough that the statement itself is never the thing elided. No
+ * JSON crush here: crushJson targets the small tool-output budget and would
+ * defeat the point of the generous excerpt, and a user paste is a prose/code mix
+ * (prose token divisor, matching {@link deferredUserPasteReplacement}).
+ */
+function firstUserHeadTailExcerpt(text: string): string {
+	return headTailExcerptShared(text, {
+		headBudget: FIRST_USER_PRUNE_HEAD_CHARS,
+		tailBudget: FIRST_USER_PRUNE_TAIL_CHARS,
+		snapWindow: 400,
+		marker: (_elidedChars, middle) => `[… ~${estimateTextTokens(middle)} tokens elided …]`,
 	});
 }
 
@@ -720,20 +786,17 @@ export function wouldPruneOldToolOutputs(
 		if (pinnedIndices.has(i)) continue; // P5: file pin — never prune this index
 		const msg = messages[i];
 		if (msg.role === "user") {
-			if (i === firstUserIndex) continue;
+			// First user message: only the 3× profile can fire (and only with a store —
+			// `firstUserIndex` is -1 without one, so this branch is unreachable then).
+			if (i === firstUserIndex) {
+				if (wouldPruneUserPasteBlocks(msg, firstUserPasteProfile(tokenThreshold))) return true;
+				continue;
+			}
 			// N8: a collapsible consumed steering reminder makes the prune worth running,
 			// independent of the deferred-output store (no defer needed — see above).
 			if (hasConsumedSteeringReminder(msg)) return true;
 			if (userPasteStore === undefined) continue;
-			const content = (msg as { content: string | Array<{ type: string; text?: string }> }).content;
-			if (typeof content === "string") {
-				if (estimateTextTokens(content) > tokenThreshold && wouldShrinkViaHeadTail(content)) return true;
-			} else if (Array.isArray(content)) {
-				for (const block of content) {
-					if (block.type !== "text" || !block.text) continue;
-					if (estimateTextTokens(block.text) > tokenThreshold && wouldShrinkViaHeadTail(block.text)) return true;
-				}
-			}
+			if (wouldPruneUserPasteBlocks(msg, userPasteProfile(tokenThreshold))) return true;
 			continue;
 		}
 		if (msg.role === "assistant" && Array.isArray(msg.content)) {
@@ -823,12 +886,45 @@ function collapseSupersededTextBlock(
 	return Math.max(0, est - after);
 }
 
-/** Index of the session's FIRST user message (the task statement) — never pruned by N5. */
+/** Index of the session's FIRST user message (the task statement) — see {@link firstUserPasteProfile}. */
 function firstUserMessageIndex(messages: AgentMessage[]): number {
 	for (let i = 0; i < messages.length; i++) {
 		if (messages[i].role === "user") return i;
 	}
 	return -1;
+}
+
+/**
+ * N5 knobs. The first user message prunes at a much higher bar with a much
+ * larger excerpt than every other user message; everything else about the pass
+ * (defer-mandatory, in-place rewrite, reclaim accounting) is identical, so the
+ * two only differ by this profile.
+ */
+interface UserPasteProfile {
+	/** Estimated tokens a single text must exceed to be shrunk. */
+	tokenThreshold: number;
+	/** Below this length the excerpt cannot shrink the text — cheap pre-filter. */
+	minShrinkChars: number;
+	excerpt: (text: string) => string;
+}
+
+/** N5 profile for ordinary (non-first) old user messages. */
+function userPasteProfile(tokenThreshold: number): UserPasteProfile {
+	return { tokenThreshold, minShrinkChars: PRUNE_MIN_SHRINK_CHARS, excerpt: headTailExcerpt };
+}
+
+/**
+ * N5 profile for the session's FIRST user message: 3× the threshold and the
+ * generous excerpt. Below that bar the opening message is left fully intact —
+ * it is the task statement, and the whole point of the exception is that it
+ * survives the session verbatim.
+ */
+function firstUserPasteProfile(tokenThreshold: number): UserPasteProfile {
+	return {
+		tokenThreshold: tokenThreshold * FIRST_USER_PASTE_THRESHOLD_MULTIPLIER,
+		minShrinkChars: FIRST_USER_PRUNE_MIN_SHRINK_CHARS,
+		excerpt: firstUserHeadTailExcerpt,
+	};
 }
 
 /**
@@ -840,13 +936,13 @@ function firstUserMessageIndex(messages: AgentMessage[]): number {
  */
 function deferredUserPasteReplacement(
 	text: string,
-	tokenThreshold: number,
+	profile: UserPasteProfile,
 	store: DeferredOutputStore,
 ): { text: string; reclaimed: number } | undefined {
 	// User pastes are prose/code mixes — classify density instead of forcing dense.
 	const est = estimateTextTokens(text);
-	if (est <= tokenThreshold) return undefined;
-	const excerpt = headTailExcerpt(text);
+	if (est <= profile.tokenThreshold) return undefined;
+	const excerpt = profile.excerpt(text);
 	if (excerpt.length >= text.length) return undefined;
 	let id: string;
 	try {
@@ -863,10 +959,10 @@ function deferredUserPasteReplacement(
  * content and text-block arrays. Mutates the (cloned) message in place and
  * returns reclaimed tokens.
  */
-function pruneUserPasteBlocks(msg: AgentMessage, tokenThreshold: number, store: DeferredOutputStore): number {
+function pruneUserPasteBlocks(msg: AgentMessage, profile: UserPasteProfile, store: DeferredOutputStore): number {
 	const content = (msg as { content: string | Array<{ type: string; text?: string }> }).content;
 	if (typeof content === "string") {
-		const result = deferredUserPasteReplacement(content, tokenThreshold, store);
+		const result = deferredUserPasteReplacement(content, profile, store);
 		if (result === undefined) return 0;
 		(msg as { content: string }).content = result.text;
 		return result.reclaimed;
@@ -875,12 +971,30 @@ function pruneUserPasteBlocks(msg: AgentMessage, tokenThreshold: number, store: 
 	let reclaimed = 0;
 	for (const block of content) {
 		if (block.type !== "text" || !block.text) continue;
-		const result = deferredUserPasteReplacement(block.text, tokenThreshold, store);
+		const result = deferredUserPasteReplacement(block.text, profile, store);
 		if (result === undefined) continue;
 		block.text = result.text;
 		reclaimed += result.reclaimed;
 	}
 	return reclaimed;
+}
+
+/** Read-only counterpart of {@link pruneUserPasteBlocks} (same profile, no store needed). */
+function wouldPruneUserPasteBlocks(msg: AgentMessage, profile: UserPasteProfile): boolean {
+	const content = (msg as { content: string | Array<{ type: string; text?: string }> }).content;
+	if (typeof content === "string") return wouldShrinkUserPaste(content, profile);
+	if (!Array.isArray(content)) return false;
+	for (const block of content) {
+		if (block.type !== "text" || !block.text) continue;
+		if (wouldShrinkUserPaste(block.text, profile)) return true;
+	}
+	return false;
+}
+
+function wouldShrinkUserPaste(text: string, profile: UserPasteProfile): boolean {
+	if (text.length <= profile.minShrinkChars) return false;
+	if (estimateTextTokens(text) <= profile.tokenThreshold) return false;
+	return profile.excerpt(text).length < text.length;
 }
 
 // ============================================================================
@@ -1022,20 +1136,26 @@ export function pruneOldToolOutputs(
 		// N5: pasted logs/stacks in OLD user messages can be 5-50k tokens. Above
 		// the same threshold, shrink to head+tail + recall id. The defer is
 		// MANDATORY (no store / failed put → paste stays intact — user input has
-		// no disk copy to re-derive). The FIRST user message of the session (the
-		// task statement) is never pruned.
+		// no disk copy to re-derive). The FIRST user message (the task statement)
+		// only prunes at 3× the threshold, with the generous excerpt.
 		if (msg.role === "user") {
-			if (i !== firstUserIndex) {
-				// N8: collapse consumed steering reminders (overthink/TTSR) to one line
-				// BEFORE the N5 paste prune. Reminders are far below the paste threshold
-				// (a few hundred chars), so N5 never reaches them — that is why N8 exists
-				// — and they need no store: the guard re-emits them, nothing to recover.
-				prunedTokens += collapseConsumedSteeringReminders(msg);
-				// N5: pasted logs/stacks are defer-mandatory (user input has no on-disk
-				// source of truth), so they only prune when a store is open.
+			if (i === firstUserIndex) {
+				// No N8 here: a synthetic steering reminder is never the opening
+				// message. Same defer-mandatory contract as N5 everywhere else.
 				if (store !== undefined) {
-					prunedTokens += pruneUserPasteBlocks(msg, tokenThreshold, store);
+					prunedTokens += pruneUserPasteBlocks(msg, firstUserPasteProfile(tokenThreshold), store);
 				}
+				continue;
+			}
+			// N8: collapse consumed steering reminders (overthink/TTSR) to one line
+			// BEFORE the N5 paste prune. Reminders are far below the paste threshold
+			// (a few hundred chars), so N5 never reaches them — that is why N8 exists
+			// — and they need no store: the guard re-emits them, nothing to recover.
+			prunedTokens += collapseConsumedSteeringReminders(msg);
+			// N5: pasted logs/stacks are defer-mandatory (user input has no on-disk
+			// source of truth), so they only prune when a store is open.
+			if (store !== undefined) {
+				prunedTokens += pruneUserPasteBlocks(msg, userPasteProfile(tokenThreshold), store);
 			}
 			continue;
 		}

@@ -1191,4 +1191,165 @@ describe("ExtensionRunner", () => {
 			expect(out.order).toEqual(["a", "b"]);
 		});
 	});
+
+	describe("emitToolCall split", () => {
+		const toolCallEvent = () =>
+			({
+				type: "tool_call",
+				toolCallId: "call-1",
+				toolName: "bash",
+				input: { command: "ls" },
+			}) as never;
+
+		it("runs side-effect handlers concurrently and mutating handlers serially in order", async () => {
+			// Two tagged observers sleep 60ms each: serial would be ~120ms just for
+			// them, concurrent ~60ms. The mutating chain runs after, in registration
+			// order, and reports the observed order through the surviving result.
+			const code = `
+				export default function(pi) {
+					const order = [];
+					pi.on("tool_call", pi.markSideEffect(async () => {
+						await new Promise((r) => setTimeout(r, 60));
+						order.push("observer-a");
+					}));
+					pi.on("tool_call", pi.markSideEffect(async () => {
+						await new Promise((r) => setTimeout(r, 60));
+						order.push("observer-b");
+					}));
+					pi.on("tool_call", async () => { order.push("mutator-1"); });
+					pi.on("tool_call", async () => {
+						order.push("mutator-2");
+						return { block: false, reason: order.join(">") };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-split.ts"), code);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			const t0 = performance.now();
+			const out = await runner.emitToolCall(toolCallEvent());
+			const elapsed = performance.now() - t0;
+
+			const order = (out?.reason ?? "").split(">");
+			// Both observers completed before the mutating chain started (their
+			// relative order is scheduling-dependent, so compare as a set).
+			expect(order.slice(0, 2).sort()).toEqual(["observer-a", "observer-b"]);
+			expect(order.slice(2)).toEqual(["mutator-1", "mutator-2"]);
+			expect(elapsed).toBeGreaterThanOrEqual(50);
+			expect(elapsed).toBeLessThan(150);
+		});
+
+		it("returns the first block immediately and skips the rest of the mutating chain", async () => {
+			const code = `
+				globalThis.__afterBlockRan = false;
+				export default function(pi) {
+					pi.on("tool_call", pi.markSideEffect(() => {
+						globalThis.__observerRan = true;
+					}));
+					pi.on("tool_call", async () => ({ reason: "advice-only" }));
+					pi.on("tool_call", async () => ({ block: true, reason: "denied" }));
+					pi.on("tool_call", async () => {
+						globalThis.__afterBlockRan = true;
+						return { block: true, reason: "later-block" };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-block.ts"), code);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			const out = await runner.emitToolCall(toolCallEvent());
+
+			expect(out).toEqual({ block: true, reason: "denied" });
+			expect((globalThis as { __afterBlockRan?: boolean }).__afterBlockRan).toBe(false);
+			// Observers are dispatched (and awaited) before the chain can block.
+			expect((globalThis as { __observerRan?: boolean }).__observerRan).toBe(true);
+		});
+
+		it("keeps the last non-block result and lets mutators rewrite input in place", async () => {
+			const code = `
+				export default function(pi) {
+					pi.on("tool_call", async (event) => {
+						event.input.command = event.input.command + " -la";
+						return { reason: "first" };
+					});
+					pi.on("tool_call", async (event) => ({ reason: "saw:" + event.input.command }));
+					pi.on("tool_call", async () => undefined);
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-last.ts"), code);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			const event = toolCallEvent();
+			const out = await runner.emitToolCall(event);
+
+			// Last non-undefined, non-block result wins; a later `undefined` never clears it.
+			expect(out).toEqual({ reason: "saw:ls -la" });
+			expect((event as unknown as { input: { command: string } }).input.command).toBe("ls -la");
+		});
+
+		it("isolates a throwing observer and a throwing mutator via emitError", async () => {
+			const code = `
+				export default function(pi) {
+					pi.on("tool_call", pi.markSideEffect(async () => {
+						throw new Error("observer boom");
+					}));
+					pi.on("tool_call", pi.markSideEffect(() => {
+						globalThis.__siblingObserverRan = true;
+					}));
+					pi.on("tool_call", async () => {
+						throw new Error("mutator boom");
+					});
+					pi.on("tool_call", async () => ({ reason: "survived" }));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-throw.ts"), code);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const errors: string[] = [];
+			runner.onError((err) => errors.push(err.error));
+
+			const out = await runner.emitToolCall(toolCallEvent());
+
+			expect(out).toEqual({ reason: "survived" });
+			expect((globalThis as { __siblingObserverRan?: boolean }).__siblingObserverRan).toBe(true);
+			expect(errors).toHaveLength(2);
+			expect(errors.join("|")).toContain("observer boom");
+			expect(errors.join("|")).toContain("mutator boom");
+		});
+
+		it("sees handlers registered after an earlier emit (partition cache invalidation)", async () => {
+			const code = `
+				export default function(pi) {
+					pi.registerCommand("arm-guard", {
+						description: "registers a late tool_call handler",
+						handler: async () => {},
+					});
+					pi.on("input", async () => {
+						pi.on("tool_call", async () => ({ block: true, reason: "late-guard" }));
+						return { action: "continue" };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-late.ts"), code);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			runner.bindCore(extensionActions, extensionContextActions);
+
+			// First emit caches an empty tool_call partition.
+			expect(await runner.emitToolCall(toolCallEvent())).toBeUndefined();
+
+			// A late api.on() invalidates it (loader routes registration through refreshTools).
+			await runner.emitInput("hi", undefined, "interactive");
+
+			expect(await runner.emitToolCall(toolCallEvent())).toEqual({ block: true, reason: "late-guard" });
+		});
+	});
 });

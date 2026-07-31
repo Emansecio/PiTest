@@ -17,10 +17,22 @@ function makeToolMap(names: string[]): Map<string, AgentTool<any>> {
 }
 
 describe("formatUnknownToolError", () => {
-	it("includes the available tool list", () => {
+	it("includes the available tool list, nearest name first", () => {
 		const error = formatUnknownToolError("readd", makeToolMap(["read", "bash", "edit", "write"]));
 		expect(error).toContain('Tool "readd" not found.');
-		expect(error).toMatch(/Available tools: bash, edit, read, write\./);
+		// Proximity order, not alphabetical: the listing is capped, so the tools
+		// closest to what the model asked for must survive the cut.
+		expect(error).toMatch(/Available tools: read, bash, edit, write\./);
+	});
+
+	it("keeps near matches inside the cap on a large, namespace-heavy surface", () => {
+		const noise = Array.from({ length: 24 }, (_, i) => `chrome_devtools_action_${String(i).padStart(2, "0")}`);
+		const error = formatUnknownToolError("write_file", makeToolMap([...noise, "write", "read"]));
+		const listed = /Available tools: ([^…]*), …/.exec(error)?.[1].split(", ") ?? [];
+		expect(listed).toHaveLength(16);
+		expect(listed[0]).toBe("write");
+		expect(listed).toContain("read");
+		expect(error).toMatch(/… \(10 more\)\./);
 	});
 
 	it("suggests the nearest tool name", () => {

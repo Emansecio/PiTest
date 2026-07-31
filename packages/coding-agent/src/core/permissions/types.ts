@@ -51,7 +51,12 @@ export interface CommandRule {
 export interface PermissionSettings {
 	/** Default mode when no CLI override is set. */
 	mode?: PermissionMode;
-	/** Paths always allowed without prompt. */
+	/**
+	 * Paths explicitly allowed (precedence step 6 in `docs/permissions.md`). There is
+	 * no interactive prompt tier — modes are only `plan`/`auto`, and both end in a
+	 * terminal `allow`, so this list is consulted after the deny rules and can only
+	 * ever confirm a decision the default would already reach.
+	 */
 	allowPaths?: PathRule[];
 	/** Paths always blocked (highest priority). Combined with built-in defaults unless disabled. */
 	denyPaths?: PathRule[];
@@ -132,9 +137,21 @@ export const BUILTIN_DANGEROUS_COMMANDS: readonly CommandRule[] = [
 		pattern: `\\brm\\s+${RM_FLAGS_WITH_RECURSIVE}\\s{1,3}(?:--\\s{1,3})?\\$\\{?HOME\\}?(?:/(?:\\s|$)|\\s|$)`,
 		reason: "Recursive rm of $HOME",
 	},
+	// Command-position anchor (`^`/`;`/`&&`/`|`, optional `sudo`) on the rules below.
+	// A deny-floor hit is a HARD block with no fire-once escape, so a rule that fires on
+	// a command merely CONTAINING the phrase (`grep -rn "mkfs" .`) wedges routine work —
+	// a false positive costs more here than a false negative, which still falls through to
+	// the middle-tier destructive-command guard (a fire-once speed-bump: it blocks once and
+	// lets an identical re-issue run). There is no interactive permission prompt to catch it.
 	{ pattern: ":\\(\\)\\s*\\{\\s*:\\s*\\|\\s*:&\\s*\\};:", reason: "Fork bomb" },
-	{ pattern: "\\b(?:mkfs|dd\\s+if=.*of=/dev/)", reason: "Disk-destroying command" },
-	{ pattern: "\\bchmod\\s+-R\\s+777\\s+/", reason: "Recursive world-writable on root" },
+	{
+		pattern: "(?:^|[;&|]\\s{0,3})(?:sudo\\s{1,3})?(?:mkfs|dd\\s{1,3}if=[^;&|]{0,80}of=/dev/)",
+		reason: "Disk-destroying command",
+	},
+	{
+		pattern: "(?:^|[;&|]\\s{0,3})(?:sudo\\s{1,3})?chmod\\s{1,3}-R\\s{1,3}777\\s{1,3}/",
+		reason: "Recursive world-writable on root",
+	},
 	// PowerShell/cmd catastrophic tier. Without these, `Remove-Item -Recurse -Force C:\`
 	// had no hard block anywhere on Windows (the middle-tier destructive guard only
 	// speed-bumps). Targets must be the FINAL token of the segment: a drive root
@@ -148,6 +165,37 @@ export const BUILTIN_DANGEROUS_COMMANDS: readonly CommandRule[] = [
 		pattern: "\\b(?:rd|rmdir|del)\\b(?=[^;&|]*\\s/s\\b)[^;&|]*\\s[\"']?[a-z]:[\\\\/]{0,2}\\*?[\"']?\\s*(?:$|[;&|])",
 		reason: "Recursive delete of a drive root (cmd)",
 	},
-	{ pattern: "\\b(?:format-volume|clear-disk)\\b", reason: "Disk-destroying command (PowerShell)" },
-	{ pattern: "\\bformat\\s+[a-z]:(?:\\s|$)", reason: "Formatting a drive" },
+	{
+		pattern: "(?:^|[;&|]\\s{0,3})(?:sudo\\s{1,3})?(?:format-volume|clear-disk)\\b",
+		reason: "Disk-destroying command (PowerShell)",
+	},
+	{ pattern: "(?:^|[;&|]\\s{0,3})(?:sudo\\s{1,3})?format\\s{1,3}[a-z]:(?:\\s|$)", reason: "Formatting a drive" },
+	{
+		pattern:
+			"(?:^|[;&|]\\s{0,3})(?:sudo\\s{1,3})?aws\\s{1,3}s3\\s{1,3}rm\\s(?=[^;&|]{0,120}--recursive\\b)[^;&|]{0,120}s3://[a-z0-9][a-z0-9.-]{1,61}/?(?:\\s|$)",
+		reason: "Recursive delete of an S3 bucket root",
+	},
+	{
+		pattern: "(?:^|[;&|]\\s{0,3})(?:sudo\\s{1,3})?aws\\s{1,3}s3\\s{1,3}rb\\b(?=[^;&|]{0,120}--force\\b)",
+		reason: "Force-deleting an S3 bucket",
+	},
+	{
+		pattern: "(?:^|[;&|]\\s{0,3})(?:sudo\\s{1,3})?kubectl\\s[^;&|]{0,60}delete\\s{1,3}(?:namespaces?|ns)\\b",
+		reason: "Deleting a Kubernetes namespace",
+	},
+	{
+		pattern:
+			"(?:^|[;&|]\\s{0,3})(?:sudo\\s{1,3})?kubectl\\s[^;&|]{0,60}delete\\b(?=[^;&|]{0,120}\\s--all-namespaces\\b)",
+		reason: "Cluster-wide kubectl delete",
+	},
+	{ pattern: "(?:^|[;&|]\\s{0,3})(?:sudo\\s{1,3})?dropdb\\b", reason: "Dropping a database" },
+	{
+		pattern:
+			"(?:^|[;&|]\\s{0,3})(?:sudo\\s{1,3})?(?:psql|mysql|mariadb|sqlite3|mongosh)\\s[^;&|]{0,160}\\bdrop\\s{1,3}(?:database|schema)\\b",
+		reason: "Dropping a database/schema",
+	},
+	{
+		pattern: "(?:^|[;&|]\\s{0,3})(?:sudo\\s{1,3})?terraform\\s{1,3}destroy\\b(?=[^;&|]{0,120}-auto-approve\\b)",
+		reason: "Unattended terraform destroy",
+	},
 ];

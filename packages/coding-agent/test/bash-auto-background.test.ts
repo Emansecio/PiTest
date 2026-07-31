@@ -17,7 +17,9 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+	_registerBashBackgroundJobForTest,
 	_resetBashBackgroundJobsForTest,
+	type BashBackgroundJob,
 	createBashToolDefinition,
 	createLocalBashOperations,
 	getBashBackgroundJob,
@@ -176,6 +178,11 @@ describe("bash auto-background: promote on threshold instead of kill", () => {
 			const text = result.content[0]?.text ?? "";
 			// Promotion is reported, not thrown — the model can poll/kill via the id.
 			expect(text).toMatch(/promoted to background id=/i);
+			// The message points at the REAL recovery surface (the bash tool itself),
+			// not at a shell that cannot see the detached process.
+			const promotedId = listBashBackgroundJobs()[0]?.id as string;
+			expect(text).toContain(`bash({jobId:"${promotedId}"})`);
+			expect(text).toContain(`bash({jobId:"${promotedId}", action:"kill"})`);
 			// The output captured up to promotion is included.
 			expect(text).toContain("marker-line");
 
@@ -296,4 +303,186 @@ describe("bash auto-background: promote on threshold instead of kill", () => {
 		},
 		15_000,
 	);
+
+	it.skipIf(!BASH_AVAILABLE)(
+		"end-to-end: a REAL promoted job is pollable and killable through the bash tool itself",
+		async () => {
+			process.env.PIT_BASH_BACKGROUND_STARTUP_MS = "150";
+			const def = createBashToolDefinition(process.cwd());
+			const ctx = {} as Parameters<typeof def.execute>[4];
+			type ToolResult = { content: Array<{ type: string; text?: string }>; isError?: boolean };
+
+			await def.execute("call-run", { command: "sleep 10", background: true }, undefined, undefined, ctx);
+			const id = listBashBackgroundJobs()[0]?.id as string;
+			expect(id).toBeTruthy();
+
+			const polled = (await def.execute("call-poll", { jobId: id }, undefined, undefined, ctx)) as ToolResult;
+			expect(polled.isError).toBeUndefined();
+			expect(polled.content[0]?.text ?? "").toContain(`Job ${id}`);
+			expect(polled.content[0]?.text ?? "").toContain("still running");
+
+			const killedResult = (await def.execute(
+				"call-kill",
+				{ jobId: id, action: "kill" },
+				undefined,
+				undefined,
+				ctx,
+			)) as ToolResult;
+			expect(killedResult.isError).toBeUndefined();
+			expect(killedResult.content[0]?.text ?? "").toContain(`Killed job ${id}`);
+			expect(listBashBackgroundJobs()).toHaveLength(0);
+			delete process.env.PIT_BASH_BACKGROUND_STARTUP_MS;
+		},
+		15_000,
+	);
+});
+
+/**
+ * The job surface the promotion message promises: `bash({jobId})` polls a
+ * promoted job's buffered output/status and `action:"kill"` stops it. Most cases
+ * use a SYNTHETIC job (no process spawned) so the assertions are about the
+ * surface itself and never about process timing.
+ */
+describe("bash job surface: bash({jobId}) polls and kills promoted jobs", () => {
+	const def = createBashToolDefinition(process.cwd());
+	const ctx = {} as Parameters<typeof def.execute>[4];
+
+	type ToolResult = { content: Array<{ type: string; text?: string }>; isError?: boolean };
+
+	const run = async (args: Record<string, unknown>): Promise<ToolResult> =>
+		(await def.execute("call-job", args as never, undefined, undefined, ctx)) as ToolResult;
+
+	const textOf = (result: ToolResult) => result.content[0]?.text ?? "";
+
+	let killed: string[] = [];
+
+	function seedJob(overrides: Partial<BashBackgroundJob> & { id: string }): BashBackgroundJob {
+		const job: BashBackgroundJob = {
+			pid: undefined,
+			command: "npm run dev",
+			startedAt: Date.now() - 2_000,
+			promotedAt: Date.now() - 1_000,
+			exited: false,
+			exitCode: null,
+			ringBuffer: "",
+			ringTruncated: false,
+			kill: () => {
+				killed.push(overrides.id);
+			},
+			...overrides,
+		};
+		_registerBashBackgroundJobForTest(job);
+		return job;
+	}
+
+	beforeEach(() => {
+		_resetBashBackgroundJobsForTest();
+		killed = [];
+	});
+
+	afterEach(() => {
+		_resetBashBackgroundJobsForTest();
+	});
+
+	it("polls a live job: status + the output buffered since promotion", async () => {
+		seedJob({ id: "bg-1", ringBuffer: "listening on :3000\nrebuilt in 12ms\n" });
+
+		const result = await run({ jobId: "bg-1" });
+
+		expect(result.isError).toBeUndefined();
+		const text = textOf(result);
+		expect(text).toContain("Job bg-1");
+		expect(text).toContain("still running");
+		expect(text).toContain("$ npm run dev");
+		expect(text).toContain("listening on :3000");
+		expect(text).toContain("rebuilt in 12ms");
+		// Polling does not consume the job — it stays tracked for the next poll.
+		expect(getBashBackgroundJob("bg-1")).toBeDefined();
+	});
+
+	it("marks a rolled-over ring buffer instead of passing it off as complete output", async () => {
+		seedJob({ id: "bg-1", ringBuffer: "tail of the log\n", ringTruncated: true });
+
+		const text = textOf(await run({ jobId: "bg-1" }));
+
+		expect(text).toContain("oldest output dropped");
+		expect(text).toContain("tail of the log");
+	});
+
+	it("polls after exit: reports the exit code and the buffered output", async () => {
+		seedJob({ id: "bg-2", command: "npm test", exited: true, exitCode: 1, ringBuffer: "2 tests failed\n" });
+
+		const text = textOf(await run({ jobId: "bg-2" }));
+
+		expect(text).toContain("exited with code 1");
+		expect(text).toContain("2 tests failed");
+	});
+
+	it("polls a job with no buffered output without pretending there was any", async () => {
+		seedJob({ id: "bg-3", exited: true, exitCode: 0 });
+
+		const text = textOf(await run({ jobId: "bg-3" }));
+
+		expect(text).toContain("exited with code 0");
+		expect(text).toContain("(no output buffered since promotion)");
+	});
+
+	it("kills a job: the tree is killed and the id leaves the registry", async () => {
+		seedJob({ id: "bg-4", command: "vite dev" });
+
+		const result = await run({ jobId: "bg-4", action: "kill" });
+
+		expect(result.isError).toBeUndefined();
+		expect(textOf(result)).toContain("Killed job bg-4");
+		expect(killed).toEqual(["bg-4"]);
+		expect(getBashBackgroundJob("bg-4")).toBeUndefined();
+	});
+
+	it("kill on an already-exited job says so instead of claiming a kill", async () => {
+		seedJob({ id: "bg-5", exited: true, exitCode: 0 });
+
+		const text = textOf(await run({ jobId: "bg-5", action: "kill" }));
+
+		expect(text).toContain("already exited with code 0");
+		expect(getBashBackgroundJob("bg-5")).toBeUndefined();
+	});
+
+	it("an unknown id is an actionable error listing the live jobs", async () => {
+		seedJob({ id: "bg-1", command: "npm run dev" });
+		seedJob({ id: "bg-2", command: "npm test", exited: true, exitCode: 0 });
+
+		const result = await run({ jobId: "bg-9" });
+
+		expect(result.isError).toBe(true);
+		const text = textOf(result);
+		expect(text).toContain('No background job "bg-9"');
+		expect(text).toContain("bg-1 (still running): npm run dev");
+		expect(text).toContain("bg-2 (exited with code 0): npm test");
+	});
+
+	it("an unknown id with an empty registry explains where ids come from", async () => {
+		const result = await run({ jobId: "bg-1" });
+
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain("no tracked jobs");
+	});
+
+	it("command and jobId are mutually exclusive", async () => {
+		seedJob({ id: "bg-1" });
+
+		const result = await run({ command: "echo hi", jobId: "bg-1" });
+
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain("never both");
+		// Neither intent was executed: the job is untouched.
+		expect(killed).toEqual([]);
+		expect(getBashBackgroundJob("bg-1")).toBeDefined();
+	});
+
+	it("a call with neither command nor jobId is an actionable error", async () => {
+		const result = await run({});
+
+		expect(result.isError).toBe(true);
+		expect(textOf(result)).toContain('Missing "command"');
+	});
 });

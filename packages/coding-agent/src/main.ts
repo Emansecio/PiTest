@@ -27,7 +27,7 @@ import type { CreateAgentSessionRuntimeFactory } from "./core/agent-session-runt
 import type { AgentSessionRuntimeDiagnostic } from "./core/agent-session-services.ts";
 import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage } from "./core/auth-storage.ts";
-import { ensureClaudeCodeVersionEnv } from "./core/claude-code-version.ts";
+import { ensureClaudeCodeVersionEnv, gateModelRequestsOnClaudeCodeVersion } from "./core/claude-code-version.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
 import { readCachedExtensionFlags, writeExtensionFlagsCache } from "./core/help-cache.ts";
 import type { ModelRegistry } from "./core/model-registry.ts";
@@ -694,11 +694,17 @@ export async function main(args: string[], options?: MainOptions) {
 
 	// Kick off `claude --version` detection now (async spawn + disk cache keyed
 	// by the binary's mtime — see core/claude-code-version.ts) so it overlaps
-	// with the runtime's module eval instead of blocking boot; awaited after the
-	// runtime is built, before anything can issue a model request. Skipped
-	// offline and when PIT_CLAUDE_CODE_VERSION is already pinned. The spoofed
-	// Claude Code user-agent version keeps Anthropic OAuth routing happy — a
-	// stale version draws intermittent OAuth 5xx.
+	// with the runtime's module eval instead of blocking boot. Skipped offline
+	// and when PIT_CLAUDE_CODE_VERSION is already pinned. The spoofed Claude Code
+	// user-agent version keeps Anthropic OAuth routing happy — a stale version
+	// draws intermittent OAuth 5xx.
+	//
+	// Nothing here awaits it: the wait is installed at the model-request boundary
+	// (gateModelRequestsOnClaudeCodeVersion, inside createRuntime below), so a
+	// cache miss delays the first provider request — which overlaps the user
+	// reading and typing — instead of the first TUI paint (was up to ~3s per
+	// candidate command). Paths that never issue a model request (--help,
+	// --version, --list-models, --dry-run, TUI paint) no longer wait at all.
 	const claudeCodeVersionReady = offlineMode ? Promise.resolve() : ensureClaudeCodeVersionEnv();
 
 	// Run migrations (pass cwd for project-local migrations)
@@ -793,6 +799,10 @@ export async function main(args: string[], options?: MainOptions) {
 		});
 		time("createRuntime-services");
 		const { settingsManager, modelRegistry, resourceLoader } = services;
+		// Hold the first model request (not the first paint) until the Claude Code
+		// version probe settles. Installed per runtime, so /new, /resume, /fork and
+		// /import get a gated registry too; a no-op once the probe has settled.
+		gateModelRequestsOnClaudeCodeVersion(modelRegistry, claudeCodeVersionReady);
 		const diagnostics: AgentSessionRuntimeDiagnostic[] = [
 			...services.diagnostics,
 			...collectSettingsDiagnostics(settingsManager, "runtime creation"),
@@ -897,12 +907,6 @@ export async function main(args: string[], options?: MainOptions) {
 		printTimings();
 		process.exit(0);
 	}
-
-	// Ensure the spoofed Claude Code version resolved (or gave up) before any
-	// path that can issue a model request. The detection was kicked off right
-	// after arg parsing, so its cost overlapped with runtime creation above —
-	// on a version-cache hit this is already settled.
-	await claudeCodeVersionReady;
 
 	if (parsed.listModels !== undefined) {
 		const { listModels } = await import("./cli/list-models.ts");
