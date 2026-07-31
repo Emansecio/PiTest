@@ -214,12 +214,10 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (model.provider === "openai-codex" && supportsOpenAiXhigh(model.id)) {
 		mergeThinkingLevelMap(model, { minimal: "low" });
 	}
-	// GPT-5.6 family: new max reasoning effort; Terra (and Sol) also expose ultra.
+	// GPT-5.6 family: reasoning efforts are low..max (Codex discovery reports
+	// low/medium/high/xhigh/max for sol, terra and luna alike; no ultra).
 	if (model.provider === "openai-codex" && model.id.startsWith("gpt-5.6")) {
 		mergeThinkingLevelMap(model, { max: "max" });
-		if (model.id === "gpt-5.6-terra" || model.id === "gpt-5.6-sol") {
-			mergeThinkingLevelMap(model, { ultra: "ultra" });
-		}
 	}
 	if (model.provider === "openrouter" && model.id.startsWith("inception/mercury-2")) {
 		// Mercury 2 in instant mode (reasoning_effort: "none") disables tool calling.
@@ -1339,6 +1337,10 @@ async function generateModels() {
 	// Context window is based on observed server limits (400s above ~272k), not marketing numbers.
 	const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 	const CODEX_CONTEXT = 272000;
+	// The GPT-5.6 SKUs raise the Codex-side window to 372k (context_window =
+	// max_context_window in OpenAI's Codex model registry); the /codex/models
+	// discovery payload omits context_window for them, so it must be hardcoded.
+	const CODEX_5_6_CONTEXT = 372000;
 	const CODEX_MAX_TOKENS = 128000;
 	const codexModels: Model<"openai-codex-responses">[] = [
 		{
@@ -1424,7 +1426,7 @@ async function generateModels() {
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
-			contextWindow: CODEX_CONTEXT,
+			contextWindow: CODEX_5_6_CONTEXT,
 			maxTokens: CODEX_MAX_TOKENS,
 		},
 		{
@@ -1436,7 +1438,7 @@ async function generateModels() {
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 },
-			contextWindow: CODEX_CONTEXT,
+			contextWindow: CODEX_5_6_CONTEXT,
 			maxTokens: CODEX_MAX_TOKENS,
 		},
 		{
@@ -1448,7 +1450,7 @@ async function generateModels() {
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 0 },
-			contextWindow: CODEX_CONTEXT,
+			contextWindow: CODEX_5_6_CONTEXT,
 			maxTokens: CODEX_MAX_TOKENS,
 		},
 	];

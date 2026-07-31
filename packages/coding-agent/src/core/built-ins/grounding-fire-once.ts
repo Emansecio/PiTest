@@ -18,9 +18,12 @@
  *   - **outcome accounting**: `outcome:"blocked"` on the first fire,
  *     `outcome:"overridden"` on the identical re-issue, so per-guard/per-rule
  *     acceptance rate is readable straight off the diagnostics ring buffer.
- *   - **fail-open**: a throw anywhere (kill-switch, tool gate, decide, or the
- *     emission itself) allows the call. Defense-in-depth — `emitToolCall`
- *     already isolates per-handler throws; a guard bug must never hard-block.
+ *   - **fail-open, but never silent**: a throw anywhere (kill-switch, tool gate,
+ *     decide, or the emission itself) allows the call. Defense-in-depth —
+ *     `emitToolCall` already isolates per-handler throws; a guard bug must never
+ *     hard-block. Every containment is recorded as a `guard.failed` diagnostic:
+ *     a swallowed throw is indistinguishable from "the guard had nothing to say",
+ *     so without it a permanently-broken guard reads as a permanently-clean one.
  *   - **in-place rewrite**: an auto-correction patches `event.input` and PASSES.
  *     That is neither a block nor an override, so it records only `{note, ruleId}`
  *     (the `outcome` enum cannot express an auto-correct).
@@ -124,6 +127,44 @@ function isThenable<T>(value: unknown): value is Promise<T> {
 	return typeof (value as { then?: unknown } | undefined)?.then === "function";
 }
 
+/** Phase of the guard ritual that threw, recorded on the `guard.failed` diagnostic. */
+type GuardFailurePhase = "check" | "settle";
+
+/**
+ * Record one contained guard fault. The call the guard was vetting RAN UNVETTED —
+ * that is the whole point of recording it: fail-open keeps the session alive, the
+ * diagnostic keeps the hole visible (and, via `outcome:"failed"`, keeps a broken
+ * guard out of the acceptance-rate math for its rule).
+ */
+function recordGuardFailure(params: {
+	spec: GuardSpec;
+	event: ToolCallEvent;
+	phase: GuardFailurePhase;
+	error: unknown;
+}): void {
+	try {
+		const { spec, event, phase, error } = params;
+		recordDiagnostic({
+			category: "guard.failed",
+			level: "error",
+			source: spec.source,
+			context: {
+				// `source` already identifies WHICH guard failed; the category is
+				// redundant with it and is not part of DiagnosticContext.
+				outcome: "failed",
+				ruleId: spec.ruleId,
+				phase,
+				toolName: event.toolName,
+				toolCallId: event.toolCallId,
+				note: error instanceof Error ? error.message : String(error),
+			},
+		});
+	} catch {
+		// The diagnostic channel itself is best-effort; never let observability
+		// turn a contained guard fault into a thrown tool call.
+	}
+}
+
 /**
  * Wrap one {@link GuardSpec} into an extension factory: the whole pre-exec guard
  * ritual (kill-switch, tool gate, fire-once, diagnostics, fail-open) applied to
@@ -192,15 +233,27 @@ export function createGuard(spec: GuardSpec): (pi: ExtensionAPI) => void {
 						(resolved) => {
 							try {
 								return settle(event, resolved);
-							} catch {
+							} catch (error) {
+								recordGuardFailure({ spec, event, phase: "settle", error });
 								return undefined;
 							}
 						},
-						() => undefined,
+						(error) => {
+							recordGuardFailure({ spec, event, phase: "check", error });
+							return undefined;
+						},
 					);
 				}
-				return settle(event, decision);
-			} catch {
+				try {
+					return settle(event, decision);
+				} catch (error) {
+					// Inner catch so the recorded `phase` distinguishes a broken check
+					// from a broken verdict application (frozen args, bad rewrite shape).
+					recordGuardFailure({ spec, event, phase: "settle", error });
+					return undefined;
+				}
+			} catch (error) {
+				recordGuardFailure({ spec, event, phase: "check", error });
 				return undefined;
 			}
 		});

@@ -33,6 +33,8 @@ const baseSpec = (overrides: Partial<GuardSpec> = {}): GuardSpec => ({
 
 const patternEvents = () => getRuntimeDiagnostics().recent.filter((e) => e.category === "guard.pattern-grounding");
 
+const failureEvents = () => getRuntimeDiagnostics().recent.filter((e) => e.category === "guard.failed");
+
 describe("stableToolCallKey", () => {
 	it("is stable across a re-ordering of the top-level arg keys", () => {
 		expect(stableToolCallKey("grep", { a: 1, b: 2 })).toBe(stableToolCallKey("grep", { b: 2, a: 1 }));
@@ -212,7 +214,7 @@ describe("createGuard — fail-open", () => {
 		resetRuntimeDiagnostics();
 	});
 
-	it("fails OPEN when a SYNC decide throws (no block, no diagnostic)", () => {
+	it("fails OPEN when a SYNC decide throws, and RECORDS the contained fault", () => {
 		const fire = register(
 			baseSpec({
 				decide: () => {
@@ -221,13 +223,56 @@ describe("createGuard — fail-open", () => {
 			}),
 		);
 		expect(fire(call({ pattern: "x" }))).toBeUndefined();
+		// The guard's own channel stays clean — a fault is not a verdict.
 		expect(patternEvents()).toHaveLength(0);
+		// ...but the hole is visible: this call ran UNVETTED.
+		const failures = failureEvents();
+		expect(failures).toHaveLength(1);
+		expect(failures[0]?.level).toBe("error");
+		expect(failures[0]?.source).toBe("test-guard");
+		expect(failures[0]?.context).toMatchObject({
+			outcome: "failed",
+			ruleId: "test-rule",
+			phase: "check",
+			toolName: "grep",
+			toolCallId: "c1",
+			note: "boom",
+		});
 	});
 
-	it("fails OPEN when an ASYNC decide rejects", async () => {
+	it("fails OPEN when an ASYNC decide rejects, and RECORDS the contained fault", async () => {
 		const fire = register(baseSpec({ decide: async () => Promise.reject(new Error("boom")) }));
 		await expect(fire(call({ pattern: "x" }))).resolves.toBeUndefined();
 		expect(patternEvents()).toHaveLength(0);
+		expect(failureEvents()[0]?.context).toMatchObject({ phase: "check", note: "boom" });
+	});
+
+	it("records phase:'settle' when the failure happens AFTER the decision", () => {
+		// A frozen `input` makes the in-place rewrite throw inside settle().
+		const fire = register(baseSpec({ decide: () => ({ action: "rewrite", args: { pattern: "fixed" } }) }));
+		const event = call(Object.freeze({ pattern: "typo" }) as Record<string, unknown>);
+		expect(fire(event)).toBeUndefined();
+		expect(failureEvents()[0]?.context).toMatchObject({ phase: "settle" });
+	});
+
+	it("records a fault raised by the kill-switch and by the tool gate", () => {
+		const killSwitch = register(
+			baseSpec({
+				disabled: () => {
+					throw new Error("switch boom");
+				},
+			}),
+		);
+		expect(killSwitch(call({ pattern: "x" }))).toBeUndefined();
+		const gate = register(
+			baseSpec({
+				appliesTo: () => {
+					throw new Error("gate boom");
+				},
+			}),
+		);
+		expect(gate(call({ pattern: "x" }))).toBeUndefined();
+		expect(failureEvents().map((e) => e.context?.note)).toEqual(["switch boom", "gate boom"]);
 	});
 });
 

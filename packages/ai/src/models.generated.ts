@@ -120,7 +120,7 @@ export const MODELS = {
 			provider: "openai-codex",
 			baseUrl: "https://chatgpt.com/backend-api",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","minimal":"low","max":"max","ultra":"ultra"},
+			thinkingLevelMap: {"xhigh":"xhigh","minimal":"low","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -128,7 +128,7 @@ export const MODELS = {
 				cacheRead: 0.5,
 				cacheWrite: 0,
 			},
-			contextWindow: 272000,
+			contextWindow: 372000,
 			maxTokens: 128000,
 		} satisfies Model<"openai-codex-responses">,
 		"gpt-5.6-terra": {
@@ -138,7 +138,7 @@ export const MODELS = {
 			provider: "openai-codex",
 			baseUrl: "https://chatgpt.com/backend-api",
 			reasoning: true,
-			thinkingLevelMap: {"xhigh":"xhigh","minimal":"low","max":"max","ultra":"ultra"},
+			thinkingLevelMap: {"xhigh":"xhigh","minimal":"low","max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 2.5,
@@ -146,7 +146,7 @@ export const MODELS = {
 				cacheRead: 0.25,
 				cacheWrite: 0,
 			},
-			contextWindow: 272000,
+			contextWindow: 372000,
 			maxTokens: 128000,
 		} satisfies Model<"openai-codex-responses">,
 		"gpt-5.6-luna": {
@@ -164,7 +164,7 @@ export const MODELS = {
 				cacheRead: 0.1,
 				cacheWrite: 0,
 			},
-			contextWindow: 272000,
+			contextWindow: 372000,
 			maxTokens: 128000,
 		} satisfies Model<"openai-codex-responses">,
 	},

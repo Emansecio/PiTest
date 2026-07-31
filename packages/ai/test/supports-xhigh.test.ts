@@ -33,26 +33,24 @@ describe("getSupportedThinkingLevels", () => {
 		expect(getSupportedThinkingLevels(model!)).toContain("xhigh");
 	});
 
-	it.each(["gpt-5.6-sol", "gpt-5.6-terra"] as const)("includes max and ultra for %s", (modelId) => {
-		const model = getModel("openai-codex", modelId);
-		expect(model).toBeDefined();
-		const levels = getSupportedThinkingLevels(model!);
-		expect(levels).toContain("xhigh");
-		expect(levels).toContain("max");
-		expect(levels).toContain("ultra");
-		// opt-in max/ultra sit at the top of the effort ladder
-		expect(levels.at(-1)).toBe("ultra");
-		expect(levels.at(-2)).toBe("max");
-	});
+	it.each(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] as const)(
+		"includes max but not ultra for %s",
+		(modelId) => {
+			const model = getModel("openai-codex", modelId);
+			expect(model).toBeDefined();
+			const levels = getSupportedThinkingLevels(model!);
+			expect(levels).toContain("xhigh");
+			expect(levels).toContain("max");
+			expect(levels).not.toContain("ultra");
+			// opt-in max sits at the top of the effort ladder
+			expect(levels.at(-1)).toBe("max");
+		},
+	);
 
-	it("includes max but not ultra for gpt-5.6-luna", () => {
+	it("keeps the codex 5.6 window at 372k", () => {
 		const model = getModel("openai-codex", "gpt-5.6-luna");
 		expect(model).toBeDefined();
-		const levels = getSupportedThinkingLevels(model!);
-		expect(levels).toContain("xhigh");
-		expect(levels).toContain("max");
-		expect(levels).not.toContain("ultra");
-		expect(levels.at(-1)).toBe("max");
+		expect(model?.contextWindow).toBe(372000);
 	});
 
 	it("does not expose max/ultra on older codex models", () => {

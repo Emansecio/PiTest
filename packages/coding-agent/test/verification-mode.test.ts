@@ -1,9 +1,11 @@
 /**
  * Verification mode (Claude Code-like default): in `in-turn` mode the model is
- * instructed via system prompt to verify BEFORE its final reply, and the
- * harness runs NOTHING after the turn — no post-reply check, no injected fix
- * turns, no self-review, no pending-checks drain. The legacy pipeline stays
- * available behind `verification.mode: "post-turn"` (or explicit `enabled: true`).
+ * instructed via system prompt to verify BEFORE its final reply, and the harness
+ * runs NO CHECK of its own — no post-reply check command, no fix loop, no
+ * pending-checks drain. It is not blind, though: a cycle that edited files and
+ * ran no check at all gets ONE corrective turn (in-turn grounding). The legacy
+ * pipeline stays available behind `verification.mode: "post-turn"` (or explicit
+ * `enabled: true`).
  */
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -60,21 +62,56 @@ describe("in-turn verification (default)", () => {
 		while (harnesses.length > 0) await harnesses.pop()?.cleanup();
 	});
 
-	it("runs NOTHING after the reply: a failing configured check never fires and no fix turn is injected", async () => {
+	it("never RUNS the configured check itself, but corrects the cycle that skipped it", async () => {
 		const harness = await createHarness({ settings: { verification: { command: NODE_FAIL, maxAttempts: 2 } } });
 		harnesses.push(harness);
 		const file = join(harness.tempDir, "out.txt");
 		harness.setResponses([
 			fauxAssistantMessage([fauxToolCall("write", { path: file, content: "hi" })], { stopReason: "toolUse" }),
 			fauxAssistantMessage("wrote it"),
+			fauxAssistantMessage("ok, ran it"),
 		]);
 
 		await harness.session.prompt("create out.txt");
 
-		// The post-turn pipeline never ran: no verification lifecycle events, no
-		// injected user prompts beyond the original one.
+		// The post-turn pipeline never ran: the failing command was never executed,
+		// so no verification lifecycle event exists (that is what `mode: in-turn` buys).
+		expect(harness.eventsOfType("verification")).toEqual([]);
+		// But the honour-gap is not silent: the model edited a file and ran no check,
+		// so exactly ONE corrective turn naming the command was injected.
+		const texts = getUserTexts(harness);
+		expect(texts).toHaveLength(2);
+		expect(texts[0]).toBe("create out.txt");
+		expect(texts[1]).toContain(NODE_FAIL);
+		expect(texts[1]).toContain("never ran the project's check");
+	});
+
+	it("stays silent when the model DID run a check during the turn", async () => {
+		const harness = await createHarness({ settings: { verification: { command: NODE_FAIL, maxAttempts: 2 } } });
+		harnesses.push(harness);
+		const file = join(harness.tempDir, "out.txt");
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("write", { path: file, content: "hi" })], { stopReason: "toolUse" }),
+			// Classified as verification-class by `isVerificationJobCommand` (names a
+			// test runner); harmless to execute, which keeps this test fast.
+			fauxAssistantMessage([fauxToolCall("bash", { command: "echo running vitest" })], { stopReason: "toolUse" }),
+			fauxAssistantMessage("wrote it and checked"),
+		]);
+
+		await harness.session.prompt("create out.txt");
+
 		expect(harness.eventsOfType("verification")).toEqual([]);
 		expect(getUserTexts(harness)).toEqual(["create out.txt"]);
+	});
+
+	it("stays silent on a read-only cycle", async () => {
+		const harness = await createHarness({ settings: { verification: { command: NODE_FAIL } } });
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("nothing to change")]);
+
+		await harness.session.prompt("what does out.txt do?");
+
+		expect(getUserTexts(harness)).toEqual(["what does out.txt do?"]);
 	});
 
 	it("injects the verify-before-replying guideline into the system prompt (with the configured command)", async () => {
