@@ -391,12 +391,16 @@ const MUTATING_TOOLS_FOR_DIFF_REFRESH = new Set(["edit", "edit_v2", "write", "ba
  * call itself identifies the row. Everything outside this set has to report its
  * own files (see `details.files` in recordTurnFile).
  */
-const SINGLE_FILE_LEDGER_TOOLS = new Set(["edit", "edit_v2", "write", "code"]);
+const SINGLE_FILE_LEDGER_TOOLS = new Set(["edit", "edit_v2", "write"]);
 /**
  * Tools whose success means "this file now differs" — the turn's file ledger
  * (right rail). `bash` is deliberately absent: it mutates through commands we
  * cannot attribute to a path, and the footer's working-tree delta already covers
- * that blind spot at the repo level.
+ * that blind spot at the repo level. `code` is absent for the opposite reason:
+ * every `tools.write(...)`/`tools.edit(...)` a code program runs is re-emitted
+ * by the session's code-mode dispatcher as its OWN tool_execution_start/end
+ * pair carrying the full result, so the inner calls enter the ledger through
+ * the normal path — a row for the outer `code` call would double-count them.
  */
 const TURN_LEDGER_TOOLS = new Set([...SINGLE_FILE_LEDGER_TOOLS, "ast_edit"]);
 /** Columns the right rail reserves on a wide terminal. */

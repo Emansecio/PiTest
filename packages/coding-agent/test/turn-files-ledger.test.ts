@@ -96,6 +96,39 @@ describe("turn files ledger (headless InteractiveMode)", () => {
 		expect([...internals.turnFileLedger.values()]).toEqual([{ path: "src/foo.ts", added: 6, removed: 1 }]);
 	});
 
+	test("code-mode: inner write events count; the outer code call adds no row", async () => {
+		const { h, internals } = await setup();
+		// The real sequence a `code` program produces: the outer `code` call plus
+		// one harness-routed inner event pair per `tools.write(...)` it runs (the
+		// session's code-mode dispatcher mirrors the agent loop's start/end with
+		// the FULL tool result — details included).
+		await h.emit({
+			type: "tool_execution_start",
+			toolName: "code",
+			toolCallId: "outer",
+			args: { code: "await tools.write({ path: 'scan5.ps1', content: '...' })" },
+		} as never);
+		await emitTool(
+			h,
+			"write",
+			"code_inner1",
+			{ path: "scan5.ps1", content: "x" },
+			{
+				content: [{ type: "text", text: "Successfully wrote" }],
+				details: { files: [{ path: "scan5.ps1", added: 7, removed: 2 }] },
+			},
+		);
+		await h.emit({
+			type: "tool_execution_end",
+			toolName: "code",
+			toolCallId: "outer",
+			isError: false,
+			result: { content: [{ type: "text", text: "ok" }], details: { durationMs: 12, hadError: false } },
+		} as never);
+
+		expect([...internals.turnFileLedger.values()]).toEqual([{ path: "scan5.ps1", added: 7, removed: 2 }]);
+	});
+
 	test("a detail-less single-file tool still lands as a touch (args fallback)", async () => {
 		const { h, internals } = await setup();
 		await emitTool(
