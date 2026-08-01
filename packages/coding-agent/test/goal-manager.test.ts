@@ -142,7 +142,8 @@ describe("GoalManager lifecycle", () => {
 		const { mgr, advance } = makeManager();
 		mgr.start("x", {});
 		advance(3 * 60_000);
-		expect(mgr.statusLine()).toBe("🎯 active 3m");
+		// Canonical formatElapsed (utils/format-display.ts) keeps seconds: 3m00s, not 3m.
+		expect(mgr.statusLine()).toBe("🎯 active 3m00s");
 
 		mgr.clear();
 		mgr.start("y", { tokenBudget: 100_000 });

@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, test } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.js";
 import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.js";
 import { FooterComponent } from "../src/modes/interactive/components/footer.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 import { stripAnsi } from "../src/utils/ansi.js";
 
 beforeAll(() => {
@@ -88,7 +88,7 @@ describe("FooterComponent extension status line", () => {
 		expect(plain).not.toMatch(/[\u0000\u0007\u000a\u000d]/);
 	});
 
-	test("joins multiple statuses with a single space, sorted alphabetically by key", () => {
+	test("joins multiple statuses with a dense ·, sorted alphabetically by key", () => {
 		const statuses = new Map([
 			["zzz", "Z"],
 			["aaa", "A"],
@@ -96,8 +96,7 @@ describe("FooterComponent extension status line", () => {
 		]);
 		const footer = new FooterComponent(makeSession(), makeFooterData(statuses));
 		const plain = stripAnsi(extensionStatusLine(footer));
-		expect(plain.indexOf("A")).toBeLessThan(plain.indexOf("M"));
-		expect(plain.indexOf("M")).toBeLessThan(plain.indexOf("Z"));
+		expect(plain).toContain("A·M·Z");
 	});
 
 	test("collapses runs of whitespace to a single space (preserves alignment)", () => {
@@ -119,8 +118,9 @@ describe("FooterComponent no-rails alert", () => {
 		expect(alertLine).toBeDefined();
 		// The alert text survives and names the dropped-floor state explicitly.
 		expect(stripAnsi(alertLine!)).toContain("NO-RAILS — built-in guard-rails off");
-		// It is the visual "shout": a hard-coded bold sequence wraps the line.
-		expect(alertLine).toContain("\x1b[1m");
+		// It is the visual "shout": the theme's bold+error treatment wraps the line
+		// (no hand-rolled SGR literals — the theme owns the emphasis vocabulary).
+		expect(alertLine).toContain(theme.bold(theme.fg("error", "⚠ NO-RAILS — built-in guard-rails off")));
 	});
 
 	test("does not render the NO-RAILS alert in guarded auto mode", () => {

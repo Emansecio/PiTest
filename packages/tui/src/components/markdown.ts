@@ -75,6 +75,46 @@ markdownParser.setOptions({
 	tokenizer: new StrictStrikethroughTokenizer(),
 });
 
+/**
+ * Tokenizer for near-literal rendering of user-typed text (`literalBlocks`):
+ * disables the block constructs that plain prose or pasted code trips into by
+ * accident — `#include <stdio.h>` is not an H1, `> quote` in a shell snippet is
+ * not a blockquote, a 4-space-indented paste is not a code block, `---`/setext
+ * underlines are not rules/headings. Returning `undefined` makes marked fall
+ * through to the paragraph/text tokenizers, which preserve the characters as
+ * typed. Deliberate inline formatting (codespans, links, bold/italic) and
+ * explicit ``` fences still work: `fences` is a separate tokenizer from the
+ * indented-code `code` one and stays enabled.
+ */
+class LiteralBlocksTokenizer extends StrictStrikethroughTokenizer {
+	override heading(): Tokens.Heading | undefined {
+		return undefined;
+	}
+
+	/** Setext headings (`text` + `===`/`---` underline). */
+	override lheading(): Tokens.Heading | undefined {
+		return undefined;
+	}
+
+	override hr(): Tokens.Hr | undefined {
+		return undefined;
+	}
+
+	override blockquote(): Tokens.Blockquote | undefined {
+		return undefined;
+	}
+
+	/** Indented (4-space) code blocks only; fenced ``` blocks use `fences`. */
+	override code(): Tokens.Code | undefined {
+		return undefined;
+	}
+}
+
+const literalBlocksParser = new Marked();
+literalBlocksParser.setOptions({
+	tokenizer: new LiteralBlocksTokenizer(),
+});
+
 // ---------------------------------------------------------------------------
 // Clickable file paths in codespans (OSC 8).
 // Models reference files as `src/foo.ts:12` inline code; when the host app
@@ -181,6 +221,15 @@ export interface MarkdownTheme {
 	heading2?: (text: string) => string;
 	/** Optional H3-specific styling (defaults to bold `heading` when omitted). */
 	heading3?: (text: string) => string;
+	/**
+	 * Optional visible line prefix per heading level (e.g. an accent bar for H2).
+	 * The renderer emits it once at the start of the heading's first line only;
+	 * continuation lines of a wrapped heading carry no prefix. Heading style
+	 * functions must stay pure ANSI styling (no visible glyphs): their output is
+	 * captured via a sentinel and replayed after every inline token's reset (see
+	 * getStylePrefix), so any visible character in them would be repeated.
+	 */
+	headingPrefix?: (depth: number) => string;
 	link: (text: string) => string;
 	linkUrl: (text: string) => string;
 	code: (text: string) => string;
@@ -218,10 +267,23 @@ export class Markdown implements Component {
 	private theme: MarkdownTheme;
 	private defaultStylePrefix?: string;
 	// Reading-column cap (cols) applied to PROSE tokens only; wide blocks (tables,
-	// code — see isWideBlock) always use the full content width. 0 disables the cap
-	// (full width for everything, the historical behavior). Immutable per instance,
-	// so the width-keyed render/token caches stay sound (see render()).
+	// code — see isWideBlock) always use the full content width for their CONTENT.
+	// Code-fence frame rules are the one exception: they follow the prose measure
+	// unless the code itself is wider (see codeRuleCap / renderToken "code").
+	// 0 disables the cap (full width for everything, the historical behavior).
+	// Immutable per instance, so the width-keyed render/token caches stay sound
+	// (see render()).
 	private proseMaxColumns: number;
+	// Per-render cap (in CONTENT columns, i.e. pad already charged) for the code
+	// fence frame rules (`╭─…`, `╰─…`) — issue #10. Code is a wide block, so its
+	// body may use the full content width, but drawing the frame rules at full
+	// width made every fence a full-terminal ruler (~200 cols) while the prose
+	// around it measured ~120. Set at the top of render() to
+	// max(1, proseMaxColumns - pad) when the prose cap is active, 0 otherwise
+	// (0 ⇒ rules span the full width, byte-identical to the historical output).
+	// Pure function of (instance config, render width), so the width-keyed
+	// tokenLineCache stays sound without folding it into the cache key.
+	private codeRuleCap = 0;
 
 	// Cache for rendered output
 	private cachedText?: string;
@@ -324,6 +386,13 @@ export class Markdown implements Component {
 	// into the key.
 	private deferredCodeLineCache = new Map<string, string[]>();
 
+	// Which marked instance lexes this document. Immutable per instance (like
+	// proseMaxColumns), so every lex/incremental-lex cache keyed off this
+	// component stays sound. Defaults to the full markdown parser; the
+	// `literalBlocks` constructor flag swaps in literalBlocksParser (see
+	// LiteralBlocksTokenizer) for near-literal user-typed text.
+	private parser: Marked = markdownParser;
+
 	constructor(
 		text: string,
 		paddingX: number,
@@ -331,6 +400,7 @@ export class Markdown implements Component {
 		theme: MarkdownTheme,
 		defaultTextStyle?: DefaultTextStyle,
 		proseMaxColumns = 0,
+		literalBlocks = false,
 	) {
 		this.text = text;
 		this.paddingX = paddingX;
@@ -338,6 +408,9 @@ export class Markdown implements Component {
 		this.theme = theme;
 		this.defaultTextStyle = defaultTextStyle;
 		this.proseMaxColumns = proseMaxColumns;
+		if (literalBlocks) {
+			this.parser = literalBlocksParser;
+		}
 	}
 
 	setText(text: string): void {
@@ -412,6 +485,11 @@ export class Markdown implements Component {
 
 		// Calculate available width for content (subtract horizontal padding)
 		const contentWidth = Math.max(1, width - pad * 2);
+
+		// Frame-rule cap for code fences (see field docs). Charged against the same
+		// clamped `pad` as the prose cap below so the rule aligns with the prose
+		// reading measure exactly.
+		this.codeRuleCap = this.proseMaxColumns > 0 ? Math.max(1, this.proseMaxColumns - pad) : 0;
 
 		// Don't render anything if there's no actual text
 		if (!this.text || this.text.trim() === "") {
@@ -627,7 +705,7 @@ export class Markdown implements Component {
 		// a render-fail retry loop. Realistic documents never reach this path.
 		let tokens: Token[];
 		try {
-			tokens = markdownParser.lexer(normalizedText);
+			tokens = this.parser.lexer(normalizedText);
 		} catch {
 			tokens = [{ type: "text", raw: normalizedText, text: normalizedText } as Token];
 		}
@@ -731,7 +809,7 @@ export class Markdown implements Component {
 		// (also-guarded) lex path rather than propagating the throw.
 		let tailTokens: Token[];
 		try {
-			tailTokens = markdownParser.lexer(tail);
+			tailTokens = this.parser.lexer(tail);
 		} catch {
 			return undefined;
 		}
@@ -1012,9 +1090,14 @@ export class Markdown implements Component {
 				};
 
 				const headingText = this.renderInlineTokens(token.tokens || [], headingStyleContext);
+				// Visible glyphs (e.g. the H2 accent bar) come from headingPrefix, not
+				// from the style function: getStylePrefix would capture them and replay
+				// them after every codespan/strong/em segment. Prepended once here, so a
+				// wrapped heading shows the prefix on its first line only.
+				const headingLinePrefix = this.theme.headingPrefix?.(headingLevel) ?? "";
 				// H3+ no longer leaks the literal "### " prefix; bold heading color + the
 				// H2 accent bar being absent is enough to distinguish levels.
-				lines.push(headingText);
+				lines.push(headingLinePrefix + headingText);
 				if (nextTokenType && nextTokenType !== "space") {
 					this.pushBlockSpacing(lines); // Add spacing after headings (unless space token follows)
 				}
@@ -1041,7 +1124,34 @@ export class Markdown implements Component {
 				const gutter = this.theme.codeBlockBorder("│ ");
 				const indent = this.theme.codeBlockIndent ?? "";
 				const prefix = gutter + indent;
-				const rule = "─".repeat(Math.max(0, width - 1));
+				// Frame-rule width (#10). The code BODY keeps the full `width` (wide
+				// block, exempt from the prose cap), but the horizontal rules follow
+				// the prose measure so a short snippet on a wide terminal doesn't draw
+				// a full-terminal ruler: rule = min(width, max(proseCap, widest
+				// code/lang line + gutter)). Short code ⇒ rule sits exactly at the
+				// prose measure; code wider than the measure grows the rule to cover
+				// it (never past `width`, where the body wraps anyway). While the
+				// fence is still OPEN (deferCodeHighlight, streaming) the widest line
+				// is not yet known, so the rule uses the stable fallback
+				// min(width, proseCap) — the opening rule must not jump as longer
+				// lines arrive; the frame settles to its final width in the first
+				// closed-fence render. With no prose cap (codeRuleCap === 0) the rule
+				// spans `width`, byte-identical to the historical behavior.
+				let ruleWidth = width;
+				if (this.codeRuleCap > 0) {
+					if (deferCodeHighlight) {
+						ruleWidth = Math.min(width, this.codeRuleCap);
+					} else {
+						const prefixWidth = 2 + visibleWidth(indent); // "│ " gutter + indent
+						let widestLine = typeof token.lang === "string" ? visibleWidth(token.lang) : 0;
+						for (const codeLine of token.text.split("\n")) {
+							const lineWidth = visibleWidth(codeLine);
+							if (lineWidth > widestLine) widestLine = lineWidth;
+						}
+						ruleWidth = Math.min(width, Math.max(this.codeRuleCap, prefixWidth + widestLine));
+					}
+				}
+				const rule = "─".repeat(Math.max(0, ruleWidth - 1));
 				lines.push(this.theme.codeBlockBorder(`╭${rule}`));
 				if (typeof token.lang === "string" && token.lang.length > 0) {
 					const langStyle = this.theme.codeBlockLang ?? this.theme.codeBlockBorder;
@@ -1180,7 +1290,11 @@ export class Markdown implements Component {
 			}
 
 			case "hr":
-				lines.push(this.theme.hr("─".repeat(Math.max(1, width))));
+				// `╌` (dashed), not `─` (solid): the solid rule is the transcript's
+				// turn separator (see coding-agent's TurnRule), so a model emitting
+				// `---` must not fabricate a fake turn boundary. Same width (prose
+				// measure) and theme.hr color — only the glyph differs.
+				lines.push(this.theme.hr("╌".repeat(Math.max(1, width))));
 				if (nextTokenType && nextTokenType !== "space") {
 					this.pushBlockSpacing(lines); // Add spacing after horizontal rules (unless space token follows)
 				}
@@ -1199,9 +1313,13 @@ export class Markdown implements Component {
 				break;
 
 			default:
-				// Handle any other token types as plain text
+				// Handle any other token types as plain text. Style through the
+				// inline context (default message style, or the enclosing
+				// blockquote/heading context) — pushing the raw text would drop the
+				// message color mid-document.
 				if ("text" in token && typeof token.text === "string") {
-					lines.push(token.text);
+					const fallbackContext = styleContext ?? this.getDefaultInlineStyleContext();
+					lines.push(applyTextWithNewlines(token.text, fallbackContext.applyText));
 				}
 		}
 
@@ -1326,13 +1444,19 @@ export class Markdown implements Component {
 			return lines;
 		}
 
-		const indent = "    ".repeat(depth);
+		// 2 spaces per nesting level (was 4): matches the 2-col message gutter and
+		// keeps deep lists dense instead of marching off the right edge.
+		const indent = "  ".repeat(depth);
 		// Use the list's start property (defaults to 1 for ordered lists)
 		const startNumber = typeof token.start === "number" ? token.start : 1;
+		// Right-align ordered markers to the widest index in THIS list so a list
+		// crossing 9→10 (or 99→100) keeps a straight text column (` 9. ` / `10. `)
+		// instead of jittering by a digit.
+		const markerNumberWidth = token.ordered ? String(startNumber + token.items.length - 1).length : 0;
 
 		for (let i = 0; i < token.items.length; i++) {
 			const item = token.items[i];
-			const bullet = token.ordered ? `${startNumber + i}. ` : "- ";
+			const bullet = token.ordered ? `${String(startNumber + i).padStart(markerNumberWidth)}. ` : "- ";
 			const taskMarker = item.task ? `[${item.checked ? "x" : " "}] ` : "";
 			const marker = bullet + taskMarker;
 			const firstPrefix = indent + this.theme.listBullet(marker);

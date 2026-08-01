@@ -59,6 +59,13 @@ export class UserMessageComponent extends MessageShell {
 			// indent to the same text column instead of repeating a column of arrows.
 			gutterContinuationChar: " ",
 		});
+		// literalBlocks: the user's text is rendered near-literally. Deliberate
+		// inline markdown (codespans, ``` fences, links, bold) still formats, but
+		// the block constructs a paste trips into by accident are neutralized:
+		// `#include <stdio.h>` stays text (not an H1), `> foo` stays text (not a
+		// blockquote), 4-space indentation stays text (not a code block), and
+		// `---` stays text (not a rule). Fidelity to what was typed beats pretty
+		// markdown here.
 		const markdown = new Markdown(
 			text,
 			0,
@@ -68,6 +75,7 @@ export class UserMessageComponent extends MessageShell {
 				color: (content: string) => theme.fg("userMessageText", content),
 			},
 			readingColumns > 0 ? readingColumns : 0,
+			true,
 		);
 		this.addChild(markdown);
 	}

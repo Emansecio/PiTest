@@ -13,6 +13,8 @@
 		"coral": "#e08a72",
 		"gold": "#e0c07b",
 		"lavender": "#b89fe0",
+		"codeGreen": "#9fd6b8",
+		"cardBg": "#121817",
 		"text": "#cdd6d3",
 		"muted": "#788a85",
 		"dim": "#5f6f6a",
@@ -43,6 +45,8 @@
 		"customMessageBg": "customMsgBg",
 		"customMessageText": "text",
 		"customMessageLabel": "lavender",
+		"command": "accentGreenBorder",
+		"compactionLabel": "accentGreenBright",
 		"toolPendingBg": "toolPendingBg",
 		"toolSuccessBg": "toolSuccessBg",
 		"toolErrorBg": "toolErrorBg",
@@ -50,10 +54,11 @@
 		"toolOutput": "muted",
 
 		"mdHeading": "gold",
+		"mdHeading3": "lavender",
 		"mdLink": "#57cf9a",
 		"mdLinkUrl": "dim",
 		"mdCode": "teal",
-		"mdCodeBlock": "#9fd6b8",
+		"mdCodeBlock": "codeGreen",
 		"mdCodeBlockBorder": "accentGreenBorder",
 		"mdQuote": "muted",
 		"mdQuoteBorder": "borderMuted",
@@ -70,7 +75,7 @@
 		"syntaxKeyword": "#7fb2d9",
 		"syntaxFunction": "#d6c98a",
 		"syntaxVariable": "#a9d4e0",
-		"syntaxString": "#9fd6b8",
+		"syntaxString": "codeGreen",
 		"syntaxNumber": "#b8d6a8",
 		"syntaxType": "#6fcfc0",
 		"syntaxOperator": "#a9b8b3",
@@ -94,7 +99,7 @@
 		"gutterUser": "accentGreenDim",
 		"gutterCustom": "muted",
 
-		"cardBg": "#121817",
+		"cardBg": "cardBg",
 		"cardBorder": "borderMuted",
 
 		"petStroke": "#e9edf0",
@@ -103,7 +108,7 @@
 	},
 	"export": {
 		"pageBg": "#0c1110",
-		"cardBg": "#121817",
+		"cardBg": "cardBg",
 		"infoBg": "#1c2330"
 	}
 }

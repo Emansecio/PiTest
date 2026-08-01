@@ -11,8 +11,6 @@ const stubData = (): StartupScreenData => ({
 	appName: "pit",
 	version: "0.0.0",
 	tagline: "your coding companion",
-	cwdDisplay: "~/x",
-	model: "m",
 	recentSessions: [],
 	petColors: PET_COLORS,
 	petEnabled: false,

@@ -9,6 +9,9 @@ import {
 	actionCoalesceKey,
 	COUNTER_SEP,
 	GUTTER_DOT,
+	GUTTER_DOT_COLOR,
+	ICON_ERROR,
+	ICON_SUCCESS,
 	isEditFamilyTool,
 	nounFor,
 	pluralizeNoun,
@@ -17,14 +20,6 @@ import type { ToolExecutionComponent } from "./tool-execution.ts";
 
 type GroupState = "pending" | "success" | "error";
 type ExpandMode = "none" | "last" | "phase";
-
-const ICON_SUCCESS = "✓"; // light check (U+2713), 1 cell — consistent with the rest of the UI
-const ICON_ERROR = "✗";
-
-/** Steady color of the settled gutter dot — same token/rationale as
- * activity-line.ts's GUTTER_DOT_COLOR, so a promoted row and the group's own
- * counter header read as one visual language. */
-const GUTTER_DOT_COLOR: ThemeColor = "gutterToolSuccess";
 
 /** Action tools promoted to their OWN line inside a WorkGroup instead of folding
  * into the cross-family counter: file mutations (edit/write), delegations (task),

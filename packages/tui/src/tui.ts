@@ -9,8 +9,10 @@ import { performance } from "node:perf_hooks";
 import { isKeyRelease, isMouseSequence, type MouseEvent, matchesKey, parseMouse } from "./keys.ts";
 import type { Terminal } from "./terminal.ts";
 import {
+	areCellDimensionsMeasured,
 	deleteKittyImage,
 	getCapabilities,
+	getCellDimensions,
 	isImageLine,
 	isSixelForcedOff,
 	isSixelLine,
@@ -685,6 +687,25 @@ export class TUI extends Container {
 	}[] = [];
 	/** Cached overlay entry whose component === focusedComponent. Kept in sync by setFocus(). */
 	private focusedOverlay: (typeof this.overlayStack)[number] | null = null;
+
+	// Persistent output buffer for compositeOverlays, reused across frames while
+	// any overlay is open. Compositing used to spread the whole transcript into a
+	// fresh array every frame ([...lines] + padding) even though overlays can only
+	// ever land inside the viewport window [viewportStart, workingHeight):
+	// resolveOverlayLayout clamps row >= 0 and the composite loop offsets by
+	// viewportStart, so the prefix [0, viewportStart) is always byte-identical to
+	// `lines`. Keep one buffer instead: rewrite only the window each frame and
+	// re-copy the prefix only when the source array changed — same identity ⇒ same
+	// content reasoning as Container's flatten prefix reuse (render() contract:
+	// changed output is returned as a NEW array, memoized arrays are never mutated
+	// in place). The buffer never escapes the frame it is returned in: doRender
+	// hands it to extractCursorPosition/applyLineResets, and what gets committed
+	// as previousLines is applyLineResets' own pooled output, so in-place reuse
+	// here can never alias committed diff state.
+	private overlayCompositeBuffer: string[] = [];
+	private overlayCompositeSource: string[] | null = null;
+	/** How many leading rows of overlayCompositeBuffer mirror overlayCompositeSource. */
+	private overlayCompositePrefixLen = 0;
 
 	// --- Mouse tracking (SGR) state machine ---
 	// Session intent: whether the app asked for mouse tracking at all (set via
@@ -1504,11 +1525,29 @@ export class TUI extends Container {
 		}
 
 		this.cellSizeExact = true;
+		this.adoptCellDimensions(widthPx, heightPx);
+		return true;
+	}
+
+	/**
+	 * Record a freshly reported cell size — invalidating the tree only when the
+	 * value actually CHANGED. scheduleCellSizeRequery re-asks after every resize
+	 * and most answers are the same cell (dragging a border does not change the
+	 * font), so an unconditional invalidate() would wipe every component cache
+	 * and re-lex the transcript (8-22ms + GC on long sessions) per resize for
+	 * nothing. The unmeasured→measured transition always invalidates, even when
+	 * the reported cell equals the built-in guess: components sized against a
+	 * guess (see areCellDimensionsMeasured) must re-render against a measurement.
+	 */
+	private adoptCellDimensions(widthPx: number, heightPx: number): void {
+		const current = getCellDimensions();
+		if (areCellDimensionsMeasured() && current.widthPx === widthPx && current.heightPx === heightPx) {
+			return;
+		}
 		setCellDimensions({ widthPx, heightPx });
 		// Invalidate all components so images re-render with correct dimensions.
 		this.invalidate();
 		this.requestRender();
-		return true;
 	}
 
 	/**
@@ -1552,9 +1591,7 @@ export class TUI extends Container {
 			return true;
 		}
 
-		setCellDimensions({ widthPx, heightPx });
-		this.invalidate();
-		this.requestRender();
+		this.adoptCellDimensions(widthPx, heightPx);
 		return true;
 	}
 
@@ -1716,15 +1753,10 @@ export class TUI extends Container {
 	/** Composite all overlays into content lines (sorted by focusOrder, higher = on top). */
 	private compositeOverlays(lines: string[], termWidth: number, termHeight: number): string[] {
 		if (this.overlayStack.length === 0) return lines;
-		// Copy before compositing: `lines` may be a Container's memoized flatten array
-		// (see Container.render) and is mutated below. The spread is at the O(N) floor
-		// any full-length return requires and is engine-optimized; profiling showed the
-		// overlay frame cost is dominated by per-line compositing + diff, not this copy.
-		const result = [...lines];
 
 		// Pre-render all visible overlays and calculate positions
 		const rendered: { overlayLines: string[]; row: number; col: number; w: number }[] = [];
-		let minLinesNeeded = result.length;
+		let minLinesNeeded = lines.length;
 
 		const visibleEntries = this.overlayStack.filter((e) => this.isOverlayVisible(e));
 		visibleEntries.sort((a, b) => a.focusOrder - b.focusOrder);
@@ -1763,14 +1795,26 @@ export class TUI extends Container {
 		// Pad to at least terminal height so overlays have screen-relative positions.
 		// Excludes maxLinesRendered: the historical high-water mark caused self-reinforcing
 		// inflation that pushed content into scrollback on terminal widen.
-		const workingHeight = Math.max(result.length, termHeight, minLinesNeeded);
-
-		// Extend result with empty lines if content is too short for overlay placement or working area
-		while (result.length < workingHeight) {
-			result.push("");
-		}
+		const workingHeight = Math.max(lines.length, termHeight, minLinesNeeded);
 
 		const viewportStart = Math.max(0, workingHeight - termHeight);
+
+		// Fill the persistent buffer (see the field comment): base content padded
+		// with "" up to workingHeight. The prefix [0, viewportStart) is untouched
+		// by the composite loop below, so when the source array is unchanged the
+		// rows already stored there are exactly `lines[0..prefix)` and are reused
+		// without an O(transcript) copy — the per-frame rewrite is bounded by the
+		// viewport window. A different source array (transcript changed) recopies
+		// from 0; identical values keep the diff/reset caches hitting either way.
+		const result = this.overlayCompositeBuffer;
+		const reusablePrefix =
+			this.overlayCompositeSource === lines ? Math.min(this.overlayCompositePrefixLen, viewportStart) : 0;
+		result.length = workingHeight;
+		for (let i = reusablePrefix; i < workingHeight; i++) {
+			result[i] = i < lines.length ? lines[i] : "";
+		}
+		this.overlayCompositeSource = lines;
+		this.overlayCompositePrefixLen = viewportStart;
 
 		// Composite each overlay
 		for (const { overlayLines, row, col, w } of rendered) {
@@ -2286,6 +2330,11 @@ export class TUI extends Container {
 		if (this.renderFaultSuppressed && !force) {
 			return;
 		}
+		// Snapshot the cursor bookkeeping so a failed frame can restore it (see the
+		// catch below). Three field reads — free on the happy path.
+		const cursorRowBefore = this.cursorRow;
+		const hardwareCursorRowBefore = this.hardwareCursorRow;
+		const hardwareCursorVisibleBefore = this.hardwareCursorVisible;
 		try {
 			this._doRenderCore(force);
 			this.consecutiveRenderFaults = 0;
@@ -2296,6 +2345,26 @@ export class TUI extends Container {
 			// would be an uncaughtException → process death. Skip the bad frame instead;
 			// `this.previous*` state is only committed at the end of a successful render,
 			// so the next requestRender diffs against the last good frame.
+			//
+			// applyLineResets, however, already advanced its stability baseline
+			// (resetInputCache/resetFirstDirty) for the frame that just FAILED —
+			// e.g. a terminal.write throw (EPIPE) lands here after the baseline
+			// moved. Left alone, the next frame's stability scan would compare
+			// against the failed frame's input, declare its changed lines "stable",
+			// and never re-emit them: stale rows on screen. Zero the baseline so the
+			// next frame runs a full scan against the last committed previousLines.
+			// Costs nothing on the happy path — this only runs on a failed frame.
+			this.resetInputCache.length = 0;
+			this.resetFirstDirty = 0;
+			// Same reasoning for the cursor bookkeeping: the differential path sets
+			// cursorRow/hardwareCursorRow (and the DECTCEM latch) BEFORE the
+			// terminal.write that failed, so they describe where the failed frame
+			// WOULD have left the cursor. The physical cursor never moved (the write
+			// raised instead of emitting), so the recovery frame must compute its
+			// moves from the pre-frame values or every re-emitted row lands offset.
+			this.cursorRow = cursorRowBefore;
+			this.hardwareCursorRow = hardwareCursorRowBefore;
+			this.hardwareCursorVisible = hardwareCursorVisibleBefore;
 			this.recordRenderFault("render", error);
 			this.consecutiveRenderFaults += 1;
 			if (this.consecutiveRenderFaults >= TUI.RENDER_FAULT_EVICT_AFTER) {
@@ -2351,6 +2420,13 @@ export class TUI extends Container {
 		// Composite overlays into the rendered lines (before differential compare)
 		if (this.overlayStack.length > 0) {
 			newLines = this.compositeOverlays(newLines, width, height);
+		} else if (this.overlayCompositeSource !== null) {
+			// No overlay left: release the composite buffer so it does not pin an
+			// old transcript's strings (freed lazily here rather than in hide(),
+			// which has several call sites).
+			this.overlayCompositeBuffer.length = 0;
+			this.overlayCompositeSource = null;
+			this.overlayCompositePrefixLen = 0;
 		}
 
 		newLines = this.guardTrailingImageLine(newLines);
@@ -2380,7 +2456,16 @@ export class TUI extends Container {
 			// Sync (no setImmediate) to avoid re-entrancy into the render loop.
 			this.terminal.write("\x1b[?2026h");
 			if (clear) {
-				this.terminal.write(this.deleteKittyImages(this.previousKittyImageIds));
+				// "screen" keeps the scrollback, and the image placements that rolled up
+				// into it are part of that history — deleting by id (d=I) would blank
+				// them everywhere. Delete only the ids physically on the screen being
+				// wiped (the previous viewport); they are re-emitted by the tail print
+				// below. "all" destroys history too, so it deletes everything.
+				this.terminal.write(
+					clearMode === "screen"
+						? this.deleteChangedKittyImages(prevViewportTop, this.previousLines.length - 1)
+						: this.deleteKittyImages(this.previousKittyImageIds),
+				);
 				// Always clear the visible screen + home; only "all" also clears the
 				// scrollback (\x1b[3J) so a height-only repaint preserves rollable history.
 				// PIT_NO_SCROLLBACK_WIPE=1 opts out of the \x1b[3J itself (pre-session
@@ -2389,11 +2474,19 @@ export class TUI extends Container {
 				const wipeScrollback = clearMode === "all" && process.env.PIT_NO_SCROLLBACK_WIPE !== "1";
 				this.terminal.write(wipeScrollback ? "\x1b[2J\x1b[H\x1b[3J" : "\x1b[2J\x1b[H");
 			}
-			for (let start = 0; start < newLines.length; start += chunkLines) {
+			// "screen" declares the preserved scrollback valid (same width, same wrap),
+			// so reprinting lines above the viewport would roll a SECOND copy of the
+			// whole transcript into it on every height-only resize. Print only the tail
+			// that lands on the physical screen. Committing the FULL newLines as the
+			// diff baseline below stays sound: the differential path never edits rows
+			// above previousViewportTop (firstChanged < prevViewportTop escalates to
+			// fullRender("all")), so it never assumes an unpainted line is reachable.
+			const printFrom = clearMode === "screen" ? Math.max(0, newLines.length - height) : 0;
+			for (let start = printFrom; start < newLines.length; start += chunkLines) {
 				const end = Math.min(start + chunkLines, newLines.length);
 				const parts: string[] = [];
 				for (let i = start; i < end; i++) {
-					if (i > 0) parts.push("\r\n");
+					if (i > printFrom) parts.push("\r\n");
 					parts.push(this.clampLineToWidth(newLines[i], i, width, newLines));
 				}
 				this.terminal.write(parts.join(""));

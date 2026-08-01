@@ -5,6 +5,7 @@ import type { ContextUsage } from "../../../core/extensions/index.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
 import type { RecoveryLevel } from "../../../core/session-recovery.ts";
 import { isReducedMotion } from "../../../utils/env-flags.ts";
+import { formatTokens } from "../../../utils/format-display.ts";
 import { buildWorkspaceCwdLabels, formatGitBranchWithDiff, type WorkspaceCwdLabels } from "../display-utils.ts";
 import { formatModelDisplayName } from "../model-display-name.ts";
 import { interpolateFg } from "../theme/color-interpolation.ts";
@@ -69,19 +70,6 @@ function collapseAdjacent(labels: string[]): string {
 		i += n;
 	}
 	return out.join(" + ");
-}
-
-/**
- * Format token counts for compact footer display. A trailing `.0` is noise
- * (`1M`, not `1.0M`), so fractional steps only render when the decimal digit
- * is non-zero.
- */
-function formatTokens(count: number): string {
-	if (count < 1000) return count.toString();
-	if (count < 10000) return `${(count / 1000).toFixed(1).replace(/\.0$/, "")}k`;
-	if (count < 1000000) return `${Math.round(count / 1000)}k`;
-	if (count < 10000000) return `${(count / 1000000).toFixed(1).replace(/\.0$/, "")}M`;
-	return `${Math.round(count / 1000000)}M`;
 }
 
 /**
@@ -512,7 +500,9 @@ export class FooterComponent implements Component {
 		const contextUsage = this.lastContextUsageForRender;
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
-		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
+		// Percent is null while the window is unknown — the gauge shows `?` then.
+		// Display formatting lives in formatContextPercent; this is only the flag.
+		const hasPercent = contextUsage?.percent !== null;
 
 		// --- Identity (line 1) -----------------------------------------------
 		// Left: cwd (branch) · session — `muted` (not dim) so it stays legible
@@ -648,9 +638,9 @@ export class FooterComponent implements Component {
 				const statusLine = otherStatuses
 					.map(([, text]) => {
 						const sanitized = sanitizeStatusText(text);
-						return sanitized.includes("") ? sanitized : theme.fg("dim", sanitized);
+						return sanitized.includes("\u001b") ? sanitized : theme.fg("dim", sanitized);
 					})
-					.join(" ");
+					.join(theme.fg("dim", "·"));
 				lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "…")));
 			}
 			this.renderCacheKey = cacheKey;
@@ -666,7 +656,7 @@ export class FooterComponent implements Component {
 		const ctxLabel = theme.fg("dim", "CTX");
 		const ctxColorize = theme.getContextUsageColor(contextPercentValue);
 		let ctxText: string;
-		if (contextPercent === "?") {
+		if (!hasPercent) {
 			ctxText = `${ctxLabel} ${theme.fg("dim", `?/${formatTokens(contextWindow)}`)}`;
 		} else if (pristine) {
 			ctxText = `${ctxLabel} ${theme.fg("dim", formatTokens(contextWindow))}`;
@@ -759,7 +749,7 @@ export class FooterComponent implements Component {
 		// own line. Fires whenever the built-in floor is off (any mode with
 		// disableBuiltinDefaults — surfaced as "no-rails" in the status).
 		if (mode === "no-rails") {
-			lines.push(`\x1b[1m${theme.fg("error", "⚠ NO-RAILS — built-in guard-rails off")}\x1b[22m`);
+			lines.push(theme.bold(theme.fg("error", "⚠ NO-RAILS — built-in guard-rails off")));
 		}
 
 		// --- Extension statuses (line 3, optional) ---------------------------
@@ -772,9 +762,9 @@ export class FooterComponent implements Component {
 			const statusLine = otherStatuses
 				.map(([, text]) => {
 					const sanitized = sanitizeStatusText(text);
-					return sanitized.includes("") ? sanitized : theme.fg("dim", sanitized);
+					return sanitized.includes("\u001b") ? sanitized : theme.fg("dim", sanitized);
 				})
-				.join(" ");
+				.join(theme.fg("dim", "·"));
 			lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "…")));
 		}
 

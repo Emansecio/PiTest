@@ -70,7 +70,7 @@ describe("session selector loading lifecycle", () => {
 		expect(pending).toMatch(/Loading/);
 		// While the load is in flight the body mirrors the header's loading
 		// state instead of contradicting it with empty-state advice.
-		expect(pending).toContain("Loading sessions…");
+		expect(pending).toContain("loading sessions…");
 		expect(pending).not.toContain("No sessions in current folder");
 
 		deferred.resolve(sessions);

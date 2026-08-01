@@ -119,13 +119,14 @@ describe("BashExecutionComponent width handling (#2569)", () => {
 		const component = new BashExecutionComponent("echo hi", stub);
 		const loader = (component as unknown as { loader: { message: string; coloredTrailingSuffix: string } }).loader;
 
-		// Raw message stays a clean status label.
-		expect(loader.message).toBe("Running…");
+		// Raw message stays a clean status label (lowercase, like the other chips).
+		expect(loader.message).toBe("running…");
 		expect(loader.message).not.toContain("cancel");
 
 		// Cancel hint is applied via setTrailingSuffix (messageColorFn wraps it).
 		const suffixPlain = stripAnsi(loader.coloredTrailingSuffix);
-		expect(suffixPlain).toContain("to cancel");
+		expect(suffixPlain).toContain(" cancel");
+		expect(suffixPlain).not.toContain("to cancel");
 		expect(suffixPlain).toMatch(/·/);
 	});
 });

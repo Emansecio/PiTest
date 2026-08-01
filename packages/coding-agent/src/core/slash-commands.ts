@@ -44,6 +44,14 @@ export interface BuiltinSlashCommand {
 	 * menu next to the description (e.g. "[instructions]" or "<message>").
 	 */
 	argumentHint?: string;
+	/**
+	 * The bare command (no argument) is not a valid invocation — dispatching it
+	 * only produces a usage warning. Enter on the autocomplete suggestion then
+	 * completes like Tab instead of submitting an empty call. Argument validity
+	 * is dispatch logic, so this is declared explicitly, never inferred from
+	 * argumentHint (e.g. `/model` has a hint but a valid bare form).
+	 */
+	completeOnly?: boolean;
 }
 
 export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
@@ -57,7 +65,13 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "fusion", description: "Configure the Fusion panel (pick two models)", group: "Model" },
 	{ name: "theme", description: "Pick a color theme (live preview, Esc reverts)", group: "Config" },
 	{ name: "mouse", description: "Toggle mouse: click positions cursor · Shift+drag = native select", group: "Config" },
-	{ name: "name", description: "Set session display name", group: "Session", argumentHint: "<display name>" },
+	{
+		name: "name",
+		description: "Set session display name",
+		group: "Session",
+		argumentHint: "<display name>",
+		completeOnly: true,
+	},
 	{ name: "session", description: "Show session info and stats", group: "Info" },
 	{ name: "tree", description: "Browse and jump around the session tree", group: "Session" },
 	{ name: "fork", description: "Fork a new session from an earlier message", group: "Session" },
@@ -91,6 +105,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		description: "Steer the active turn without interrupting it",
 		group: "Session",
 		argumentHint: "<message>",
+		completeOnly: true,
 	},
 	{ name: "resume", description: "Resume a different session", group: "Session" },
 	{
@@ -128,7 +143,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		group: "Session",
 		argumentHint: "[text or path]",
 	},
-	{ name: "unpin", description: "Remove a pin by id", group: "Session", argumentHint: "<id>" },
+	{ name: "unpin", description: "Remove a pin by id", group: "Session", argumentHint: "<id>", completeOnly: true },
 	{
 		name: "plan",
 		description: "Enter plan mode (read-only): research and build a plan, then exit_plan to execute",

@@ -1,5 +1,10 @@
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { Container, setKeybindings } from "@pit/tui";
+import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
+import { KeybindingsManager } from "../src/core/keybindings.ts";
+import { keyText } from "../src/modes/interactive/components/keybinding-hints.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { stripAnsi } from "../src/utils/ansi.ts";
 
 function createEditor(text = "next message") {
 	return {
@@ -32,6 +37,7 @@ describe("interactive input queue routing", () => {
 			dismissStartupScreen: vi.fn(),
 			session: { isCompacting: false, isStreaming: true, isFusing: false, prompt },
 			sendNowChooserEnabled: Reflect.get(InteractiveMode.prototype, "sendNowChooserEnabled"),
+			attachPastedImagesFor: vi.fn(),
 			updatePendingMessagesDisplay: vi.fn(),
 			ui: { requestRender: vi.fn() },
 		};
@@ -78,6 +84,7 @@ describe("interactive input queue routing", () => {
 		const fakeThis = {
 			editor,
 			session: { isCompacting: false, isStreaming: true, prompt },
+			attachPastedImagesFor: vi.fn(),
 			updatePendingMessagesDisplay: vi.fn(),
 			ui: { requestRender: vi.fn() },
 		};
@@ -103,6 +110,7 @@ describe("interactive input queue routing", () => {
 		const fakeThis = {
 			editor,
 			session: { isCompacting: false, isStreaming: false, isFusing: true, prompt },
+			attachPastedImagesFor: vi.fn(),
 			updatePendingMessagesDisplay: vi.fn(),
 			showStatus,
 			ui: { requestRender: vi.fn() },
@@ -141,5 +149,46 @@ describe("interactive input queue routing", () => {
 		expect(prompt).not.toHaveBeenCalled();
 		expect(showWarning).toHaveBeenCalledWith("There is no active turn to steer");
 		expect(editor.setText).toHaveBeenCalledWith("nowhere to go");
+	});
+});
+
+describe("InteractiveMode.updatePendingMessagesDisplay", () => {
+	beforeAll(() => {
+		initTheme("dark");
+		setKeybindings(new KeybindingsManager());
+	});
+
+	function renderPending(queues: { steering: string[]; followUp: string[] }) {
+		const container = new Container();
+		const fakeThis = {
+			pendingMessagesContainer: container,
+			getAllQueuedMessages: () => queues,
+		};
+		const update = Reflect.get(InteractiveMode.prototype, "updatePendingMessagesDisplay") as (
+			this: typeof fakeThis,
+		) => void;
+		update.call(fakeThis);
+		return {
+			container,
+			lines: container.children.flatMap((child) => child.render(120)).map((line) => stripAnsi(line)),
+		};
+	}
+
+	test("the dequeue hint rides the last queued row as a dense suffix — no hint line", () => {
+		const dequeueKey = keyText("app.message.dequeue");
+		const { container, lines } = renderPending({ steering: ["steer this"], followUp: ["then this"] });
+
+		// Spacer + one component per message; the old standalone hint line is gone.
+		expect(container.children).toHaveLength(3);
+		const last = lines[lines.length - 1] ?? "";
+		expect(last).toContain(`then this·${dequeueKey} edit`);
+		// Only the LAST row carries the hint.
+		expect(lines.filter((l) => l.includes(`${dequeueKey} edit`))).toHaveLength(1);
+		expect(lines.join("\n")).not.toContain("to edit all queued messages");
+	});
+
+	test("clears without adding anything when both queues are empty", () => {
+		const { container } = renderPending({ steering: [], followUp: [] });
+		expect(container.children).toHaveLength(0);
 	});
 });

@@ -41,6 +41,7 @@ function makeFakeThis(overrides: Record<string, unknown> = {}) {
 		flushPendingBashComponents: vi.fn(),
 		sendNowChooserEnabled: () => true,
 		openSendNowChooser: vi.fn(),
+		attachPastedImagesFor: vi.fn(),
 		updatePendingMessagesDisplay: vi.fn(),
 		showError: vi.fn(),
 		ui: { requestRender: vi.fn() },

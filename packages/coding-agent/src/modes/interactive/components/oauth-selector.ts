@@ -114,7 +114,11 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 			const statusIndicator = this.formatStatusIndicator(provider);
 			const cursor = selectionCursor(isSelected);
 			const name = isSelected ? theme.fg("accent", provider.name) : theme.fg("text", provider.name);
-			this.listContainer.addChild(new SelectableRow(`${cursor}${name}${statusIndicator}`, isSelected, 1));
+			// Mouse (shared selector contract): click an unselected row to move the
+			// cursor, click the selected row again to confirm — see handleRowClick.
+			this.listContainer.addChild(
+				new SelectableRow(`${cursor}${name}${statusIndicator}`, isSelected, 1, () => this.handleRowClick(i)),
+			);
 		}
 
 		const scrollHint = themedScrollPositionHint(
@@ -144,9 +148,9 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		if (credential?.type === provider.authType) return theme.fg("success", " ✓ configured");
 		if (credential) {
 			const label = credential.type === "oauth" ? "subscription configured" : "API key configured";
-			return theme.fg("muted", " • ") + theme.fg("warning", label);
+			return theme.fg("muted", " · ") + theme.fg("warning", label);
 		}
-		if (provider.authType !== "api_key") return theme.fg("muted", " • unconfigured");
+		if (provider.authType !== "api_key") return theme.fg("muted", " · unconfigured");
 
 		const status = this.getAuthStatus(provider.id);
 		switch (status.source) {
@@ -161,8 +165,24 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 			case "models_json_command":
 				return theme.fg("success", " ✓ command in models.json");
 			default:
-				return theme.fg("muted", " • unconfigured");
+				return theme.fg("muted", " · unconfigured");
 		}
+	}
+
+	/**
+	 * Mouse contract (wired into each SelectableRow): clicking an unselected row
+	 * moves the cursor there; clicking the already-selected row confirms it like
+	 * Enter. The re-render after a claimed click comes from the TUI's mouse
+	 * pipeline.
+	 */
+	private handleRowClick(index: number): void {
+		if (index !== this.selectedIndex) {
+			this.selectedIndex = index;
+			this.updateList();
+			return;
+		}
+		const selectedProvider = this.filteredProviders[index];
+		if (selectedProvider) this.onSelectCallback(selectedProvider.id);
 	}
 
 	handleInput(keyData: string): void {

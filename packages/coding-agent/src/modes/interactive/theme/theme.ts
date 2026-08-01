@@ -93,6 +93,13 @@ const ThemeJsonSchema = Type.Object({
 		bashMode: ColorValueSchema,
 		// Plan permission mode (editor border + footer chip)
 		planMode: ColorValueSchema,
+		// Semantic text tokens. Optional so custom themes written before they
+		// existed keep validating; call sites fall back to the token each slot
+		// historically borrowed (command → border, mdHeading3 →
+		// customMessageLabel, compactionLabel → borderAccent).
+		command: Type.Optional(ColorValueSchema),
+		mdHeading3: Type.Optional(ColorValueSchema),
+		compactionLabel: Type.Optional(ColorValueSchema),
 		// Message Shell Gutters (5 colors) — see message-shell.ts. Assistant +
 		// user have no key here: assistant uses the default fg, user reuses
 		// `border` until it gains a dedicated key in a later batch.
@@ -140,9 +147,12 @@ export type ThemeColor =
 	| "userMessageText"
 	| "customMessageText"
 	| "customMessageLabel"
+	| "command"
+	| "compactionLabel"
 	| "toolTitle"
 	| "toolOutput"
 	| "mdHeading"
+	| "mdHeading3"
 	| "mdLink"
 	| "mdLinkUrl"
 	| "mdCode"
@@ -1449,8 +1459,15 @@ export function getMarkdownTheme(): MarkdownTheme {
 	return {
 		heading: (text: string) => theme.fg("mdHeading", text),
 		heading1: (text: string) => theme.bold(theme.underline(h1Gradient(text))),
-		heading2: (text: string) => theme.fg("accent", "▎ ") + theme.bold(theme.fg("accent", text)),
-		heading3: (text: string) => theme.bold(theme.fg("customMessageLabel", text)),
+		// Style functions must be pure ANSI (no visible glyphs): the renderer
+		// replays their prefix after every inline token reset. The H2 accent bar
+		// is emitted once per heading via headingPrefix below.
+		heading2: (text: string) => theme.bold(theme.fg("accent", text)),
+		// `mdHeading3` is a newer optional token; custom themes written before it
+		// existed fall back to `customMessageLabel` — the color H3 always used.
+		heading3: (text: string) =>
+			theme.bold(theme.fg(theme.hasColor("mdHeading3") ? "mdHeading3" : "customMessageLabel", text)),
+		headingPrefix: (depth: number) => (depth === 2 ? theme.fg("accent", "▎ ") : ""),
 		link: (text: string) => theme.fg("mdLink", text),
 		linkUrl: (text: string) => theme.fg("mdLinkUrl", text),
 		code: (text: string) => theme.fg("mdCode", text),
@@ -1503,10 +1520,12 @@ export function getEditorTheme(): EditorTheme {
 	return {
 		borderColor: (text: string) => theme.fg("border", text),
 		selectList: getSelectListTheme(),
-		// Slash commands (`/chrome`, …) render their leading token in the accent
-		// border color — `border` resolves to the green accent-border var in both
-		// built-in themes, keeping the input chrome inside the green family.
-		commandColor: (text: string) => theme.fg("border", text),
+		// Slash commands (`/chrome`, …) render their leading token in the dedicated
+		// `command` TEXT token (same accent-border value in both built-in themes,
+		// keeping the input chrome inside the green family). Custom themes written
+		// before the token existed fall back to `border` — the color this slot
+		// always borrowed.
+		commandColor: (text: string) => theme.fg(theme.hasColor("command") ? "command" : "border", text),
 		placeholderColor: (t) => theme.fg("dim", t),
 	};
 }

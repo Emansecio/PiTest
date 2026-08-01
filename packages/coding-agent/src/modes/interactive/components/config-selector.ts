@@ -10,6 +10,8 @@ import {
 	type Focusable,
 	getKeybindings,
 	Input,
+	type MouseEvent,
+	type MouseTarget,
 	matchesKey,
 	Spacer,
 	truncateToWidth,
@@ -19,7 +21,13 @@ import { CONFIG_DIR_NAME } from "../../../config.ts";
 import type { PathMetadata, ResolvedPaths, ResolvedResource } from "../../../core/package-manager.ts";
 import type { PackageSource, SettingsManager } from "../../../core/settings-manager.ts";
 import { theme } from "../theme/theme.ts";
-import { checkboxGlyph, rawKeyHint, selectionCursor, themedScrollPositionHint } from "./keybinding-hints.ts";
+import {
+	checkboxGlyph,
+	HINT_SEPARATOR,
+	rawKeyHint,
+	selectionCursor,
+	themedScrollPositionHint,
+} from "./keybinding-hints.ts";
 import { paintSelectedRow } from "./selectable-row.ts";
 import { beginSelectorSurface } from "./selector-surface.ts";
 
@@ -185,7 +193,7 @@ class ConfigSelectorHeader implements Component {
 
 	render(width: number): string[] {
 		const title = theme.bold("Resource Configuration");
-		const sep = theme.fg("muted", " · ");
+		const sep = theme.fg("muted", HINT_SEPARATOR);
 		const hint = rawKeyHint("space", "toggle") + sep + rawKeyHint("esc", "close");
 		const hintWidth = visibleWidth(hint);
 		const titleWidth = visibleWidth(title);
@@ -197,7 +205,13 @@ class ConfigSelectorHeader implements Component {
 	}
 }
 
-class ResourceList implements Component, Focusable {
+class ResourceList implements Component, Focusable, MouseTarget {
+	// Mouse bookkeeping from the last rendered frame (SelectList idiom): local
+	// row where the entry rows start, first filtered index shown, and entry-row
+	// count — so onMouse can map a clicked row back to the entry it showed.
+	private lastRenderItemStartRow = 0;
+	private lastRenderStartIndex = 0;
+	private lastRenderItemRows = 0;
 	private groups: ResourceGroup[];
 	private flatItems: FlatEntry[] = [];
 	private filteredItems: FlatEntry[] = [];
@@ -369,6 +383,11 @@ class ResourceList implements Component, Focusable {
 		lines.push(...this.searchInput.render(width));
 		lines.push("");
 
+		// Entry rows start right below the search block; no rows yet (see the
+		// empty early return) means clicks map to nothing.
+		this.lastRenderItemStartRow = lines.length;
+		this.lastRenderItemRows = 0;
+
 		if (this.filteredItems.length === 0) {
 			lines.push(theme.fg("muted", "  No resources found"));
 			return lines;
@@ -381,6 +400,8 @@ class ResourceList implements Component, Focusable {
 			Math.min(this.selectedIndex - Math.floor(maxVisible / 2), this.filteredItems.length - maxVisible),
 		);
 		const endIndex = Math.min(startIndex + maxVisible, this.filteredItems.length);
+		this.lastRenderStartIndex = startIndex;
+		this.lastRenderItemRows = endIndex - startIndex;
 
 		for (let i = startIndex; i < endIndex; i++) {
 			const entry = this.filteredItems[i];
@@ -419,6 +440,32 @@ class ResourceList implements Component, Focusable {
 		}
 
 		return lines;
+	}
+
+	/**
+	 * Left-press on a resource row. Click an unselected item to move the cursor;
+	 * click the selected item again to toggle its checkbox (Enter/Space
+	 * semantics — same two-step contract as the other selectors). Group/subgroup
+	 * headers are not keyboard-selectable and decline, as do the search box,
+	 * scroll hint and non-left/non-press events — native terminal selection
+	 * keeps working there.
+	 */
+	onMouse(ev: MouseEvent, localRow: number, _localCol: number): boolean {
+		if (ev.type !== "press" || ev.button !== "left") return false;
+		const itemRow = localRow - this.lastRenderItemStartRow;
+		if (itemRow < 0 || itemRow >= this.lastRenderItemRows) return false;
+		const index = this.lastRenderStartIndex + itemRow;
+		const entry = this.filteredItems[index];
+		if (entry?.type !== "item") return false;
+		if (index !== this.selectedIndex) {
+			this.selectedIndex = index;
+			return true;
+		}
+		const newEnabled = !entry.item.enabled;
+		this.toggleResource(entry.item, newEnabled);
+		this.updateItem(entry.item, newEnabled);
+		this.onToggle?.(entry.item, newEnabled);
+		return true;
 	}
 
 	handleInput(data: string): void {

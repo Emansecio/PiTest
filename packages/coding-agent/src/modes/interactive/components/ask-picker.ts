@@ -7,6 +7,13 @@
  * multi-select (checkbox toggling), freeform typed answers, a comment attached
  * to a selection, and a live countdown when the request carries a timeout.
  *
+ * Keyboard fast paths (list mode only — while the freeform/comment Input has
+ * focus every printable key belongs to the text): digits `1`-`9` quick-select
+ * option N when the list has ≤9 options (single-select confirms in one
+ * keystroke, multi-select toggles; out-of-range digits are ignored), and an
+ * option may declare a letter `hotkey` that jumps to it directly (see
+ * {@link AskOption.hotkey} — e.g. exit_plan's `a` for approval).
+ *
  * Wiring: the interactive mode subscribes to the UserInputBus on session boot.
  * When a request arrives it constructs this picker (inline or as an overlay)
  * and resolves the bus with the picked labels, freeform text, and/or comment
@@ -138,6 +145,12 @@ class AskPicker implements Component, Focusable, MouseTarget {
 	private readonly commentToggleKey: string;
 	/** Row index of the synthetic "type a custom answer" entry, or -1. */
 	private readonly freeformRow: number;
+	/**
+	 * Digits 1-9 map to option rows only when every option is numerable in one
+	 * keystroke (≤9 options). Longer lists render no numbers and ignore digits —
+	 * a two-digit scheme would need a timeout buffer for dubious value.
+	 */
+	private readonly quickSelect: boolean;
 	/** Wall-clock deadline for the auto-answer timeout, if the request has one. */
 	private readonly deadline: number | undefined;
 
@@ -169,6 +182,7 @@ class AskPicker implements Component, Focusable, MouseTarget {
 		this.overlayToggleKey = req.overlayToggleKey?.trim() || "alt+o";
 		this.commentToggleKey = req.commentToggleKey?.trim() || "ctrl+g";
 		this.freeformRow = this.allowFreeform ? this.options.length : -1;
+		this.quickSelect = this.options.length > 0 && this.options.length <= 9;
 		this.deadline =
 			typeof req.timeout === "number" && Number.isFinite(req.timeout) && req.timeout > 0
 				? Date.now() + req.timeout
@@ -268,6 +282,33 @@ class AskPicker implements Component, Focusable, MouseTarget {
 		this.settle({ picked: label ? [label] : [], comment, cancelled: false });
 	}
 
+	/**
+	 * Direct pick of option `i` (digit quick-select or option hotkey).
+	 * Single-select: select + confirm in one keystroke — settles, which clears
+	 * the countdown tick exactly like Enter. Multi-select: TOGGLES the checkbox
+	 * and moves the cursor there (an instant confirm would make picking a second
+	 * option impossible — same rationale as mouse clicks); Enter still confirms.
+	 */
+	private pickOption(i: number): void {
+		this.index = i;
+		if (this.allowMultiple) {
+			if (this.checked.has(i)) this.checked.delete(i);
+			else this.checked.add(i);
+			return;
+		}
+		this.confirmList();
+	}
+
+	/** Option index whose declared letter hotkey matches `data`, or -1. */
+	private hotkeyOptionIndex(data: string): number {
+		if (data.length !== 1) return -1;
+		const key = data.toLowerCase();
+		// Letters only: digits belong to positional quick-select, and control/
+		// space/symbol chars stay with their existing bindings.
+		if (key < "a" || key > "z") return -1;
+		return this.options.findIndex((o) => o.hotkey?.toLowerCase() === key);
+	}
+
 	handleInput(data: string): void {
 		// Overlay visibility toggle works in any non-typing context.
 		if (this.mode !== "freeform" && this.mode !== "comment" && matchesKey(data, this.overlayToggleKey as KeyId)) {
@@ -304,6 +345,19 @@ class AskPicker implements Component, Focusable, MouseTarget {
 		}
 		if (kb.matches(data, "tui.select.cancel")) {
 			this.settle({ picked: [], cancelled: true });
+			return;
+		}
+		// Option hotkey (letter): jump straight to the declared option.
+		const hotkeyIndex = this.hotkeyOptionIndex(data);
+		if (hotkeyIndex !== -1) {
+			this.pickOption(hotkeyIndex);
+			return;
+		}
+		// Numeric quick-select: `1`-`9` picks option N when the list is short
+		// enough to number. Out-of-range digits are consumed silently.
+		if (this.quickSelect && data >= "1" && data <= "9") {
+			const i = data.charCodeAt(0) - "1".charCodeAt(0);
+			if (i < this.options.length) this.pickOption(i);
 			return;
 		}
 		// Space toggles a checkbox in multi-select mode (never on the freeform row).
@@ -402,13 +456,22 @@ class AskPicker implements Component, Focusable, MouseTarget {
 			this.rowToListRow.set(lines.length, i);
 			const focused = i === this.index && this.mode === "list";
 			const cursor = selectionCursor(focused);
+			// Quick-select ordinal, `1·` dim (dense, matching the hint separator
+			// idiom) — the number IS the discoverability of the digit shortcut, so
+			// no extra hint line is spent on it. Rendered only when digits are live.
+			const num = this.quickSelect ? defaultTheme.fg("dim", `${i + 1}·`) : "";
 			const box = this.checkboxPrefix(i);
 			// The badge marks the default pick quietly: dim, never bold — the label
 			// owns the row. Width reserved separately so clamping never eats it.
+			// Same for the hotkey tag: `[a]` dim right after the label makes the
+			// letter shortcut discoverable without a hint entry.
 			const badge = opt.recommended ? defaultTheme.fg("dim", RECOMMENDED_BADGE) : "";
+			const hotkeyTag = opt.hotkey ? defaultTheme.fg("dim", ` [${opt.hotkey}]`) : "";
+			const suffix = hotkeyTag + badge;
 			const labelText = opt.recommended ? defaultTheme.bold(opt.label) : opt.label;
 			const head =
-				truncateToWidth(`${cursor}${box}${labelText}`, Math.max(0, width - visibleWidth(badge)), "…") + badge;
+				truncateToWidth(`${cursor}${num}${box}${labelText}`, Math.max(0, width - visibleWidth(suffix)), "…") +
+				suffix;
 			// Full-width selectedBg on the focused row (same idiom as other selectors).
 			lines.push(paintSelectedRow(focused ? defaultTheme.fg("accent", head) : head, width, focused));
 			// Detail pane: ONLY the focused option shows its description, wrapped

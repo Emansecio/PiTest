@@ -4,7 +4,7 @@ import { afterEach, describe, it } from "node:test";
 import { pathToFileURL } from "node:url";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { Chalk } from "chalk";
-import { Markdown, setMarkdownFileLinkBase } from "../src/components/markdown.js";
+import { Markdown, type MarkdownTheme, setMarkdownFileLinkBase } from "../src/components/markdown.js";
 import { resetCapabilitiesCache, setCapabilities } from "../src/terminal-image.js";
 import { type Component, TUI } from "../src/tui.js";
 import { defaultMarkdownTheme } from "./test-themes.js";
@@ -60,8 +60,8 @@ describe("Markdown component", () => {
 
 			// Check structure
 			assert.ok(plainLines.some((line) => line.includes("- Item 1")));
-			assert.ok(plainLines.some((line) => line.includes("    - Nested 1.1")));
-			assert.ok(plainLines.some((line) => line.includes("    - Nested 1.2")));
+			assert.ok(plainLines.some((line) => line.includes("  - Nested 1.1")));
+			assert.ok(plainLines.some((line) => line.includes("  - Nested 1.2")));
 			assert.ok(plainLines.some((line) => line.includes("- Item 2")));
 		});
 
@@ -79,11 +79,11 @@ describe("Markdown component", () => {
 			const lines = markdown.render(80);
 			const plainLines = lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""));
 
-			// Check proper indentation
-			assert.ok(plainLines.some((line) => line.includes("- Level 1")));
-			assert.ok(plainLines.some((line) => line.includes("    - Level 2")));
-			assert.ok(plainLines.some((line) => line.includes("        - Level 3")));
-			assert.ok(plainLines.some((line) => line.includes("            - Level 4")));
+			// Check proper indentation: 2 spaces per nesting level (dense measure).
+			assert.ok(plainLines.some((line) => line.startsWith("- Level 1")));
+			assert.ok(plainLines.some((line) => line.startsWith("  - Level 2")));
+			assert.ok(plainLines.some((line) => line.startsWith("    - Level 3")));
+			assert.ok(plainLines.some((line) => line.startsWith("      - Level 4")));
 		});
 
 		it("should render ordered nested list", () => {
@@ -101,8 +101,8 @@ describe("Markdown component", () => {
 			const plainLines = lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""));
 
 			assert.ok(plainLines.some((line) => line.includes("1. First")));
-			assert.ok(plainLines.some((line) => line.includes("    1. Nested first")));
-			assert.ok(plainLines.some((line) => line.includes("    2. Nested second")));
+			assert.ok(plainLines.some((line) => line.startsWith("  1. Nested first")));
+			assert.ok(plainLines.some((line) => line.startsWith("  2. Nested second")));
 			assert.ok(plainLines.some((line) => line.includes("2. Second")));
 		});
 
@@ -122,7 +122,7 @@ describe("Markdown component", () => {
 			const plainLines = lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""));
 
 			assert.ok(plainLines.some((line) => line.includes("1. Ordered item")));
-			assert.ok(plainLines.some((line) => line.includes("    - Unordered nested")));
+			assert.ok(plainLines.some((line) => line.startsWith("  - Unordered nested")));
 			assert.ok(plainLines.some((line) => line.includes("2. Second ordered")));
 		});
 
@@ -200,7 +200,7 @@ describe("Markdown component", () => {
 
 			const lines = markdown.render(24).map((line) => stripAnsi(line).trimEnd());
 
-			assert.deepStrictEqual(lines, ["- parent", "    - alpha beta gamma", "      delta epsilon"]);
+			assert.deepStrictEqual(lines, ["- parent", "  - alpha beta gamma", "    delta epsilon"]);
 		});
 
 		it("should indent wrapped nested list lines under ordered parents", () => {
@@ -208,7 +208,7 @@ describe("Markdown component", () => {
 
 			const lines = markdown.render(24).map((line) => stripAnsi(line).trimEnd());
 
-			assert.deepStrictEqual(lines, ["1. parent", "    - alpha beta gamma", "      delta epsilon"]);
+			assert.deepStrictEqual(lines, ["1. parent", "  - alpha beta gamma", "    delta epsilon"]);
 		});
 
 		it("should render and wrap blockquotes inside list items", () => {
@@ -631,7 +631,7 @@ describe("Markdown component", () => {
 			assert.ok(plainLines.some((line) => line.includes("Test Document")));
 			// Check list
 			assert.ok(plainLines.some((line) => line.includes("- Item 1")));
-			assert.ok(plainLines.some((line) => line.includes("    - Nested item")));
+			assert.ok(plainLines.some((line) => line.startsWith("  - Nested item")));
 			// Check table
 			assert.ok(plainLines.some((line) => line.includes("Col1")));
 			assert.ok(plainLines.some((line) => line.includes("│")));
@@ -885,7 +885,7 @@ again, hello world`,
 			const lines = markdown.render(80);
 			const plainLines = lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").trimEnd());
 
-			const dividerIndex = plainLines.findIndex((line) => line.includes("─"));
+			const dividerIndex = plainLines.findIndex((line) => line.includes("╌"));
 			assert.ok(dividerIndex !== -1, "Should have divider");
 
 			const afterDivider = plainLines.slice(dividerIndex + 1);
@@ -1482,6 +1482,27 @@ bar`,
 			const plain = stripAnsi(markdown.render(80)[0]);
 			assert.ok(plain.includes("H2:Section title"));
 		});
+
+		it("emits headingPrefix exactly once, never replayed after inline tokens", () => {
+			// Regression: the H2 accent bar used to live inside the heading2 style
+			// function; getStylePrefix captured the visible glyph as part of the ANSI
+			// prefix and renderInlineTokens replayed it after every codespan/strong
+			// segment ("▎ Setup npm i▎ ▎  now"). The bar must come from headingPrefix
+			// (a renderer-emitted line prefix) while style functions stay pure ANSI.
+			const themeWithPrefix: MarkdownTheme = {
+				...defaultMarkdownTheme,
+				heading2: (text: string) => chalk.bold(chalk.cyan(text)),
+				headingPrefix: (depth: number) => (depth === 2 ? chalk.cyan("▎ ") : ""),
+			};
+			const markdown = new Markdown("## Setup `npm i` now", 0, 0, themeWithPrefix);
+			const plain = stripAnsi(markdown.render(80)[0]);
+			assert.strictEqual(plain, "▎ Setup npm i now");
+			assert.strictEqual(
+				plain.split("▎").length - 1,
+				1,
+				`expected exactly one bar glyph in ${JSON.stringify(plain)}`,
+			);
+		});
 	});
 
 	describe("Heading 3 styling", () => {
@@ -1541,7 +1562,7 @@ bar`,
 			const ruleLines = md
 				.render(100)
 				.map((line) => stripAnsi(line))
-				.filter((line) => line.includes("─"));
+				.filter((line) => line.includes("╌"));
 			assert.ok(ruleLines.length > 0, "expected a horizontal-rule line");
 			for (const line of ruleLines) {
 				assert.ok(line.length <= 40, `hr should be capped to the prose measure, got ${line.length}`);
@@ -1573,6 +1594,230 @@ bar`,
 			const streamed = streaming.render(100);
 			const oneShot = new Markdown(full, 0, 0, defaultMarkdownTheme, undefined, 40).render(100);
 			assert.deepStrictEqual(streamed, oneShot);
+		});
+	});
+
+	describe("Code fence frame rules under the prose cap (#10)", () => {
+		// Rule policy: with the prose cap active, the `╭─…`/`╰─…` rules span
+		// min(width, max(proseCap, widest code/lang line + gutter)). The code BODY
+		// keeps the full width (wide block); only the frame follows the measure.
+		function fenceRuleLines(lines: string[]): string[] {
+			return lines.map((line) => stripAnsi(line)).filter((line) => line.startsWith("╭") || line.startsWith("╰"));
+		}
+
+		it("caps the frame rules at the prose measure for short code on a wide terminal", () => {
+			const md = new Markdown("```js\nconst a = 1;\n```", 0, 0, defaultMarkdownTheme, undefined, 40);
+			const rules = fenceRuleLines(md.render(200));
+			assert.strictEqual(rules.length, 2, "expected an opening and a closing rule");
+			for (const rule of rules) {
+				assert.strictEqual(rule.length, 40, `rule should sit at the prose measure, got ${rule.length}`);
+			}
+		});
+
+		it("grows the rules to cover code wider than the prose measure", () => {
+			const wideLine = "x".repeat(60);
+			const md = new Markdown(`\`\`\`\n${wideLine}\n\`\`\``, 0, 0, defaultMarkdownTheme, undefined, 40);
+			const lines = md.render(200);
+			const rules = fenceRuleLines(lines);
+			// Gutter "│ " (2 cols) + 60 cols of code = 62-col rule.
+			for (const rule of rules) {
+				assert.strictEqual(rule.length, 62, `rule should cover the widest code line, got ${rule.length}`);
+			}
+			// No rendered line overhangs the rule.
+			const maxWidth = Math.max(...lines.map((line) => stripAnsi(line).length));
+			assert.ok(maxWidth <= 62, `content should not overhang the rule, got ${maxWidth}`);
+		});
+
+		it("clamps the rules at the terminal width when the code is wider still", () => {
+			const wideLine = "x".repeat(120);
+			const md = new Markdown(`\`\`\`\n${wideLine}\n\`\`\``, 0, 0, defaultMarkdownTheme, undefined, 40);
+			const rules = fenceRuleLines(md.render(80));
+			for (const rule of rules) {
+				assert.strictEqual(rule.length, 80, `rule should clamp at the terminal width, got ${rule.length}`);
+			}
+		});
+
+		it("without a prose cap the rules keep the historical full width (byte-identical)", () => {
+			const doc = "```js\nconst a = 1;\n```";
+			const uncapped = new Markdown(doc, 0, 0, defaultMarkdownTheme).render(200);
+			const zeroCap = new Markdown(doc, 0, 0, defaultMarkdownTheme, undefined, 0).render(200);
+			assert.deepStrictEqual(zeroCap, uncapped);
+			const rules = fenceRuleLines(uncapped);
+			assert.strictEqual(rules.length, 2);
+			for (const rule of rules) {
+				assert.strictEqual(rule.length, 200, `uncapped rule should span the full width, got ${rule.length}`);
+			}
+		});
+
+		it("uses the stable fallback rule while the fence is streaming open, then settles on close", () => {
+			const md = new Markdown("", 0, 0, defaultMarkdownTheme, undefined, 40);
+			// Open fence with a long code line already present: the widest line is
+			// not final yet, so the rule must hold at min(width, proseCap) instead
+			// of jumping wider with each streamed delta.
+			md.setText(`\`\`\`js\n${"y".repeat(70)}`);
+			const openLines = md.render(200).map((line) => stripAnsi(line));
+			const openRule = openLines.find((line) => line.startsWith("╭"));
+			assert.ok(openRule, "expected an opening rule while the fence is open");
+			assert.strictEqual(
+				openRule.length,
+				40,
+				`open-fence rule should use the stable fallback, got ${openRule.length}`,
+			);
+
+			// Closing the fence settles the frame to its final width, identical to a
+			// one-shot render of the same document.
+			const full = `\`\`\`js\n${"y".repeat(70)}\n\`\`\``;
+			md.setText(full);
+			const settled = md.render(200);
+			const oneShot = new Markdown(full, 0, 0, defaultMarkdownTheme, undefined, 40).render(200);
+			assert.deepStrictEqual(settled, oneShot);
+			const settledRules = fenceRuleLines(settled);
+			for (const rule of settledRules) {
+				assert.strictEqual(
+					rule.length,
+					72,
+					`settled rule should cover the widest line + gutter, got ${rule.length}`,
+				);
+			}
+		});
+	});
+
+	describe("Horizontal rule glyph", () => {
+		it("renders hr with the dashed ╌ glyph, never the solid ─ turn-separator glyph", () => {
+			// `─` is the transcript's TURN separator (coding-agent TurnRule); a model
+			// emitting `---` must not fabricate a visually identical turn boundary.
+			const lines = new Markdown("---", 0, 0, defaultMarkdownTheme).render(24).map((line) => stripAnsi(line));
+			assert.deepStrictEqual(lines, ["╌".repeat(24)]);
+			assert.ok(!lines.some((line) => line.includes("─")), "hr must not reuse the solid turn-rule glyph");
+		});
+	});
+
+	describe("Default style on escape/image inline tokens", () => {
+		it("keeps the default message color on an escaped character mid-line", () => {
+			const markdown = new Markdown("alpha \\* beta", 0, 0, defaultMarkdownTheme, {
+				color: (text) => chalk.gray(text),
+			});
+			const joined = markdown.render(80).join("\n");
+			assert.ok(joined.includes("alpha"), "escaped text should render");
+			// The escape token's `*` must carry the default gray, exactly like the
+			// text around it — not fall through unstyled mid-line.
+			assert.ok(
+				joined.includes("\x1b[90m*\x1b[39m"),
+				`escaped char should keep default color: ${JSON.stringify(joined)}`,
+			);
+		});
+
+		it("keeps the default message color on inline image alt text mid-line", () => {
+			const markdown = new Markdown(
+				"before ![alt text](http://example.com/i.png) after",
+				0,
+				0,
+				defaultMarkdownTheme,
+				{
+					color: (text) => chalk.gray(text),
+				},
+			);
+			const joined = markdown.render(80).join("\n");
+			assert.ok(
+				joined.includes("\x1b[90malt text\x1b[39m"),
+				`image alt should keep default color: ${JSON.stringify(joined)}`,
+			);
+		});
+	});
+
+	describe("Ordered list marker alignment", () => {
+		it("right-aligns markers when a list crosses a digit boundary (9 → 10)", () => {
+			const doc = Array.from({ length: 10 }, (_, i) => `${i + 1}. item ${i + 1}`).join("\n");
+			const lines = new Markdown(doc, 0, 0, defaultMarkdownTheme)
+				.render(60)
+				.map((line) => stripAnsi(line).trimEnd());
+			assert.strictEqual(lines[0], " 1. item 1");
+			assert.strictEqual(lines[8], " 9. item 9");
+			assert.strictEqual(lines[9], "10. item 10");
+			// The text column stays straight across the digit boundary.
+			const columns = new Set(lines.map((line) => line.indexOf("item")));
+			assert.deepStrictEqual([...columns], [4], `text column should not jitter: ${JSON.stringify(lines)}`);
+		});
+
+		it("keeps single-digit lists byte-identical (padStart is a no-op)", () => {
+			const lines = new Markdown("1. a\n2. b", 0, 0, defaultMarkdownTheme)
+				.render(40)
+				.map((line) => stripAnsi(line).trimEnd());
+			assert.deepStrictEqual(lines, ["1. a", "2. b"]);
+		});
+	});
+
+	describe("literalBlocks mode (near-literal user text)", () => {
+		const literal = (text: string, width = 60) =>
+			new Markdown(text, 0, 0, defaultMarkdownTheme, undefined, 0, true)
+				.render(width)
+				.map((line) => stripAnsi(line));
+
+		it("keeps a # line literal instead of promoting it to a heading", () => {
+			const lines = literal("# include <stdio.h>");
+			assert.strictEqual(lines[0], "# include <stdio.h>");
+		});
+
+		it("keeps a > line literal instead of rendering a blockquote", () => {
+			const lines = literal("> not a quote");
+			assert.ok(
+				lines.some((line) => line.includes("> not a quote")),
+				`should keep the > prefix: ${JSON.stringify(lines)}`,
+			);
+			assert.ok(!lines.some((line) => line.includes("│")), "no blockquote border");
+		});
+
+		it("keeps 4-space indentation literal instead of an indented code block", () => {
+			const lines = literal("paragraph\n\n    return 0;");
+			assert.ok(
+				lines.some((line) => line.includes("    return 0;")),
+				`indentation should survive: ${JSON.stringify(lines)}`,
+			);
+			assert.ok(!lines.some((line) => line.includes("╭")), "no code-block frame");
+		});
+
+		it("keeps --- and setext underlines literal instead of hr/heading", () => {
+			const lines = literal("---\n\nTitle\n===");
+			assert.ok(
+				lines.some((line) => line === "---"),
+				`--- should stay text: ${JSON.stringify(lines)}`,
+			);
+			assert.ok(
+				lines.some((line) => line === "Title"),
+				"setext text line survives",
+			);
+			assert.ok(
+				lines.some((line) => line === "==="),
+				"setext underline survives",
+			);
+			assert.ok(!lines.some((line) => line.includes("╌")), "no horizontal rule");
+		});
+
+		it("still renders explicit ``` fences and inline codespans", () => {
+			const md = new Markdown("run `npm test`\n\n```c\nint x;\n```", 0, 0, defaultMarkdownTheme, undefined, 0, true);
+			const raw = md.render(60);
+			const plain = raw.map((line) => stripAnsi(line));
+			assert.ok(
+				plain.some((line) => line.includes("╭")),
+				"fenced code keeps its frame",
+			);
+			assert.ok(
+				plain.some((line) => line.includes("int x;")),
+				"fenced code body renders",
+			);
+			// Codespan styling (theme code = yellow) still applies.
+			assert.ok(
+				raw.some((line) => line.includes("\x1b[33mnpm test")),
+				`codespan should stay styled: ${JSON.stringify(raw)}`,
+			);
+		});
+
+		it("does not leak literal mode into default instances", () => {
+			const normal = new Markdown("# Title", 0, 0, defaultMarkdownTheme).render(60).map((line) => stripAnsi(line));
+			assert.ok(
+				normal.some((line) => line.includes("Title") && !line.includes("# Title")),
+				`default instances still render headings: ${JSON.stringify(normal)}`,
+			);
 		});
 	});
 });

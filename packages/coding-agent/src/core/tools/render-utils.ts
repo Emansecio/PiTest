@@ -1,5 +1,5 @@
 import * as os from "node:os";
-import { getCapabilities, getImageDimensions, imageFallback, Text } from "@pit/tui";
+import { type Component, getCapabilities, getImageDimensions, imageFallback, Text, truncateToWidth } from "@pit/tui";
 import { collapseAnnotatedBlocks } from "../../modes/interactive/components/annotated-block-collapse.ts";
 import { expandKeyHint, moreLinesTrailer } from "../../modes/interactive/components/tool-activity.ts";
 import type { ThemeColor } from "../../modes/interactive/theme/theme.ts";
@@ -156,20 +156,32 @@ export function nonEmptyDetails<T extends object>(d: T): T | undefined {
 	return Object.keys(d).length > 0 ? d : undefined;
 }
 
-/**
- * Reuse the previously-rendered Text component for this tool row when present,
- * otherwise allocate a fresh empty one. Every tool whose result render is a
- * single Text node threads its component through `context.lastComponent`; this
- * centralizes that `(lastComponent as Text) ?? new Text(...)` idiom.
- */
-function reuseText(context: { lastComponent?: unknown }): Text {
-	return (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-}
-
 /** Collapsed-preview line cap shared by every `renderResult: renderToolOutput`
  * tool and (via {@link buildCappedToolOutput}) the TUI's no-custom-renderer
  * result fallback in tool-execution.ts. */
 export const DEFAULT_RESULT_PREVIEW_LINES = 15;
+
+/** Optional knobs for {@link buildCappedToolOutput}'s collapsed preview. */
+export interface CappedOutputOptions {
+	/**
+	 * Errored result: keep the TAIL of the output — the informative part of an
+	 * error body (final message, exit status) is its end, not its preamble — and
+	 * announce the hidden head with a leading `… +N earlier lines` trailer, the
+	 * same {@link moreLinesTrailer} dialect capErrorPreview (tool-activity.ts)
+	 * uses. Normal output keeps the HEAD (scanning a preview top-down is how you
+	 * decide whether to expand), with the trailing `… +N more lines` trailer.
+	 */
+	isError?: boolean;
+	/**
+	 * Render width (cells). When present, the cap counts VISUAL lines (after
+	 * wrap), reusing bash-execution.ts's truncateToVisualLines idiom: a single
+	 * 2000-char logical line wraps to dozens of terminal rows, so a logical-line
+	 * cap is no cap at all. When absent (callers without a width at build time —
+	 * tool-execution.ts's string fallback), the cap degrades to logical lines,
+	 * which can still over-show on pathologically long lines.
+	 */
+	width?: number;
+}
 
 /**
  * Collapse raw tool-result text to a bounded preview unless `expanded`,
@@ -177,47 +189,148 @@ export const DEFAULT_RESULT_PREVIEW_LINES = 15;
  * "N more lines (expand)" trailer when content is hidden. Returns null for
  * empty output (callers render nothing in that case).
  *
- * This is the byte-identical logic tool-execution.ts's no-custom-renderer
- * fallback already used (`ToolExecutionComponent.buildCappedOutput`) —
- * extracted here so every `renderResult: renderToolOutput` tool gets the same
- * collapsed-by-default safety net instead of dumping full output regardless
- * of `options.expanded`.
+ * This is the logic tool-execution.ts's no-custom-renderer fallback already
+ * used (`ToolExecutionComponent.buildCappedOutput`) — extracted here so every
+ * `renderResult: renderToolOutput` tool gets the same collapsed-by-default
+ * safety net instead of dumping full output regardless of `options.expanded`.
+ * See {@link CappedOutputOptions} for the visual-line cap and error-tail modes;
+ * without `opts` the behavior is byte-identical to the historical head +
+ * logical-line cap, which keeps the untouched tool-execution.ts caller stable.
+ *
+ * Boundary note: the activity stream's error auto-preview (activity-line.ts)
+ * calls setResultExpanded(true) BEFORE rendering and then caps the EXPANDED
+ * body with capErrorPreview — so it always reaches this function with
+ * `expanded === true` (full output, no cap here) and there is no double-cap.
  */
 export function buildCappedToolOutput(
 	rawOutput: string,
 	expanded: boolean,
 	theme: ToolTheme,
 	previewLines: number = DEFAULT_RESULT_PREVIEW_LINES,
+	opts: CappedOutputOptions = {},
 ): string | null {
 	const output = rawOutput.trim();
 	if (!output) return null;
-	const displayOutput = expanded
-		? output
-		: collapseAnnotatedBlocks(output, {
-				expanded: false,
-				muted: (s) => theme.fg("muted", s),
-				expandHint: expandKeyHint(),
-			});
-	const lines = displayOutput.split("\n");
-	const maxLines = expanded ? lines.length : previewLines;
-	const displayLines = lines.slice(0, maxLines);
-	const remaining = lines.length - maxLines;
-	let text = displayLines.map((line) => theme.fg("toolOutput", line)).join("\n");
-	if (remaining > 0) {
-		text += `\n${moreLinesTrailer(remaining, expandKeyHint())}`;
+	if (expanded) {
+		return output
+			.split("\n")
+			.map((line) => theme.fg("toolOutput", line))
+			.join("\n");
 	}
-	return text;
+	const displayOutput = collapseAnnotatedBlocks(output, {
+		expanded: false,
+		muted: (s) => theme.fg("muted", s),
+		expandHint: expandKeyHint(),
+	});
+	const styledLines = displayOutput.split("\n").map((line) => theme.fg("toolOutput", line));
+	const isError = opts.isError ?? false;
+
+	if (opts.width === undefined) {
+		// Logical-line cap (no width known at build time). Head + trailing trailer
+		// for normal output — byte-identical to the historical behavior relied on
+		// by tool-execution.ts; tail + leading trailer for errors.
+		if (styledLines.length <= previewLines) return styledLines.join("\n");
+		const hidden = styledLines.length - previewLines;
+		if (isError) {
+			return [moreLinesTrailer(hidden, expandKeyHint(), "earlier lines"), ...styledLines.slice(-previewLines)].join(
+				"\n",
+			);
+		}
+		return [...styledLines.slice(0, previewLines), moreLinesTrailer(hidden, expandKeyHint())].join("\n");
+	}
+
+	// Visual-line cap: wrap the styled text exactly as the Text component will
+	// (same idiom as bash-execution.ts's truncateToVisualLines + slice), then
+	// keep head or tail of the VISUAL rows. The trailer is width-clamped so it
+	// can never wrap into a second row and break the budget.
+	const width = Math.max(1, Math.floor(opts.width));
+	const visual = new Text(styledLines.join("\n"), 0, 0).render(width);
+	if (visual.length <= previewLines) return visual.join("\n");
+	const hidden = visual.length - previewLines;
+	if (isError) {
+		return [
+			truncateToWidth(moreLinesTrailer(hidden, expandKeyHint(), "earlier lines"), width),
+			...visual.slice(-previewLines),
+		].join("\n");
+	}
+	return [...visual.slice(0, previewLines), truncateToWidth(moreLinesTrailer(hidden, expandKeyHint()), width)].join(
+		"\n",
+	);
+}
+
+/**
+ * Width-aware body component for the default tool-result renderer. A plain
+ * `Text` caps at BUILD time (no width), so its logical-line cap dissolves the
+ * moment a long line wraps; this component defers the cap to render(width),
+ * where the visual-line budget of {@link buildCappedToolOutput} is exact.
+ * Wrapping still goes through an inner `Text`, so expanded output wraps
+ * exactly as before instead of being clamped by the renderer downstream.
+ */
+export class CappedToolOutputText implements Component {
+	private raw = "";
+	private expanded = false;
+	private isError = false;
+	private theme: ToolTheme | null = null;
+	private readonly text = new Text("", 0, 0);
+	private cachedWidth = -1;
+	private cachedLines: string[] | null = null;
+
+	/** Update the source data; no-op (cache kept) when nothing changed. */
+	setSource(raw: string, expanded: boolean, isError: boolean, theme: ToolTheme): void {
+		if (raw === this.raw && expanded === this.expanded && isError === this.isError && theme === this.theme) {
+			return;
+		}
+		this.raw = raw;
+		this.expanded = expanded;
+		this.isError = isError;
+		this.theme = theme;
+		this.invalidate();
+	}
+
+	invalidate(): void {
+		this.text.invalidate();
+		this.cachedWidth = -1;
+		this.cachedLines = null;
+	}
+
+	render(width: number): string[] {
+		if (this.cachedLines !== null && this.cachedWidth === width) {
+			return this.cachedLines;
+		}
+		let lines: string[];
+		if (!this.theme) {
+			lines = [];
+		} else {
+			const capped = buildCappedToolOutput(this.raw, this.expanded, this.theme, DEFAULT_RESULT_PREVIEW_LINES, {
+				isError: this.isError,
+				width,
+			});
+			// Leading newline detaches the result from the call title (the same
+			// `\n${capped}` prefix the previous Text-based renderer used). The inner
+			// Text re-wrap is an identity pass for the already-fitting collapsed
+			// rows and does the real wrapping for expanded output.
+			this.text.setText(capped ? `\n${capped}` : "");
+			lines = this.text.render(width);
+		}
+		this.cachedWidth = width;
+		this.cachedLines = lines;
+		return lines;
+	}
 }
 
 /**
  * Default tool-result renderer: collapse the (trimmed) textual output into a
- * bounded preview unless `options.expanded`, in a single Text node prefixed
- * with a blank line so the result detaches from the call title, and render
- * nothing when there is no output. This is the shared body that the
- * hindsight, plan-adjacent, and utility tools all reuse (reflect/recall/
- * retain/resolve/eval/search_tool_bm25/recipe/inspect_image/render_mermaid/
- * recall_tool_output/goal_complete/forget). Tools whose body differs (no
- * leading newline, custom prefix, error-only) keep their own.
+ * bounded preview unless `options.expanded`, prefixed with a blank line so the
+ * result detaches from the call title, and render nothing when there is no
+ * output. This is the shared body that the hindsight, plan-adjacent, and
+ * utility tools all reuse (reflect/recall/retain/resolve/eval/
+ * search_tool_bm25/recipe/inspect_image/render_mermaid/recall_tool_output/
+ * goal_complete/forget). Tools whose body differs (no leading newline, custom
+ * prefix, error-only) keep their own.
+ *
+ * The returned {@link CappedToolOutputText} caps by VISUAL lines at render
+ * time and, for errored results (`context.isError` / `result.isError`), keeps
+ * the tail of the output instead of the head — see {@link CappedOutputOptions}.
  *
  * Signature mirrors ToolDefinition.renderResult — (result, options, theme,
  * context) — so it drops straight into `renderResult: renderToolOutput`.
@@ -226,14 +339,14 @@ export function buildCappedToolOutput(
  * no-renderer fallback already collapses via {@link buildCappedToolOutput}).
  */
 export function renderToolOutput(
-	result: { content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> },
+	result: { content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>; isError?: boolean },
 	options: { expanded?: boolean } | undefined,
 	theme: ToolTheme,
-	context: { lastComponent?: unknown; showImages: boolean },
-): Text {
-	const text = reuseText(context);
+	context: { lastComponent?: unknown; showImages: boolean; isError?: boolean },
+): Component {
+	const component =
+		context.lastComponent instanceof CappedToolOutputText ? context.lastComponent : new CappedToolOutputText();
 	const output = getTextOutput(result, context.showImages);
-	const capped = buildCappedToolOutput(output, options?.expanded ?? false, theme);
-	text.setText(capped ? `\n${capped}` : "");
-	return text;
+	component.setSource(output, options?.expanded ?? false, context.isError ?? result.isError ?? false, theme);
+	return component;
 }

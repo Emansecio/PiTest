@@ -52,7 +52,7 @@ describe("ActivityLineComponent", () => {
 		expect(out[0]).toMatch(/✓$/);
 		for (const l of out) expect(l).not.toContain("│");
 	});
-	it("keeps a genuine error header-only until explicitly expanded", () => {
+	it("auto-shows the result body on a genuine error without any expand", () => {
 		let resultExpanded = false;
 		const c = new ActivityLineComponent(fakeTui());
 		c.setExec(
@@ -66,9 +66,56 @@ describe("ActivityLineComponent", () => {
 			}),
 		);
 		const out = c.render(120).map(stripAnsi);
-		expect(out).toHaveLength(1);
 		expect(out[0]).toContain("Edited");
-		expect(out[0]).not.toContain("error details");
+		expect(out.some((l) => l.includes("error details"))).toBe(true);
+		// The RESULT expands, not the call/args — the designed auto-preview channel.
+		expect(resultExpanded).toBe(true);
+	});
+	it("caps the auto-shown error body to its tail with an earlier-lines trailer", () => {
+		const bodyLines = Array.from({ length: 10 }, (_, i) => `stderr line ${i + 1}`);
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(
+			execStub({
+				getActivityState: () => "error",
+				isAborted: () => false,
+				render: () => bodyLines,
+			}),
+		);
+		const out = c.render(120).map(stripAnsi);
+		// header + trailer + 4 tail lines — compact, never a full dump.
+		expect(out).toHaveLength(6);
+		// Tail, not head: a stderr's informative part is its end.
+		expect(out.some((l) => l.includes("stderr line 10"))).toBe(true);
+		expect(out.some((l) => l.includes("stderr line 7"))).toBe(true);
+		expect(out.some((l) => /stderr line 1$/.test(l))).toBe(false);
+		expect(out.some((l) => l.includes("+6 earlier lines"))).toBe(true);
+	});
+	it("trims blank edge lines before capping the error preview", () => {
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(
+			execStub({
+				getActivityState: () => "error",
+				isAborted: () => false,
+				render: () => ["", "boom", ""],
+			}),
+		);
+		const out = c.render(120).map(stripAnsi);
+		expect(out).toHaveLength(2);
+		expect(out[1]).toContain("boom");
+	});
+	it("shows no body on success until explicitly expanded", () => {
+		let resultExpanded = false;
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(
+			execStub({
+				setResultExpanded: (value: boolean) => {
+					resultExpanded = value;
+				},
+				render: () => ["result body"],
+			}),
+		);
+		const out = c.render(120).map(stripAnsi);
+		expect(out).toHaveLength(1);
 		expect(resultExpanded).toBe(false);
 	});
 	it("renders the full error body when explicitly expanded", () => {
@@ -95,11 +142,14 @@ describe("ActivityLineComponent", () => {
 				render: () => ["Operation aborted"],
 			}),
 		);
-		const header = stripAnsi(c.render(120)[0]!);
+		const out = c.render(120).map(stripAnsi);
+		const header = out[0]!;
 		expect(header.startsWith("●")).toBe(true);
 		expect(header.endsWith("◦")).toBe(true);
 		expect(header).not.toContain("✓");
 		expect(header).not.toContain("✗");
+		// A user interrupt is not a failure: no auto-shown body.
+		expect(out).toHaveLength(1);
 	});
 	it("folds identical repeated actions into a ×N counter", () => {
 		const todoStub = () =>
@@ -293,6 +343,21 @@ describe("ActivityLineComponent — settled-line memoization", () => {
 		const s1 = c.render(120);
 		expect(s1.map(stripAnsi)[0]).toContain("Edited");
 		expect(c.render(120)).toBe(s1);
+	});
+
+	it("memoizes a settled genuine-error row including its auto-preview body", () => {
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(
+			execStub({
+				getActivityState: () => "error",
+				isAborted: () => false,
+				render: () => ["boom"],
+			}),
+		);
+		const first = c.render(120);
+		expect(first.map(stripAnsi).some((l) => l.includes("boom"))).toBe(true);
+		// Settled error bytes are static (state is part of the cache key).
+		expect(c.render(120)).toBe(first);
 	});
 
 	it("setExpanded busts the memo and the body recomputes every frame", () => {

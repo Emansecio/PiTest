@@ -32,11 +32,6 @@ function makeData(overrides: Partial<StartupScreenData> = {}): StartupScreenData
 		version: "0.75.4",
 		tagline: "your coding companion",
 		helpHint: "/help",
-		cwdDisplay: "~/PiTest",
-		branch: "main",
-		model: "deepseek-v4-pro",
-		thinking: "High",
-		mode: "auto",
 		recentSessions: [],
 		petColors: PET_COLORS,
 		petEnabled: true,
@@ -59,14 +54,10 @@ describe("StartupScreen", () => {
 		expect(text).not.toMatch(/─{5,}/); // no horizontal rule
 	});
 
-	test("renders the workspace context line", () => {
-		const text = plain(new StartupScreen(makeData()).render(80));
-		expect(text).toContain("~/PiTest");
-		expect(text).toContain("main");
-		expect(text).toContain("deepseek-v4-pro");
-		expect(text).toContain("High");
-		expect(text).toContain("auto");
-	});
+	// The old "workspace context accepted but NOT rendered" test is gone with the
+	// fields themselves: StartupScreenData no longer carries cwd/branch/model/
+	// thinking/mode at all (the pristine footer on the same screen shows them),
+	// so the type system now enforces what that test asserted.
 
 	test("renders up to three resumable recent sessions with ↳", () => {
 		const data = makeData({
@@ -201,9 +192,9 @@ describe("StartupScreen", () => {
 
 	test("blink dips the pet mid-window then reopens", () => {
 		const screen = new StartupScreen(makeData({ reducedMotion: false, recentSessions: [] }));
-		// units = pet + identity + context = 3 → revealDone at 2*110=220ms, blink at 920ms.
+		// units = pet + identity = 2 → revealDone at 1*110=110ms, blink at 810ms.
 		screen.tick(0);
-		screen.tick(950); // inside the blink window
+		screen.tick(850); // inside the blink window [810, 940)
 		const blinking = screen.render(80).join("");
 		screen.tick(2000); // after the blink
 		const open = screen.render(80).join("");
@@ -215,10 +206,10 @@ describe("StartupScreen", () => {
 		setSixelSupport(false); // keep the comparison on the deterministic cell path
 		const screen = new StartupScreen(makeData({ reducedMotion: false, recentSessions: [] }));
 		screen.tick(0);
-		// 3 units → revealDone 220ms → blink [920, 1050) → glance [1210, 1730).
-		screen.tick(1100); // blink over, glance not yet begun
+		// 2 units → revealDone 110ms → blink [810, 940) → glance [1100, 1620).
+		screen.tick(1050); // blink over, glance not yet begun
 		const resting = screen.render(80).join("");
-		screen.tick(1400); // mid-glance (p ≈ 0.37 → eyes near the dip's peak)
+		screen.tick(1400); // mid-glance (p ≈ 0.58 → eyes near the dip's peak)
 		const glancing = screen.render(80).join("");
 		screen.tick(1800); // glance finished — the screen is now final
 		const settled = screen.render(80).join("");

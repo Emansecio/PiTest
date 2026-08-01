@@ -11,7 +11,9 @@ const THINKING_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	digitSelect: true,
 };
 
-const LEVEL_DESCRIPTIONS: Record<ThinkingLevel, string> = {
+/** One-line description per thinking level. Owned here (the dedicated selector);
+ * the /settings submenu imports it so the two lists can never drift apart. */
+export const THINKING_LEVEL_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	off: "No reasoning",
 	minimal: "Very brief reasoning (~1k tokens)",
 	low: "Light reasoning (~2k tokens)",
@@ -50,7 +52,7 @@ export class ThinkingSelectorComponent extends Container implements Focusable {
 			value: level,
 			// Green ✓ marks the level that was active when the selector opened.
 			label: level === currentLevel ? `${level}${theme.fg("success", " ✓")}` : level,
-			description: LEVEL_DESCRIPTIONS[level],
+			description: THINKING_LEVEL_DESCRIPTIONS[level],
 		}));
 
 		this.selectList = new SelectList(

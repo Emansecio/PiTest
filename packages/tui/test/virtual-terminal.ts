@@ -126,6 +126,21 @@ export class VirtualTerminal implements Terminal {
 	}
 
 	/**
+	 * Resize the emulator WITHOUT firing the resize callback. Mimics the window
+	 * ProcessTerminal opens in real sessions: process.stdout.rows updates the
+	 * moment SIGWINCH lands, but the resize handler is debounced (leading +
+	 * trailing, see TERMINAL_RESIZE_DEBOUNCE_MS) — so a render triggered inside
+	 * that window (an animation tick mid-drag) sees the new geometry while the
+	 * handler's previousWidth reset has not happened yet. That is the path that
+	 * reaches fullRender("screen") on a height-only resize.
+	 */
+	resizeWithoutNotify(columns: number, rows: number): void {
+		this._columns = columns;
+		this._rows = rows;
+		this.xterm.resize(columns, rows);
+	}
+
+	/**
 	 * Wait for all pending writes to complete. Viewport and scroll buffer will be updated.
 	 */
 	async flush(): Promise<void> {

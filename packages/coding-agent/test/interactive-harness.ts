@@ -39,6 +39,7 @@ const SETTINGS_STUB = {
 	getShowImages: () => false,
 	getImageWidthCells: () => 0,
 	getCardPaddingX: () => 0,
+	getCodeBlockIndent: () => "  ",
 };
 
 export interface HarnessOptions {
@@ -46,6 +47,8 @@ export interface HarnessOptions {
 	rows?: number;
 	/** `tui.toolActivity` — "grouped" keeps the working loader neutral. */
 	toolActivity?: "grouped" | "legacy";
+	/** Streaming smoothing (production default: true; stub default: false). */
+	streamingSmoothing?: boolean;
 }
 
 export interface InteractiveHarness {
@@ -99,6 +102,7 @@ export function createInteractiveHarness(options: HarnessOptions = {}): Interact
 	const settingsManager = {
 		...SETTINGS_STUB,
 		getToolActivity: () => options.toolActivity ?? "legacy",
+		getStreamingSmoothing: () => options.streamingSmoothing ?? false,
 	};
 
 	// tmpdir() is deliberately outside any git repo: FooterDataProvider's

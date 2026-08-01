@@ -56,6 +56,19 @@ const REVEAL_MIN_STEP = 1;
 const REVEAL_MAX_STEP = 48; // ~3000 cps at 62fps — above any model's emit rate
 const REVEAL_FRAME_MS = 16;
 /**
+ * Ceiling on how far the backlog term may be spread (frames). The spread tracks
+ * ~2× the observed inter-burst gap (see spreadFrames) so a COARSE stream — the
+ * Anthropic OAuth endpoint was measured delivering ~70-char bursts every ~470ms
+ * — drains each burst across the whole gap instead of dumping it in ~130ms and
+ * freezing the wavefront for the remaining ~340ms (the "text arrives in blocks"
+ * report). The cap keeps one provider stall from stretching the crawl past
+ * ~720ms; the floor is the classic 8-frame constant, so fine-grained streams
+ * behave exactly as before.
+ */
+const REVEAL_MAX_SPREAD_FRAMES = 45;
+/** Cap on one inter-burst gap sample (frames) so a single multi-second stall cannot pin the EMA. */
+const REVEAL_MAX_GAP_SAMPLE_FRAMES = 90;
+/**
  * Weight of the newest sample in the arrival-rate EMA (chars per 16ms frame).
  * Low enough that one jittery inter-delta gap can't spike the drain, high enough
  * that the estimate tracks a model that changes pace mid-answer within ~10 frames.
@@ -138,6 +151,81 @@ class ThinkingLabelComponent {
 		this.cachedBucket = -1;
 		this.cachedWidth = -1;
 		this.cachedLines = null;
+	}
+}
+
+/**
+ * Visual-line tail kept when a SETTLED visible thinking trace folds (#9).
+ * A long thought's conclusion — the part that feeds the answer — is its end,
+ * so the fold keeps the last rows and hides the earlier ramble behind a
+ * `… +N earlier lines` trailer. The LIVE thinking tail of an in-flight stream
+ * never folds: it keeps flowing whole under the reveal.
+ */
+const SETTLED_THINKING_TAIL_LINES = 6;
+
+/**
+ * Wraps a thinking block's Markdown and, when the block is settled (per
+ * `shouldFold`, evaluated fresh on every render), folds the rendered output to its
+ * last {@link SETTLED_THINKING_TAIL_LINES} VISUAL lines behind a leading
+ * trailer. Sits INSIDE the MessageShell so every emitted row — trailer
+ * included — still gets the thinking gutter.
+ *
+ * The trailer replicates the `… +N earlier lines` counter of
+ * moreLinesTrailer (tool-activity.ts) WITHOUT its `(<key> to expand)` clause:
+ * no keybinding unfolds a settled thinking trace, and promising one would lie
+ * (same rationale as capDiffPreview). Only folds when it actually saves rows
+ * (hidden ≥ 2), since a 1-line saving spent on a trailer is a wash.
+ *
+ * Honors the Component memoization contract: returns the cached array while
+ * the Markdown's own returned reference, the width, and the fold decision are
+ * all unchanged; any change produces a new array.
+ */
+class FoldedThinkingText implements Component {
+	private cachedSource: string[] | null = null;
+	private cachedWidth = -1;
+	private cachedFolded = false;
+	private cachedOut: string[] | null = null;
+
+	private readonly markdown: Markdown;
+	private readonly shouldFold: () => boolean;
+
+	constructor(markdown: Markdown, shouldFold: () => boolean) {
+		this.markdown = markdown;
+		this.shouldFold = shouldFold;
+	}
+
+	invalidate(): void {
+		this.markdown.invalidate();
+		this.cachedSource = null;
+		this.cachedOut = null;
+	}
+
+	render(width: number): string[] {
+		const source = this.markdown.render(width);
+		const folded = source.length > SETTLED_THINKING_TAIL_LINES + 1 && this.shouldFold();
+		if (
+			this.cachedOut !== null &&
+			source === this.cachedSource &&
+			width === this.cachedWidth &&
+			folded === this.cachedFolded
+		) {
+			return this.cachedOut;
+		}
+		let out: string[];
+		if (!folded) {
+			out = source;
+		} else {
+			const kept = source.slice(-SETTLED_THINKING_TAIL_LINES);
+			const hidden = source.length - kept.length;
+			// Leading space matches the thinking Markdown's paddingX=1 text column.
+			const trailer = truncateToWidth(theme.fg("muted", ` … +${hidden} earlier lines`), Math.max(1, width));
+			out = [trailer, ...kept];
+		}
+		this.cachedSource = source;
+		this.cachedWidth = width;
+		this.cachedFolded = folded;
+		this.cachedOut = out;
+		return out;
 	}
 }
 
@@ -724,7 +812,12 @@ export class AssistantMessageComponent extends Container {
 							gutterColor: theme.getThinkingBorderColor(this.thinkingLevel),
 							noLeadingGap: true,
 						});
-						shell.addChild(markdown);
+						// The fold wrapper sits between shell and markdown so a settled
+						// trace collapses to its visual tail (see FoldedThinkingText);
+						// entry.markdown stays the raw Markdown, so setText/freeze paths
+						// above and in patchContentIfPossible are untouched.
+						const blockIndex = i;
+						shell.addChild(new FoldedThinkingText(markdown, () => this.isThinkingBlockSettled(blockIndex)));
 						entry = {
 							kind: "thinking",
 							markdown,
@@ -791,11 +884,33 @@ export class AssistantMessageComponent extends Container {
 		this.lastStructureKey = this.computeStructureKey(message);
 	}
 
+	/**
+	 * True when the thinking block at `index` has settled — full text present,
+	 * reveal finished — so FoldedThinkingText may fold it. The LIVE tail (the
+	 * message's last block while the turn is still open) keeps flowing whole,
+	 * and a block the reveal cursor is still draining (it stopped being the
+	 * tail mid-ease) waits until the reveal catches up, so the fold never
+	 * fights clampReveal/the wavefront.
+	 */
+	private isThinkingBlockSettled(index: number): boolean {
+		const message = this.lastMessage;
+		if (!message) return false;
+		if (message.stopReason) return true;
+		// Live tail of an in-flight stream (same "is the model still on this
+		// thought?" test as the hidden-thinking label): last visible AND last
+		// block of any kind — a tool call after it means the thought is done.
+		if (index === message.content.length - 1 && index === this.lastVisibleBlockIndex(message)) return false;
+		if (this.revealIndex === index && this.revealedChars < this.blockTextLength(message, index)) return false;
+		return true;
+	}
+
 	/** Clamp a block's text to the reveal cursor when it is the block currently
 	 * being smoothed; otherwise return it whole. */
 	private clampReveal(index: number, text: string): string {
 		if (this.revealIndex !== index || this.revealedChars >= text.length) return text;
-		return sliceSafe(text, 0, this.revealedChars);
+		// revealedChars accumulates fractionally (sub-char steps carry across
+		// frames on slow crawls); the visible cut is whole characters.
+		return sliceSafe(text, 0, Math.floor(this.revealedChars));
 	}
 
 	/** Fade the wavefront line's trailing edge while the trailing block is still
@@ -864,6 +979,7 @@ export class AssistantMessageComponent extends Container {
 			this.arrivalEma = 0;
 			this.arrivalSamples = 0;
 			this.lastDeltaAt = 0;
+			this.gapEma = 0;
 		}
 		const target = this.blockTextLength(message, idx);
 		const burst = Math.max(0, target - this.lastRevealTarget);
@@ -894,12 +1010,14 @@ export class AssistantMessageComponent extends Container {
 	 * arrival estimate the law degrades to the pure backlog term.
 	 */
 	private arrivalEma = 0;
-	/** Samples folded into `arrivalEma`, for the bias correction below. */
+	/** Samples folded into `arrivalEma`/`gapEma`, for the bias correction below. */
 	private arrivalSamples = 0;
 	/** Timestamp of the last observed target growth, for the rate estimate. */
 	private lastDeltaAt = 0;
+	/** EMA of the inter-burst gap (frames) — how coarse this stream's cadence is. */
+	private gapEma = 0;
 
-	/** Fold one observed delta into the arrival-rate estimate. */
+	/** Fold one observed delta into the arrival-rate and gap estimates. */
 	private observeArrival(burst: number, now: number): void {
 		if (this.lastDeltaAt <= 0) {
 			this.lastDeltaAt = now;
@@ -913,6 +1031,8 @@ export class AssistantMessageComponent extends Container {
 		// pin the estimate high for the following frames.
 		const instant = Math.min(REVEAL_MAX_STEP, burst / frames);
 		this.arrivalEma = this.arrivalEma * (1 - REVEAL_RATE_ALPHA) + instant * REVEAL_RATE_ALPHA;
+		this.gapEma =
+			this.gapEma * (1 - REVEAL_RATE_ALPHA) + Math.min(REVEAL_MAX_GAP_SAMPLE_FRAMES, frames) * REVEAL_RATE_ALPHA;
 		this.arrivalSamples++;
 	}
 
@@ -930,10 +1050,28 @@ export class AssistantMessageComponent extends Container {
 		return this.arrivalEma / weight;
 	}
 
+	/**
+	 * Frames the backlog term spreads over: ~2× the observed inter-burst gap,
+	 * clamped to [8-frame classic, REVEAL_MAX_SPREAD_FRAMES]. Aiming past ONE gap
+	 * means a burst is still easing in when the next one lands, so the wavefront
+	 * never starves on a coarse stream; the arrival term keeps the total drain
+	 * converging instead of trailing (same argument as before, unchanged).
+	 */
+	private spreadFrames(): number {
+		if (this.arrivalSamples === 0) return REVEAL_CATCHUP_FRAMES;
+		const weight = 1 - (1 - REVEAL_RATE_ALPHA) ** this.arrivalSamples;
+		const gap = this.gapEma / weight;
+		return Math.min(REVEAL_MAX_SPREAD_FRAMES, Math.max(REVEAL_CATCHUP_FRAMES, 2 * gap));
+	}
+
 	private computeRevealStep(backlog: number, frameCount: number): number {
 		// Arrival + backlog decay. See the constants block for why the arrival term
-		// is what makes the backlog converge instead of plateauing.
-		const raw = this.arrivalPerFrame() + backlog / REVEAL_CATCHUP_FRAMES;
+		// is what makes the backlog converge instead of plateauing, and
+		// REVEAL_MAX_SPREAD_FRAMES for why the decay window follows the stream's
+		// own cadence. The ceil is load-bearing: the discrete margin it adds is
+		// what keeps a mid-rate delta fully shown before its successor lands (the
+		// no-standing-backlog contract) even with the spread stretched to 2× gap.
+		const raw = this.arrivalPerFrame() + backlog / this.spreadFrames();
 		const perFrame = Math.min(REVEAL_MAX_STEP, Math.max(REVEAL_MIN_STEP, Math.ceil(raw)));
 		return Math.min(backlog, perFrame * frameCount);
 	}
@@ -1021,6 +1159,7 @@ export class AssistantMessageComponent extends Container {
 		this.arrivalEma = 0;
 		this.arrivalSamples = 0;
 		this.lastDeltaAt = 0;
+		this.gapEma = 0;
 		this.pauseReveal();
 	}
 

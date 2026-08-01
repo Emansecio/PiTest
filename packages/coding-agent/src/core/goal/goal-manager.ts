@@ -8,6 +8,10 @@
  * the interactive mode owns continuation. Clocks/ids are injected for testing.
  */
 
+import {
+	formatElapsed as formatElapsedCanonical,
+	formatTokens as formatTokensCanonical,
+} from "../../utils/format-display.ts";
 import { sliceSafe } from "../../utils/surrogate.ts";
 
 export type GoalStatus = "active" | "paused" | "budget_limited" | "complete";
@@ -65,20 +69,20 @@ export function parseTokenBudget(raw: string): number | undefined {
 	return Math.round(n * mult);
 }
 
+/**
+ * Thin shim over the canonical formatter in utils/format-display.ts, kept so
+ * existing call sites (goal-overlay, activity-line, turn-view) don't churn.
+ * The old local dialect (lowercase `m`, no decimal below 10k) is gone on
+ * purpose — every UI surface now shares one output.
+ */
 export function formatTokens(n: number): string {
-	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}m`;
-	if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
-	return String(n);
+	return formatTokensCanonical(n);
 }
 
+/** Thin shim over utils/format-display.ts (see formatTokens above). The old
+ * dialect dropped seconds (`9m`); the canonical one keeps them (`9m14s`). */
 export function formatElapsed(ms: number): string {
-	const totalSec = Math.floor(ms / 1000);
-	if (totalSec < 60) return `${totalSec}s`;
-	const totalMin = Math.floor(totalSec / 60);
-	if (totalMin < 60) return `${totalMin}m`;
-	const h = Math.floor(totalMin / 60);
-	const m = totalMin % 60;
-	return m > 0 ? `${h}h${m}m` : `${h}h`;
+	return formatElapsedCanonical(ms);
 }
 
 export class GoalManager {

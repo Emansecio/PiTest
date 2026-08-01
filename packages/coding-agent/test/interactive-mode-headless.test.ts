@@ -153,7 +153,7 @@ describe("InteractiveMode headless (injected terminal)", () => {
 			errorMessage: "429 rate limit exceeded",
 		} as never);
 		expect(internals.retryLoader).toBeDefined();
-		expect(harness.statusText()).toContain("Retrying (2/5) in 4s…");
+		expect(harness.statusText()).toContain("retry 2/5 in 4s");
 		expect(internals.defaultEditor.onEscape).not.toBe(escapeBefore);
 
 		await harness.emit({ type: "auto_retry_end", success: false, attempt: 2, cancelled: true } as never);

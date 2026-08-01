@@ -13,6 +13,7 @@
 		"coral": "#c0533a",
 		"gold": "#8a6d2a",
 		"lavender": "#6a4ba8",
+		"cardBg": "#ffffff",
 		"text": "#16201d",
 		"muted": "#5e706a",
 		"dim": "#7a8781",
@@ -43,6 +44,8 @@
 		"customMessageBg": "customMsgBg",
 		"customMessageText": "text",
 		"customMessageLabel": "lavender",
+		"command": "accentGreenBorder",
+		"compactionLabel": "accentGreenBright",
 		"toolPendingBg": "toolPendingBg",
 		"toolSuccessBg": "toolSuccessBg",
 		"toolErrorBg": "toolErrorBg",
@@ -50,6 +53,7 @@
 		"toolOutput": "muted",
 
 		"mdHeading": "gold",
+		"mdHeading3": "lavender",
 		"mdLink": "#1f8a5a",
 		"mdLinkUrl": "dim",
 		"mdCode": "teal",
@@ -94,7 +98,7 @@
 		"gutterUser": "accentGreenDim",
 		"gutterCustom": "muted",
 
-		"cardBg": "#ffffff",
+		"cardBg": "cardBg",
 		"cardBorder": "borderMuted",
 
 		"petStroke": "#16201d",
@@ -103,7 +107,7 @@
 	},
 	"export": {
 		"pageBg": "#f4f7f6",
-		"cardBg": "#ffffff",
+		"cardBg": "cardBg",
 		"infoBg": "#fbf3e0"
 	}
 }

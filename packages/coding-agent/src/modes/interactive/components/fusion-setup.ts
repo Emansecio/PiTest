@@ -151,7 +151,7 @@ export class FusionSetupComponent extends Container implements Focusable {
 	private buildHeader(): string {
 		return (
 			`${theme.fg("accent", theme.bold("Fusion setup"))}` +
-			`\n${theme.fg("dim", `synth: ${this.synthId}  ·  change with /model`)}`
+			`\n${theme.fg("dim", `synth: ${this.synthId}·change with /model`)}`
 		);
 	}
 
@@ -172,7 +172,7 @@ export class FusionSetupComponent extends Container implements Focusable {
 		const onOff = (on: boolean) => (on ? theme.fg("success", "on") : theme.fg("dim", "off"));
 		return (
 			`${theme.fg("muted", "verify")} ${onOff(this.verify)}` +
-			`${theme.fg("dim", "  ·  ")}` +
+			`${theme.fg("dim", "·")}` +
 			`${theme.fg("muted", "brief")} ${onOff(this.brief)}` +
 			`${theme.fg("dim", "  (v / b)")}`
 		);

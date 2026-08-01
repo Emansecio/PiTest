@@ -1,6 +1,6 @@
-import { CancellableLoader, Container, Loader, Spacer, Text, type TUI } from "@pit/tui";
+import { CancellableLoader, Container, Loader, type TUI } from "@pit/tui";
 import type { Theme } from "../theme/theme.ts";
-import { keyHint } from "./keybinding-hints.ts";
+import { keyText } from "./keybinding-hints.ts";
 import { SelectorCard } from "./selector-card.ts";
 import { reducedMotionLoaderIndicator } from "./spinner-ticker.ts";
 import { workingPulsePalette } from "./working-palette.ts";
@@ -30,10 +30,10 @@ export class BorderedLoader extends Container {
 		}
 		card.addChild(this.loader);
 		if (this.cancellable) {
-			card.addChild(new Spacer(1));
-			card.addChild(new Text(keyHint("tui.select.cancel", "cancel"), 1, 0));
+			// Dense chrome: the cancel hint rides the loader line itself as a dim
+			// suffix (`⠙ message·esc cancel`) instead of its own hint line + spacers.
+			this.loader.setTrailingSuffix(theme.fg("dim", `·${keyText("tui.select.cancel")} cancel`));
 		}
-		card.addChild(new Spacer(1));
 		this.addChild(card);
 	}
 

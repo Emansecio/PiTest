@@ -19,6 +19,7 @@
 
 import { type Component, truncateToWidth, visibleWidth } from "@pit/tui";
 import { theme } from "../theme/theme.ts";
+import { pluralCountLabel } from "./context-display.ts";
 
 /** One file's accumulated delta for the current turn. */
 export interface TurnFileEntry {
@@ -188,7 +189,7 @@ export class TurnFilesComponent implements Component {
 		const lines: string[] = [];
 		// Header in the UI's language (English), like every other chrome string.
 		const count = this.entries.length;
-		lines.push(theme.fg("dim", truncateToWidth(`${count} ${count === 1 ? "file" : "files"} this turn`, width, "…")));
+		lines.push(theme.fg("dim", truncateToWidth(`${pluralCountLabel(count, "file", "files")} this turn`, width, "…")));
 
 		for (const [i, entry] of shown.entries()) {
 			const label = labels[i] ?? basename(entry.path);

@@ -3,7 +3,7 @@ import type { Dirent } from "fs";
 import { readdir, stat } from "fs/promises";
 import { homedir } from "os";
 import { basename, dirname, join } from "path";
-import { fuzzyFilter } from "./fuzzy.ts";
+import { fuzzyFilter, fuzzyMatch } from "./fuzzy.ts";
 
 const PATH_DELIMITERS = new Set([" ", "\t", '"', "'", "="]);
 
@@ -23,10 +23,24 @@ function escapeRegex(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function buildFdPathQuery(query: string): string {
+// Fuzzy fd pattern (#15): each path segment's characters may be separated by
+// arbitrary non-separator characters, so `agsess` matches `agent-session.ts`
+// at the fd level (a[^/]*g[^/]*s… — fd's Rust regex engine is linear-time, so
+// the chained wildcards are safe). fd pre-filters the tree with this pattern
+// (bounded by maxResults) and the caller ranks the surviving paths with
+// fuzzyMatch/scoreEntry — the previous literal-escaped pattern discarded
+// fuzzy matches before ranking ever saw them. Multi-segment queries keep the
+// old shape (segments joined by a separator pattern, matched with
+// --full-path), with each segment individually fuzzified.
+function buildFdFuzzyQuery(query: string): string {
 	const normalized = toDisplayPath(query);
+	const fuzzySegment = (segment: string): string =>
+		segment
+			.split("")
+			.map((ch) => escapeRegex(ch))
+			.join("[^\\\\/]*");
 	if (!normalized.includes("/")) {
-		return normalized;
+		return fuzzySegment(normalized);
 	}
 
 	const hasTrailingSeparator = normalized.endsWith("/");
@@ -39,7 +53,7 @@ function buildFdPathQuery(query: string): string {
 	const segments = trimmed
 		.split("/")
 		.filter(Boolean)
-		.map((segment) => escapeRegex(segment));
+		.map((segment) => fuzzySegment(segment));
 	if (segments.length === 0) {
 		return normalized;
 	}
@@ -161,7 +175,7 @@ async function walkDirectoryWithFd(
 	}
 
 	if (query) {
-		args.push(buildFdPathQuery(query));
+		args.push(buildFdFuzzyQuery(query));
 	}
 
 	return await new Promise((resolve) => {
@@ -229,6 +243,16 @@ export interface AutocompleteItem {
 	value: string;
 	label: string;
 	description?: string;
+	/**
+	 * When true, confirming this item (Enter) only completes the text — exactly
+	 * like Tab — instead of completing AND submitting. Set for slash commands
+	 * whose argument is required: submitting the bare command would only earn
+	 * the user a usage warning. Deliberately NOT inferred from argumentHint —
+	 * whether the bare command is valid is dispatch logic the hint string does
+	 * not encode (e.g. `/model <model> | <role>` is perfectly submittable bare:
+	 * it opens the model picker).
+	 */
+	completeOnly?: boolean;
 }
 
 type Awaitable<T> = T | Promise<T>;
@@ -237,6 +261,10 @@ export interface SlashCommand {
 	name: string;
 	description?: string;
 	argumentHint?: string;
+	/** Bare command is not submittable (argument required) — Enter on the
+	 * autocomplete suggestion completes like Tab instead of submitting. See
+	 * {@link AutocompleteItem.completeOnly}. */
+	completeOnly?: boolean;
 	// Function to get argument completions for this command
 	// Returns null if no argument completion is available
 	getArgumentCompletions?(argumentPrefix: string): Awaitable<AutocompleteItem[] | null>;
@@ -331,6 +359,10 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 						name,
 						label: name,
 						description: fullDesc || undefined,
+						// Propagated verbatim (never inferred from the hint — see the
+						// field docs): the command source declares whether the bare
+						// command is submittable.
+						completeOnly: cmd.completeOnly === true,
 					};
 				});
 
@@ -338,6 +370,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 					value: item.name,
 					label: item.label,
 					...(item.description && { description: item.description }),
+					...(item.completeOnly && { completeOnly: true }),
 				}));
 
 				if (filtered.length === 0) return null;
@@ -719,28 +752,49 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		}
 	}
 
-	// Score an entry against the query (higher = better match)
-	// isDirectory adds bonus to prioritize folders
-	private scoreEntry(filePath: string, query: string, isDirectory: boolean): number {
+	// Score an entry against the query. Returns null when the entry does not
+	// match at all. `tier` encodes match quality (higher = better) — the exact/
+	// prefix/substring tiers keep their historical precedence, and a real fuzzy
+	// match (all query chars in order, per fuzzyMatch) forms a NEW lowest tier
+	// below every substring tier, so an exact substring hit always outranks a
+	// distant fuzzy one. `tieBreak` is the fuzzyMatch score over the full path
+	// (lower = better) and orders entries WITHIN a tier — it rewards word-
+	// boundary and consecutive-character matches, which is what puts
+	// `agent-session.ts` at the top for `agsess`. Directories keep their +10
+	// tier bonus so folders surface first at equal quality.
+	private scoreEntry(
+		filePath: string,
+		query: string,
+		isDirectory: boolean,
+	): { tier: number; tieBreak: number } | null {
 		const fileName = basename(filePath);
 		const lowerFileName = fileName.toLowerCase();
 		const lowerQuery = query.toLowerCase();
 
-		let score = 0;
+		let tier = 0;
 
 		// Exact filename match (highest)
-		if (lowerFileName === lowerQuery) score = 100;
+		if (lowerFileName === lowerQuery) tier = 100;
 		// Filename starts with query
-		else if (lowerFileName.startsWith(lowerQuery)) score = 80;
+		else if (lowerFileName.startsWith(lowerQuery)) tier = 80;
 		// Substring match in filename
-		else if (lowerFileName.includes(lowerQuery)) score = 50;
+		else if (lowerFileName.includes(lowerQuery)) tier = 50;
 		// Substring match in full path
-		else if (filePath.toLowerCase().includes(lowerQuery)) score = 30;
+		else if (filePath.toLowerCase().includes(lowerQuery)) tier = 30;
+
+		// A substring match is always an in-order character match, so the fuzzy
+		// score is defined for every tier above and can serve as the tie-break.
+		const fuzzy = fuzzyMatch(query, filePath);
+		if (tier === 0) {
+			if (!fuzzy.matches) return null;
+			// Fuzzy-only match: below every substring tier.
+			tier = 20;
+		}
 
 		// Directories get a bonus to appear first
-		if (isDirectory && score > 0) score += 10;
+		if (isDirectory) tier += 10;
 
-		return score;
+		return { tier, tieBreak: fuzzy.matches ? fuzzy.score : 0 };
 	}
 
 	// Fuzzy file search using fd (fast, respects .gitignore)
@@ -756,19 +810,37 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			const scopedQuery = await this.resolveScopedFuzzyQuery(query);
 			const fdBaseDir = scopedQuery?.baseDir ?? this.basePath;
 			const fdQuery = scopedQuery?.query ?? query;
-			const entries = await walkDirectoryWithFd(fdBaseDir, this.fdPath, fdQuery, 100, options.signal);
+			// With a query, fd only returns fuzzy-pattern matches (see
+			// buildFdFuzzyQuery), so a large cap feeds the RANKING below instead of
+			// truncating candidates before it — the old cap of 100 could drop the
+			// best match before scoring ever ran. Ranked output is still sliced to
+			// 20, so the UI list is unchanged. Without a query fd returns the whole
+			// tree in arbitrary order; ranking can't help there, so keep the small
+			// cap. The caller's AbortSignal (debounce/typeahead) remains the
+			// latency guard either way.
+			const maxResults = fdQuery ? 1000 : 100;
+			const entries = await walkDirectoryWithFd(fdBaseDir, this.fdPath, fdQuery, maxResults, options.signal);
 			if (options.signal.aborted) {
 				return [];
 			}
 
-			const scoredEntries = entries
-				.map((entry) => ({
-					...entry,
-					score: fdQuery ? this.scoreEntry(entry.path, fdQuery, entry.isDirectory) : 1,
-				}))
-				.filter((entry) => entry.score > 0);
+			// Rank against the display-normalized query so a Windows `\` separator
+			// in the typed query still matches the `/`-normalized entry paths.
+			const rankQuery = toDisplayPath(fdQuery);
+			const scoredEntries: Array<{ path: string; isDirectory: boolean; tier: number; tieBreak: number }> = [];
+			for (const entry of entries) {
+				if (!rankQuery) {
+					scoredEntries.push({ ...entry, tier: 1, tieBreak: 0 });
+					continue;
+				}
+				const score = this.scoreEntry(entry.path, rankQuery, entry.isDirectory);
+				if (score) {
+					scoredEntries.push({ ...entry, ...score });
+				}
+			}
 
-			scoredEntries.sort((a, b) => b.score - a.score);
+			// Sort is stable, so fd's traversal order breaks remaining ties.
+			scoredEntries.sort((a, b) => b.tier - a.tier || a.tieBreak - b.tieBreak);
 			const topEntries = scoredEntries.slice(0, 20);
 
 			const suggestions: AutocompleteItem[] = [];

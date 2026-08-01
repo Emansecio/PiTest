@@ -50,6 +50,7 @@ function createChooserThis(overrides: Record<string, any> = {}): any {
 		sendNowChooserContainer: { clear: vi.fn(), addChild: vi.fn() },
 		session: { isStreaming: true, isFusing: false, prompt: vi.fn().mockResolvedValue(undefined) },
 		getInterruptiblePendingTools: () => [] as Array<{ id: string; name: string }>,
+		attachPastedImagesFor: vi.fn(),
 		updatePendingMessagesDisplay: vi.fn(),
 		showStatus: vi.fn(),
 		ui: { requestRender: vi.fn(), addInputListener: vi.fn(() => unsub) },
@@ -100,7 +101,7 @@ describe("SendNowChooser component", () => {
 		// ▸ Steer / ◷ Queued in system-message-glyphs.ts.
 		expect(line).toContain("▸ Send now");
 		expect(line).toContain("◷ Queue");
-		expect(line).toContain("✕ Cancel");
+		expect(line).toContain("✗ Cancel");
 	});
 
 	test("carries navigation only — confirm/cancel are what the buttons already say", () => {
@@ -161,7 +162,7 @@ describe("SendNowChooser mouse", () => {
 			for (const [label, key] of [
 				["▸ Send now", "send"],
 				["◷ Queue", "queue"],
-				["✕ Cancel", "cancel"],
+				["✗ Cancel", "cancel"],
 			] as const) {
 				const chooser = new SendNowChooser(text);
 				const fired: string[] = [];
@@ -228,6 +229,38 @@ describe("Send-now chooser routing", () => {
 		expect(prompt).not.toHaveBeenCalled();
 	});
 
+	// Fix 14: an extension command prompt()ed mid-turn executes IMMEDIATELY in
+	// agent-session (_promptOnce handles it before any queue routing), so both
+	// chooser buttons would lie — [Send now] and [Queue] each run it on the spot.
+	test("an extension command during streaming dispatches directly, no chooser", async () => {
+		const editor = createEditor();
+		const prompt = vi.fn().mockResolvedValue(undefined);
+		const openSendNowChooser = vi.fn();
+		const fakeThis = {
+			defaultEditor: editor,
+			editor,
+			clearEphemeralStatus: vi.fn(),
+			clearCtrlCHint: vi.fn(),
+			_dispatchSlashCommand: vi.fn().mockResolvedValue(false), // busy → dispatcher refuses it
+			_warnIfUnknownCommand: vi.fn(() => false), // registered command, no typo warning
+			isExtensionCommand: vi.fn(() => true),
+			dismissStartupScreen: vi.fn(),
+			session: { isCompacting: false, isStreaming: true, isFusing: false, prompt },
+			sendNowChooserEnabled: () => true,
+			openSendNowChooser,
+			updatePendingMessagesDisplay: vi.fn(),
+			ui: { requestRender: vi.fn() },
+		};
+		const setup = proto<(this: typeof fakeThis) => void>("setupEditorSubmitHandler");
+		setup.call(fakeThis);
+		await editor.onSubmit?.("/review src/parser.ts");
+
+		expect(openSendNowChooser).not.toHaveBeenCalled();
+		expect(prompt).toHaveBeenCalledWith("/review src/parser.ts", { streamingBehavior: "followUp" });
+		expect(editor.addToHistory).toHaveBeenCalledWith("/review src/parser.ts");
+		expect(editor.getText()).toBe(""); // composer cleared — the command left for the session
+	});
+
 	test("PIT_NO_SEND_NOW=1 restores the direct followUp behavior", async () => {
 		process.env.PIT_NO_SEND_NOW = "1";
 		const editor = createEditor();
@@ -243,6 +276,7 @@ describe("Send-now chooser routing", () => {
 			session: { isCompacting: false, isStreaming: true, isFusing: false, prompt },
 			sendNowChooserEnabled: proto("sendNowChooserEnabled"),
 			openSendNowChooser,
+			attachPastedImagesFor: vi.fn(),
 			updatePendingMessagesDisplay: vi.fn(),
 			ui: { requestRender: vi.fn() },
 		};
@@ -453,7 +487,7 @@ describe("Send-now chooser routing", () => {
 		fakeThis.openSendNowChooser.call(fakeThis, "never mind");
 
 		const chooser = fakeThis.sendNowChooser as SendNowChooser;
-		chooser.onMouse(leftPress(), 0, columnOf(chooser, 80, "✕ Cancel"));
+		chooser.onMouse(leftPress(), 0, columnOf(chooser, 80, "✗ Cancel"));
 		await new Promise((resolve) => setTimeout(resolve, 0));
 
 		expect(fakeThis.session.prompt).not.toHaveBeenCalled();
@@ -644,6 +678,7 @@ describe("Alt+Enter stays a direct queue (no chooser)", () => {
 			dismissStartupScreen: vi.fn(),
 			session: { isCompacting: false, isStreaming: true, isFusing: false, prompt },
 			openSendNowChooser,
+			attachPastedImagesFor: vi.fn(),
 			updatePendingMessagesDisplay: vi.fn(),
 			ui: { requestRender: vi.fn() },
 		};

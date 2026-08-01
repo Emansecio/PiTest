@@ -20,7 +20,7 @@ import { type ThemeColor, theme } from "../theme/theme.ts";
 import { summarizeArgsOneLine } from "./arg-summary.ts";
 import { MessageShell } from "./message-shell.ts";
 import { spinnerFrameIndexAt } from "./spinner-ticker.ts";
-import { isEditFamilyTool, type ToolActivity } from "./tool-activity.ts";
+import { ICON_ERROR, isEditFamilyTool, type ToolActivity } from "./tool-activity.ts";
 
 // Cap for the no-custom-renderer result fallback. Tools without their own
 // renderResult (MCP tools, the coordinator/Task tool, extension tools) would
@@ -36,11 +36,6 @@ const SINGLE_LINE_PREVIEW_TOOLS = new Set<string>(["task"]);
 
 /** Duration of the gutter color fade when a tool settles pending → success/error (P5). */
 const GUTTER_EASE_MS = 180;
-
-/** Failure glyph for the compact gutter label (U+2717, width-1). Mirrors the
- * activity line's error icon so a standalone tool and a grouped activity row
- * read the same failure mark. */
-const ICON_ERROR = "✗";
 
 /** Result text marking an aborted/interrupted tool (vs a real failure). Such
  * results must not auto-expand their captured output — the user chose to stop. */

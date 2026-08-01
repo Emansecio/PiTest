@@ -339,6 +339,112 @@ describe("TUI cell size re-query after resize", () => {
 	});
 });
 
+/**
+ * scheduleCellSizeRequery re-asks for the cell size after EVERY resize, and the
+ * usual answer is the same cell (dragging a border does not change the font).
+ * Each reply used to invalidate the entire component tree unconditionally —
+ * wiping every render cache and re-lexing the transcript per resize for
+ * nothing. The guard: a reply equal to the already-measured cell is a no-op.
+ */
+describe("TUI cell size reply equality guard", () => {
+	afterEach(() => resetCellDimensions());
+
+	function startWithInvalidateSpy(terminal: VirtualTerminal): { tui: TUI; invalidations: () => number } {
+		const tui = new TUI(terminal);
+		let count = 0;
+		const original = tui.invalidate.bind(tui);
+		tui.invalidate = () => {
+			count++;
+			original();
+		};
+		tui.start();
+		return { tui, invalidations: () => count };
+	}
+
+	it("invalidates on the first reply even when it equals the built-in guess", () => {
+		withImageTerminal(() => {
+			resetCellDimensions();
+			const terminal = new VirtualTerminal(80, 24);
+			const { tui, invalidations } = startWithInvalidateSpy(terminal);
+
+			assert.equal(areCellDimensionsMeasured(), false);
+			terminal.sendInput("\x1b[6;18;9t"); // identical to the 9x18 default guess
+
+			assert.equal(invalidations(), 1, "unmeasured→measured must invalidate: the guess became a measurement");
+			assert.equal(areCellDimensionsMeasured(), true);
+			tui.stop();
+		});
+	});
+
+	it("does not invalidate when a re-queried exact reply reports the same cell", () => {
+		withImageTerminal(() => {
+			resetCellDimensions();
+			const terminal = new VirtualTerminal(80, 24);
+			const { tui, invalidations } = startWithInvalidateSpy(terminal);
+
+			terminal.sendInput("\x1b[6;18;9t");
+			assert.equal(invalidations(), 1);
+
+			// The post-resize re-query answering with the unchanged cell (the common
+			// case: a border drag) must not pay a full-tree invalidate again.
+			terminal.sendInput("\x1b[6;18;9t");
+			assert.equal(invalidations(), 1, "an identical reply is a no-op");
+			assert.deepStrictEqual(getCellDimensions(), { widthPx: 9, heightPx: 18 });
+			tui.stop();
+		});
+	});
+
+	it("still invalidates when the reply reports a different cell", () => {
+		withImageTerminal(() => {
+			resetCellDimensions();
+			const terminal = new VirtualTerminal(80, 24);
+			const { tui, invalidations } = startWithInvalidateSpy(terminal);
+
+			terminal.sendInput("\x1b[6;18;9t");
+			terminal.sendInput("\x1b[6;20;10t"); // a real font change
+
+			assert.equal(invalidations(), 2, "a changed cell must invalidate");
+			assert.deepStrictEqual(getCellDimensions(), { widthPx: 10, heightPx: 20 });
+			tui.stop();
+		});
+	});
+
+	it("applies the same guard to the derived (CSI 14 t) fallback", () => {
+		withImageTerminal(() => {
+			resetCellDimensions();
+			const terminal = new VirtualTerminal(80, 24);
+			const { tui, invalidations } = startWithInvalidateSpy(terminal);
+
+			terminal.sendInput("\x1b[4;480;800t"); // derives 10x20
+			assert.equal(invalidations(), 1, "first derived measurement invalidates");
+
+			terminal.sendInput("\x1b[4;480;800t");
+			assert.equal(invalidations(), 1, "identical derived reply is a no-op");
+
+			terminal.sendInput("\x1b[4;528;880t"); // derives 11x22
+			assert.equal(invalidations(), 2, "changed derived cell invalidates");
+			assert.deepStrictEqual(getCellDimensions(), { widthPx: 11, heightPx: 22 });
+			tui.stop();
+		});
+	});
+
+	it("keeps the exact-beats-derived precedence when the exact reply is skipped as identical", () => {
+		withImageTerminal(() => {
+			resetCellDimensions();
+			const terminal = new VirtualTerminal(80, 24);
+			const { tui, invalidations } = startWithInvalidateSpy(terminal);
+
+			terminal.sendInput("\x1b[6;18;9t"); // exact
+			terminal.sendInput("\x1b[6;18;9t"); // exact again — guard skips the invalidate…
+			terminal.sendInput("\x1b[4;480;800t"); // …but the derived fallback must STILL lose
+
+			assert.deepStrictEqual(getCellDimensions(), { widthPx: 9, heightPx: 18 }, "exact wins");
+			assert.equal(invalidations(), 1);
+			tui.stop();
+		});
+	});
+});
+
 describe("TUI input rendering", () => {
 	it("paints synchronous input on the next tick instead of waiting for the animation throttle", async () => {
 		const terminal = new VirtualTerminal(80, 24);

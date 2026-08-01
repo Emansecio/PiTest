@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { type Component, SPINNER_FRAMES, type TUI, truncateToWidth, visibleWidth } from "@pit/tui";
+import { formatElapsed, formatTokens } from "../../../utils/format-display.ts";
 import { truncateWithEllipsis } from "../../../utils/surrogate.ts";
 import { theme } from "../theme/theme.ts";
 import { spinnerFrameIndexAt } from "./spinner-ticker.ts";
@@ -88,7 +89,7 @@ function activitySummary(entry: MemberEntry): string {
 		if (entry.toolSummaryCache === null) {
 			const parts: string[] = [];
 			for (const [name, n] of entry.toolCounts) parts.push(`${name} ${n}`);
-			entry.toolSummaryCache = parts.join(" · ");
+			entry.toolSummaryCache = parts.join("·");
 		}
 		return entry.toolSummaryCache;
 	}
@@ -108,11 +109,13 @@ function statusTail(entry: MemberEntry, secs: number, now: number): string {
 	const member = entry.member;
 	if (member.status === "done") {
 		const chars = member.chars ?? 0;
-		const tools = entry.toolCount > 0 ? `${entry.toolCount} tools · ` : "";
-		return theme.fg("muted", `done   ${secs}s · ${tools}${chars} chars`);
+		const tools = entry.toolCount > 0 ? `${entry.toolCount} tools·` : "";
+		// formatElapsed rolls seconds into minutes (`3m07s`, not `187s`); the char
+		// count compacts like a token count (`8.3k chars`).
+		return theme.fg("muted", `done·${formatElapsed(secs * 1000)}·${tools}${formatTokens(chars)} chars`);
 	}
 	if (member.status === "failed") {
-		return theme.fg("error", `failed ${secs}s · ${member.error ?? ""}`);
+		return theme.fg("error", `failed·${formatElapsed(secs * 1000)}·${member.error ?? ""}`);
 	}
 	// running: live activity (accent) + clock. The member is killed by the IDLE cap
 	// (reset on every chunk of output), NOT the wall-clock cap — so once it goes quiet
@@ -122,9 +125,9 @@ function statusTail(entry: MemberEntry, secs: number, now: number): string {
 	const idleLimit = member.idleTimeoutMs ? Math.floor(member.idleTimeoutMs / 1000) : 0;
 	const idleSecs = Math.max(0, Math.floor((now - entry.lastActivityAt) / 1000));
 	if (idleLimit > 0 && idleSecs >= Math.max(1, Math.floor(idleLimit / 2))) {
-		return `${activity}  ${theme.fg("warning", `idle ${idleSecs}s / ${idleLimit}s`)}`;
+		return `${activity}${theme.fg("dim", "·")}${theme.fg("warning", `idle ${idleSecs}s / ${idleLimit}s`)}`;
 	}
-	return `${activity}  ${theme.fg("muted", `${secs}s`)}`;
+	return `${activity}${theme.fg("dim", "·")}${theme.fg("muted", formatElapsed(secs * 1000))}`;
 }
 
 /**
@@ -369,9 +372,9 @@ export class FusionLiveComponent implements Component {
 		if (this.verifyToolSummaryCache === null) {
 			const parts: string[] = [];
 			for (const [name, n] of this.verifyToolCounts) parts.push(`${name} ${n}`);
-			this.verifyToolSummaryCache = parts.join(" · ");
+			this.verifyToolSummaryCache = parts.join("·");
 		}
-		return `turn ${this.verifyTurn} · ${this.verifyToolSummaryCache}`;
+		return `turn ${this.verifyTurn}·${this.verifyToolSummaryCache}`;
 	}
 
 	render(width: number): string[] {
@@ -403,9 +406,9 @@ export class FusionLiveComponent implements Component {
 		else if (this.stage === "panel") stageWord = `${n} advisor${n === 1 ? "" : "s"} (read-only)`;
 		else if (this.stage === "verify") stageWord = "verifying claims";
 		else if (this.stage === "judge") stageWord = "judging";
-		let header = `  ${theme.fg("accent", "Fusion")}  ${theme.fg("muted", stageWord)}`;
+		let header = `  ${theme.fg("accent", "Fusion")}${theme.fg("dim", "·")}${theme.fg("muted", stageWord)}`;
 		if (this.synthId) {
-			header += `  ${theme.fg("dim", `→ synth ${this.synthId}`)}`;
+			header += theme.fg("dim", `·→ synth ${this.synthId}`);
 		}
 		lines.push(header);
 
@@ -415,7 +418,7 @@ export class FusionLiveComponent implements Component {
 		if (this.stage === "writer") {
 			const ws = this.writerStartedAt > 0 ? Math.max(0, Math.floor((now - this.writerStartedAt) / 1000)) : 0;
 			lines.push(
-				`  ${theme.fg("accent", spinner)} ${theme.fg("muted", `synth ${this.synthId} · writing final answer`)}  ${theme.fg("dim", `${ws}s`)}`,
+				`  ${theme.fg("accent", spinner)} ${theme.fg("muted", `synth ${this.synthId}·writing final answer`)}${theme.fg("dim", `·${ws}s`)}`,
 			);
 			const rendered = lines.map((line) => truncateToWidth(line, width, theme.fg("dim", "…")));
 			this.renderCache = { version: this.renderVersion, width, frameIdx, elapsedKey, lines: rendered };
@@ -426,7 +429,7 @@ export class FusionLiveComponent implements Component {
 		if (this.stage === "brief") {
 			const bs = this.briefStartedAt > 0 ? Math.max(0, Math.floor((now - this.briefStartedAt) / 1000)) : 0;
 			lines.push(
-				`  ${theme.fg("accent", spinner)} ${theme.fg("muted", `synth ${this.synthId} · drafting the advisor brief`)}  ${theme.fg("dim", `${bs}s`)}`,
+				`  ${theme.fg("accent", spinner)} ${theme.fg("muted", `synth ${this.synthId}·drafting the advisor brief`)}${theme.fg("dim", `·${bs}s`)}`,
 			);
 			const rendered = lines.map((line) => truncateToWidth(line, width, theme.fg("dim", "…")));
 			this.renderCache = { version: this.renderVersion, width, frameIdx, elapsedKey, lines: rendered };
@@ -449,18 +452,19 @@ export class FusionLiveComponent implements Component {
 			let tail = statusTail(entry, secs, now);
 			if (m.status === "running" && entry.thought) {
 				const thoughtSnippet = truncateToWidth(entry.thought, Math.max(12, width - 24), theme.fg("dim", "…"));
-				tail = `${tail}  ${theme.fg("dim", thoughtSnippet)}`;
+				tail = `${tail}${theme.fg("dim", `·${thoughtSnippet}`)}`;
 			}
-			lines.push(`  ${glyph} ${slot}  ${name}  ${tail}`);
+			// Name is padded to the shared column, so the dense `·` before the tail
+			// lands on the same column for every row (member names stay aligned).
+			lines.push(`  ${glyph} ${slot} ${name}${theme.fg("dim", "·")}${tail}`);
 		}
 
 		// Judge stage: the synthesizer reconciles the advisors. Name the synth so it
 		// reads as the principal model now working, distinct from the advisors above.
 		if (this.stage === "judge") {
 			const judgeSecs = this.judgeStartedAt > 0 ? Math.max(0, Math.floor((now - this.judgeStartedAt) / 1000)) : 0;
-			lines.push("");
 			lines.push(
-				`  ${theme.fg("accent", spinner)} ${theme.fg("muted", `synth ${this.synthId} · judging ${n} advisors`)}  ${theme.fg("dim", `${judgeSecs}s`)}`,
+				`  ${theme.fg("accent", spinner)} ${theme.fg("muted", `synth ${this.synthId}·judging ${n} advisors`)}${theme.fg("dim", `·${judgeSecs}s`)}`,
 			);
 		}
 
@@ -469,10 +473,9 @@ export class FusionLiveComponent implements Component {
 		if (this.stage === "verify") {
 			const verifySecs = this.verifyStartedAt > 0 ? Math.max(0, Math.floor((now - this.verifyStartedAt) / 1000)) : 0;
 			const vAct = this.verifyActivitySummary();
-			const vActStr = vAct ? `  ${theme.fg("accent", vAct)}` : "";
-			lines.push("");
+			const vActStr = vAct ? `${theme.fg("dim", "·")}${theme.fg("accent", vAct)}` : "";
 			lines.push(
-				`  ${theme.fg("accent", spinner)} ${theme.fg("muted", `synth ${this.synthId} · verifying claims against the code`)}${vActStr}  ${theme.fg("dim", `${verifySecs}s`)}`,
+				`  ${theme.fg("accent", spinner)} ${theme.fg("muted", `synth ${this.synthId}·verifying claims against the code`)}${vActStr}${theme.fg("dim", `·${verifySecs}s`)}`,
 			);
 		}
 

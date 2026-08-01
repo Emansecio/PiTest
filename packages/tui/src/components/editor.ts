@@ -1456,7 +1456,12 @@ export class Editor implements Component, Focusable, MouseTarget {
 					this.setCursorCol(result.cursorCol);
 					this.touchBuffer();
 
-					if (this.autocompletePrefix.startsWith("/")) {
+					// completeOnly items (a slash command whose argument is required —
+					// see AutocompleteItem.completeOnly) must never auto-submit:
+					// submitting the bare command would only produce a usage warning.
+					// Enter then behaves exactly like Tab: complete and keep editing.
+					const completeOnly = (selected as { completeOnly?: boolean }).completeOnly === true;
+					if (this.autocompletePrefix.startsWith("/") && !completeOnly) {
 						this.cancelAutocomplete();
 						// Fall through to submit
 					} else {

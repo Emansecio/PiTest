@@ -135,7 +135,7 @@ describe("InteractiveMode._onPasteTruncated", () => {
 		const message = self.showWarning.mock.calls[0][0] as string;
 		expect(message).toContain("12.5 MB"); // original size, one decimal
 		expect(message).toContain("10 MB"); // kept / limit
-		expect(message).toMatch(/truncad/i);
+		expect(message).toMatch(/truncated/i);
 	});
 });
 
@@ -1031,6 +1031,71 @@ describe("InteractiveMode.onEscape goal pause", () => {
 		runEscape(fakeThis);
 
 		expect(pauseGoal).not.toHaveBeenCalled();
+	});
+});
+
+describe("InteractiveMode.onEscape mid-turn interrupt", () => {
+	/**
+	 * Wire the REAL setupKeyHandlers onto a minimal fake and hand back the
+	 * captured onEscape. The other handlers registered in the same method are
+	 * closures that only dereference `this` when invoked, so the fake needs
+	 * nothing beyond the registration surface.
+	 */
+	function captureOnEscape(tools: Array<{ id: string; name: string }>) {
+		const editor: any = { onAction: vi.fn() };
+		const fakeThis: any = {
+			defaultEditor: editor,
+			editor: { getText: () => "" },
+			ui: { addInputListener: vi.fn(() => vi.fn()) },
+			signalCleanupHandlers: [],
+			session: { isBusy: true, interrupt: vi.fn() },
+			getInterruptiblePendingTools: () => tools,
+			restoreQueuedMessagesToEditor: vi.fn(),
+			disposeFusionLive: vi.fn(),
+			deferredTurnDone: {},
+			stopWorkingLoader: vi.fn(),
+			showStatus: vi.fn(),
+			armInterruptWatchdog: vi.fn(),
+			promptInterruptChoice: vi.fn().mockResolvedValue(undefined),
+			isBashMode: false,
+		};
+		(InteractiveMode as any).prototype.setupKeyHandlers.call(fakeThis);
+		return { fakeThis, onEscape: editor.onEscape as () => void };
+	}
+
+	const expectDirectInterrupt = (fakeThis: any) => {
+		expect(fakeThis.restoreQueuedMessagesToEditor).toHaveBeenCalledOnce();
+		expect(fakeThis.session.interrupt).toHaveBeenCalledOnce();
+		expect(fakeThis.disposeFusionLive).toHaveBeenCalledOnce();
+		expect(fakeThis.deferredTurnDone).toBeNull();
+		expect(fakeThis.stopWorkingLoader).toHaveBeenCalledOnce();
+		expect(fakeThis.showStatus).toHaveBeenCalledWith("Interrupted");
+		expect(fakeThis.armInterruptWatchdog).toHaveBeenCalledOnce();
+		expect(fakeThis.promptInterruptChoice).not.toHaveBeenCalled();
+	};
+
+	test("no tools in flight: Esc interrupts everything directly", () => {
+		const { fakeThis, onEscape } = captureOnEscape([]);
+		onEscape();
+		expectDirectInterrupt(fakeThis);
+	});
+
+	test("a SINGLE tool in flight: Esc interrupts directly, no picker detour", () => {
+		const { fakeThis, onEscape } = captureOnEscape([{ id: "t1", name: "bash" }]);
+		onEscape();
+		expectDirectInterrupt(fakeThis);
+	});
+
+	test("two or more tools in flight: Esc opens the interrupt picker", () => {
+		const tools = [
+			{ id: "t1", name: "bash" },
+			{ id: "t2", name: "read" },
+		];
+		const { fakeThis, onEscape } = captureOnEscape(tools);
+		onEscape();
+		expect(fakeThis.promptInterruptChoice).toHaveBeenCalledWith(tools);
+		expect(fakeThis.session.interrupt).not.toHaveBeenCalled();
+		expect(fakeThis.restoreQueuedMessagesToEditor).not.toHaveBeenCalled();
 	});
 });
 

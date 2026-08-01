@@ -201,12 +201,15 @@ export function createExitPlanToolDefinition(
 			//    every auto-answer fallback picks recommended-or-first, so any path
 			//    that bypasses a real human (headless bus, picker-collision
 			//    auto-resolve) lands on "Keep planning", never on approval.
+			//    The `a` hotkey is interactive-only sugar (one keystroke instead of
+			//    Down+Enter in the picker); auto-answer paths never read `hotkey`,
+			//    so the fail-closed ordering above is untouched.
 			const current = mgr.current();
 			const context = `${summary ? `${summary}\n\n` : ""}${mgr.render()}`;
 			const answer = await bus.askOptions({
 				question: "Approve this plan and switch to execution?",
 				context,
-				options: [{ label: KEEP_LABEL }, { label: APPROVE_LABEL }],
+				options: [{ label: KEEP_LABEL }, { label: APPROVE_LABEL, hotkey: "a" }],
 				allowFreeform: true,
 				source: { toolCallId: _toolCallId, toolName: "exit_plan" },
 			});

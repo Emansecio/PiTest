@@ -46,10 +46,13 @@ describe("startup header hints", () => {
 		expect(build.call(fakeThis({ quietStartup: true, verbose: true }), false)).not.toBeNull();
 	});
 
-	test("expanded view lists the full shortcut set", () => {
+	test("expanded view lists the full shortcut set (dense: no 'to ' prefixes)", () => {
 		const header = build.call(fakeThis({ quietStartup: false }), false);
 		const expanded = header?.expanded() ?? "";
-		expect(expanded).toContain("to interrupt");
-		expect(expanded).toContain("to select model");
+		expect(expanded).toContain("interrupt");
+		expect(expanded).toContain("select model");
+		// 2026-07 dense-grammar pass: shortcut descriptions are bare verbs.
+		expect(expanded).not.toContain("to interrupt");
+		expect(expanded).not.toContain("to select model");
 	});
 });

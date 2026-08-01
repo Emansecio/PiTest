@@ -1,7 +1,7 @@
 import { basename } from "node:path";
 import { truncateToWidth } from "@pit/tui";
 import { truncateWithEllipsis } from "../../../utils/surrogate.ts";
-import { theme } from "../theme/theme.ts";
+import { type ThemeColor, theme } from "../theme/theme.ts";
 import { keyText } from "./keybinding-hints.ts";
 
 export type ToolActivity = "navigation" | "action";
@@ -67,16 +67,20 @@ export function expandKeyHint(): string {
 }
 
 /**
- * Cap an auto-shown error body to {@link ERROR_PREVIEW_LINES}, appending a
- * muted `… +N more lines (… to expand)` trailer when lines were hidden.
- * `width` is the cell budget of each body line (already inset by the caller);
- * the trailer is clamped to it so the TUI width invariant holds.
+ * Cap an auto-shown error body to `maxLines` (default {@link ERROR_PREVIEW_LINES}),
+ * keeping the TAIL of the body — the informative part of a stderr/stack trace is
+ * its end (final error, exit status), not its preamble. Hidden lines are therefore
+ * EARLIER lines, announced by a leading muted `… +N earlier lines (… to expand)`
+ * trailer (the same {@link moreLinesTrailer} dialect the bash command row uses for
+ * its collapsed output). `width` is the cell budget of each body line (already
+ * inset by the caller); the trailer is clamped to it so the TUI width invariant
+ * holds.
  */
 export function capErrorPreview(lines: string[], width: number, maxLines: number = ERROR_PREVIEW_LINES): string[] {
 	if (lines.length <= maxLines) return lines;
-	const kept = lines.slice(0, maxLines);
+	const kept = lines.slice(lines.length - maxLines);
 	const hidden = lines.length - kept.length;
-	kept.push(truncateToWidth(moreLinesTrailer(hidden, expandKeyHint()), width));
+	kept.unshift(truncateToWidth(moreLinesTrailer(hidden, expandKeyHint(), "earlier lines"), width));
 	return kept;
 }
 
@@ -140,9 +144,22 @@ export const COUNTER_SEP = "·";
 
 /** Leading gutter glyph for a settled action/work-group row — a steady accent
  * dot, independent of outcome (success/error/aborted all show the same dot; the
- * outcome rides on the TRAILING icon instead, see {@link ICON_SUCCESS}-alikes in
- * activity-line.ts/work-group.ts). Shared so both files render the same glyph. */
+ * outcome rides on the TRAILING {@link ICON_SUCCESS}/{@link ICON_ERROR}
+ * instead). Shared so both files render the same glyph. */
 export const GUTTER_DOT = "●";
+
+/** Trailing outcome icons for a settled tool row. Single source for the
+ * activity line, work group and legacy tool execution, so a promoted row, a
+ * group header and a standalone tool all wear the same marks. */
+export const ICON_SUCCESS = "✓"; // light check (U+2713), renders 1 cell — consistent with the rest of the UI
+export const ICON_ERROR = "✗";
+
+/** Steady color of the settled gutter dot — the existing "success" green, reused
+ * as the row's fixed accent regardless of outcome (outcome moved to the trailing
+ * icon). Reuses the theme's required `gutterToolSuccess` token rather than
+ * `accent` (a different, cyan-branded hue elsewhere in the theme) or a new
+ * optional token that could throw on a custom theme missing it. */
+export const GUTTER_DOT_COLOR: ThemeColor = "gutterToolSuccess";
 
 const CONSONANTS_BEFORE_Y = /[bcdfghjklmnpqrstvwxz]y$/i;
 

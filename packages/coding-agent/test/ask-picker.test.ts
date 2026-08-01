@@ -1,5 +1,5 @@
 import { visibleWidth } from "@pit/tui";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AskOptionsRequest } from "../src/core/user-input-bus.js";
 import { type AskPickerResolveResult, createAskPicker } from "../src/modes/interactive/components/ask-picker.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
@@ -404,5 +404,163 @@ describe("ask picker mouse", () => {
 		expect(target.onMouse(leftPress({ type: "drag" }), row, 4)).toBe(false);
 		expect(target.onMouse(leftPress({ button: "right" }), row, 4)).toBe(false);
 		expect(result()).toBeNull();
+	});
+});
+
+describe("ask picker numeric quick-select", () => {
+	beforeAll(() => {
+		initTheme(undefined, false);
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("single-select: a digit selects AND confirms option N in one keystroke", () => {
+		const p = drive(makeReq({}));
+		p.send("2");
+		expect(p.result()).toEqual({ picked: ["Beta"], cancelled: false });
+	});
+
+	it("multi-select: digits toggle option N; Enter still confirms the set", () => {
+		const p = drive(makeReq({ allowMultiple: true }));
+		p.send("1"); // check Alpha
+		p.send("3"); // check Gamma
+		p.send("3"); // uncheck Gamma
+		p.send("2"); // check Beta
+		expect(p.result()).toBeNull(); // digits toggle, they don't submit
+		p.send(ENTER);
+		expect(p.result()).toEqual({ picked: ["Alpha", "Beta"], cancelled: false });
+	});
+
+	it("ignores digits outside the option range", () => {
+		const p = drive(makeReq({})); // 3 options
+		p.send("9");
+		p.send("0"); // 0 is never an ordinal
+		expect(p.result()).toBeNull();
+		p.send(ENTER); // list still works normally afterwards
+		expect(p.result()).toEqual({ picked: ["Alpha"], cancelled: false });
+	});
+
+	it("digits never target the freeform row", () => {
+		// 1 option + freeform row: "2" would hit the freeform row if the synthetic
+		// row were numbered — it must be ignored instead.
+		const p = drive(makeReq({ options: [{ label: "Alpha" }], allowFreeform: true }));
+		p.send("2");
+		expect(p.result()).toBeNull();
+		expect(p.render()).not.toMatch(/\d·✎/);
+	});
+
+	it("disables quick-select entirely on lists longer than 9 options", () => {
+		const options = Array.from({ length: 12 }, (_, i) => ({ label: `Option-${i + 1}` }));
+		const p = drive(makeReq({ options }));
+		p.send("2"); // in-range digit, but the list is not numerable
+		expect(p.result()).toBeNull();
+		expect(p.render()).not.toMatch(/\d·Option/);
+	});
+
+	it("shows a dim `N·` ordinal prefix on numerable rows", () => {
+		const out = drive(makeReq({})).render();
+		expect(out).toContain("1·Alpha");
+		expect(out).toContain("2·Beta");
+		expect(out).toContain("3·Gamma");
+	});
+
+	it("keeps the ordinal before the checkbox in multi-select rows", () => {
+		const out = drive(makeReq({ allowMultiple: true })).render();
+		expect(out).toContain("1·☐ Alpha");
+	});
+
+	it("routes digits to the text field while the freeform input has focus", () => {
+		const p = drive(makeReq({ options: [{ label: "Alpha" }], allowFreeform: true }));
+		p.send(DOWN); // → freeform row
+		p.send(ENTER); // enter freeform mode
+		p.send("1");
+		p.send("2");
+		p.send(ENTER);
+		expect(p.result()).toEqual({ picked: [], freeformText: "12", cancelled: false });
+	});
+
+	it("routes digits to the comment field while it has focus", () => {
+		const p = drive(makeReq({ allowComment: true }));
+		p.send(CTRL_G); // open comment field
+		p.send("2");
+		p.send(ENTER); // save comment, back to list
+		p.send(ENTER); // confirm Alpha
+		expect(p.result()).toEqual({ picked: ["Alpha"], comment: "2", cancelled: false });
+	});
+
+	it("digit confirm clears the countdown tick exactly like Enter", () => {
+		vi.useFakeTimers();
+		const settle = (driveKeys: (send: (data: string) => void) => void) => {
+			let result: AskPickerResolveResult | null = null;
+			const { component } = createAskPicker(
+				makeReq({ timeout: 8_000 }),
+				(r) => {
+					result = r;
+				},
+				{ onRequestRender: () => {} },
+			);
+			component.render(80); // arms the repaint tick
+			expect(vi.getTimerCount()).toBe(1);
+			driveKeys((data) => component.handleInput?.(data));
+			component.render(80); // settled → must not re-arm
+			return { result: () => result, timers: () => vi.getTimerCount() };
+		};
+		const viaDigit = settle((send) => send("2"));
+		expect(viaDigit.result()).toEqual({ picked: ["Beta"], cancelled: false });
+		const viaEnter = settle((send) => send(ENTER));
+		expect(viaEnter.result()).toEqual({ picked: ["Alpha"], cancelled: false });
+		expect(viaDigit.timers()).toBe(viaEnter.timers());
+		expect(viaDigit.timers()).toBe(0);
+	});
+});
+
+describe("ask picker option hotkeys", () => {
+	beforeAll(() => {
+		initTheme(undefined, false);
+	});
+
+	it("a declared letter hotkey selects AND confirms its option (single-select)", () => {
+		const p = drive(makeReq({ options: [{ label: "Keep" }, { label: "Approve", hotkey: "a" }] }));
+		p.send("a");
+		expect(p.result()).toEqual({ picked: ["Approve"], cancelled: false });
+	});
+
+	it("matches the hotkey case-insensitively", () => {
+		const p = drive(makeReq({ options: [{ label: "Keep" }, { label: "Approve", hotkey: "a" }] }));
+		p.send("A");
+		expect(p.result()).toEqual({ picked: ["Approve"], cancelled: false });
+	});
+
+	it("multi-select: the hotkey toggles its option; Enter confirms", () => {
+		const p = drive(
+			makeReq({ allowMultiple: true, options: [{ label: "Keep" }, { label: "Approve", hotkey: "a" }] }),
+		);
+		p.send("a");
+		expect(p.result()).toBeNull();
+		p.send(ENTER);
+		expect(p.result()).toEqual({ picked: ["Approve"], cancelled: false });
+	});
+
+	it("undeclared letters are ignored in list mode", () => {
+		const p = drive(makeReq({ options: [{ label: "Keep" }, { label: "Approve", hotkey: "a" }] }));
+		p.send("z");
+		expect(p.result()).toBeNull();
+	});
+
+	it("renders the hotkey dim on its row, after the label", () => {
+		const out = drive(makeReq({ options: [{ label: "Keep" }, { label: "Approve", hotkey: "a" }] })).render();
+		expect(out).toContain("Approve [a]");
+		expect(out).not.toContain("Keep [");
+	});
+
+	it("routes hotkey letters to the text field while the freeform input has focus", () => {
+		const p = drive(makeReq({ options: [{ label: "Approve", hotkey: "a" }], allowFreeform: true }));
+		p.send(DOWN); // → freeform row
+		p.send(ENTER); // enter freeform mode
+		p.send("a");
+		p.send(ENTER);
+		expect(p.result()).toEqual({ picked: [], freeformText: "a", cancelled: false });
 	});
 });

@@ -166,6 +166,14 @@
 					"$ref": "#/$defs/colorValue",
 					"description": "Custom message type label color"
 				},
+				"command": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Optional. Slash-command text in the editor input. Falls back to border."
+				},
+				"compactionLabel": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Optional. Compaction entry label in the session tree selector. Falls back to borderAccent."
+				},
 				"toolPendingBg": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Tool execution box (pending state)"
@@ -189,6 +197,10 @@
 				"mdHeading": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Markdown heading fallback (H4+); H1–H3 use dedicated wiring"
+				},
+				"mdHeading3": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Optional. Markdown H3 heading text. Falls back to customMessageLabel."
 				},
 				"mdLink": {
 					"$ref": "#/$defs/colorValue",

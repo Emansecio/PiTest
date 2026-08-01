@@ -19,6 +19,7 @@
 
 import type { AgentSessionEvent } from "../../core/agent-session-events.ts";
 import { formatElapsed } from "../../core/goal/goal-manager.ts";
+import { pluralCountLabel } from "./components/context-display.ts";
 import type { FusionLiveMember } from "./components/fusion-live.ts";
 import type { PetMoodState } from "./components/pet-mood.ts";
 import { workingPhaseLabel } from "./components/tool-activity.ts";
@@ -55,7 +56,7 @@ export type TurnViewEffect =
 	| { kind: "stop-working-loader" }
 	/** Phase label shown next to the spinner. */
 	| { kind: "working-phase"; text: string }
-	/** Recompute the loader's trailing `esc to interrupt` / token chips. */
+	/** Recompute the loader's trailing `esc interrupt` / token chips. */
 	| { kind: "refresh-loader-suffix" }
 	| { kind: "pet-mood"; mood: PetMoodName }
 	/** Gearbox anomaly: leave the smol role for this step. */
@@ -173,7 +174,7 @@ export function decideToolExecutionStart(
 
 /** Label for the compaction spinner, including the cancel hint. */
 export function compactionLoaderLabel(reason: EventOf<"compaction_start">["reason"], interruptKey: string): string {
-	const cancelHint = `(${interruptKey} to cancel)`;
+	const cancelHint = `(${interruptKey} cancel)`;
 	if (reason === "manual") return `Compacting context… ${cancelHint}`;
 	return `${reason === "overflow" ? "Context overflow detected, " : ""}Auto-compacting… ${cancelHint}`;
 }
@@ -284,8 +285,8 @@ export function decideSubagentStart(event: Pick<EventOf<"subagent_start">, "hand
 export function decideSubagentProgress(
 	event: Pick<EventOf<"subagent_progress">, "handle" | "turn" | "lastTool">,
 ): TurnViewEffect[] {
-	const tool = event.lastTool ? ` · ${event.lastTool}` : "";
-	return [subagentEffect("◐", event, "", ` · turn ${event.turn}${tool}`)];
+	const tool = event.lastTool ? `·${event.lastTool}` : "";
+	return [subagentEffect("◐", event, "", `·turn ${event.turn}${tool}`)];
 }
 
 export function decideSubagentComplete(
@@ -299,7 +300,7 @@ export function decideSubagentComplete(
 		done ? "✓" : "✗",
 		event,
 		done ? "finished" : "failed",
-		meta.length > 0 ? ` · ${meta.join(" · ")}` : "",
+		meta.length > 0 ? `·${meta.join("·")}` : "",
 	);
 	// A terminal state is a report, not a process: flat tone, auto-dismiss.
 	effect.tone = done ? "success" : "warning";
@@ -323,7 +324,7 @@ export function retryLoaderMessage(
 	interruptKey: string,
 ): string {
 	const prefix = descriptor.reason ? `${descriptor.reason} — ` : "";
-	return `${prefix}Retrying (${descriptor.attempt}/${descriptor.maxAttempts}) in ${seconds}s… (${interruptKey} to cancel)`;
+	return `${prefix}retry ${descriptor.attempt}/${descriptor.maxAttempts} in ${seconds}s·${interruptKey} cancel`;
 }
 
 export function decideAutoRetryStart(
@@ -423,7 +424,7 @@ export function decideVerification(
 		effects.push({ kind: "stop-working-loader" });
 		effects.push({
 			kind: "error",
-			text: `✗ ${event.command} still failing after ${event.maxAttempts} fix attempt(s) — reported unverified.`,
+			text: `✗ ${event.command} still failing after ${pluralCountLabel(event.maxAttempts, "fix attempt", "fix attempts")} — reported unverified.`,
 		});
 	}
 	effects.push({ kind: "render" });

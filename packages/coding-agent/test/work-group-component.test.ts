@@ -153,6 +153,45 @@ describe("WorkGroupComponent", () => {
 		expect(g.render(120).map(stripAnsi).join("\n")).toContain("boom: build failed");
 	});
 
+	it("keeps a genuine promoted error visible with its capped body in a sealed collapse", () => {
+		const g = new WorkGroupComponent(fakeTui());
+		g.addCall(nav("read"));
+		g.addCall(
+			makeExec({
+				getActivityFamily: () => "action",
+				getToolName: () => "edit",
+				getArgs: () => ({ path: "a.ts" }),
+				getActivityState: () => "error",
+				isAborted: () => false,
+				render: () => ["oldText not found in a.ts"],
+			}),
+		);
+		g.seal();
+		const lines = g.render(120).map(stripAnsi);
+		expect(lines.some((l) => l.includes("Edited") && l.includes("a.ts"))).toBe(true);
+		// The error text itself is readable without any expand.
+		expect(lines.some((l) => l.includes("oldText not found"))).toBe(true);
+	});
+
+	it("hides an aborted promoted row's body everywhere — an interrupt is not a failure", () => {
+		const g = new WorkGroupComponent(fakeTui());
+		g.addCall(
+			makeExec({
+				getActivityFamily: () => "action",
+				getToolName: () => "edit",
+				getArgs: () => ({ path: "a.ts" }),
+				getActivityState: () => "error",
+				isAborted: () => true,
+				render: () => ["Operation aborted"],
+			}),
+		);
+		const live = g.render(120).map(stripAnsi);
+		expect(live.join("\n")).not.toContain("Operation aborted");
+		g.seal();
+		const collapsed = g.render(120).map(stripAnsi);
+		expect(collapsed.join("\n")).not.toContain("Operation aborted");
+	});
+
 	it("caps settled promoted lines live and folds the rest into the header", () => {
 		const g = new WorkGroupComponent(fakeTui());
 		g.addCall(edit("a.ts"));

@@ -8,6 +8,8 @@ import {
 	type Focusable,
 	getKeybindings,
 	Input,
+	type MouseEvent,
+	type MouseTarget,
 	Spacer,
 	Text,
 	type TUI,
@@ -19,7 +21,7 @@ import type { SessionInfo, SessionListProgress } from "../../../core/session-man
 import { canonicalizePath as _canonicalizePath } from "../../../utils/paths.ts";
 import { formatDisplayPath } from "../display-utils.ts";
 import { theme } from "../theme/theme.ts";
-import { keyHint, keyText, selectionCursor, themedScrollPositionHint } from "./keybinding-hints.ts";
+import { HINT_SEPARATOR, keyHint, keyText, selectionCursor, themedScrollPositionHint } from "./keybinding-hints.ts";
 import { paintSelectedRow } from "./selectable-row.ts";
 import { beginSelectorSurface } from "./selector-surface.ts";
 import { filterAndSortSessions, hasSessionName, type NameFilter, type SortMode } from "./session-selector-search.ts";
@@ -156,14 +158,14 @@ class SessionSelectorHeader implements Component {
 		// (post de-clutter pass — previously two permanent hint lines).
 		let hintLine: string;
 		if (this.confirmingDeletePath !== null) {
-			const confirmHint = `Delete session? ${keyHint("tui.select.confirm", "confirm")} · ${keyHint("tui.select.cancel", "cancel")}`;
+			const confirmHint = `Delete session? ${keyHint("tui.select.confirm", "confirm")}${HINT_SEPARATOR}${keyHint("tui.select.cancel", "cancel")}`;
 			hintLine = theme.fg("error", truncateToWidth(confirmHint, width, "…"));
 		} else if (this.statusMessage) {
 			const color = this.statusMessage.type === "error" ? "error" : "accent";
 			hintLine = theme.fg(color, truncateToWidth(this.statusMessage.message, width, "…"));
 		} else {
 			const pathState = this.showPath ? "(on)" : "(off)";
-			const sep = theme.fg("muted", " · ");
+			const sep = theme.fg("muted", HINT_SEPARATOR);
 			const parts = [
 				keyHint("tui.input.tab", "scope"),
 				keyHint("app.session.toggleSort", "sort"),
@@ -292,11 +294,17 @@ function flattenSessionTree(roots: SessionTreeNode[]): FlatSessionNode[] {
 /**
  * Custom session list component with multi-line items and search
  */
-class SessionList implements Component, Focusable {
+class SessionList implements Component, Focusable, MouseTarget {
 	public getSelectedSessionPath(): string | undefined {
 		const selected = this.filteredSessions[this.selectedIndex];
 		return selected?.session.path;
 	}
+	// Mouse bookkeeping from the last rendered frame (SelectList idiom): local
+	// row where the item rows start, first filtered index shown, and item-row
+	// count — so onMouse can map a clicked row back to the session it showed.
+	private lastRenderItemStartRow = 0;
+	private lastRenderStartIndex = 0;
+	private lastRenderItemRows = 0;
 	private allSessions: SessionInfo[] = [];
 	private filteredSessions: FlatSessionNode[] = [];
 	private selectedIndex: number = 0;
@@ -327,7 +335,7 @@ class SessionList implements Component, Focusable {
 	private filterDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 	private filterPending = false;
 	// Async session load in flight (mirrors the header's loading flag): while
-	// true with an empty list, the body shows "Loading sessions…" instead of
+	// true with an empty list, the body shows "loading sessions…" instead of
 	// the empty-state advice, so the two never contradict each other.
 	private loading = false;
 
@@ -478,12 +486,17 @@ class SessionList implements Component, Focusable {
 		lines.push(...this.searchInput.render(width));
 		lines.push(""); // Blank line after search
 
+		// Item rows start right below the search block; no items yet (see the
+		// empty/loading early returns) means clicks map to nothing.
+		this.lastRenderItemStartRow = lines.length;
+		this.lastRenderItemRows = 0;
+
 		if (this.filteredSessions.length === 0) {
 			// While the async load is in flight the list is empty because nothing
 			// has arrived yet — advising "Press Tab to view all" would contradict
 			// the header's "Loading…" and invite wrong moves.
 			if (this.loading) {
-				lines.push(theme.fg("muted", "  Loading sessions…"));
+				lines.push(theme.fg("muted", "  loading sessions…"));
 				return lines;
 			}
 			let emptyMessage: string;
@@ -511,6 +524,8 @@ class SessionList implements Component, Focusable {
 			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.filteredSessions.length - this.maxVisible),
 		);
 		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredSessions.length);
+		this.lastRenderStartIndex = startIndex;
+		this.lastRenderItemRows = endIndex - startIndex;
 
 		// Render visible sessions (one line each with tree structure)
 		for (let i = startIndex; i < endIndex; i++) {
@@ -584,6 +599,36 @@ class SessionList implements Component, Focusable {
 		}
 
 		return lines;
+	}
+
+	/**
+	 * Left-press on a session row. Click an unselected row to move the cursor;
+	 * click the selected row again to resume it (Enter semantics — resuming
+	 * swaps the whole session, so it deliberately takes two clicks). While a
+	 * delete confirmation is pending the click is claimed but only dismisses the
+	 * confirmation — a stray click must never delete. Non-item rows (search box,
+	 * blank line, scroll hint) and non-left/non-press events are declined so
+	 * native terminal selection keeps working there. The pending debounced
+	 * filter is NOT flushed: the mapping targets the frame the user clicked on,
+	 * and the timer applies the newer query right after.
+	 */
+	onMouse(ev: MouseEvent, localRow: number, _localCol: number): boolean {
+		if (ev.type !== "press" || ev.button !== "left") return false;
+		const itemRow = localRow - this.lastRenderItemStartRow;
+		if (itemRow < 0 || itemRow >= this.lastRenderItemRows) return false;
+		if (this.confirmingDeletePath !== null) {
+			this.setConfirmingDeletePath(null);
+			return true;
+		}
+		const index = this.lastRenderStartIndex + itemRow;
+		const node = this.filteredSessions[index];
+		if (!node) return false;
+		if (index !== this.selectedIndex) {
+			this.selectedIndex = index;
+			return true;
+		}
+		this.onSelect?.(node.session.path);
+		return true;
 	}
 
 	private buildTreePrefix(node: FlatSessionNode): string {
@@ -1025,7 +1070,10 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		panel.addChild(new Spacer(1));
 		panel.addChild(
 			new Text(
-				theme.fg("muted", `${keyText("tui.select.confirm")} to save · ${keyText("tui.select.cancel")} to cancel`),
+				theme.fg(
+					"muted",
+					`${keyText("tui.select.confirm")} save${HINT_SEPARATOR}${keyText("tui.select.cancel")} cancel`,
+				),
 				1,
 				0,
 			),

@@ -154,6 +154,7 @@ import {
 import { copyToClipboard } from "../../utils/clipboard.ts";
 import { type ClipboardImage, readClipboardImage } from "../../utils/clipboard-image.ts";
 import { isOfflineMode, isReducedMotion, isTruthyEnvFlag } from "../../utils/env-flags.ts";
+import { formatCost, formatTokens, formatTokensPrecise } from "../../utils/format-display.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { prewarmHljs } from "../../utils/syntax-highlight.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
@@ -201,7 +202,7 @@ import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.ts";
 import { OverthinkSteerMessageComponent } from "./components/overthink-steer-message.ts";
-import { PendingUserMessageComponent } from "./components/pending-user-message.ts";
+import { type PendingDeliveryMode, PendingUserMessageComponent } from "./components/pending-user-message.ts";
 import { createPetCompanion, PET_COMPANION_MIN_COLS, type PetCompanion } from "./components/pet-companion.ts";
 import type { PetMoodState } from "./components/pet-mood.ts";
 import { RewindSelectorComponent } from "./components/rewind-selector.ts";
@@ -226,7 +227,6 @@ import { workingPulsePalette } from "./components/working-palette.ts";
 import { formatRuntimeDiagnostics } from "./diagnostics-summary.ts";
 import {
 	buildScopeGroups,
-	buildWorkspaceCwdLabels,
 	formatContextPath,
 	formatDisplayPath,
 	formatExtensionDisplayPath,
@@ -239,7 +239,7 @@ import {
 import { EphemeralStatusController, type EphemeralStatusKind } from "./ephemeral-status.ts";
 import { runGoalDialog } from "./goal-dialog.ts";
 import { dispatchSlashCommand, type SlashCommandHost } from "./interactive-slash-commands.ts";
-import { formatModelDisplayName } from "./model-display-name.ts";
+import { imageMarker, reconcilePastedImages } from "./pasted-images.ts";
 import {
 	createPendingFollowUpDraftSnapshot,
 	findLatestPendingFollowUpDrafts,
@@ -371,6 +371,10 @@ const INTERRUPT_WATCHDOG_MS = 2000;
 // and reacting takes ~1s — a 500ms window expired before the user could
 // comply, making exit feel broken. 1.5s matches comparable CLIs.
 const CTRL_C_EXIT_WINDOW_MS = 1500;
+
+// Source tag on the "Interrupt what?" ask (promptInterruptChoice); agent_end
+// uses it to recognize — and close — an interrupt picker its turn outlived.
+const INTERRUPT_ASK_TOOL_NAME = "interrupt";
 
 /** /hotkeys row for double-Esc, per the configured doubleEscapeAction. */
 const DOUBLE_ESC_HOTKEY_LABELS: Record<"fork" | "tree" | "none", string> = {
@@ -570,7 +574,7 @@ export class InteractiveMode {
 	// refreshLoaderTrailingSuffix skip the setTrailingSuffix() call (colorizes +
 	// diffs again internally) when the composed suffix is byte-identical to what's
 	// already showing — true for most ticks, since the token/char chips only change
-	// in coarse steps (formatTokenChip).
+	// in coarse steps (formatTokensPrecise).
 	private lastAppliedLoaderSuffix: string | undefined;
 	private workingVisible = true;
 	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
@@ -587,6 +591,12 @@ export class InteractiveMode {
 	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
 
 	private lastSigintTime = 0;
+
+	// Clipboard images pasted into the composer, in paste order (buffer position
+	// N-1 ↔ visible `[Image #N]` marker). Held locally — NOT attached to the
+	// session — until a draft is dispatched; attachPastedImagesFor() then sends
+	// only the images whose marker survived in the submitted text.
+	private pendingPastedImages: ImageContent[] = [];
 	// Ephemeral "Press Ctrl+C again to exit" hint (lives in statusContainer, not the
 	// permanent showStatus channel). Cleared on next input or when the 500ms window expires.
 	private ctrlCHint: Text | undefined = undefined;
@@ -720,6 +730,14 @@ export class InteractiveMode {
 	private userInputBus: UserInputBus = createUserInputBus();
 	private userInputBusUnsubscribe?: () => void;
 	private pendingAskRequest: AskOptionsRequest | undefined;
+	// Cancels the picker currently bound to `pendingAskRequest` (resolves the bus
+	// with cancelled:true and tears the UI down). Set/cleared by handleAskRequest.
+	private pendingAskCancel: (() => void) | undefined;
+	// Set when agent_end closes a still-open "Interrupt what?" picker: tells the
+	// awaiting promptInterruptChoice that the turn died under the picker, so the
+	// cancel must NOT fall back to stop-the-whole-task of a turn that no longer
+	// exists. Consumed (reset) by promptInterruptChoice.
+	private interruptAskSuperseded = false;
 
 	// Track if editor is in bash mode (text starts with !)
 	private isBashMode = false;
@@ -961,6 +979,7 @@ export class InteractiveMode {
 			name: command.name,
 			description: command.description,
 			...(command.argumentHint && { argumentHint: command.argumentHint }),
+			...(command.completeOnly && { completeOnly: true }),
 		}));
 		// Built-ins flagged `hidden` stay "known" (dispatched when typed, still shadow
 		// same-named extension/skill commands) but are dropped from the "/" menu.
@@ -1433,26 +1452,26 @@ export class InteractiveMode {
 		const hint = (keybinding: AppKeybinding, description: string) => keyHint(keybinding, description);
 
 		const expandedInstructions = [
-			hint("app.interrupt", "to interrupt"),
-			hint("app.clear", "to clear"),
-			rawKeyHint(`${keyText("app.clear")} twice`, "to exit"),
-			hint("app.exit", "to exit (empty)"),
-			hint("app.suspend", "to suspend"),
-			keyHint("tui.editor.deleteToLineEnd", "to delete to end"),
-			hint("app.thinking.cycle", "to cycle thinking level"),
-			rawKeyHint(`${keyText("app.model.cycleForward")}/${keyText("app.model.cycleBackward")}`, "to cycle models"),
-			hint("app.model.select", "to select model"),
-			hint("app.tools.expand", "to expand tools"),
-			hint("app.thinking.toggle", "to expand thinking"),
-			hint("app.editor.external", "for external editor"),
-			rawKeyHint("/", "for commands"),
-			rawKeyHint("!", "to run bash"),
-			rawKeyHint("!!", "to run bash (no context)"),
+			hint("app.interrupt", "interrupt"),
+			hint("app.clear", "clear"),
+			rawKeyHint(`${keyText("app.clear")} twice`, "exit"),
+			hint("app.exit", "exit (empty)"),
+			hint("app.suspend", "suspend"),
+			keyHint("tui.editor.deleteToLineEnd", "delete to end"),
+			hint("app.thinking.cycle", "cycle thinking level"),
+			rawKeyHint(`${keyText("app.model.cycleForward")}/${keyText("app.model.cycleBackward")}`, "cycle models"),
+			hint("app.model.select", "select model"),
+			hint("app.tools.expand", "expand tools"),
+			hint("app.thinking.toggle", "expand thinking"),
+			hint("app.editor.external", "external editor"),
+			rawKeyHint("/", "commands"),
+			rawKeyHint("!", "run bash"),
+			rawKeyHint("!!", "run bash (no context)"),
 			rawKeyHint("enter", "during a turn: send now / queue chooser"),
-			hint("app.message.followUp", "to queue directly (skips chooser)"),
-			hint("app.message.dequeue", "to edit all queued messages"),
-			hint("app.clipboard.pasteImage", "to paste image"),
-			rawKeyHint("drop files", "to attach"),
+			hint("app.message.followUp", "queue directly (skips chooser)"),
+			hint("app.message.dequeue", "edit all queued messages"),
+			hint("app.clipboard.pasteImage", "paste image"),
+			rawKeyHint("drop files", "attach"),
 		].join("\n");
 		// Compact = a short essentials line + (first-run only) one rotating tip,
 		// instead of the old wall of shortcuts. The full list stays one expand away.
@@ -1461,8 +1480,8 @@ export class InteractiveMode {
 		);
 		const startupTips = [
 			"drag files into the terminal to attach them",
-			`${keyText("app.model.cycleForward")} cycles models · ${keyText("app.model.select")} picks one`,
-			`/fusion pairs two advisors · ${keyText("app.permission.cycle")} cycles plan/auto/fusion`,
+			`${keyText("app.model.cycleForward")} cycles models·${keyText("app.model.select")} picks one`,
+			`/fusion pairs two advisors·${keyText("app.permission.cycle")} cycles plan/auto/fusion`,
 			`ask "how does ${APP_NAME} work?" — it can explain and extend itself`,
 			`${keyText("app.editor.external")} opens your editor for long prompts`,
 			`${keyText("app.thinking.cycle")} cycles the thinking level`,
@@ -1852,34 +1871,13 @@ export class InteractiveMode {
 
 	/** Assemble the welcome data from the live session, footer provider, and theme. */
 	private buildStartupScreenData(recentSessions: StartupRecentSession[]): StartupScreenData {
-		const state = this.session.state;
-		const labels = buildWorkspaceCwdLabels(
-			this.sessionManager.getCwd(),
-			this.launchCwd,
-			this.footerDataProvider.getRepoDir(),
-		);
-		const branch = this.footerDataProvider.getGitBranch() ?? undefined;
-		const model = formatModelDisplayName(state.model?.id || "no-model");
-
-		let thinking: string | undefined;
-		if (state.model?.reasoning) {
-			const level = state.thinkingLevel;
-			if (level && level !== "off") thinking = `${level[0]!.toUpperCase()}${level.slice(1)}`;
-		}
-
-		const permissionsStatus = this.footerDataProvider.getExtensionStatuses().get("permissions");
-		const mode = permissionsStatus ? (/permissions:\s*(\S+)/.exec(permissionsStatus)?.[1] ?? undefined) : undefined;
-
+		// No workspace context here (cwd/branch/model/thinking/mode): the pristine
+		// footer on the SAME screen already shows it (footer.ts collapse).
 		return {
 			appName: APP_NAME,
 			version: this.version,
 			tagline: InteractiveMode.STARTUP_TAGLINE,
 			helpHint: "/help",
-			cwdDisplay: labels.session,
-			branch,
-			model,
-			thinking,
-			mode,
 			recentSessions,
 			petColors: this.resolvePetColors(),
 			petEnabled: !isTruthyEnvFlag(process.env.PIT_NO_PET),
@@ -1997,9 +1995,9 @@ export class InteractiveMode {
 		} else {
 			const hint = [
 				rawKeyHint("/", "commands"),
-				theme.fg("dim", " · "),
+				theme.fg("dim", HINT_SEPARATOR),
 				rawKeyHint("!", "bash"),
-				theme.fg("dim", " · "),
+				theme.fg("dim", HINT_SEPARATOR),
 				theme.fg("dim", "drop files to attach"),
 			].join("");
 			this.emptyStateHint = new Text(hint, 0, 1);
@@ -2195,13 +2193,6 @@ export class InteractiveMode {
 		return n;
 	}
 
-	/** Compact count for working-line chips: 97, 1.2k, 10.8k, 3.4M. */
-	private formatTokenChip(count: number): string {
-		if (count < 1000) return count.toString();
-		if (count < 1_000_000) return `${(count / 1000).toFixed(1).replace(/\.0$/, "")}k`;
-		return `${(count / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
-	}
-
 	/** Output tokens accrued this turn: finalized assistant messages plus whatever
 	 * the in-flight streaming message reports so far (partial until its own
 	 * message_end lands the final count). */
@@ -2218,14 +2209,15 @@ export class InteractiveMode {
 	 */
 	private static readonly LOADER_META_SEP = "·";
 
-	/** Lazily computed, memoized `·<key> to interrupt` suffix fragment. See
+	/** Lazily computed, memoized `·<key> interrupt` suffix fragment. See
 	 * `cachedLoaderInterruptSuffix` for why this is worth memoizing. */
 	private getLoaderInterruptSuffix(): string {
-		// With cancellable tools in flight, Esc opens the stop/cancel picker
-		// instead of interrupting on the spot — the hint must tell that story,
-		// and credit Ctrl+C as the always-immediate path. Same Esc key doing
-		// two different things with one static hint read as "esc is broken".
-		if (this.getInterruptiblePendingTools().length > 0) {
+		// With TWO OR MORE cancellable tools in flight, Esc opens the stop/cancel
+		// picker instead of interrupting on the spot (onEscape's `<= 1` branch
+		// interrupts directly) — the hint must tell that story, and credit
+		// Ctrl+C as the always-immediate path. Same Esc key doing two different
+		// things with one static hint read as "esc is broken".
+		if (this.getInterruptiblePendingTools().length > 1) {
 			if (this.cachedLoaderInterruptToolsSuffix === null) {
 				this.cachedLoaderInterruptToolsSuffix = theme.fg(
 					"dim",
@@ -2237,7 +2229,7 @@ export class InteractiveMode {
 		if (this.cachedLoaderInterruptSuffix === null) {
 			this.cachedLoaderInterruptSuffix = theme.fg(
 				"dim",
-				`${InteractiveMode.LOADER_META_SEP}${keyText("app.interrupt")} to interrupt`,
+				`${InteractiveMode.LOADER_META_SEP}${keyText("app.interrupt")} interrupt`,
 			);
 		}
 		return this.cachedLoaderInterruptSuffix;
@@ -2255,11 +2247,9 @@ export class InteractiveMode {
 		const interrupt = this.getLoaderInterruptSuffix();
 		const outputTokens = this.currentTurnOutputTokens();
 		const sep = InteractiveMode.LOADER_META_SEP;
-		const tokens = outputTokens > 0 ? theme.fg("dim", `${sep}↑${this.formatTokenChip(outputTokens)}`) : "";
+		const tokens = outputTokens > 0 ? theme.fg("dim", `${sep}↑${formatTokensPrecise(outputTokens)}`) : "";
 		const streamChars =
-			this.streamTextCharCount > 0
-				? theme.fg("dim", `${sep}↓${this.formatTokenChip(this.streamTextCharCount)}`)
-				: "";
+			this.streamTextCharCount > 0 ? theme.fg("dim", `${sep}↓${formatTokensPrecise(this.streamTextCharCount)}`) : "";
 		const suffix = `${interrupt}${tokens}${streamChars}`;
 		// Skip the Loader call entirely when nothing changed since the last applied
 		// suffix — most message_update ticks land on an unchanged chip string.
@@ -3298,9 +3288,11 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Esc with tools in flight: ask whether to stop the whole task (default) or
-	 * cancel a single tool. Reuses the ask-options overlay. Any cancel / timeout /
-	 * empty answer falls back to stopping the whole task, so Esc never gets stuck.
+	 * Esc with TWO OR MORE tools in flight: ask whether to stop the whole task
+	 * (default) or cancel a single tool. With fewer there is nothing to choose —
+	 * onEscape interrupts everything directly. Reuses the ask-options overlay.
+	 * Any cancel / timeout / empty answer falls back to stopping the whole task,
+	 * so Esc never gets stuck.
 	 */
 	private async promptInterruptChoice(tools: Array<{ id: string; name: string }>): Promise<void> {
 		const STOP_ALL = "Stop the whole task";
@@ -3313,16 +3305,25 @@ export class InteractiveMode {
 		});
 
 		let picked: string | undefined;
+		this.interruptAskSuperseded = false;
 		try {
 			const answer = await this.userInputBus.askOptions({
 				question: "Interrupt what?",
 				header: "Interrupt",
 				options,
-				source: { toolName: "interrupt" },
+				source: { toolName: INTERRUPT_ASK_TOOL_NAME },
 			});
 			picked = answer.picked[0];
 		} catch {
 			picked = undefined;
+		}
+
+		// The turn can end (agent_end) while the picker is still up. The event
+		// handler cancels the ask and flags it here: there is nothing left to
+		// interrupt, so do NOT fall through to the stop-the-whole-task default.
+		if (this.interruptAskSuperseded) {
+			this.interruptAskSuperseded = false;
+			return;
 		}
 
 		if (!picked || picked === STOP_ALL) {
@@ -3345,6 +3346,20 @@ export class InteractiveMode {
 		this.showStatus(cancelled ? `Cancelled ${tool?.name ?? "tool"}` : "Tool already finished");
 	}
 
+	/**
+	 * Close a still-open "Interrupt what?" picker when the turn it would
+	 * interrupt ends underneath it — otherwise it keeps asking about tools of a
+	 * dead turn. Resolves the pending ask as cancelled and flags
+	 * promptInterruptChoice to swallow that cancel instead of treating it as
+	 * "stop the whole task". No-op when the pending ask (if any) is not the
+	 * interrupt picker.
+	 */
+	private cancelInterruptAskOnTurnEnd(): void {
+		if (this.pendingAskRequest?.source.toolName !== INTERRUPT_ASK_TOOL_NAME) return;
+		this.interruptAskSuperseded = true;
+		this.pendingAskCancel?.();
+	}
+
 	// =========================================================================
 	// Key Handlers
 	// =========================================================================
@@ -3354,14 +3369,16 @@ export class InteractiveMode {
 		// so they work correctly regardless of which editor is active
 		this.defaultEditor.onEscape = () => {
 			if (this.session.isBusy) {
-				// Per-tool interruption: when tools are in flight, offer a choice
-				// between stopping the WHOLE task (default — current turn + goal
-				// auto-continuation + verification gate + in-flight bash + retry
-				// backoff) and cancelling just one tool. With nothing granular in
-				// flight, Esc stops the whole task immediately, as before. Queued
-				// messages are returned to the editor so the user doesn't lose them.
+				// Per-tool interruption: only with TWO OR MORE tools in flight is
+				// there a real choice between stopping the WHOLE task (default —
+				// current turn + goal auto-continuation + verification gate +
+				// in-flight bash + retry backoff) and cancelling just one tool.
+				// With zero or one, "cancel only this tool" is indistinguishable
+				// from stopping the work the user is watching, so Esc stops the
+				// whole task immediately — no picker detour for the common case.
+				// Queued messages are returned to the editor so nothing is lost.
 				const interruptible = this.getInterruptiblePendingTools();
-				if (interruptible.length === 0) {
+				if (interruptible.length <= 1) {
 					this.restoreQueuedMessagesToEditor();
 					this.session.interrupt();
 					// A Fusion turn returns before agent_end, so its live strip + ticker
@@ -3419,7 +3436,16 @@ export class InteractiveMode {
 
 		// Global debug handler on TUI (works regardless of focus)
 		this.ui.onDebug = () => this.handleDebugCommand();
-		this.defaultEditor.onAction("app.model.select", () => this.showModelSelector());
+		// Ctrl+L duality: with an EMPTY editor it is the universal clear-screen —
+		// a hard full repaint via requestRender(true), NOT a /clear of the visible
+		// transcript. With text in the editor it keeps opening the model selector.
+		this.defaultEditor.onAction("app.model.select", () => {
+			if (this.editor.getText().trim() === "") {
+				this.ui.requestRender(true);
+				return;
+			}
+			this.showModelSelector();
+		});
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
 		this.defaultEditor.onAction("app.thinking.toggle", () => this.toggleThinkingBlockVisibility());
 		this.defaultEditor.onAction("app.editor.external", () => this.openExternalEditor());
@@ -3499,18 +3525,36 @@ export class InteractiveMode {
 			return;
 		}
 
-		// Attach the image as a real ImageContent block on the NEXT prompt. The
-		// agent merges attached images into whatever text the user submits, so the
-		// model receives an actual image (not a temp-file path as text).
+		// Buffer the image LOCALLY as a real ImageContent block; it is only
+		// attached to the session when a draft whose text still carries its
+		// `[Image #N]` marker is actually dispatched (attachPastedImagesFor).
+		// Attaching at paste time made the image ghost onto whatever prompt came
+		// next, even after the marker was deleted or the draft cleared.
 		// readClipboardImage already normalizes unsupported formats to PNG, so the
 		// mimeType is always one the Anthropic API accepts.
 		const base64 = Buffer.from(image.bytes).toString("base64");
-		this.session.attachImages([{ type: "image", data: base64, mimeType: image.mimeType }]);
+		this.pendingPastedImages.push({ type: "image", data: base64, mimeType: image.mimeType });
 
-		// Visible marker so the user can see the attachment landed.
-		const index = this.session.getAttachedImageCount();
-		this.editor.insertTextAtCursor?.(`[Image #${index}] `);
+		// Visible marker so the user can see the attachment landed — and can
+		// delete it to detach the image again.
+		this.editor.insertTextAtCursor?.(`${imageMarker(this.pendingPastedImages.length)} `);
 		this.ui.requestRender();
+	}
+
+	/**
+	 * Hand the pasted images whose `[Image #N]` marker survived in `text` to the
+	 * session, and drop the rest. Called at every seam where a composer draft
+	 * actually leaves for the session (direct prompt, follow-up/steer, compaction
+	 * queue, Send-now chooser confirm) — never earlier, so a cleared or abandoned
+	 * draft can no longer ghost its images onto an unrelated prompt. Idempotent:
+	 * the buffer empties on the first flush. The session's own drain-all contract
+	 * for programmatic callers (attachImages without markers) is untouched.
+	 */
+	private attachPastedImagesFor(text: string): void {
+		if (this.pendingPastedImages.length === 0) return;
+		const surviving = reconcilePastedImages(text, this.pendingPastedImages);
+		this.pendingPastedImages = [];
+		if (surviving.length > 0) this.session.attachImages(surviving);
 	}
 
 	private setupEditorSubmitHandler(): void {
@@ -3580,17 +3624,32 @@ export class InteractiveMode {
 			// routes the second message here (re-seated, not lost) instead of racing into
 			// a concurrent prompt() that throws "already processing".
 			if (this.session.isStreaming || this.session.isFusing || this.submitStarting) {
+				// An extension command prompt()ed mid-turn executes IMMEDIATELY
+				// (agent-session handles it before any queue/steer routing), so the
+				// [Send now][Queue][Cancel] chooser would promise semantics neither
+				// button can deliver — both would run the command on the spot.
+				// Dispatch it directly instead; streamingBehavior only matters on
+				// the fallback path where the command turns out not to be handled.
+				if (extensionCommand) {
+					this.editor.addToHistory?.(text);
+					this.editor.setText("");
+					await this.session.prompt(text, { streamingBehavior: "followUp" });
+					return;
+				}
 				// Native on-by-default: instead of silently queuing, offer
 				// [Send now] [Queue] [Cancel]. The editor cleared its own text in
 				// submitValue() before this handler ran, so the chooser re-seats `text`
 				// in the composer and confirmation routes it. PIT_NO_SEND_NOW=1 restores
 				// the previous "Enter → followUp direct" behavior.
 				if (this.sendNowChooserEnabled()) {
+					// No pasted-image flush here: the chooser may Cancel and re-seat the
+					// draft, so the buffer only flushes when the chooser confirms.
 					this.openSendNowChooser(text);
 					return;
 				}
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
+				this.attachPastedImagesFor(text);
 				await this.session.prompt(text, { streamingBehavior: "followUp" });
 				this.updatePendingMessagesDisplay();
 				this.ui.requestRender();
@@ -3619,6 +3678,9 @@ export class InteractiveMode {
 			if (this.onInputCallback) {
 				this.onInputCallback(text);
 			}
+			// Attach only the pasted images whose marker survived in this draft;
+			// orphans (marker deleted) are dropped here for good.
+			this.attachPastedImagesFor(text);
 			// Latch synchronously BEFORE the first await so a rapid second Enter (which can
 			// only run once we yield here) observes the in-flight turn even though
 			// session.isStreaming has not flipped yet. Cleared once prompt() settles.
@@ -3721,15 +3783,13 @@ export class InteractiveMode {
 	 */
 	private toggleMouse(): void {
 		if (isTruthyEnvFlag(process.env.PIT_NO_MOUSE)) {
-			this.showStatus("mouse off·PIT_NO_MOUSE ativo (kill-switch)");
+			this.showStatus("mouse off·PIT_NO_MOUSE kill-switch");
 			return;
 		}
 		const next = !this.settingsManager.getMouseEnabled();
 		this.settingsManager.setMouseEnabled(next);
 		this.ui.setMouseEnabled(next);
-		this.showStatus(
-			next ? "mouse on·clique posiciona·shift+arrasto p/ seleção nativa" : "mouse off·seleção nativa direta",
-		);
+		this.showStatus(next ? "mouse on·click positions·shift+drag native select" : "mouse off·native select");
 	}
 
 	/**
@@ -4450,6 +4510,11 @@ export class InteractiveMode {
 			case "agent_end":
 				this.setTerminalProgress(false);
 				this.clearInterruptWatchdog();
+				// An "Interrupt what?" picker must not outlive the turn it would
+				// interrupt (its tools are disposed just below). Kept open across
+				// willRetry: the run is still alive, so "Stop the whole task" stays
+				// meaningful through the retry backoff.
+				if (!event.willRetry) this.cancelInterruptAskOnTurnEnd();
 				this.disposeFusionLive();
 				// Belt-and-suspenders: the turn is over one way or another, so the
 				// preview must not linger into post-turn gates (verification etc.).
@@ -4821,7 +4886,9 @@ export class InteractiveMode {
 			.filter((k) => isKittyProtocolActive() || k !== "ctrl+/");
 		const cheatsheet = cheatsheetKeys.length > 0 ? formatKeyText(cheatsheetKeys.join("/")) : "f1";
 		const interrupt = keyText("app.interrupt");
-		this.showStatus(`tip: ${cheatsheet} shortcuts · /model · ${interrupt} interrupts`);
+		// Dense `·` separator + no-"to" key grammar — the one idiom every
+		// ephemeral toast in this file uses (see LOADER_META_SEP).
+		this.showStatus(`tip: ${cheatsheet} shortcuts·/model·${interrupt} interrupt`);
 	}
 
 	/** Insert a between-turns hairline rule before a user prompt, but only when the
@@ -5077,7 +5144,7 @@ export class InteractiveMode {
 			// it pending so tool_execution_end can still settle it normally.
 			if (options.settleOrphanTools) {
 				component.updateResult({
-					content: [{ type: "text", text: "(incompleto — sessão retomada)" }],
+					content: [{ type: "text", text: "(incomplete — session resumed)" }],
 					isError: true,
 				});
 			} else {
@@ -5169,10 +5236,11 @@ export class InteractiveMode {
 		this.showCtrlCHint();
 	}
 
-	/** Ephemeral hint shown on the first Ctrl+C; auto-clears when the exit window expires. */
-	private showCtrlCHint(): void {
+	/** Ephemeral hint shown on the first Ctrl+C (or busy Ctrl+D, which passes its
+	 * own key label); auto-clears when the exit window expires. */
+	private showCtrlCHint(keyLabel = "ctrl+c"): void {
 		this.clearCtrlCHint();
-		const hint = new Text(theme.fg("dim", "Press Ctrl+C again to exit"), 1, 0);
+		const hint = new Text(theme.fg("dim", `${keyLabel} again to exit`), 1, 0);
 		this.ctrlCHint = hint;
 		this.statusContainer.addChild(hint);
 		this.ctrlCHintTimer = setTimeout(() => this.clearCtrlCHint(), CTRL_C_EXIT_WINDOW_MS);
@@ -5224,7 +5292,23 @@ export class InteractiveMode {
 	}
 
 	private handleCtrlD(): void {
-		// Only called when editor is empty (enforced by CustomEditor)
+		// Only called when editor is empty (enforced by CustomEditor).
+		// Mid-turn, a single Ctrl+D killing the running task is too easy to
+		// fat-finger — require the same double-press window as Ctrl+C. The
+		// timestamp is shared with handleCtrlC on purpose: the two keys arm one
+		// exit window, so Ctrl+C then Ctrl+D (or vice versa) still exits. Idle
+		// keeps the direct single-press exit.
+		if (this.session.isBusy) {
+			const now = Date.now();
+			if (now - this.lastSigintTime < CTRL_C_EXIT_WINDOW_MS) {
+				this.clearCtrlCHint();
+				void this.shutdown();
+				return;
+			}
+			this.lastSigintTime = now;
+			this.showCtrlCHint("ctrl+d");
+			return;
+		}
 		void this.shutdown();
 	}
 
@@ -5452,6 +5536,7 @@ export class InteractiveMode {
 		if (this.session.isStreaming || this.session.isFusing) {
 			this.editor.addToHistory?.(text);
 			this.editor.setText("");
+			this.attachPastedImagesFor(text);
 			await this.session.prompt(text, { streamingBehavior: "followUp" });
 			this.updatePendingMessagesDisplay();
 			this.ui.requestRender();
@@ -5483,6 +5568,7 @@ export class InteractiveMode {
 		if (this.session.isFusing) {
 			this.editor.addToHistory?.(`/steer ${text}`);
 			this.editor.setText("");
+			this.attachPastedImagesFor(text);
 			await this.session.prompt(text, { streamingBehavior: "followUp" });
 			this.updatePendingMessagesDisplay();
 			this.showStatus("Fusion turn — delivered at end of turn");
@@ -5498,6 +5584,7 @@ export class InteractiveMode {
 
 		this.editor.addToHistory?.(`/steer ${text}`);
 		this.editor.setText("");
+		this.attachPastedImagesFor(text);
 		await this.session.prompt(text, { streamingBehavior: "steer" });
 		this.updatePendingMessagesDisplay();
 		this.ui.requestRender();
@@ -5630,6 +5717,11 @@ export class InteractiveMode {
 			return;
 		}
 		this.closeSendNowChooser();
+
+		// The decided draft is definitively leaving now — reconcile its pasted
+		// images (Cancel paths above keep the buffer for the re-seated draft).
+		// Idempotent with queueCompactionMessage's own flush below.
+		this.attachPastedImagesFor(text);
 
 		const mode: "steer" | "followUp" = selection === "send" ? "steer" : "followUp";
 
@@ -5903,10 +5995,10 @@ export class InteractiveMode {
 				this.scopedExpandTarget = target;
 				if (target instanceof WorkGroupComponent) {
 					target.expandLastChild();
-					this.showStatus("Expanded last tool · ctrl+o again for phase");
+					this.showStatus("Expanded last tool·ctrl+o again for phase");
 				} else {
 					target.setExpanded(true);
-					this.showStatus("Expanded last tool output · ctrl+o again for all");
+					this.showStatus("Expanded last tool output·ctrl+o again for all");
 				}
 				this.chatContainer.markChildStale(target);
 				this.ui.requestRender();
@@ -5922,7 +6014,7 @@ export class InteractiveMode {
 		) {
 			this.scopedExpandTarget.setExpanded(true);
 			this.chatContainer.markChildStale(this.scopedExpandTarget);
-			this.showStatus("Expanded phase · ctrl+o again for all");
+			this.showStatus("Expanded phase·ctrl+o again for all");
 			this.ui.requestRender();
 			return;
 		}
@@ -6106,6 +6198,10 @@ export class InteractiveMode {
 
 	clearEditor(): void {
 		this.editor.setText("");
+		// Clearing the draft (Ctrl+C) discards its `[Image #N]` markers, so the
+		// images they anchored must go too — otherwise they would ghost onto the
+		// next unrelated prompt.
+		this.pendingPastedImages = [];
 		this.ui.requestRender();
 	}
 
@@ -6124,7 +6220,7 @@ export class InteractiveMode {
 		const originalMB = (info.originalBytes / bytesPerMB).toFixed(1);
 		const keptMB = Math.round(info.keptBytes / bytesPerMB);
 		this.showWarning(
-			`Paste truncado: ${originalMB} MB excede o limite de ${keptMB} MB, mantido os primeiros ${keptMB} MB.`,
+			`Paste truncated: ${originalMB} MB exceeds the ${keptMB} MB limit, kept the first ${keptMB} MB.`,
 		);
 	}
 
@@ -6205,15 +6301,18 @@ export class InteractiveMode {
 		const { steering: steeringMessages, followUp: followUpMessages } = this.getAllQueuedMessages();
 		if (steeringMessages.length > 0 || followUpMessages.length > 0) {
 			this.pendingMessagesContainer.addChild(new Spacer(1));
-			for (const message of steeringMessages) {
-				this.pendingMessagesContainer.addChild(new PendingUserMessageComponent("steer", message));
-			}
-			for (const message of followUpMessages) {
-				this.pendingMessagesContainer.addChild(new PendingUserMessageComponent("queued", message));
-			}
-			const dequeueHint = this.getAppKeyDisplay("app.message.dequeue");
-			const hintText = theme.fg("dim", `↳ ${dequeueHint} to edit all queued messages`);
-			this.pendingMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
+			// The dequeue hint rides the LAST queued row as a dense `·<key> edit`
+			// suffix (the rows render dim already) instead of a hint line of its
+			// own — one queued message must cost one line, not two.
+			const hintSuffix = `${InteractiveMode.LOADER_META_SEP}${keyText("app.message.dequeue")} edit`;
+			const rows: Array<{ mode: PendingDeliveryMode; text: string }> = [
+				...steeringMessages.map((text) => ({ mode: "steer" as const, text })),
+				...followUpMessages.map((text) => ({ mode: "queued" as const, text })),
+			];
+			rows.forEach(({ mode, text }, i) => {
+				const withHint = i === rows.length - 1 ? `${text}${hintSuffix}` : text;
+				this.pendingMessagesContainer.addChild(new PendingUserMessageComponent(mode, withHint));
+			});
 		}
 	}
 
@@ -6239,6 +6338,9 @@ export class InteractiveMode {
 	}
 
 	private queueCompactionMessage(text: string, mode: "steer" | "followUp"): void {
+		// The queued draft is leaving the composer for good: reconcile its pasted
+		// images now (they sit in the session buffer until the flush prompts).
+		this.attachPastedImagesFor(text);
 		this.compactionQueuedMessages.push({ text, mode });
 		this.editor.addToHistory?.(text);
 		this.editor.setText("");
@@ -6419,10 +6521,14 @@ export class InteractiveMode {
 				timer = undefined;
 			}
 			this.pendingAskRequest = undefined;
+			this.pendingAskCancel = undefined;
 			releaseAskWait();
 			this.userInputBus.resolve(req.requestId, answer);
 			close?.();
 		};
+		// Host-side cancellation (e.g. agent_end closing an interrupt picker whose
+		// turn just died) rides the same single funnel as user answers/timeouts.
+		this.pendingAskCancel = () => resolveOnce({ picked: [], cancelled: true });
 		const resolveFromUser = (answer: Omit<AskOptionsAnswer, "requestId">) => {
 			if (!answer.cancelled && answer.picked.length > 0) this.dismissStartupScreen();
 			resolveOnce(answer);
@@ -6807,7 +6913,7 @@ export class InteractiveMode {
 				const chainStr =
 					cfg.fallbackChain && cfg.fallbackChain.length > 0 ? ` chain=[${cfg.fallbackChain.join(", ")}]` : "";
 				const thinkStr = cfg.thinkingLevel ? ` thinking=${cfg.thinkingLevel}` : "";
-				this.showStatus(`Role: ${current} -> ${cfg.model}${thinkStr}${chainStr}`);
+				this.showStatus(`Role: ${current} → ${cfg.model}${thinkStr}${chainStr}`);
 			} else {
 				this.showStatus(`Role: ${current} (no configuration in settings.modelRoles)`);
 			}
@@ -6862,7 +6968,7 @@ export class InteractiveMode {
 				this.applyThinkingLevel(resolution.thinkingLevel);
 				this.refreshModelIndicators();
 				if (!opts?.silent) {
-					this.showStatus(`Role: ${role} -> ${resolution.model.provider}/${resolution.model.id}`);
+					this.showStatus(`Role: ${role} → ${resolution.model.provider}/${resolution.model.id}`);
 				}
 			} catch (error) {
 				this.showError(errMsg(error));
@@ -7120,7 +7226,7 @@ export class InteractiveMode {
 					done();
 					const a = result.advisors[0].model.id;
 					const b = result.advisors[1].model.id;
-					this.showStatus(`${humanModeNotifyLabel("fusion", "plan")} · synth: ${synthId} · advisors: ${a} + ${b}`);
+					this.showStatus(`${humanModeNotifyLabel("fusion", "plan")}·synth: ${synthId}·advisors: ${a} + ${b}`);
 				},
 				() => {
 					done();
@@ -7345,7 +7451,7 @@ export class InteractiveMode {
 							this.ui,
 							workingPulsePalette(),
 							(text) => theme.fg("muted", text),
-							`Summarizing branch… (${keyText("app.interrupt")} to cancel)`,
+							`Summarizing branch… (${keyText("app.interrupt")} cancel)`,
 							reducedMotionLoaderIndicator(),
 						);
 						this.statusContainer.addChild(summaryLoader);
@@ -8213,21 +8319,20 @@ export class InteractiveMode {
 
 		if (stats.cost > 0) {
 			info += `\n${theme.bold("Cost")}\n`;
-			info += `${theme.fg("dim", "Total:")} ${stats.cost.toFixed(4)}`;
+			info += `${theme.fg("dim", "Total:")} ${formatCost(stats.cost)}`;
 		}
 
 		const fixedCost = this.session.getFixedCostSurface();
 		const cacheStatsForFixed = this.session.getCacheStats();
-		const kFmt = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
 		const pctFmt = (r: number): string => `${Math.round(r * 100)}%`;
 		info += `\n${theme.bold("Fixed Cost")}\n`;
 		if (fixedCost) {
 			const sysDyn =
 				fixedCost.dynamicSystemTokens > 0
-					? ` (${kFmt(fixedCost.staticSystemTokens)} static + ${kFmt(fixedCost.dynamicSystemTokens)} dyn)`
+					? ` (${formatTokens(fixedCost.staticSystemTokens)} static + ${formatTokens(fixedCost.dynamicSystemTokens)} dyn)`
 					: "";
-			info += `${theme.fg("dim", "System:")} ${kFmt(fixedCost.systemTokens)} tok${sysDyn} (est.)\n`;
-			info += `${theme.fg("dim", "Tools:")}  ${kFmt(fixedCost.toolTokens)} tok (est.)\n`;
+			info += `${theme.fg("dim", "System:")} ${formatTokens(fixedCost.systemTokens)} tok${sysDyn} (est.)\n`;
+			info += `${theme.fg("dim", "Tools:")}  ${formatTokens(fixedCost.toolTokens)} tok (est.)\n`;
 		} else {
 			info += `${theme.fg("muted", "— no request yet")}\n`;
 		}
@@ -8277,7 +8382,7 @@ export class InteractiveMode {
 		// for surviving idle gaps — the input to whether "long" earns its default.
 		if (stats.totalCacheWriteLong > 0) {
 			const longShare = stats.totalCacheWrite > 0 ? stats.totalCacheWriteLong / stats.totalCacheWrite : 0;
-			info += theme.fg("muted", `  ·  ${pct(longShare)} at 1h tier (1.6× price)`);
+			info += theme.fg("muted", `·${pct(longShare)} at 1h tier (1.6× price)`);
 		}
 		info += "\n";
 		info += `${theme.fg("dim", "Uncached in:")}  ${stats.totalInput.toLocaleString()} tok\n`;

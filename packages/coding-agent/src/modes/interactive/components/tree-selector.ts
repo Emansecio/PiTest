@@ -4,6 +4,8 @@ import {
 	type Focusable,
 	getKeybindings,
 	Input,
+	type MouseEvent,
+	type MouseTarget,
 	Spacer,
 	Text,
 	TruncatedText,
@@ -49,7 +51,12 @@ interface ToolCallInfo {
 	arguments: Record<string, unknown>;
 }
 
-class TreeList implements Component {
+class TreeList implements Component, MouseTarget {
+	// Mouse bookkeeping from the last rendered frame (SelectList idiom): first
+	// filtered index shown and item-row count. Item rows start at local row 0;
+	// the trailing scroll/status line never maps.
+	private lastRenderStartIndex = 0;
+	private lastRenderItemRows = 0;
 	private flatNodes: FlatNode[] = [];
 	private entryById: Map<string, FlatNode> = new Map();
 	private filteredNodes: FlatNode[] = [];
@@ -623,6 +630,7 @@ class TreeList implements Component {
 		const lines: string[] = [];
 
 		if (this.filteredNodes.length === 0) {
+			this.lastRenderItemRows = 0;
 			lines.push(truncateToWidth(theme.fg("muted", "  No entries found"), width));
 			lines.push(truncateToWidth(theme.fg("muted", `  (0/0)${this.getStatusLabels()}`), width));
 			return lines;
@@ -636,6 +644,8 @@ class TreeList implements Component {
 			),
 		);
 		const endIndex = Math.min(startIndex + this.maxVisibleLines, this.filteredNodes.length);
+		this.lastRenderStartIndex = startIndex;
+		this.lastRenderItemRows = endIndex - startIndex;
 
 		for (let i = startIndex; i < endIndex; i++) {
 			const flatNode = this.filteredNodes[i];
@@ -703,7 +713,7 @@ class TreeList implements Component {
 				this.showLabelTimestamps && flatNode.node.label && flatNode.node.labelTimestamp
 					? theme.fg("muted", `${this.formatLabelTimestamp(flatNode.node.labelTimestamp)} `)
 					: "";
-			const content = this.getEntryDisplayText(flatNode.node, isSelected);
+			const content = this.getEntryDisplayText(flatNode.node, isSelected, width);
 
 			lines.push(
 				paintSelectedRow(
@@ -722,7 +732,31 @@ class TreeList implements Component {
 		return lines;
 	}
 
-	private getEntryDisplayText(node: SessionTreeNode, isSelected: boolean): string {
+	/**
+	 * Left-press on an entry row. Click an unselected row to move the cursor
+	 * (the eye can then verify the entry before committing); click the selected
+	 * row again to navigate there (Enter semantics — onSelect rewinds/forks the
+	 * session, so it deliberately takes two clicks). The trailing scroll/status
+	 * line and non-left/non-press events are declined so native selection keeps
+	 * working there. The pending debounced search filter is NOT flushed: the
+	 * mapping targets the frame the user clicked on.
+	 */
+	onMouse(ev: MouseEvent, localRow: number, _localCol: number): boolean {
+		if (ev.type !== "press" || ev.button !== "left") return false;
+		if (localRow < 0 || localRow >= this.lastRenderItemRows) return false;
+		const index = this.lastRenderStartIndex + localRow;
+		const node = this.filteredNodes[index];
+		if (!node) return false;
+		if (index !== this.selectedIndex) {
+			this.selectedIndex = index;
+			this.lastSelectedId = node.node.entry.id;
+			return true;
+		}
+		this.onSelect?.(node.node.entry.id);
+		return true;
+	}
+
+	private getEntryDisplayText(node: SessionTreeNode, isSelected: boolean, width: number): string {
 		const entry = node.entry;
 		let result: string;
 
@@ -753,7 +787,7 @@ class TreeList implements Component {
 					const toolMsg = msg as { toolCallId?: string; toolName?: string };
 					const toolCall = toolMsg.toolCallId ? this.toolCallMap.get(toolMsg.toolCallId) : undefined;
 					if (toolCall) {
-						result = theme.fg("muted", this.formatToolCall(toolCall.name, toolCall.arguments));
+						result = theme.fg("muted", this.formatToolCall(toolCall.name, toolCall.arguments, width));
 					} else {
 						result = theme.fg("muted", `[${toolMsg.toolName ?? "tool"}]`);
 					}
@@ -778,7 +812,12 @@ class TreeList implements Component {
 			}
 			case "compaction": {
 				const tokens = Math.round(entry.tokensBefore / 1000);
-				result = theme.fg("borderAccent", `[compaction: ${tokens}k tokens]`);
+				// Semantic text token; borderAccent is the fallback for custom themes
+				// that predate `compactionLabel` (same hasColor idiom as theme.ts).
+				result = theme.fg(
+					theme.hasColor("compactionLabel") ? "compactionLabel" : "borderAccent",
+					`[compaction: ${tokens}k tokens]`,
+				);
 				break;
 			}
 			case "branch_summary":
@@ -862,7 +901,12 @@ class TreeList implements Component {
 		return false;
 	}
 
-	private formatToolCall(name: string, args: Record<string, unknown>): string {
+	/** One-bracket summary of a tool call. `width` is the row's render width —
+	 * long free-text payloads (bash commands, custom-tool JSON) are clamped to it
+	 * by cells via truncateToWidth (the row itself is exact-clamped later by
+	 * paintSelectedRow; this just keeps the pre-assembled string bounded without
+	 * a magic character count). */
+	private formatToolCall(name: string, args: Record<string, unknown>, width: number): string {
 		switch (name) {
 			case "read": {
 				const path = formatDisplayPath(String(args.path || args.file_path || ""));
@@ -885,12 +929,10 @@ class TreeList implements Component {
 				return `[edit: ${path}]`;
 			}
 			case "bash": {
-				const rawCmd = String(args.command || "");
-				const cmd = rawCmd
+				const cmd = String(args.command || "")
 					.replace(/[\n\t]/g, " ")
-					.trim()
-					.slice(0, 50);
-				return `[bash: ${cmd}${rawCmd.length > 50 ? "…" : ""}]`;
+					.trim();
+				return `[bash: ${truncateToWidth(cmd, width, "…")}]`;
 			}
 			case "grep": {
 				const pattern = String(args.pattern || "");
@@ -909,8 +951,7 @@ class TreeList implements Component {
 			default: {
 				// Custom tool - show name and truncated JSON args
 				const serialized = JSON.stringify(args);
-				const argsStr = serialized.slice(0, 40);
-				return `[${name}: ${argsStr}${serialized.length > 40 ? "…" : ""}]`;
+				return `[${name}: ${truncateToWidth(serialized, width, "…")}]`;
 			}
 		}
 	}

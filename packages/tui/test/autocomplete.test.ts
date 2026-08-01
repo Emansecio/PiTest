@@ -422,6 +422,66 @@ describe("CombinedAutocompleteProvider", () => {
 			const applied = provider.applyCompletion([line], 0, cursorCol, item!, result!.prefix);
 			assert.strictEqual(applied.lines[0], '@"my folder/test.txt" ');
 		});
+
+		test("fuzzy-matches non-contiguous queries (#15): agsess finds agent-session.ts", async () => {
+			setupFolder(baseDir, {
+				files: {
+					"src/core/agent-session.ts": "export {};",
+					"src/core/agent-loop.ts": "export {};",
+					"src/utils/logger.ts": "export {};",
+				},
+			});
+
+			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+			const line = "@agsess";
+			const result = await getSuggestions(provider, [line], 0, line.length);
+
+			assert.notEqual(result, null, "fuzzy query should return suggestions");
+			assert.strictEqual(result?.items[0]?.value, "@src/core/agent-session.ts");
+		});
+
+		test("exact substring match outranks a distant fuzzy match", async () => {
+			setupFolder(baseDir, {
+				files: {
+					// basename contains "sess" as a literal substring (tier above fuzzy)
+					"agent-session.ts": "export {};",
+					// matches "sess" only fuzzily (s..e..s..s scattered across the name)
+					"sandbox-espresso-stuff.ts": "export {};",
+				},
+			});
+
+			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+			const line = "@sess";
+			const result = await getSuggestions(provider, [line], 0, line.length);
+
+			const values = result?.items.map((item) => item.value) ?? [];
+			assert.strictEqual(values[0], "@agent-session.ts", `substring match should rank first, got ${values[0]}`);
+			assert.ok(
+				values.includes("@sandbox-espresso-stuff.ts"),
+				`fuzzy-only match should still be suggested, got ${JSON.stringify(values)}`,
+			);
+		});
+
+		test("ranks the full candidate set before applying the 20-item cap", async () => {
+			// 30 weak fuzzy matches for "target" plus one substring match named so
+			// that a pre-ranking truncation would be likely to drop it. The old code
+			// capped fd's output BEFORE scoring; now all candidates (up to the fd
+			// cap of 1000) are ranked first and only the ranked list is cut to 20.
+			const files: Record<string, string> = {};
+			for (let i = 10; i < 40; i++) {
+				files[`a-t-a-r-g-e-t-filler-${i}.md`] = "x";
+			}
+			files["z-target.ts"] = "x";
+			setupFolder(baseDir, { files });
+
+			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
+			const line = "@target";
+			const result = await getSuggestions(provider, [line], 0, line.length);
+
+			assert.notEqual(result, null);
+			assert.strictEqual(result?.items.length, 20, "ranked output should be capped at 20 items");
+			assert.strictEqual(result?.items[0]?.value, "@z-target.ts", "best match must survive the cap");
+		});
 	});
 
 	describe("dot-slash path completion", () => {

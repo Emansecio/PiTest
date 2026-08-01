@@ -114,17 +114,15 @@ describe("decideToolExecutionStart", () => {
 
 describe("compactionLoaderLabel", () => {
 	test("manual compaction says so and carries the cancel hint", () => {
-		expect(compactionLoaderLabel("manual", "esc")).toBe("Compacting context… (esc to cancel)");
+		expect(compactionLoaderLabel("manual", "esc")).toBe("Compacting context… (esc cancel)");
 	});
 
 	test("overflow is called out ahead of the auto wording", () => {
-		expect(compactionLoaderLabel("overflow", "esc")).toBe(
-			"Context overflow detected, Auto-compacting… (esc to cancel)",
-		);
+		expect(compactionLoaderLabel("overflow", "esc")).toBe("Context overflow detected, Auto-compacting… (esc cancel)");
 	});
 
 	test("threshold is a plain auto-compaction", () => {
-		expect(compactionLoaderLabel("threshold", "ctrl+c")).toBe("Auto-compacting… (ctrl+c to cancel)");
+		expect(compactionLoaderLabel("threshold", "ctrl+c")).toBe("Auto-compacting… (ctrl+c cancel)");
 	});
 
 	test("the event rebinds Esc before painting the spinner", () => {
@@ -214,11 +212,11 @@ describe("subagent events", () => {
 
 	test("progress appends the last tool only when there is one", () => {
 		expect(decideSubagentProgress({ handle: "e", turn: 2, lastTool: "read" })[0]).toMatchObject({
-			text: "◐ Agent “e” · turn 2 · read",
+			text: "◐ Agent “e”·turn 2·read",
 			level: "sticky",
 		});
 		expect(decideSubagentProgress({ handle: "e", turn: 2 })[0]).toMatchObject({
-			text: "◐ Agent “e” · turn 2",
+			text: "◐ Agent “e”·turn 2",
 		});
 	});
 
@@ -232,7 +230,7 @@ describe("subagent events", () => {
 		});
 		expect(decideSubagentComplete({ handle: "e", status: "error", turns: 1 })[0]).toMatchObject({
 			// Singular counts do not pluralize.
-			text: "✗ Agent “e” failed · 1 turn",
+			text: "✗ Agent “e” failed·1 turn",
 			tone: "warning",
 		});
 	});
@@ -264,14 +262,14 @@ describe("auto retry", () => {
 		expect(find(effects, "pet-mood")?.mood).toBe("waiting");
 		const loader = find(effects, "retry-loader");
 		expect(loader?.reason).toBeTruthy();
-		expect(retryLoaderMessage(loader as never, 8, "esc")).toContain("Retrying (2/5) in 8s… (esc to cancel)");
-		expect(retryLoaderMessage(loader as never, 8, "esc")).toMatch(/ — Retrying/);
+		expect(retryLoaderMessage(loader as never, 8, "esc")).toContain("retry 2/5 in 8s·esc cancel");
+		expect(retryLoaderMessage(loader as never, 8, "esc")).toMatch(/ — retry/);
 	});
 
 	test("an unclassifiable error keeps the wording unchanged", () => {
 		const effects = decideAutoRetryStart({ attempt: 1, maxAttempts: 3, delayMs: 1000, errorMessage: "???" });
 		const loader = find(effects, "retry-loader");
-		expect(retryLoaderMessage(loader as never, 1, "esc")).toBe("Retrying (1/3) in 1s… (esc to cancel)");
+		expect(retryLoaderMessage(loader as never, 1, "esc")).toBe("retry 1/3 in 1s·esc cancel");
 	});
 
 	test("a cancelled retry is a muted status, not sticky error red", () => {
@@ -361,7 +359,7 @@ describe("decideVerification", () => {
 			live,
 		);
 		expect(kinds(effects)).toEqual(["terminal-progress", "stop-working-loader", "error", "render"]);
-		expect(find(effects, "error")?.text).toBe("✗ tsc still failing after 2 fix attempt(s) — reported unverified.");
+		expect(find(effects, "error")?.text).toBe("✗ tsc still failing after 2 fix attempts — reported unverified.");
 	});
 });
 

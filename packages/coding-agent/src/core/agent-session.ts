@@ -4085,9 +4085,14 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	}
 
 	/**
-	 * Attach images to be merged into the NEXT user prompt (e.g. a clipboard
-	 * paste in the TUI, where the image arrives before the user submits text).
-	 * They are consumed exactly once, when the next user message is built.
+	 * Attach images to be merged into the NEXT user prompt. They are consumed
+	 * exactly once, when the next user message is built — a deliberate drain-all
+	 * contract for programmatic (RPC/headless/extension) callers that attach
+	 * images without any marker text. The interactive composer does NOT rely on
+	 * this buffer between paste and submit: it reconciles its `[Image #N]`
+	 * markers on its own side and only calls this at dispatch time with the
+	 * images that actually belong to the submitted draft (see
+	 * modes/interactive/pasted-images.ts).
 	 */
 	attachImages(images: ImageContent[]): void {
 		if (images.length > 0) this._attachedImages.push(...images);

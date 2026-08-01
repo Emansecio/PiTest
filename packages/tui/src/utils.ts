@@ -364,11 +364,20 @@ export function extractAnsiCode(str: string, pos: number): { code: string; lengt
 
 	const next = str[pos + 1];
 
-	// CSI sequence: ESC [ ... m/G/K/H/J
+	// CSI sequence: ESC [ <parameter bytes 0x30–0x3F> <intermediate bytes
+	// 0x20–0x2F> <final byte 0x40–0x7E> (ECMA-48). Accepting the full final-byte
+	// range — not just m/G/K/H/J — makes sequences like \x1b[?25l (DECTCEM),
+	// \x1b[2A (CUU) and \x1b[4 q (DECSCUSR) zero-width instead of counting their
+	// bodies as visible text. A truncated sequence (no final byte before the
+	// string ends, or a byte outside the grammar) still returns null so callers
+	// keep their existing skip-one-ESC fallback.
 	if (next === "[") {
 		let j = pos + 2;
-		while (j < str.length && !/[mGKHJ]/.test(str[j]!)) j++;
-		if (j < str.length) return { code: str.substring(pos, j + 1), length: j + 1 - pos };
+		while (j < str.length && str[j]! >= "0" && str[j]! <= "?") j++;
+		while (j < str.length && str[j]! >= " " && str[j]! <= "/") j++;
+		if (j < str.length && str[j]! >= "@" && str[j]! <= "~") {
+			return { code: str.substring(pos, j + 1), length: j + 1 - pos };
+		}
 		return null;
 	}
 

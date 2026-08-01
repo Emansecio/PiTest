@@ -60,13 +60,89 @@ describe("renderToolOutput collapse", () => {
 		expect(stripAnsi(component.render(120).join("\n")).trim()).toBe("");
 	});
 
-	it("reuses context.lastComponent instead of allocating a new Text node", () => {
+	it("reuses context.lastComponent instead of allocating a new component", () => {
+		const existing = renderToolOutput(
+			{ content: [{ type: "text", text: "hello" }] },
+			{ expanded: false },
+			theme,
+			renderContext(),
+		);
+		const component = renderToolOutput(
+			{ content: [{ type: "text", text: "hello again" }] },
+			{ expanded: false },
+			theme,
+			{
+				lastComponent: existing,
+				showImages: false,
+			},
+		);
+		expect(component).toBe(existing);
+	});
+
+	it("does not reuse a foreign Text as lastComponent (allocates its own component)", () => {
 		const existing = new Text("", 0, 0);
 		const component = renderToolOutput({ content: [{ type: "text", text: "hello" }] }, { expanded: false }, theme, {
 			lastComponent: existing,
 			showImages: false,
 		});
-		expect(component).toBe(existing);
+		expect(component).not.toBe(existing);
+		expect(stripAnsi(component.render(120).join("\n"))).toContain("hello");
+	});
+
+	it("caps by VISUAL lines: a single 2000-char line cannot explode the collapsed preview after wrap", () => {
+		const longLine = "x".repeat(2000);
+		const rest = Array.from({ length: 30 }, (_, i) => `tail line ${String(i).padStart(2, "0")}`);
+		const component = renderToolOutput(
+			{ content: [{ type: "text", text: [longLine, ...rest].join("\n") }] },
+			{ expanded: false },
+			theme,
+			renderContext(),
+		);
+		const lines = component.render(80);
+		// Preview budget (15 visual rows) + optional leading blank + one trailer line.
+		// Before the visual cap, the 2000-char logical line alone wrapped to ~25
+		// visual rows at width 80, blowing way past the cap.
+		expect(lines.length).toBeLessThanOrEqual(17);
+		expect(stripAnsi(lines.join("\n"))).toMatch(/more lines/i);
+		// Every emitted row fits the render width (no line wider than 80 cells).
+		for (const line of lines) {
+			expect(stripAnsi(line).length).toBeLessThanOrEqual(80);
+		}
+	});
+
+	it("an errored result keeps the TAIL (the useful end) behind a leading earlier-lines trailer", () => {
+		const lines = Array.from({ length: 40 }, (_, i) => `err line ${String(i).padStart(2, "0")}`);
+		const component = renderToolOutput(
+			{ content: [{ type: "text", text: lines.join("\n") }], isError: true },
+			{ expanded: false },
+			theme,
+			{ ...renderContext(), isError: true },
+		);
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("err line 39"); // the end survives
+		expect(rendered).not.toContain("err line 00"); // the preamble is what folds away
+		expect(rendered).toMatch(/earlier lines/i);
+		// The trailer leads (hidden lines are ABOVE the kept tail), same dialect as
+		// capErrorPreview in tool-activity.ts.
+		const renderedLines = component.render(120).map((l) => stripAnsi(l));
+		const trailerIdx = renderedLines.findIndex((l) => /earlier lines/i.test(l));
+		const tailIdx = renderedLines.findIndex((l) => l.includes("err line 39"));
+		expect(trailerIdx).toBeGreaterThanOrEqual(0);
+		expect(trailerIdx).toBeLessThan(tailIdx);
+	});
+
+	it("a NON-error result still keeps the HEAD when collapsed", () => {
+		const lines = Array.from({ length: 40 }, (_, i) => `ok line ${String(i).padStart(2, "0")}`);
+		const component = renderToolOutput(
+			{ content: [{ type: "text", text: lines.join("\n") }] },
+			{ expanded: false },
+			theme,
+			renderContext(),
+		);
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("ok line 00");
+		expect(rendered).not.toContain("ok line 39");
+		expect(rendered).toMatch(/more lines/i);
 	});
 });
 

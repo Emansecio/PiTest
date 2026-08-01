@@ -107,13 +107,33 @@ export class ExtensionSelectorComponent extends Container {
 			const isSelected = i === this.selectedIndex;
 			const cursor = selectionCursor(isSelected);
 			const label = isSelected ? theme.fg("accent", this.options[i]) : theme.fg("text", this.options[i]);
-			this.listContainer.addChild(new SelectableRow(`${cursor}${label}`, isSelected, 1));
+			// Mouse (shared selector contract): click an unselected row to move the
+			// cursor, click the selected row again to confirm — see handleRowClick.
+			this.listContainer.addChild(
+				new SelectableRow(`${cursor}${label}`, isSelected, 1, () => this.handleRowClick(i)),
+			);
 		}
 
 		const scrollHint = themedScrollPositionHint(this.selectedIndex, this.options.length, startIndex, endIndex);
 		if (scrollHint) {
 			this.listContainer.addChild(new Text(scrollHint, 0, 0));
 		}
+	}
+
+	/**
+	 * Mouse contract (wired into each SelectableRow): clicking an unselected row
+	 * moves the cursor there; clicking the already-selected row confirms it like
+	 * Enter. The re-render after a claimed click comes from the TUI's mouse
+	 * pipeline.
+	 */
+	private handleRowClick(index: number): void {
+		if (index !== this.selectedIndex) {
+			this.selectedIndex = index;
+			this.updateList();
+			return;
+		}
+		const selected = this.options[index];
+		if (selected) this.onSelectCallback(selected);
 	}
 
 	handleInput(keyData: string): void {

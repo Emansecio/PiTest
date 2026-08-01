@@ -56,8 +56,8 @@ describe("FusionLiveComponent", () => {
 		// The bug: identical members collided on a cli/model key → ONE row. Slot keying
 		// must yield TWO distinct rows, numbered 1 and 2.
 		expect(rows.length).toBe(2);
-		expect(rows.some((l) => / 1 {2}claude:claude-opus-4-8/.test(l))).toBe(true);
-		expect(rows.some((l) => / 2 {2}claude:claude-opus-4-8/.test(l))).toBe(true);
+		expect(rows.some((l) => / 1 +claude:claude-opus-4-8/.test(l))).toBe(true);
+		expect(rows.some((l) => / 2 +claude:claude-opus-4-8/.test(l))).toBe(true);
 		// Running rows show a live elapsed clock; the "idle Ns / Ts" countdown only appears
 		// once a member goes quiet, so a freshly-upserted (active) row just shows the seconds.
 		expect(rows.every((l) => /\d+s/.test(l))).toBe(true);
@@ -69,7 +69,8 @@ describe("FusionLiveComponent", () => {
 		c.setStage("panel");
 		c.upsertMember({ index: 0, cli: "claude", model: "opus", status: "done", elapsedMs: 22000, chars: 3100 });
 		const lines = c.render(120).map(stripAnsi);
-		expect(lines.some((l) => l.includes("done") && l.includes("22s") && l.includes("3100 chars"))).toBe(true);
+		// Char count compacts through the canonical formatTokens: 3100 → 3.1k.
+		expect(lines.some((l) => l.includes("done") && l.includes("22s") && l.includes("3.1k chars"))).toBe(true);
 		c.dispose();
 	});
 
@@ -106,7 +107,7 @@ describe("FusionLiveComponent", () => {
 				.map(stripAnsi)
 				.find((l) => l.includes("claude:opus")) ?? "";
 		expect(row).toContain("2 tools");
-		expect(row).toContain("3100 chars");
+		expect(row).toContain("3.1k chars");
 		c.dispose();
 	});
 

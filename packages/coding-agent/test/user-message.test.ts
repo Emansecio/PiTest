@@ -83,4 +83,62 @@ describe("UserMessageComponent", () => {
 		// No OSC markers either; an empty zone is meaningless to terminals.
 		expect(lines).toEqual([]);
 	});
+
+	describe("near-literal rendering (paste accidents)", () => {
+		test("pasted C code does not become a heading", () => {
+			initTheme("dark");
+
+			const component = new UserMessageComponent("# include <stdio.h>\nint main(void) { return 0; }");
+			const plain = component.render(80).map((line) => stripAnsi(line));
+
+			// The `#` line survives verbatim — not promoted to an H1 (which would
+			// strip the marker and restyle the text).
+			expect(plain.some((line) => line.includes("# include <stdio.h>"))).toBe(true);
+			expect(plain.some((line) => line.includes("int main(void) { return 0; }"))).toBe(true);
+		});
+
+		test("a > line stays literal text, not a blockquote", () => {
+			initTheme("dark");
+
+			const component = new UserMessageComponent("> some quoted-looking paste");
+			const plain = component.render(80).map((line) => stripAnsi(line));
+
+			expect(plain.some((line) => line.includes("> some quoted-looking paste"))).toBe(true);
+			expect(plain.some((line) => line.includes("│"))).toBe(false);
+		});
+
+		test("4-space indentation stays literal, not an indented code block", () => {
+			initTheme("dark");
+
+			const component = new UserMessageComponent("some text\n\n    indented paste line");
+			const plain = component.render(80).map((line) => stripAnsi(line));
+
+			expect(plain.some((line) => line.includes("    indented paste line"))).toBe(true);
+			// No code-block frame corner.
+			expect(plain.some((line) => line.includes("╭"))).toBe(false);
+		});
+
+		test("--- stays literal, not a rule that fakes a turn boundary", () => {
+			initTheme("dark");
+
+			const component = new UserMessageComponent("above\n\n---\n\nbelow");
+			const plain = component.render(80).map((line) => stripAnsi(line));
+
+			expect(plain.some((line) => line.includes("---"))).toBe(true);
+			expect(plain.some((line) => line.includes("╌") || line.includes("─"))).toBe(false);
+		});
+
+		test("deliberate inline markdown still works: codespans and fences", () => {
+			initTheme("dark");
+
+			const component = new UserMessageComponent("run `npm test` first\n\n```c\nint x;\n```");
+			const plain = component.render(80).map((line) => stripAnsi(line));
+
+			// Codespan parsed (backticks consumed, content kept).
+			expect(plain.some((line) => line.includes("run npm test first"))).toBe(true);
+			// Explicit fence keeps its frame + body.
+			expect(plain.some((line) => line.includes("╭"))).toBe(true);
+			expect(plain.some((line) => line.includes("int x;"))).toBe(true);
+		});
+	});
 });

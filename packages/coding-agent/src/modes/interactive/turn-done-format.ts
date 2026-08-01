@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@pit/agent-core";
 import type { AssistantMessage } from "@pit/ai";
-import { formatElapsed } from "../../core/goal/goal-manager.ts";
+import { formatCost, formatElapsed, formatTokens } from "../../utils/format-display.ts";
 
 export interface TurnDoneSnapshot {
 	elapsedMs: number;
@@ -8,14 +8,6 @@ export interface TurnDoneSnapshot {
 	outputTokens: number;
 	cost?: number;
 	stopReason: "stop" | "aborted" | "error" | "toolUse";
-}
-
-function formatCompactTokens(count: number): string {
-	if (count < 1000) return count.toString();
-	if (count < 10000) return `${(count / 1000).toFixed(1).replace(/\.0$/, "")}k`;
-	if (count < 1000000) return `${Math.round(count / 1000)}k`;
-	if (count < 10000000) return `${(count / 1000000).toFixed(1).replace(/\.0$/, "")}M`;
-	return `${Math.round(count / 1000000)}M`;
 }
 
 export function buildTurnDoneSnapshot(messages: AgentMessage[], elapsedMs: number): TurnDoneSnapshot {
@@ -61,12 +53,11 @@ export function formatTurnDoneDisplayLine(snapshot: TurnDoneSnapshot): string {
 
 	const parts: string[] = [formatElapsed(snapshot.elapsedMs)];
 	const io: string[] = [];
-	if (snapshot.inputTokens > 0) io.push(`↑${formatCompactTokens(snapshot.inputTokens)}`);
-	if (snapshot.outputTokens > 0) io.push(`↓${formatCompactTokens(snapshot.outputTokens)}`);
+	if (snapshot.inputTokens > 0) io.push(`↑${formatTokens(snapshot.inputTokens)}`);
+	if (snapshot.outputTokens > 0) io.push(`↓${formatTokens(snapshot.outputTokens)}`);
 	if (io.length > 0) parts.push(io.join(" "));
 	if (snapshot.cost !== undefined && snapshot.cost > 0) {
-		const costText = snapshot.cost < 0.01 ? `$${snapshot.cost.toFixed(4)}` : `$${snapshot.cost.toFixed(2)}`;
-		parts.push(costText);
+		parts.push(formatCost(snapshot.cost));
 	}
 	return parts.join(" · ");
 }

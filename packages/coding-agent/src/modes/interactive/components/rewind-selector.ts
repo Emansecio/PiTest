@@ -19,18 +19,21 @@ function stampToEpochMs(stamp: string): number {
 	return Date.parse(`${date}T${hh}:${mm}:${ss}.${ms ?? "000"}Z`);
 }
 
+/** Compact relative age (`now`, `42s`, `5m`, `2h`, `3d`) — the session picker's
+ * dialect (see `formatStartupSessionAge` in interactive-mode.ts), so every
+ * "how old is this?" column in the UI reads the same. */
 function relativeTime(stamp: string): string {
 	const ms = stampToEpochMs(stamp);
 	if (Number.isNaN(ms)) return "recently";
 	const secs = Math.max(0, Math.round((Date.now() - ms) / 1000));
-	if (secs < 5) return "just now";
-	if (secs < 60) return `${secs}s ago`;
+	if (secs < 5) return "now";
+	if (secs < 60) return `${secs}s`;
 	const mins = Math.round(secs / 60);
-	if (mins < 60) return `${mins}m ago`;
+	if (mins < 60) return `${mins}m`;
 	const hours = Math.round(mins / 60);
-	if (hours < 24) return `${hours}h ago`;
+	if (hours < 24) return `${hours}h`;
 	const days = Math.round(hours / 24);
-	return `${days}d ago`;
+	return `${days}d`;
 }
 
 /** One-line label: `<relative time> · <n files> · <first file…>`. */

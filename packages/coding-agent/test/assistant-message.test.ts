@@ -118,6 +118,109 @@ describe("AssistantMessageComponent", () => {
 		expect(plain).not.toContain("╭");
 	});
 
+	test("folds a SETTLED long visible thinking trace to a tail with an earlier-lines trailer", () => {
+		initTheme("dark");
+
+		// 30 paragraphs → far more than the fold budget of visual lines.
+		const thinking = Array.from({ length: 30 }, (_, i) => `thought line ${String(i).padStart(2, "0")}`).join("\n\n");
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([{ type: "thinking", thinking }]), // stopReason: "stop" → settled
+			false,
+			undefined,
+			"Thinking…",
+			undefined,
+			false,
+			100,
+			"high",
+		);
+		const lines = component.render(80);
+		const plain = lines.map(stripAnsi).join("\n");
+		expect(plain).toContain("thought line 29"); // the tail survives
+		expect(plain).not.toContain("thought line 00"); // the head folds away
+		expect(plain).toMatch(/\+\d+ earlier lines/);
+		// Folded trace stays compact: trailer + tail lines (plus OSC decoration rows).
+		expect(lines.length).toBeLessThanOrEqual(9);
+		// The trailer must not promise an expand keybinding — none unfolds thinking.
+		expect(plain).not.toMatch(/to expand/);
+	});
+
+	test("a short settled thinking trace renders whole, without a fold trailer", () => {
+		initTheme("dark");
+
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([{ type: "thinking", thinking: "brief thought\n\nsecond line" }]),
+			false,
+			undefined,
+			"Thinking…",
+			undefined,
+			false,
+			100,
+			"high",
+		);
+		const plain = component.render(80).map(stripAnsi).join("\n");
+		expect(plain).toContain("brief thought");
+		expect(plain).toContain("second line");
+		expect(plain).not.toMatch(/earlier lines/);
+	});
+
+	test("the LIVE thinking tail of an in-flight stream keeps flowing whole (no fold)", () => {
+		initTheme("dark");
+
+		const fakeUi = {
+			addAnimationCallback: () => () => {},
+			requestRender: () => {},
+		} as unknown as import("@pit/tui").TUI;
+
+		const thinking = Array.from({ length: 30 }, (_, i) => `live thought ${String(i).padStart(2, "0")}`).join("\n\n");
+		const message = createAssistantMessage([{ type: "thinking", thinking }]);
+		message.stopReason = undefined as unknown as AssistantMessage["stopReason"]; // still streaming
+		const component = new AssistantMessageComponent(
+			message,
+			false,
+			undefined,
+			"Thinking…",
+			fakeUi,
+			false,
+			100,
+			"high",
+		);
+		const plain = component.render(80).map(stripAnsi).join("\n");
+		expect(plain).toContain("live thought 00"); // nothing hidden while live
+		expect(plain).toContain("live thought 29");
+		expect(plain).not.toMatch(/earlier lines/);
+	});
+
+	test("a thinking block folds as soon as the stream moves past it (answer text follows)", () => {
+		initTheme("dark");
+
+		const fakeUi = {
+			addAnimationCallback: () => () => {},
+			requestRender: () => {},
+		} as unknown as import("@pit/tui").TUI;
+
+		const thinking = Array.from({ length: 30 }, (_, i) => `done thought ${String(i).padStart(2, "0")}`).join("\n\n");
+		const message = createAssistantMessage([
+			{ type: "thinking", thinking },
+			{ type: "text", text: "the answer" },
+		]);
+		message.stopReason = undefined as unknown as AssistantMessage["stopReason"]; // turn still open
+		const component = new AssistantMessageComponent(
+			message,
+			false,
+			undefined,
+			"Thinking…",
+			fakeUi,
+			false,
+			100,
+			"high",
+		);
+		const plain = component.render(80).map(stripAnsi).join("\n");
+		expect(plain).toContain("the answer");
+		expect(plain).toContain("done thought 29");
+		expect(plain).not.toContain("done thought 00");
+		expect(plain).toMatch(/\+\d+ earlier lines/);
+	});
+
 	test("prefixes hidden Thinking… label with a thinking-level gutter glyph", () => {
 		initTheme("dark");
 

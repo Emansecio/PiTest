@@ -3,7 +3,7 @@
  * composer while the agent is working (`isStreaming || isFusing`). Instead of
  * silently queuing, it offers three actions:
  *
- *   ▌ <message preview…>  ▸ Send now ◷ Queue ✕ Cancel  ←/→ ⏎
+ *   ▌ <message preview…>  ▸ Send now ◷ Queue ✗ Cancel  ←/→ ⏎
  *
  * - Send now  → deliver for immediate reading in the current turn (steer). Tools
  *               still running are cancelled so the step boundary — and with it
@@ -57,7 +57,7 @@ interface ChooserAction {
 const ACTIONS: readonly ChooserAction[] = [
 	{ key: "send", glyph: "▸", label: "Send now" },
 	{ key: "queue", glyph: "◷", label: "Queue" },
-	{ key: "cancel", glyph: "✕", label: "Cancel" },
+	{ key: "cancel", glyph: "✗", label: "Cancel" },
 ];
 
 /** Length budget for the message preview when the terminal is comfortably wide. */

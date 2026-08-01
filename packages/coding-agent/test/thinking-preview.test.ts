@@ -84,3 +84,74 @@ describe("deriveThinkingTail", () => {
 		expect(deriveThinkingTail(raw, 25)).toBe(deriveThinkingTail(raw, 25));
 	});
 });
+
+describe("deriveThinkingTail — windowed sanitization", () => {
+	/** Full-scan oracle: a window at least as large as the buffer sanitizes everything. */
+	const fullTail = (raw: string, maxWidth: number) => deriveThinkingTail(raw, maxWidth, raw.length + 1);
+
+	const proseLines = (count: number, prefix = "line") =>
+		Array.from({ length: count }, (_, i) => `${prefix} ${i} with some ordinary reasoning words`).join("\n");
+
+	test("small window matches the full scan on plain prose", () => {
+		const raw = proseLines(200);
+		expect(deriveThinkingTail(raw, 70, 512)).toBe(fullTail(raw, 70));
+	});
+
+	test("small window matches the full scan with closed fences near the tail", () => {
+		const raw = `${proseLines(100)}\n\`\`\`ts\nconst hidden = 1;\n\`\`\`\nvisible after the fence with plenty of words to fill`;
+		const windowed = deriveThinkingTail(raw, 70, 512);
+		expect(windowed).toBe(fullTail(raw, 70));
+		expect(windowed).not.toContain("hidden");
+	});
+
+	test("window starting inside a closed fence skips past its closer", () => {
+		// The fence body is larger than the window, so the window opens mid-code.
+		const bigFence = `\`\`\`js\n${"const noise = 0;\n".repeat(100)}\`\`\``;
+		const raw = `${proseLines(3, "before")}\n${bigFence}\nafter the code we keep reasoning about the actual problem`;
+		const windowed = deriveThinkingTail(raw, 70, 256);
+		expect(windowed).toBe(fullTail(raw, 70));
+		expect(windowed).not.toContain("noise");
+	});
+
+	test("open trailing fence larger than the window still shows the prose before it", () => {
+		const raw = `${proseLines(5, "prose")}\n\`\`\`ts\n${"streamed code line;\n".repeat(500)}`;
+		const windowed = deriveThinkingTail(raw, 70, 256);
+		expect(windowed).toBe(fullTail(raw, 70));
+		expect(windowed).not.toContain("streamed");
+		expect(windowed.length).toBeGreaterThan(0);
+	});
+
+	test("append-only streaming (the 300ms tick) stays equivalent to the full scan at every step", () => {
+		let raw = "";
+		const chunks = [
+			"first burst of reasoning\n",
+			"## a heading marker\n- a bullet\n",
+			"```py\nx = 1\n",
+			"y = 2\n```\n",
+			"back to prose after the fence closed and more words to make it long enough\n",
+			proseLines(50, "tail"),
+		];
+		for (const chunk of chunks) {
+			raw += chunk;
+			expect(deriveThinkingTail(raw, 70, 128)).toBe(fullTail(raw, 70));
+		}
+	});
+
+	test("non-append input (buffer reset) still yields correct results", () => {
+		const a = `${proseLines(80, "alpha")}\n\`\`\`\nfenced\n\`\`\`\nomega words at the end for the visible tail`;
+		expect(deriveThinkingTail(a, 70, 256)).toBe(fullTail(a, 70));
+		// Completely different buffer afterwards: the incremental fence cache must
+		// fall back to a full rescan, not reuse stale indices.
+		const b = `${proseLines(90, "beta")}\ndistinct closing words for the second buffer`;
+		expect(deriveThinkingTail(b, 70, 256)).toBe(fullTail(b, 70));
+		// And back to (a) again.
+		expect(deriveThinkingTail(a, 70, 256)).toBe(fullTail(a, 70));
+	});
+
+	test("large buffer (way past the default window) produces the same tail as the full scan", () => {
+		const raw = `${proseLines(5000)}\nfinal thought about the fix`;
+		expect(raw.length).toBeGreaterThan(100_000);
+		expect(deriveThinkingTail(raw, 70)).toBe(fullTail(raw, 70));
+		expect(deriveThinkingTail(raw, 70)).toContain("final thought about the fix");
+	});
+});

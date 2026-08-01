@@ -7,11 +7,16 @@ import { clampBashCommandRow } from "./bash-command-row.ts";
 import { ColorEase } from "./color-ease.ts";
 import { createSpinnerTicker, type SpinnerTicker } from "./spinner-ticker.ts";
 import {
+	ACTIVITY_ERROR_PREVIEW_LINES,
 	activityTargetLabel,
 	capDiffPreview,
+	capErrorPreview,
 	diffStat,
 	EDIT_EXPANDED_MAX_LINES,
 	GUTTER_DOT,
+	GUTTER_DOT_COLOR,
+	ICON_ERROR,
+	ICON_SUCCESS,
 	isEditFamilyTool,
 	mcpActivityTarget,
 	parseMcpToolName,
@@ -29,22 +34,16 @@ const PENDING_ELAPSED_SUFFIX_AFTER_MS = 3000;
 
 type LineState = "pending" | "success" | "error";
 
-const ICON_SUCCESS = "✓"; // light check (U+2713), renders 1 cell — consistent with the rest of the UI
-const ICON_ERROR = "✗";
 const ICON_ABORTED = "◦"; // muted — user interrupt is not a failure
-
-/** Steady color of the settled gutter dot — the existing "success" green, reused
- * as the row's fixed accent regardless of outcome (outcome moved to the trailing
- * icon). Reuses the theme's required `gutterToolSuccess` token rather than
- * `accent` (a different, cyan-branded hue elsewhere in the theme) or a new
- * optional token that could throw on a custom theme missing it. */
-const GUTTER_DOT_COLOR: ThemeColor = "gutterToolSuccess";
 
 /** One action call on its own verb-led line: a steady accent gutter dot leads
  * (a live call keeps the existing braille spinner in its place), the verb+target
  * follow, and a trailing ✓/✗/◦ reports the outcome once settled. The wrapped exec
- * renders only when expanded or on a genuine error. Used as a promoted
- * (edit/write/task/bookkeeping) row inside a WorkGroupComponent. */
+ * renders only when expanded or on a genuine error — a real failure (never a user
+ * abort) auto-shows the RESULT body, capped to the tail of the error via
+ * {@link capErrorPreview}/{@link ACTIVITY_ERROR_PREVIEW_LINES}, so the error text
+ * is readable without ctrl+o. Used as a promoted (edit/write/task/bookkeeping)
+ * row inside a WorkGroupComponent. */
 export class ActivityLineComponent extends Container {
 	private ui: TUI;
 	private isFrozen: () => boolean;
@@ -369,6 +368,23 @@ export class ActivityLineComponent extends Container {
 		if (this.expanded) {
 			const bodyLines = this.exec.render(bodyWidth);
 			const capped = editFamily ? capDiffPreview(bodyLines, bodyWidth, EDIT_EXPANDED_MAX_LINES) : bodyLines;
+			for (const l of capped) lines.push(`  ${l}`);
+		} else if (state === "error") {
+			// Genuine failure (state() already filters aborts and recoverable
+			// results): auto-show the error text so it is readable without ctrl+o.
+			// setResultExpanded expands only the RESULT — the call/args stay compact
+			// (an activity child skips the call renderer while collapsed). Idempotent,
+			// so re-invoking it every frame (and after a ctrl+o collapse reset it) is
+			// safe and keeps the adopted exec current across coalesce().
+			this.exec.setResultExpanded(true);
+			const bodyLines = this.exec.render(bodyWidth);
+			// Spend the tight tail budget on error text, not the blank padding some
+			// result renderers lead/trail with.
+			let start = 0;
+			let end = bodyLines.length;
+			while (start < end && stripAnsi(bodyLines[start]).trim() === "") start++;
+			while (end > start && stripAnsi(bodyLines[end - 1]).trim() === "") end--;
+			const capped = capErrorPreview(bodyLines.slice(start, end), bodyWidth, ACTIVITY_ERROR_PREVIEW_LINES);
 			for (const l of capped) lines.push(`  ${l}`);
 		}
 		if (cacheable) {

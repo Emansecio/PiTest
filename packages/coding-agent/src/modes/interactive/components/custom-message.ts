@@ -196,7 +196,7 @@ export class CustomMessageComponent extends Container {
 
 			// Compose main line segments — each pre-coloured, no outer fg wrap
 			// that would overwrite semantic colours.
-			let mainLine = `  ${badges}${theme.fg("muted", "  fusion  ")}${theme.fg("muted", memberParts.join(" · "))}`;
+			let mainLine = `  ${badges}${theme.fg("muted", "  fusion  ")}${theme.fg("muted", memberParts.join("·"))}`;
 
 			// Judge stats (only non-zero fields).
 			if (data.judge) {
@@ -208,7 +208,7 @@ export class CustomMessageComponent extends Container {
 				if (j.unique > 0) judgeFields.push(`${j.unique} unique`);
 				if (j.blindSpots > 0) judgeFields.push(`${j.blindSpots} blind-spot`);
 				if (judgeFields.length > 0) {
-					mainLine += theme.fg("muted", ` → judge: ${judgeFields.join(" · ")}`);
+					mainLine += theme.fg("muted", ` → judge: ${judgeFields.join("·")}`);
 				}
 			}
 
@@ -220,7 +220,7 @@ export class CustomMessageComponent extends Container {
 				if (v.refuted > 0) vFields.push(theme.fg("error", `${v.refuted} refuted`));
 				if (v.unverified > 0) vFields.push(theme.fg("warning", `${v.unverified} unverified`));
 				if (vFields.length > 0) {
-					mainLine += theme.fg("muted", " → verify: ") + vFields.join(theme.fg("muted", " · "));
+					mainLine += theme.fg("muted", " → verify: ") + vFields.join(theme.fg("muted", "·"));
 				}
 			}
 

@@ -23,6 +23,15 @@ export interface AskOption {
 	description?: string;
 	recommended?: boolean;
 	value?: string;
+	/**
+	 * Single letter that jumps to this option in the interactive picker: in
+	 * single-select it selects AND confirms in one keystroke; in multi-select it
+	 * toggles the checkbox (Enter still confirms). Shown dim on the row. Letters
+	 * only — digits are reserved for positional quick-select (1-9). Ignored by
+	 * every auto-answer path (headless/timeout still picks recommended-or-first),
+	 * so declaring a hotkey never weakens a fail-closed ordering.
+	 */
+	hotkey?: string;
 }
 
 export interface AskOptionsRequest {

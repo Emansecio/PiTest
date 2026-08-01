@@ -78,6 +78,10 @@ export const KEYBINDINGS = {
 		defaultKeys: "shift+ctrl+p",
 		description: "Cycle to previous model",
 	},
+	// Ctrl+L is dual-use in interactive mode: with text in the editor it opens the
+	// model selector; with an EMPTY editor it repaints the screen (clear-screen
+	// parity with shells — a repaint, not a /clear of the transcript). The branch
+	// lives in interactive-mode's "app.model.select" handler.
 	"app.model.select": { defaultKeys: "ctrl+l", description: "Open model selector" },
 	"app.permission.cycle": { defaultKeys: "alt+p", description: "Cycle mode (plan → auto → fusion)" },
 	"app.tools.expand": { defaultKeys: "ctrl+o", description: "Expand last tool output, then all (cycles)" },

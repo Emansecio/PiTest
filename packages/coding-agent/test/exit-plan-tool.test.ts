@@ -278,4 +278,51 @@ describe("exit_plan tool", () => {
 		expect(checker.mode).toBe("auto");
 		expect(res.details.outcome).toBe("approved");
 	});
+
+	it("declares the `a` hotkey on approval only, keeping the fail-closed ordering intact", async () => {
+		// The hotkey is interactive-only sugar: "Keep planning" must stay FIRST and
+		// no option may be `recommended`, or an auto-answer path could approve.
+		const dir = makeDir();
+		const checker = new PermissionChecker({ cwd: dir, mode: "plan", settings: {} });
+		proposePlan();
+		const bus = createUserInputBus();
+		setCurrentUserInputBus(bus);
+		bus.onRequest((req) => {
+			expect(req.options.map((o) => o.label)).toEqual(["Keep planning", "Approve & execute"]);
+			expect(req.options[0].hotkey).toBeUndefined();
+			expect(req.options[1].hotkey).toBe("a");
+			expect(req.options.some((o) => o.recommended)).toBe(false);
+			expect(computeAutoAnswer(req).picked).toEqual(["Keep planning"]);
+			bus.resolve(req.requestId, { picked: [], cancelled: true });
+		});
+		const res = await runExitPlan(dir, checker, { title: "Scaffold module" });
+		expect(checker.mode).toBe("plan");
+		expect(res.details.outcome).toBe("keep_planning");
+	});
+
+	it("pressing `a` in the interactive picker approves and flips the mode (end-to-end)", async () => {
+		const dir = makeDir();
+		const checker = new PermissionChecker({ cwd: dir, mode: "plan", settings: {} });
+		proposePlan();
+		const bus = createUserInputBus();
+		setCurrentUserInputBus(bus);
+		// Mount the real ask-picker as the listener and drive it with one keystroke.
+		const { createAskPicker } = await import("../src/modes/interactive/components/ask-picker.ts");
+		const { initTheme } = await import("../src/modes/interactive/theme/theme.ts");
+		initTheme(undefined, false);
+		bus.onRequest((req) => {
+			const { component } = createAskPicker(req, (answer) => {
+				bus.resolve(req.requestId, {
+					picked: answer.picked,
+					freeformText: answer.freeformText,
+					comment: answer.comment,
+					cancelled: answer.cancelled,
+				});
+			});
+			component.handleInput?.("a");
+		});
+		const res = await runExitPlan(dir, checker, { title: "Scaffold module" });
+		expect(checker.mode).toBe("auto");
+		expect(res.details.outcome).toBe("approved");
+	});
 });

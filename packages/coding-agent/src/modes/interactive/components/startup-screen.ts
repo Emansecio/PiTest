@@ -3,9 +3,12 @@
  *
  * Redesign (2026-07): a centered column reproducing the approved mock — the pet
  * mascot on top (sixel when the terminal supports it, half-block cells
- * otherwise), then a dense identity line (`pit v… · tagline`), a workspace
- * context line (`cwd · branch · model·thinking·mode`), and up to three resumable
- * recent sessions (`↳ title (age)`). No horizontal rule, no "Welcome to Pit".
+ * otherwise), then a dense identity line (`pit v… · tagline`) and up to three
+ * resumable recent sessions (`↳ title (age)`). No horizontal rule, no "Welcome
+ * to Pit", and no workspace context line: cwd/branch/model/thinking/mode are
+ * already on the pristine footer of the SAME screen (footer.ts collapse), so
+ * repeating them here was pure noise — the original welcome-box had cut exactly
+ * this duplication once before.
  *
  * Motion (unless {@link StartupScreenData.reducedMotion}): the block reveals one
  * unit at a time (~110 ms apart), the pet blinks once about a second after the
@@ -53,13 +56,6 @@ export interface StartupScreenData {
 	tagline: string;
 	/** Optional dim suffix on the identity line, e.g. "/help". */
 	helpHint?: string;
-	cwdDisplay: string;
-	branch?: string;
-	model: string;
-	/** Thinking level label (e.g. "High"); omitted when off/none. */
-	thinking?: string;
-	/** Permission mode label (e.g. "auto"); omitted when unknown. */
-	mode?: string;
 	/** Up to three recent sessions to offer for resume. */
 	recentSessions: StartupRecentSession[];
 	/** Resolved pet colors (stroke/eye/bg) from the theme. */
@@ -142,7 +138,7 @@ export class StartupScreen implements Component {
 		const compact = data.rows < COMPACT_ROWS;
 		const showPet = data.petEnabled && !compact;
 		const resumes = Math.min(3, data.recentSessions.length);
-		const unitCount = (showPet ? 1 : 0) + 1 /* identity */ + 1 /* context */ + resumes;
+		const unitCount = (showPet ? 1 : 0) + 1 /* identity */ + resumes;
 		return { showPet, unitCount };
 	}
 
@@ -238,7 +234,6 @@ export class StartupScreen implements Component {
 		// is the first line (compact/top-anchored — no leading gap).
 		const identityLine = this.buildIdentityLine(colWidth, width);
 		units.push(this.showPet ? ["", identityLine] : [identityLine]);
-		units.push([this.buildContextLine(colWidth, width)]);
 		const resumes = d.recentSessions.slice(0, 3);
 		resumes.forEach((s, i) => {
 			const line = this.buildResumeLine(s, colWidth, width);
@@ -273,23 +268,6 @@ export class StartupScreen implements Component {
 		let meta = ` v${d.version} · ${d.tagline}`;
 		if (d.helpHint) meta += ` · ${d.helpHint}`;
 		const line = `${brand}${theme.fg("dim", meta)}`;
-		return centerLine(truncateToWidth(line, colWidth, "…"), width);
-	}
-
-	/** The dense context line: `cwd · branch · model·thinking·mode`. */
-	private buildContextLine(colWidth: number, width: number): string {
-		const d = this.data;
-		const sep = theme.fg("dim", " · ");
-		const left: string[] = [theme.fg("muted", d.cwdDisplay)];
-		if (d.branch) left.push(theme.fg("muted", d.branch));
-
-		let modelChip = theme.fg("text", d.model);
-		const tail: string[] = [];
-		if (d.thinking) tail.push(d.thinking);
-		if (d.mode) tail.push(d.mode);
-		if (tail.length > 0) modelChip += theme.fg("dim", `·${tail.join("·")}`);
-
-		const line = [...left, modelChip].join(sep);
 		return centerLine(truncateToWidth(line, colWidth, "…"), width);
 	}
 
