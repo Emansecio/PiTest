@@ -250,15 +250,31 @@ describe("Coding Agent Tools", () => {
 	});
 
 	describe("write tool", () => {
-		it("should write file contents", async () => {
+		it("should write file contents and report the ledger delta (new file: all lines added)", async () => {
 			const testFile = join(testDir, "write-test.txt");
-			const content = "Test content";
+			const content = "line one\nline two\nline three";
 
 			const result = await writeTool.execute("test-call-3", { path: testFile, content });
 
 			expect(getTextOutput(result)).toContain("Successfully wrote");
 			expect(getTextOutput(result)).toContain(testFile);
-			expect(result.details).toBeUndefined();
+			// Regression: write used to report no details at all, so files it
+			// touched sat in the turn-files rail as a permanent `+0 −0`.
+			expect(result.details).toEqual({ files: [{ path: testFile, added: 3, removed: 0 }] });
+		});
+
+		it("reports a real old→new delta on overwrite, not a zero touch", async () => {
+			const testFile = join(testDir, "write-overwrite.txt");
+			writeFileSync(testFile, "keep\nold-a\nold-b\n");
+
+			const result = await writeTool.execute("test-call-3b", {
+				path: testFile,
+				content: "keep\nnew-a\n",
+			});
+
+			const files = (result.details as { files: Array<{ added: number; removed: number }> }).files;
+			expect(files).toHaveLength(1);
+			expect(files[0]).toMatchObject({ added: 1, removed: 2 });
 		});
 
 		it("should create parent directories", async () => {

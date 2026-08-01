@@ -1,6 +1,7 @@
 import type { AgentTool } from "@pit/agent-core";
 import { Container, Text } from "@pit/tui";
-import { mkdir as fsMkdir, stat as fsStat } from "fs/promises";
+import { diffLines } from "diff";
+import { mkdir as fsMkdir, readFile as fsReadFile, stat as fsStat } from "fs/promises";
 import { dirname } from "path";
 import { type Static, Type } from "typebox";
 import { getLanguageFromPath, highlightCode } from "../../modes/interactive/theme/theme.js";
@@ -55,6 +56,32 @@ function prepareWriteArguments(input: unknown): WriteToolInput {
 }
 
 export type WriteToolInput = Static<typeof writeSchema>;
+
+/**
+ * Per-file delta the committed write reports, in the shape the interactive
+ * turn-files ledger consumes directly (`details.files` — see
+ * `recordTurnFile`). A full overwrite is still a countable change: the old
+ * content is on disk right up until the atomic rename, so the tool diffs
+ * old→new instead of entering the ledger as a permanent `+0 −0` touch. A new
+ * file counts every written line as added. Only the local-filesystem
+ * operations report this (remote/custom `WriteOperations` have no readable
+ * "old" side here); preview staging reports nothing — a stage is not a
+ * change on disk.
+ */
+export interface WriteToolDetails {
+	files: Array<{ path: string; added: number; removed: number }>;
+}
+
+/** Line delta between two contents, counted the way the ledger displays it. */
+function countWriteDelta(oldContent: string, newContent: string): { added: number; removed: number } {
+	let added = 0;
+	let removed = 0;
+	for (const part of diffLines(oldContent, newContent)) {
+		if (part.added) added += part.count ?? 0;
+		else if (part.removed) removed += part.count ?? 0;
+	}
+	return { added, removed };
+}
 
 /**
  * Pluggable operations for the write tool.
@@ -213,7 +240,7 @@ function formatWriteResult(
 export function createWriteToolDefinition(
 	cwd: string,
 	options?: WriteToolOptions,
-): ToolDefinition<typeof writeSchema, undefined> {
+): ToolDefinition<typeof writeSchema, WriteToolDetails | undefined> {
 	const ops = options?.operations ?? defaultWriteOperations;
 	const mtimeStore = options?.mtimeStore;
 	return {
@@ -293,7 +320,7 @@ export function createWriteToolDefinition(
 			const writeResult = await withFileMutationQueue(
 				absolutePath,
 				() =>
-					new Promise<{ content: Array<{ type: "text"; text: string }>; details: undefined }>(
+					new Promise<{ content: Array<{ type: "text"; text: string }>; details: WriteToolDetails | undefined }>(
 						(resolve, reject) => {
 							if (signal?.aborted) {
 								reject(new Error("Operation aborted"));
@@ -327,6 +354,18 @@ export function createWriteToolDefinition(
 										}
 									}
 
+									// Old content for the ledger delta (see WriteToolDetails). Read
+									// before the write commits; local ops only — a remote impl's old
+									// side is not this filesystem. ENOENT ⇒ new file ⇒ base "".
+									let oldContent: string | undefined;
+									if (ops === defaultWriteOperations) {
+										try {
+											oldContent = await fsReadFile(absolutePath, "utf-8");
+										} catch {
+											oldContent = "";
+										}
+									}
+
 									// Create parent directories if needed.
 									await ops.mkdir(dir);
 									if (aborted) return;
@@ -346,7 +385,12 @@ export function createWriteToolDefinition(
 												text: `Successfully wrote ${formatted.content.length} bytes to ${path}${formatted.formatted ? " (formatted)" : ""}.${staleNote}`,
 											},
 										],
-										details: undefined,
+										// Path exactly as the call named it, so the ledger keys this
+										// row together with edits to the same file.
+										details:
+											oldContent !== undefined
+												? { files: [{ path, ...countWriteDelta(oldContent, formatted.content) }] }
+												: undefined,
 									});
 								} catch (error: any) {
 									signal?.removeEventListener("abort", onAbort);
