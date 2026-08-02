@@ -496,6 +496,55 @@ Content`,
 		});
 	});
 
+	describe("bundled skills", () => {
+		// The reload path always calls loadSkills with includeDefaults:false, so
+		// the package's own skills/ dir has to be pushed explicitly there. These
+		// cases pin that it is, that it is opt-out-able, and that it never wins a
+		// name collision.
+		it("discovers the package's bundled skills by default", async () => {
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload();
+
+			const bundled = loader.getSkills().skills.find((s) => s.name === "pit-knowledge");
+			expect(bundled).toBeDefined();
+			expect(bundled?.filePath.replace(/\\/g, "/")).toContain("/skills/pit-knowledge/SKILL.md");
+		});
+
+		it("does not load them when PIT_NO_BUNDLED_SKILLS is set", async () => {
+			vi.stubEnv("PIT_NO_BUNDLED_SKILLS", "1");
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload();
+
+			expect(loader.getSkills().skills.some((s) => s.name === "pit-knowledge")).toBe(false);
+		});
+
+		it("does not load them when noSkills is true", async () => {
+			const loader = new DefaultResourceLoader({ cwd, agentDir, noSkills: true });
+			await loader.reload();
+
+			expect(loader.getSkills().skills.some((s) => s.name === "pit-knowledge")).toBe(false);
+		});
+
+		it("loses a name collision to a user skill", async () => {
+			const skillsDir = join(agentDir, "skills", "pit-knowledge");
+			mkdirSync(skillsDir, { recursive: true });
+			writeFileSync(
+				join(skillsDir, "SKILL.md"),
+				`---
+name: pit-knowledge
+description: User override of the bundled skill
+---
+Content`,
+			);
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload();
+
+			const winner = loader.getSkills().skills.find((s) => s.name === "pit-knowledge");
+			expect(winner?.description).toBe("User override of the bundled skill");
+		});
+	});
+
 	describe("override functions", () => {
 		it("should apply skillsOverride", async () => {
 			const injectedSkill: Skill = {

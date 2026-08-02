@@ -9,6 +9,7 @@ Pit implements the [Agent Skills standard](https://agentskills.io/specification)
 ## Table of Contents
 
 - [Locations](#locations)
+- [Bundled Skills](#bundled-skills)
 - [How Skills Work](#how-skills-work)
 - [Skill Commands](#skill-commands)
 - [Skill Structure](#skill-structure)
@@ -32,6 +33,7 @@ Pit loads skills from:
 - Packages: `skills/` directories or `pit.skills` entries in `package.json`
 - Settings: `skills` array with files or directories
 - CLI: `--skill <path>` (repeatable, additive even with `--no-skills`)
+- Bundled: `skills/` inside the pit package itself (see [Bundled skills](#bundled-skills))
 
 Discovery rules:
 - In `~/.pit/agent/skills/` and `.pit/skills/`, direct root `.md` files are discovered as individual skills
@@ -61,14 +63,40 @@ For project-level Claude Code skills, add to `.pit/settings.json`:
 }
 ```
 
+## Bundled Skills
+
+Pit ships a small set of curated skills inside the package, under `skills/`. They
+are discovered at startup like any other skill directory — no settings entry and
+no `--skill` flag needed — and the path is resolved relative to the installed
+package, so it works the same from `dist/`, from a source checkout run via `tsx`,
+and from the compiled binary.
+
+| Skill | Purpose |
+|-------|---------|
+| `pit-knowledge` | Pit's own product knowledge: Modes and permissions, tools and tool discovery, settings and `PIT_*` flags, slash commands and keybindings, sessions, compaction, and the extensibility surfaces. Loaded when you ask pit about itself |
+
+Bundled skills load **last**, so a skill with the same name from your agent dir,
+the project, a package, a legacy tree, or `--skill` always wins the collision.
+Each bundled skill is an index into the real docs under `docs/` rather than a
+copy of them; when the docs are reachable, read them for anything
+version-sensitive.
+
+Opt out entirely:
+
+```bash
+PIT_NO_BUNDLED_SKILLS=1 pit
+```
+
+`--no-skills` also drops them, together with every other auto-discovered source.
+
 ## How Skills Work
 
 1. At startup, pit scans skill locations and extracts names and descriptions
-2. The system prompt includes available skills in XML format per the [specification](https://agentskills.io/integrate-skills)
-3. When a task matches, the agent uses `read` to load the full SKILL.md (models don't always do this; use prompting or `/skill:name` to force it)
+2. The normal system prompt contains a compact retrieval hint; matching skills may appear as up to three per-turn cards after the dynamic marker
+3. When a task matches, the agent uses `search_skills` and `read` to load the full SKILL.md (or `/skill:name` to force it)
 4. The agent follows the instructions, using relative paths to reference scripts and assets
 
-This is progressive disclosure: only descriptions are always in context, full instructions load on-demand.
+This is progressive disclosure: the full catalog and instructions load on-demand, so unrelated turns do not pay for every installed skill.
 
 ## Skill Commands
 

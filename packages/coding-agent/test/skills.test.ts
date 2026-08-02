@@ -1,9 +1,11 @@
+import { existsSync } from "fs";
 import { homedir } from "os";
 import { join, resolve } from "path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ResourceDiagnostic } from "../src/core/diagnostics.js";
 import {
 	formatSkillsForPrompt,
+	getBundledSkillsDir,
 	getClaudeCodeSkillsDir,
 	loadSkills,
 	loadSkillsFromDir,
@@ -388,6 +390,11 @@ describe("skills", () => {
 		const emptyAgentDir = resolve(__dirname, "fixtures/empty-agent");
 		const emptyCwd = resolve(__dirname, "fixtures/empty-cwd");
 
+		// `includeDefaults: true` also picks up the skills bundled inside the
+		// package; these cases are about the explicit/user sources, so the
+		// bundled ones are filtered out rather than counted.
+		const withoutBundled = (skills: Skill[]) => skills.filter((s) => s.sourceInfo.source !== "bundled");
+
 		it("should load from explicit skillPaths", () => {
 			const { skills, diagnostics } = loadSkills({
 				agentDir: emptyAgentDir,
@@ -395,8 +402,9 @@ describe("skills", () => {
 				skillPaths: [join(fixturesDir, "valid-skill")],
 				includeDefaults: true,
 			});
-			expect(skills).toHaveLength(1);
-			expect(skills[0].sourceInfo.scope).toBe("temporary");
+			const explicit = withoutBundled(skills);
+			expect(explicit).toHaveLength(1);
+			expect(explicit[0].sourceInfo.scope).toBe("temporary");
 			expect(diagnostics).toHaveLength(0);
 		});
 
@@ -407,7 +415,7 @@ describe("skills", () => {
 				skillPaths: ["/non/existent/path"],
 				includeDefaults: true,
 			});
-			expect(skills).toHaveLength(0);
+			expect(withoutBundled(skills)).toHaveLength(0);
 			expect(diagnostics.some((d: ResourceDiagnostic) => d.message.includes("does not exist"))).toBe(true);
 		});
 
@@ -467,6 +475,86 @@ describe("skills", () => {
 			expect(collisionWarnings).toHaveLength(1);
 			expect(collisionWarnings[0].message).toContain("name collision");
 		});
+	});
+});
+
+describe("bundled skills", () => {
+	// Outside the main `describe("skills")` block: these mutate the opt-out env
+	// var, and the fixture-driven cases above assume it is unset.
+	const emptyAgentDir = resolve(__dirname, "fixtures/empty-agent");
+	const emptyCwd = resolve(__dirname, "fixtures/empty-cwd");
+	const original = process.env.PIT_NO_BUNDLED_SKILLS;
+
+	afterEach(() => {
+		if (original === undefined) {
+			delete process.env.PIT_NO_BUNDLED_SKILLS;
+		} else {
+			process.env.PIT_NO_BUNDLED_SKILLS = original;
+		}
+	});
+
+	it("resolves to the package's own skills/ directory when the opt-out is unset", () => {
+		delete process.env.PIT_NO_BUNDLED_SKILLS;
+		const dir = getBundledSkillsDir();
+		expect(dir).not.toBeNull();
+		// Package-relative, not cwd-relative: the same directory the repo ships.
+		expect(dir).toBe(resolve(__dirname, "..", "skills"));
+		expect(existsSync(join(dir as string, "pit-knowledge", "SKILL.md"))).toBe(true);
+	});
+
+	it("returns null when PIT_NO_BUNDLED_SKILLS is truthy", () => {
+		for (const value of ["1", "true", "yes"]) {
+			process.env.PIT_NO_BUNDLED_SKILLS = value;
+			expect(getBundledSkillsDir()).toBeNull();
+		}
+	});
+
+	it("treats falsy opt-out values as not-opting-out", () => {
+		for (const value of ["0", "false", "no", ""]) {
+			process.env.PIT_NO_BUNDLED_SKILLS = value;
+			expect(getBundledSkillsDir()).not.toBeNull();
+		}
+	});
+
+	it("loads pit-knowledge by default, with no user or project skills configured", () => {
+		delete process.env.PIT_NO_BUNDLED_SKILLS;
+		const { skills } = loadSkills({
+			agentDir: emptyAgentDir,
+			cwd: emptyCwd,
+			skillPaths: [],
+			includeDefaults: true,
+		});
+		const bundled = skills.find((s) => s.name === "pit-knowledge");
+		expect(bundled).toBeDefined();
+		expect(bundled?.sourceInfo.source).toBe("bundled");
+		expect(bundled?.description.length).toBeGreaterThan(0);
+	});
+
+	it("PIT_NO_BUNDLED_SKILLS=1 removes it from the default catalog", () => {
+		process.env.PIT_NO_BUNDLED_SKILLS = "1";
+		const { skills } = loadSkills({
+			agentDir: emptyAgentDir,
+			cwd: emptyCwd,
+			skillPaths: [],
+			includeDefaults: true,
+		});
+		expect(skills.some((s) => s.name === "pit-knowledge")).toBe(false);
+	});
+
+	it("loses a name collision to an earlier source", () => {
+		delete process.env.PIT_NO_BUNDLED_SKILLS;
+		// An explicit --skill path is loaded before the defaults' bundled dir, so
+		// a same-named skill from it must win and the bundled one must be the
+		// reported loser.
+		const { skills, diagnostics } = loadSkills({
+			agentDir: emptyAgentDir,
+			cwd: emptyCwd,
+			skillPaths: [join(collisionFixturesDir, "bundled-override")],
+			includeDefaults: true,
+		});
+		const winner = skills.find((s) => s.name === "pit-knowledge");
+		expect(winner?.sourceInfo.source).not.toBe("bundled");
+		expect(diagnostics.some((d) => d.type === "collision" && d.collision?.name === "pit-knowledge")).toBe(true);
 	});
 });
 

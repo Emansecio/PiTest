@@ -23,7 +23,7 @@ import type { PromptTemplate } from "./prompt-templates.ts";
 import { loadPromptTemplates } from "./prompt-templates.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import type { Skill } from "./skills.ts";
-import { getClaudeCodeSkillsDir, loadSkills, prewarmSkillFrontmatter } from "./skills.ts";
+import { getBundledSkillsDir, getClaudeCodeSkillsDir, loadSkills, prewarmSkillFrontmatter } from "./skills.ts";
 import { createSourceInfo, type SourceInfo } from "./source-info.ts";
 
 /**
@@ -564,6 +564,19 @@ export class DefaultResourceLoader implements ResourceLoader {
 			const claudeSkillsDir = getClaudeCodeSkillsDir();
 			if (claudeSkillsDir && existsSync(claudeSkillsDir) && !skillPaths.includes(claudeSkillsDir)) {
 				skillPaths.push(claudeSkillsDir);
+			}
+		}
+
+		// Skills shipped inside the Pit package (`<package>/skills/`), same
+		// reasoning as the Claude Code block above: this path always calls
+		// loadSkills with includeDefaults:false, so a default source has to be
+		// pushed explicitly. Appended LAST so every user/project/legacy skill
+		// wins a name collision — a bundled skill is only a default. Suppressed
+		// by --no-skills; PIT_NO_BUNDLED_SKILLS makes the getter return null.
+		if (!this.noSkills) {
+			const bundledSkillsDir = getBundledSkillsDir();
+			if (bundledSkillsDir && existsSync(bundledSkillsDir) && !skillPaths.includes(bundledSkillsDir)) {
+				skillPaths.push(bundledSkillsDir);
 			}
 		}
 

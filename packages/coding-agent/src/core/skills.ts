@@ -2,7 +2,7 @@ import { type Dirent, existsSync, readdirSync, readFileSync, statSync } from "fs
 import ignore from "ignore";
 import { homedir } from "os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "path";
-import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
+import { CONFIG_DIR_NAME, getAgentDir, getPackageDir } from "../config.ts";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { canonicalizePath, isUnderPath } from "../utils/paths.ts";
@@ -596,6 +596,27 @@ export function getClaudeCodeSkillsDir(): string | null {
 	return join(homedir(), ".claude", "skills");
 }
 
+/**
+ * Resolve the skills directory shipped inside the Pit package
+ * (`<package>/skills/`), or null when the user opted out via
+ * `PIT_NO_BUNDLED_SKILLS`. Resolved relative to the package (not the cwd), so
+ * it works identically when running from `src/` via tsx, from `dist/`, and from
+ * the Bun binary (`copy-binary-assets` copies `skills/` next to the executable,
+ * which is what `getPackageDir()` returns there).
+ *
+ * Bundled skills are Pit's own curated skills (currently `pit-knowledge`). They
+ * are loaded LAST, so any user/project/legacy skill with the same name wins.
+ *
+ * Lives here rather than `config.ts` for the same reason as
+ * {@link getClaudeCodeSkillsDir}: only the skill discovery path consumes it.
+ */
+export function getBundledSkillsDir(): string | null {
+	if (isTruthyEnvFlag(process.env.PIT_NO_BUNDLED_SKILLS)) {
+		return null;
+	}
+	return resolve(join(getPackageDir(), "skills"));
+}
+
 function resolveSkillPath(p: string, cwd: string): string {
 	const normalized = normalizePath(p);
 	return isAbsolute(normalized) ? normalized : resolve(cwd, normalized);
@@ -708,6 +729,17 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 		}
 	}
 
+	// Skills shipped inside the Pit package. Loaded LAST — after the default
+	// dirs AND after the explicit paths — so every other source wins a name
+	// collision; a bundled skill is only ever a fallback default. Opt-out:
+	// PIT_NO_BUNDLED_SKILLS.
+	if (includeDefaults) {
+		const bundledSkillsDir = getBundledSkillsDir();
+		if (bundledSkillsDir && existsSync(bundledSkillsDir)) {
+			addSkills(loadSkillsFromDirInternal(bundledSkillsDir, "bundled", true), "bundled");
+		}
+	}
+
 	return {
 		skills: Array.from(skillMap.values()),
 		diagnostics: [...allDiagnostics, ...collisionDiagnostics],
@@ -748,6 +780,13 @@ function collectSkillFiles(options: LoadSkillsOptions): string[] {
 			}
 		} catch {
 			// Unreadable path — the sync loader owns the diagnostic.
+		}
+	}
+
+	if (includeDefaults) {
+		const bundledSkillsDir = getBundledSkillsDir();
+		if (bundledSkillsDir && existsSync(bundledSkillsDir)) {
+			visitSkillFiles(bundledSkillsDir, true, push);
 		}
 	}
 
