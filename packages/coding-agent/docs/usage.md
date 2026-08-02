@@ -330,6 +330,7 @@ Feature kill-switches (all default-ON; set the variable to `1`/`true`/`yes` to d
 | `PIT_NO_PATH_GROUNDING` | Path grounding — pre-exec check that a `read`/`edit` target path exists |
 | `PIT_NO_PATTERN_GROUNDING` | Pattern grounding — pre-exec structural balance-check of a `grep`/`find` regex/glob |
 | `PIT_NO_EDIT_PRECONDITION` | The `edit` dry-run precondition check |
+| `PIT_NO_PDF` | PDF → markdown conversion in `read`; PDFs fall back to the "binary file, not displayable as text" note |
 | `PIT_NO_CODE_MODE` | The code-mode execution path |
 | `PIT_NO_DEBUG_VERIFY` | The debug-driven verification gate |
 | `PIT_NO_REFACTOR_TX` | The refactor-transaction staged multi-file edit primitive |

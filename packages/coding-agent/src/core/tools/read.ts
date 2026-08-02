@@ -15,6 +15,15 @@ import { formatDimensionNote, resizeImage } from "../../utils/image-resize.js";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.js";
 import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
+import {
+	formatPdfErrorNote,
+	formatPdfHeader,
+	formatPdfNoTextNote,
+	isPdf,
+	isPdfReadEnabled,
+	isPdfWithoutText,
+	pdfToMarkdown,
+} from "../pdf.ts";
 import { getUrlSchemeRegistry } from "../url-schemes/index.ts";
 import { prepareWithPathAliases } from "./argument-prep.js";
 import { generateDiffString } from "./edit-diff.ts";
@@ -742,7 +751,7 @@ export function createReadToolDefinition(
 				// Best-effort cleanup: an unresolvable path means nothing was recorded.
 			}
 		},
-		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete. Set outline:true for a symbol outline (names + line ranges) instead of file content; path also accepts pr://, issue://, and conflict:// virtual schemes to pull a GitHub PR, issue, or merge-conflict directly.
+		description: `Read the contents of a file. Supports text files, images (jpg, png, gif, webp), and PDFs. Images are sent as attachments. PDFs are converted to markdown (embedded text only — no OCR, so a scanned/image-only PDF is reported as unreadable rather than empty) and page with offset/limit like any text file. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete. Set outline:true for a symbol outline (names + line ranges) instead of file content; path also accepts pr://, issue://, and conflict:// virtual schemes to pull a GitHub PR, issue, or merge-conflict directly.
 
 Never call read on a directory (use "ls") or twice with the same offset (increment it by the previous limit).`,
 		promptSnippet: "Read file contents",
@@ -886,6 +895,18 @@ Never call read on a directory (use "ls") or twice with the same offset (increme
 							// abort guard), so an aborted read whose result is discarded never
 							// poisons the baseline a later edit/write compares against.
 							let pendingMtime: number | undefined;
+							/**
+							 * Settle this read with a plain note, applying the same
+							 * commit-then-resolve discipline every other early-return in
+							 * this function uses: the mtime baseline is written to shared
+							 * session state only after the final abort guard, so a read the
+							 * user cancelled never poisons it.
+							 */
+							const resolveNote = (text: string): void => {
+								if (mtimeStore && pendingMtime !== undefined) mtimeStore.set(absolutePath, pendingMtime);
+								signal?.removeEventListener("abort", onAbort);
+								resolve({ content: [{ type: "text", text } as TextContent], details: undefined });
+							};
 							const nonVisionImageNote = getNonVisionImageNote(ctx?.model);
 							if (mimeType) {
 								// Read image as binary.
@@ -947,11 +968,19 @@ Never call read on a directory (use "ls") or twice with the same offset (increme
 								const fitsJsonCrush = preReadStat === undefined || preReadStat.size <= JSON_CRUSH_MAX_BYTES;
 								const jsonCrushEligible =
 									isJsonCrushEnabled() && offset === undefined && limit === undefined && fitsJsonCrush;
+								// A `.pdf` is routed through the markdown converter below, which
+								// needs the whole file in one buffer — same reason .ipynb opts out
+								// of the line-streaming path. Files without the extension are
+								// caught later by their `%PDF-` magic, once the buffer exists.
+								const pdfEnabled = isPdfReadEnabled();
+								const hasPdfExtension = absolutePath.toLowerCase().endsWith(".pdf");
+								const pdfByExtension = pdfEnabled && hasPdfExtension;
 								let streamed: StreamedTextRead | StreamedBinaryRead | undefined;
 								if (
 									preReadStat &&
 									ops.createByteStream &&
 									!jsonCrushEligible &&
+									!pdfByExtension &&
 									!absolutePath.toLowerCase().endsWith(".ipynb")
 								) {
 									const fileStat = preReadStat;
@@ -984,6 +1013,11 @@ Never call read on a directory (use "ls") or twice with the same offset (increme
 								let selectedLines: string[];
 								// Whole-file data, only available on the buffered path (anchors need it).
 								let wholeFile: { textContent: string; allLines: string[] } | undefined;
+								// Set when the body below is CONVERTED markdown rather than the file's
+								// own bytes: carries the context line prefixed to the output, and
+								// doubles as the flag that suppresses hashline anchors and
+								// rawFileContent (both of which must describe real on-disk text).
+								let pdfHeader: string | undefined;
 								if (streamed?.kind === "text") {
 									totalFileLines = streamed.totalFileLines;
 									// Check if offset is out of bounds.
@@ -1022,17 +1056,73 @@ Never call read on a directory (use "ls") or twice with the same offset (increme
 										resolve({ content: [{ type: "text", text: note } as TextContent], details: undefined });
 										return;
 									}
+									// Same reasoning as the notebook guard: the PDF parser takes one
+									// contiguous buffer, so a giant PDF would be fully resident (plus
+									// its markdown) for an output capped at a few KB. Refuse above the
+									// streaming threshold instead.
+									if (pdfByExtension && preReadStat && preReadStat.size > streamingMinBytes) {
+										recordDiagnostic({
+											category: "output.cap",
+											level: "info",
+											source: "read.pdf",
+											context: { path, bytes: preReadStat.size },
+										});
+										if (aborted) return;
+										resolveNote(
+											`[pdf ${path}: ${formatSize(preReadStat.size)} exceeds ${formatSize(streamingMinBytes)} — too large to convert to markdown. Split it (e.g. \`bash\` with qpdf/pdftk) or extract the pages you need.]`,
+										);
+										return;
+									}
 									// P6: skip the disk read entirely when the graph-prefetch warm cache
 									// already has this exact (path, mtime, size) resident.
 									const buffer =
 										tryWarmBuffer(warmFileCache, absolutePath, preReadStat) ??
 										(await ops.readFile(absolutePath));
-									const textContent = buffer.toString("utf-8");
+
+									// PDFs: convert to markdown instead of dumping bytes. Detected by
+									// extension OR by `%PDF-` magic (so an extension-less PDF is caught
+									// too, on the path that would otherwise report "binary file"). The
+									// converted markdown then flows through the SAME pipeline as any
+									// text file — offset/limit, truncation notices, de-dup — so paging
+									// a PDF behaves exactly like paging a source file.
+									let textContent: string;
+									if (pdfEnabled && (hasPdfExtension || isPdf(buffer))) {
+										const conversion = await pdfToMarkdown(buffer);
+										if (aborted) return;
+										if (!conversion.ok) {
+											// Contained, not fatal: the note below is what the model sees.
+											recordDiagnostic({
+												category: "error.isolated",
+												level: "warn",
+												source: "read.pdf",
+												context: { path, note: conversion.reason },
+											});
+											// No native binary for this platform: fall back to exactly what
+											// `read` did before PDF support existed, with the reason appended
+											// so the failure is diagnosable rather than mysterious.
+											resolveNote(
+												conversion.reason === "unavailable"
+													? `${formatBinaryFileNote(absolutePath, buffer.length)}\n${formatPdfErrorNote(path, conversion)}`
+													: formatPdfErrorNote(path, conversion),
+											);
+											return;
+										}
+										if (isPdfWithoutText(conversion.classification)) {
+											// Scanned/image-only: returning the (empty) markdown would read
+											// as "this PDF is blank". Say what it actually is instead.
+											resolveNote(formatPdfNoTextNote(path, conversion));
+											return;
+										}
+										pdfHeader = formatPdfHeader(conversion);
+										textContent = conversion.markdown;
+									} else {
+										textContent = buffer.toString("utf-8");
+									}
 
 									// Binary sniff: a non-image file with NUL bytes or mostly-invalid
 									// UTF-8 is not displayable as text. Returning the mojibake wastes
 									// context and tells the model nothing; instead point it at bash.
-									if (looksBinary(buffer, textContent)) {
+									if (pdfHeader === undefined && looksBinary(buffer, textContent)) {
 										const note = formatBinaryFileNote(absolutePath, buffer.length);
 										content = [{ type: "text", text: note }];
 										if (aborted) return;
@@ -1195,6 +1285,11 @@ Never call read on a directory (use "ls") or twice with the same offset (increme
 									outputText = truncation.content;
 									bodyIsClean = true;
 								}
+								// Prefix the PDF context line AFTER slicing, so offset/limit and every
+								// "Showing lines X-Y of N" figure above address the converted markdown
+								// itself — the header is context about the conversion, not line 1 of
+								// the document.
+								if (pdfHeader !== undefined) outputText = `${pdfHeader}\n${outputText}`;
 								// De-dup / delta: if this exact (path, range) was already read this session,
 								// either suppress it (identical content) or re-send only a diff (changed
 								// since). LRU-bounded so only recent reads qualify; an older one may have
@@ -1278,6 +1373,9 @@ Never call read on a directory (use "ls") or twice with the same offset (increme
 									!dedupeSuppressed &&
 									!deltaApplied &&
 									anchorsEnabled &&
+									// Converted markdown is not what is on disk, so its line hashes
+									// would anchor edit_hashline onto content no file contains.
+									pdfHeader === undefined &&
 									offset === undefined &&
 									limit === undefined &&
 									!truncation.truncated &&
@@ -1295,7 +1393,9 @@ Never call read on a directory (use "ls") or twice with the same offset (increme
 								// regardless of what range this particular call requested. Gated on
 								// captureRawContent (opt-in) so `details` stays undefined for a plain
 								// clean read by default.
-								if (captureRawContent && bodyIsClean && wholeFile !== undefined) {
+								// (never for a converted PDF: `rawFileContent` promises verbatim
+								// on-disk text, and markdown from a PDF is not that.)
+								if (captureRawContent && bodyIsClean && pdfHeader === undefined && wholeFile !== undefined) {
 									const raw = wholeFile.textContent;
 									details = {
 										...details,
