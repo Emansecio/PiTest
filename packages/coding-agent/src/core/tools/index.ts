@@ -138,6 +138,7 @@ import { createSymbolToolDefinition, type SymbolToolOptions } from "./symbol.ts"
 import { createTodoToolDefinition, type TodoToolOptions } from "./todo.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { createUndoToolDefinition, type UndoToolOptions } from "./undo.ts";
+import { createWebFetchToolDefinition, type WebFetchToolOptions } from "./web-fetch.ts";
 import { createWebSearchToolDefinition, type WebSearchToolOptions } from "./web-search.ts";
 import { createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
 
@@ -380,6 +381,19 @@ const TOOL_REGISTRY = {
 		optionsKey: "web_search",
 		readOnly: false,
 		coding: "webSearch",
+	},
+	web_fetch: {
+		definitionFactory: createWebFetchToolDefinition,
+		optionsKey: "web_fetch",
+		// Genuinely read-only: a GET plus a text conversion. Nothing on disk, no
+		// process, no session state — hence also `sideEffect: "none"`, which is what
+		// lets plan/ask use it.
+		readOnly: true,
+		// Native + default-on (no settings gate, no API key needed): the native
+		// fetcher always works, and the Firecrawl fallback is opt-OUT via
+		// PIT_NO_FIRECRAWL=1. Deliberately NOT behind the `webSearch` gate — that
+		// gate is about search-provider keys, which web_fetch does not need.
+		coding: "native",
 	},
 	eval: {
 		definitionFactory: createEvalToolDefinition,
@@ -784,6 +798,7 @@ export interface ToolsOptions {
 	ast_grep?: AstGrepToolOptions;
 	ast_edit?: AstEditToolOptions;
 	web_search?: WebSearchToolOptions;
+	web_fetch?: WebFetchToolOptions;
 	webSearch?: { enabled?: boolean; defaultProvider?: string };
 	eval?: EvalToolOptions & { enabled?: boolean };
 	code?: CodeModeToolOptions;

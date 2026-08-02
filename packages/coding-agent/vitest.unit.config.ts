@@ -33,6 +33,7 @@ const integrationTests = [
 	"test/stdout-cleanliness.test.ts",
 	"test/tools.test.ts",
 	"test/verification-gate.test.ts",
+	"test/web-fetch-live.test.ts",
 ];
 
 export default mergeConfig(

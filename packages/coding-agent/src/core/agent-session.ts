@@ -1383,6 +1383,11 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 			...on(s.getToolDiscoverySettings().enabled, ["search_tool_bm25"]),
 			...on(s.getHindsightSettings().enabled, ["retain", "recall", "reflect", "forget"]),
 			...on(s.getWebSearchSettings().enabled, ["web_search"]),
+			// `web_fetch` is native + always-on: unlike web_search it needs no provider
+			// key, and it is the natural next call after a search returns URLs — leaving
+			// it discovery-only would cost a round-trip on every "read that page". Still
+			// hideable via toolDiscovery.hiddenByDefault (it is in `gated`, not `core`).
+			"web_fetch",
 			...on(s.getEvalSettings().enabled, ["eval"]),
 			// Code-mode is native + default-on. It rides on the JS eval kernel (its
 			// bidirectional tool channel lives there), so it's gated on eval being

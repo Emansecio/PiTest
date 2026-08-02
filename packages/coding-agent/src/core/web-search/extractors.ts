@@ -28,7 +28,8 @@ function cap(text: string, max: number = MAX_BYTES): string {
 	return `${sliceSafe(text, 0, max - 3)}...`;
 }
 
-function decodeEntities(text: string): string {
+/** Decode the HTML entities the regex-based converters leave behind. Shared with `web_fetch` (title decoding). */
+export function decodeEntities(text: string): string {
 	return text
 		.replace(/&nbsp;/g, " ")
 		.replace(/&amp;/g, "&")
@@ -91,9 +92,18 @@ function stripTags(html: string): string {
 	return html.replace(/<[^>]+>/g, "");
 }
 
-function combineSignals(timeoutMs: number, signal?: AbortSignal): { signal: AbortSignal; cancel: () => void } {
+/**
+ * Fuse a caller `AbortSignal` with a local timeout into one signal, plus a
+ * `cancel()` that clears the timer and detaches the listener. Shared with
+ * `web_fetch`, which passes its own `timeoutMessage`.
+ */
+export function combineSignals(
+	timeoutMs: number,
+	signal?: AbortSignal,
+	timeoutMessage = "extract timeout",
+): { signal: AbortSignal; cancel: () => void } {
 	const ctrl = new AbortController();
-	const timer = setTimeout(() => ctrl.abort(new Error("extract timeout")), timeoutMs);
+	const timer = setTimeout(() => ctrl.abort(new Error(timeoutMessage)), timeoutMs);
 	const onAbort = () => ctrl.abort((signal as AbortSignal).reason);
 	if (signal) {
 		if (signal.aborted) ctrl.abort(signal.reason);
@@ -108,7 +118,56 @@ function combineSignals(timeoutMs: number, signal?: AbortSignal): { signal: Abor
 	};
 }
 
-async function readCapped(res: Response, maxBytes: number): Promise<string> {
+/**
+ * Read a response body as raw bytes, stopping once `maxBytes` have been
+ * consumed (the reader is then cancelled, so the rest never lands in memory).
+ *
+ * Used by `web_fetch`, which cannot decode while streaming: the charset may be
+ * declared by a `<meta>` tag inside the bytes themselves, so the decision needs
+ * the head of the document in hand. `readCapped` above stays byte-capped but
+ * UTF-8-only for the `web_search` extractors.
+ */
+export async function readCappedBytes(res: Response, maxBytes: number): Promise<Uint8Array> {
+	const body = res.body;
+	if (!body) {
+		const buf = new Uint8Array(await res.arrayBuffer());
+		return buf.byteLength > maxBytes ? buf.subarray(0, maxBytes) : buf;
+	}
+	const reader = body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (!value) continue;
+			const remaining = maxBytes - total;
+			const chunk = value.byteLength > remaining ? value.subarray(0, remaining) : value;
+			chunks.push(chunk);
+			total += chunk.byteLength;
+			if (total >= maxBytes) break;
+		}
+	} finally {
+		await reader.cancel().catch(() => {});
+	}
+	if (chunks.length === 1) return chunks[0];
+	const out = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		out.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return out;
+}
+
+/**
+ * Read a response body as UTF-8 text, stopping once `maxBytes` of *raw* bytes
+ * have been consumed (the reader is then cancelled, so the rest never lands in
+ * memory). Used by the `web_search` extractors, which only ever see UTF-8
+ * registry APIs and rendered docs pages; `web_fetch` goes through
+ * `readCappedBytes` instead so it can honour a declared charset.
+ */
+export async function readCapped(res: Response, maxBytes: number): Promise<string> {
 	const body = res.body;
 	if (!body) {
 		const text = await res.text();

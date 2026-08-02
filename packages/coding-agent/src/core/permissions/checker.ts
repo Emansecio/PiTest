@@ -85,6 +85,9 @@ export const BUILTIN_TOOL_SIDE_EFFECTS: Readonly<Record<string, ToolSideEffect>>
 	ast_grep: "none",
 	ast_edit: "workspace",
 	web_search: "none",
+	// Read-only: an HTTP GET converted to text. Nothing on disk, no process, no
+	// session state — so plan and ask can both use it.
+	web_fetch: "none",
 	eval: "exec",
 	code: "exec",
 	retain: "agent",

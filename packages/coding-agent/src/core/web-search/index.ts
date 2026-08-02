@@ -5,7 +5,29 @@
  */
 
 export { autoSearchChain, type ChainAttempt, type ChainOutcome, type ChainResult } from "./chain.ts";
-export { type ExtractedContent, extractFromUrl, htmlToMarkdown, stripBoilerplate } from "./extractors.ts";
+export {
+	combineSignals,
+	decodeEntities,
+	type ExtractedContent,
+	extractFromUrl,
+	htmlToMarkdown,
+	readCapped,
+	stripBoilerplate,
+} from "./extractors.ts";
+export {
+	FIRECRAWL_SCRAPE_ENDPOINT,
+	type FirecrawlScrapeResult,
+	firecrawlScrape,
+	isFirecrawlEnabled,
+} from "./firecrawl.ts";
+export {
+	type FetchedPage,
+	type FetchPageDeps,
+	type FetchPageSource,
+	fetchPage,
+	HttpStatusError,
+	looksJsHeavy,
+} from "./page-fetch.ts";
 export {
 	ALL_PROVIDERS,
 	availableProviders,
@@ -17,6 +39,14 @@ export {
 	type SearchProvider,
 	tavilyProvider,
 } from "./providers.ts";
+export {
+	assertUrlAllowed,
+	checkUrlAllowed,
+	classifyIpAddress,
+	type DnsResolver,
+	UrlBlockedError,
+	type UrlCheckResult,
+} from "./url-guard.ts";
 
 import {
 	availableProviders,

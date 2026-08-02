@@ -212,7 +212,26 @@ cat README.md | pit -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools |
 
-Core built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `symbol`, `find_symbol`, `ask`, `todo`, `plan` (DAG-based structured plan), `calc` (arithmetic evaluator), `recipe` (task-runner abstraction), `repo_map` (project skeleton), `code` (code-mode VM), `ast_grep` (AST structural search), `ast_edit` (AST structural edit), `resolve` (stage/commit previews), `render_mermaid` (ASCII Mermaid diagrams), `inspect_image`, `search_skills`, `search_tool_bm25`, `recall_tool_output`, `goal_complete`, `message` (inter-agent messaging), `retain`/`recall`/`reflect`/`forget` (hindsight memory). Feature tools join the surface when their settings are enabled (most are on by default; see [Settings](settings.md)): `lsp`, `debug`, `eval`, `web_search`, `chrome_devtools_*` (8 tools), `preview`, `edit_v2` (hashline-based editing).
+`read` also handles non-text files: images (jpg, png, gif, webp) are sent as attachments, and **PDFs are converted to markdown** — detected by the `.pdf` extension or by the `%PDF-` magic bytes, so an extension-less PDF works too. The output starts with a short context line (`[PDF converted to markdown · TextBased · 12 pages]`) and `offset`/`limit` page through the converted markdown exactly like a text file. Extraction is text-layer only: **there is no OCR**, so a scanned or image-only PDF returns an explicit "no embedded text layer" message instead of an empty document. PDFs above the streaming threshold (10MB) are refused rather than buffered. Conversion is powered by `@firecrawl/pdf-inspector`, whose native binary ships prebuilt for Linux x64, macOS ARM64, and Windows x64; on any other platform `read` falls back to the old "binary file" note. Set `PIT_NO_PDF=1` to disable PDF conversion entirely.
+
+Core built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `symbol`, `find_symbol`, `ask`, `todo`, `plan` (DAG-based structured plan), `calc` (arithmetic evaluator), `recipe` (task-runner abstraction), `repo_map` (project skeleton), `code` (code-mode VM), `ast_grep` (AST structural search), `ast_edit` (AST structural edit), `resolve` (stage/commit previews), `render_mermaid` (ASCII Mermaid diagrams), `inspect_image`, `search_skills`, `search_tool_bm25`, `recall_tool_output`, `goal_complete`, `message` (inter-agent messaging), `web_fetch` (URL → markdown; see [Fetching URLs](#fetching-urls)), `retain`/`recall`/`reflect`/`forget` (hindsight memory). Feature tools join the surface when their settings are enabled (most are on by default; see [Settings](settings.md)): `lsp`, `debug`, `eval`, `web_search`, `edit_v2` (hashline-based editing). Chrome DevTools tools and `preview` are activated for browser-oriented turns and remain discoverable through `search_tool_bm25`.
+
+### Fetching URLs
+
+`web_fetch` turns an arbitrary URL into readable markdown. It is read-only (a GET plus a text conversion), needs no API key, and is available in every Mode — including the read-only stances `Plan` and `Ask`. Use `web_search` to *find* a URL; use `web_fetch` once you have one.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `url` | string | — | Absolute `http:`/`https:` URL |
+| `start_index` | number | `0` | Character offset into the converted document, for paging through long pages |
+
+**Content types.** `text/html` (and `application/xhtml+xml`) is converted to markdown with boilerplate — `script`, `style`, `nav`, `header`, `footer`, `aside`, `form` — stripped; `text/*` and `application/json` are returned raw; PDFs and binary types are refused with an explicit message rather than a wall of bytes. Raw bodies are read up to 2MB and each request has a 15s budget. The **charset** is honoured: the `charset=` of the `Content-Type` header wins, otherwise HTML is prescanned for a `<meta charset>` / `<meta http-equiv="Content-Type">` declaration in its first 1KB, otherwise UTF-8 — so a latin-1 or Shift_JIS page reads correctly instead of as mojibake, and an unknown charset label degrades to UTF-8 rather than failing.
+
+**Pagination.** Output is capped at ~24,000 characters per call. When a document is longer, the result ends with `[truncated at 24000 chars] continue with start_index=<n>` — call again with that `start_index` to read the next slice. The header line reports `chars <from>-<to>/<total>` whenever the result is a partial view.
+
+**SSRF guard.** Only `http:`/`https:` are accepted, URLs carrying credentials (`user:pass@host`) are refused, and the hostname is resolved (A **and** AAAA) before any request: if *any* resolved address is loopback, private (`10/8`, `172.16/12`, `192.168/16`), link-local (`169.254/16`, which covers the `169.254.169.254` cloud-metadata endpoint), CGNAT, multicast/reserved, IPv6 unique-local (`fc00::/7`), `::1`, or `0.0.0.0/8`, the fetch is refused. Literal-IP hosts go through the same classification without DNS, including the IPv4-in-IPv6 (`::ffff:10.0.0.1`) and NAT64 forms. Redirects are followed manually (max 5 hops) and **every hop is re-validated**, so a public host cannot bounce you onto the metadata service. A DNS failure is also a refusal — the guard fails closed.
+
+**Firecrawl fallback.** When the native path is bot-walled (HTTP 403/429/5xx), fails at the transport layer or times out, or returns HTML that converts to almost nothing (a JS-rendered app shell), `web_fetch` retries through Firecrawl's `v2/scrape` endpoint, which renders the page in a real browser. It works without credentials; set `FIRECRAWL_API_KEY` to use your own quota. A URL rejected by the SSRF guard is **never** sent to Firecrawl. Set `PIT_NO_FIRECRAWL=1` to disable the fallback and keep `web_fetch` on the native path only.
 
 ### Resource Options
 
@@ -298,6 +317,7 @@ pit --tools read,grep,find,ls -p "Review the code"
 | `PIT_READ_DEDUPE` | Per-session de-dup of identical repeat reads is on by default; set to `0` to disable |
 | `PIT_JSON_CRUSH` | Set to `1` to enable structural crushing of large JSON tool outputs |
 | `PIT_DEFER_HISTORY` | Set to `1` to defer large historical tool outputs to a session store, recallable via `recall_tool_output` |
+| `FIRECRAWL_API_KEY` | Optional bearer token for the `web_fetch` Firecrawl fallback. The fallback works without it; set it to use your own quota |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
 | `PIT_KEY_COOLDOWN_MS` | Cooldown in milliseconds before retrying a rate-limited API key (default: `300000` — 5 minutes). Applies to the per-key cool-down in the credential pool |
 
@@ -318,8 +338,10 @@ Feature kill-switches (all default-ON; set the variable to `1`/`true`/`yes` to d
 | `PIT_NO_STRUCTURAL_COMPACTION` | Structural-only compaction |
 | `PIT_NO_SECRET_REDACT` | Secret redaction on egress |
 | `PIT_NO_LEARNED_ERROR_GUARD` | The learned-error guard (blocks pre-exec calls matching a cross-session error pattern) |
+| `PIT_NO_FIRECRAWL` | The `web_fetch` Firecrawl fallback (bot-walled or JS-rendered pages then fail natively instead of being retried through a real browser) |
 | `PIT_NO_LEGACY_SKILLS` | Discovery of skills from legacy directories (`.claude/`, `.cursor/`, `.codex/`, `.gemini/`) |
 | `PIT_NO_CLAUDE_CODE_SKILLS` | Loading skills from `~/.claude/skills/` (alias: `PIT_DISABLE_CLAUDE_CODE_SKILLS`) |
+| `PIT_NO_BUNDLED_SKILLS` | Loading the skills shipped inside the pit package (`skills/`, e.g. `pit-knowledge`); see [Skills](skills.md#bundled-skills) |
 
 ### Advanced tuning
 
