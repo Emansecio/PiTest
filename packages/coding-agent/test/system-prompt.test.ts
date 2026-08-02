@@ -156,7 +156,7 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("a screenshot alone is not a verified functional UI");
+			expect(prompt).toContain("Visual verification: after any change that may affect rendered UI");
 		});
 
 		test("included with a chrome_devtools tool as the visual surface", () => {
@@ -167,10 +167,10 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("a screenshot alone is not a verified functional UI");
+			expect(prompt).toContain("Visual verification: after any change that may affect rendered UI");
 		});
 
-		test("omitted when edit/write exist but no preview/browser tool is reachable", () => {
+		test("included before preview/browser activation", () => {
 			const prompt = buildSystemPrompt({
 				selectedTools: ["read", "bash", "edit", "write"],
 				contextFiles: [],
@@ -178,7 +178,7 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).not.toContain("a screenshot alone is not a verified functional UI");
+			expect(prompt).toContain("Visual verification: after any change that may affect rendered UI");
 		});
 
 		test("omitted in a read-only session even when a preview tool is present", () => {
@@ -189,7 +189,7 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).not.toContain("a screenshot alone is not a verified functional UI");
+			expect(prompt).not.toContain("Visual verification: after any change that may affect rendered UI");
 		});
 	});
 
@@ -466,13 +466,13 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("Comment code only for non-obvious why.");
 		});
 
-		test("still omits the preview-UI nuance bullet even when a preview tool is active", () => {
+		test("keeps visual verification in the compact profile", () => {
 			const prompt = buildSystemPrompt({
 				...base,
 				selectedTools: [...base.selectedTools, "preview"],
 				profile: "compact",
 			});
-			expect(prompt).not.toContain("a screenshot alone is not a verified functional UI");
+			expect(prompt).toContain("Visual verification: after any change that may affect rendered UI");
 		});
 
 		test("respects PIT_NARRATION in the condensed narration line", () => {

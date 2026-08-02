@@ -78,11 +78,23 @@ describe("InteractiveMode headless (injected terminal)", () => {
 		expect(harness.chatText()).toContain("[fallback] anthropic/opus -> anthropic/sonnet: overloaded");
 	});
 
-	test("subagent lifecycle events land in the status band", async () => {
+	test("subagent lifecycle feeds the multi-row Agents strip and collapses to a summary", async () => {
 		harness = createInteractiveHarness();
+		// Fold synchronously: the post-settle linger is visual polish, not what
+		// this test exercises.
+		harness.internals().agentsCollapseLingerMs = 0;
 
 		await harness.emit({ type: "subagent_start", handle: "explorer" } as never);
-		expect(harness.statusText()).toContain("Agent “explorer” started");
+		await harness.emit({ type: "subagent_progress", handle: "explorer", turn: 2, lastTool: "read" } as never);
+		// Single agent: one bare strip line, reading like the old status text.
+		expect(await harness.screen()).toContain("Agent “explorer”·turn 2·read");
+
+		// A second agent grows the header + one row per agent (no more alternating).
+		await harness.emit({ type: "subagent_start", handle: "provas" } as never);
+		const screen = await harness.screen();
+		expect(screen).toContain("Agents·0/2");
+		expect(screen).toContain("explorer·turn 2·read");
+		expect(screen).toContain("provas·turn 1");
 
 		await harness.emit({
 			type: "subagent_complete",
@@ -91,11 +103,35 @@ describe("InteractiveMode headless (injected terminal)", () => {
 			turns: 3,
 			totalTokens: 1234,
 		} as never);
-		expect(harness.statusText()).toContain("Agent “explorer” finished");
-		expect(harness.statusText()).toContain("3 turns");
-		// `toLocaleString()` groups per the host locale (1,234 / 1.234) — assert
-		// the grouping happened without pinning the separator.
-		expect(harness.statusText()).toMatch(/1[.,\s ]234 tok/);
+		await harness.emit({
+			type: "subagent_complete",
+			handle: "provas",
+			status: "done",
+			turns: 1,
+			totalTokens: 766,
+		} as never);
+		// The LAST settle folds the whole strip into a one-line transcript summary.
+		expect(harness.chatText()).toContain("2 agents·2✓");
+		// 1234 + 766 = 2000: formatTokens strips the trailing .0, so "2k tok".
+		expect(harness.chatText()).toContain("2k tok");
+	});
+
+	test("a stale progress during the post-settle linger re-arms the collapse instead of wedging the strip", async () => {
+		harness = createInteractiveHarness();
+		const internals = harness.internals();
+		// Long linger so the strip is mid-linger when the stale event lands.
+		internals.agentsCollapseLingerMs = 60_000;
+
+		await harness.emit({ type: "subagent_start", handle: "solo" } as never);
+		await harness.emit({ type: "subagent_complete", handle: "solo", status: "done", turns: 2 } as never);
+		expect(internals.agentsLiveCollapseTimer).toBeDefined();
+
+		// Reordered progress for the already-settled agent: the component ignores
+		// it (settled rows stay settled), and the collapse timer — cancelled by the
+		// event arriving — must be re-armed, or nothing would ever fold the strip.
+		await harness.emit({ type: "subagent_progress", handle: "solo", turn: 3, lastTool: "read" } as never);
+		expect(internals.agentsLive).toBeDefined();
+		expect(internals.agentsLiveCollapseTimer).toBeDefined();
 	});
 
 	test("compaction_start swaps the status band for the compaction spinner and rebinds Esc", async () => {

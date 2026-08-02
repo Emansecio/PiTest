@@ -1527,7 +1527,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						onWorktreeReady: (path: string) => {
 							effectiveChildCwd = path;
 						},
-						onSubagentEvent: (info: { turn: number; lastTool?: string }) =>
+						onSubagentEvent: (info: { turn: number; lastTool?: string; totalTokens?: number }) =>
 							options.onSubagentProgress?.(runHandle, info),
 						onAgentReady: (agent: Agent, record: { id: string }) => {
 							capturedAgent = agent;

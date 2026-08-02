@@ -118,7 +118,7 @@ import {
 	getCurrentDeferredOutputStore,
 	setCurrentDeferredOutputStore,
 } from "./deferred-output-store.ts";
-import { getEngineeringStyleGuidelines } from "./engineering-styles.js";
+import { getEngineeringStylePromptGuidelines } from "./engineering-styles.js";
 import {
 	createEvalKernelManager,
 	type EvalKernelManager,
@@ -275,11 +275,13 @@ import {
 import { agentToolToWireSurface, compactToolsForProviderContext, compactWireToolSurface } from "./tool-wire-schema.ts";
 import {
 	type BashBackgroundJob,
+	type BashBackgroundJobEvent,
 	type BashOperations,
 	createLocalBashOperations,
 	disposeBashBackgroundJobs,
 	disposeBashSparePool,
 	listBashBackgroundJobs,
+	onBashBackgroundJobEvent,
 } from "./tools/bash.js";
 import { isGitWorkTree, prewarmFffIndex } from "./tools/fff-search.ts";
 import { FileMtimeStore } from "./tools/file-mtime-store.ts";
@@ -739,7 +741,6 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	private _toolRegistry: Map<string, AgentTool> = new Map();
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
-	private _toolPromptGuidelines: Map<string, string[]> = new Map();
 
 	// Per-session tool-call telemetry. Fed from tool_execution_end events.
 	private readonly _toolCallStats = new ToolCallStats();
@@ -1099,6 +1100,10 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
+		// Background-job lifecycle → model notifications: an exit mid-turn steers
+		// the in-flight run, an exit while idle rides in with the next turn, and a
+		// UI-initiated kill is reported so the model never polls a ghost job.
+		this._unsubscribeBashJobEvents = onBashBackgroundJobEvent((event) => this._onBashBackgroundJobEvent(event));
 		this._installAgentToolHooks();
 		this._installContextPruneHook();
 		this._installPrepareNextTurnHook();
@@ -1398,7 +1403,8 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 			...on(s.getDebugSettings().enabled, ["debug"]),
 			...on(!isTruthyEnvFlag(process.env.PIT_NO_DEFER_HISTORY), ["recall_tool_output"]),
 			...on(!isTruthyEnvFlag(process.env.PIT_NO_RECALL_HISTORY), ["recall_history"]),
-			...on(s.getChromeDevtoolsSettings().enabled, chromeFeatureToolNames),
+			// Chrome DevTools is turn-scoped by the browser routing extension. Keeping
+			// it out of the default surface avoids paying its schemas on normal turns.
 		];
 		const hidden = new Set(s.getToolDiscoverySettings().hiddenByDefault);
 		return [...core, ...gated.filter((name) => !hidden.has(name))];
@@ -1440,10 +1446,8 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		const explicit = new Set(cfg.hiddenByDefault);
 		// 2. Delta = allTools − default-active surface, minus alwaysActive. The
 		// active surface (single source) already covers the gated features that
-		// are ON. We additionally hide, unconditionally: the chrome feature (its
-		// gate also governs the auto-launched manager, so a discovered-while-off
-		// chrome tool would only fail) and the meta/infra tools the model must
-		// never pull in via discovery.
+		// are ON. Chrome is intentionally part of this delta: the browser routing
+		// extension activates it per turn, while discovery remains the fallback.
 		//
 		// `edit_v2` is deliberately NOT excluded here (unlike `resolve`,
 		// `goal_complete`): the edit/write/ast_edit tool descriptions actively tell
@@ -1456,7 +1460,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		// reachable.
 		const codingNames = new Set([
 			...this._defaultActiveToolNames(),
-			...chromeFeatureToolNames,
+			...(this.settingsManager.getChromeDevtoolsSettings().enabled ? [] : chromeFeatureToolNames),
 			"resolve",
 			"goal_complete",
 			"recall_tool_output",
@@ -3073,6 +3077,10 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		// Cancel any in-flight verification check so its child process does not keep
 		// holding the session cwd (Windows rmSync EBUSY in tests).
 		this._verificationAbort?.abort();
+		// Stop listening to background-job events BEFORE the registry teardown below —
+		// a dead session must not react to the dispose-time kills (or any later jobs).
+		this._unsubscribeBashJobEvents?.();
+		this._unsubscribeBashJobEvents = undefined;
 		// Kill promoted/auto-background bash jobs and any other tracked detached
 		// children before spare-pool dispose so session replace (/new, /fork) and
 		// graceful process exit do not leave orphan process groups (Unix) or
@@ -3659,10 +3667,9 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		for (const name of validToolNames) {
 			const snippet = this._toolPromptSnippets.get(name);
 			if (snippet) toolSnippets[name] = snippet;
-			const toolGuidelines = this._toolPromptGuidelines.get(name);
-			if (toolGuidelines) promptGuidelines.push(...toolGuidelines);
+			promptGuidelines.push(...this._getCustomToolPromptGuidelines(name));
 		}
-		promptGuidelines.push(...getEngineeringStyleGuidelines(this.settingsManager.getEngineeringStyle()));
+		promptGuidelines.push(...getEngineeringStylePromptGuidelines(this.settingsManager.getEngineeringStyle()));
 
 		// Skills block is gated on `read`; flipping its presence needs a full rebuild
 		// so the skills section stays consistent with the tools list (T07).
@@ -3777,6 +3784,17 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	}
 
 	/**
+	 * Keep extension/SDK tool guidance supported without re-injecting Pit's own
+	 * built-in tool bullets into the global prompt. Built-in guidance belongs in
+	 * the tool contract; user-provided guidance remains useful session context.
+	 */
+	private _getCustomToolPromptGuidelines(name: string): string[] {
+		const entry = this._toolDefinitions.get(name);
+		if (!entry || entry.sourceInfo.source === "builtin") return [];
+		return this._normalizePromptGuidelines(entry.definition.promptGuidelines);
+	}
+
+	/**
 	 * Memoized project check command for the in-turn verification guideline
 	 * (undefined = not yet computed). Static per session: the guideline lives in
 	 * the cacheable prompt prefix, so re-detecting per rebuild would risk
@@ -3802,17 +3820,13 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 			if (snippet) {
 				toolSnippets[name] = snippet;
 			}
-
-			const toolGuidelines = this._toolPromptGuidelines.get(name);
-			if (toolGuidelines) {
-				promptGuidelines.push(...toolGuidelines);
-			}
+			promptGuidelines.push(...this._getCustomToolPromptGuidelines(name));
 		}
 
-		// Append engineering-style guideline pack (opt-in via settings). Pushed
-		// before downstream caller-supplied guidelines so they remain authoritative
-		// on conflict; buildSystemPrompt deduplicates verbatim repeats.
-		promptGuidelines.push(...getEngineeringStyleGuidelines(this.settingsManager.getEngineeringStyle()));
+		// Keep built-in tool guidance in the tool interface. Extension/SDK guidance
+		// remains supported here because it is user-provided context, not a duplicate
+		// of Pit's own tool descriptions.
+		promptGuidelines.push(...getEngineeringStylePromptGuidelines(this.settingsManager.getEngineeringStyle()));
 
 		// In-turn verification (default mode): the model verifies BEFORE its final
 		// reply, so the harness runs nothing after the turn — no post-reply check,
@@ -3868,6 +3882,9 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		this._baseSystemPromptOptions = {
 			cwd: this._cwd,
 			skills: loadedSkills,
+			// Keep the cacheable prefix small; the skill router adds only relevant
+			// cards after the dynamic marker for each user prompt.
+			skillsMode: "hint",
 			contextFiles: loadedContextFiles,
 			customPrompt: loaderSystemPrompt,
 			appendSystemPrompt,
@@ -4260,6 +4277,53 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	 * something that resolves differently re-arms the gate naturally.
 	 */
 	private readonly _sessionTimedOutChecks = new Set<string>();
+
+	/** Unsubscribe for the background-job lifecycle listener (set in the constructor). */
+	private _unsubscribeBashJobEvents: (() => void) | undefined;
+
+	/**
+	 * Background-job lifecycle → model notifications. An exit is reported once
+	 * (`resultSeen` latches); verification jobs are excluded because the
+	 * pending-checks gate owns their story and would double-report. A `killed`
+	 * event is reported only for `source: "ui"` — the user ended the job from the
+	 * jobs panel / Esc picker, and the model must not keep polling a ghost.
+	 */
+	private _onBashBackgroundJobEvent(event: BashBackgroundJobEvent): void {
+		if (this._disposed) return;
+		if (event.type === "promoted") return;
+		const job = event.job;
+		const commandLine = job.command.split("\n", 1)[0];
+		if (event.type === "killed") {
+			if (event.source !== "ui") return;
+			void this.sendCustomMessage(
+				{
+					customType: "pit.background-job",
+					content: `[background job] The user killed job ${job.id} ($ ${commandLine}) from the UI. It is gone from the registry — do not poll it; rerun the command if its work is still needed.`,
+					display: true,
+				},
+				{ deliverAs: this.isStreaming ? "steer" : "nextTurn" },
+			);
+			return;
+		}
+		if (job.resultSeen) return;
+		if (isVerificationJobCommand(job.command)) return;
+		job.resultSeen = true;
+		const outcome =
+			job.exitCode === 0
+				? "finished successfully (exit 0)"
+				: job.exitCode === null
+					? "was killed or died on a signal"
+					: `FAILED with exit code ${job.exitCode}`;
+		const elapsed = ((Date.now() - job.startedAt) / 1000).toFixed(1);
+		void this.sendCustomMessage(
+			{
+				customType: "pit.background-job",
+				content: `[background job] Job ${job.id} ($ ${commandLine}) ${outcome} after ${elapsed}s. Read its buffered output with bash({jobId:"${job.id}"}).`,
+				display: true,
+			},
+			{ deliverAs: this.isStreaming ? "steer" : "nextTurn" },
+		);
+	}
 
 	/** Verification jobs still running that no drain this session has handed off yet. */
 	private _undrainedVerificationJobs(): BashBackgroundJob[] {
@@ -4789,8 +4853,14 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	 * Emit a lightweight per-turn progress event for a running subagent.
 	 * @internal Wired from agent-session-services via __bindBuiltInRefs.
 	 */
-	_emitSubagentProgress(handle: string, info: { turn: number; lastTool?: string }): void {
-		this.emit({ type: "subagent_progress", handle, turn: info.turn, lastTool: info.lastTool });
+	_emitSubagentProgress(handle: string, info: { turn: number; lastTool?: string; totalTokens?: number }): void {
+		this.emit({
+			type: "subagent_progress",
+			handle,
+			turn: info.turn,
+			lastTool: info.lastTool,
+			totalTokens: info.totalTokens,
+		});
 	}
 
 	/**
@@ -6727,15 +6797,11 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		}
 		this._toolDefinitions = definitionRegistry;
 		const nextSnippets = new Map<string, string>();
-		const nextGuidelines = new Map<string, string[]>();
 		for (const { definition } of definitionRegistry.values()) {
 			const snippet = this._normalizePromptSnippet(definition.promptSnippet);
 			if (snippet) nextSnippets.set(definition.name, snippet);
-			const guidelines = this._normalizePromptGuidelines(definition.promptGuidelines);
-			if (guidelines.length > 0) nextGuidelines.set(definition.name, guidelines);
 		}
 		this._toolPromptSnippets = nextSnippets;
-		this._toolPromptGuidelines = nextGuidelines;
 		// Keep plan-mode sideEffect lookup in sync with the live tool registry
 		// (extension tools default to opaque via registerTool).
 		if (this.permissionChecker) {

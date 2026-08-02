@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { type EngineeringStyle, getEngineeringStyleGuidelines } from "../src/core/engineering-styles.js";
+import {
+	type EngineeringStyle,
+	getEngineeringStyleGuidelines,
+	getEngineeringStylePromptGuidelines,
+} from "../src/core/engineering-styles.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { buildSystemPrompt } from "../src/core/system-prompt.js";
 
@@ -31,6 +35,19 @@ describe("getEngineeringStyleGuidelines", () => {
 			expect(b.trim()).toBe(b);
 			expect(b.length).toBeGreaterThan(20);
 		}
+	});
+});
+
+describe("getEngineeringStylePromptGuidelines", () => {
+	it("returns one compact pointer for karpathy", () => {
+		const hints = getEngineeringStylePromptGuidelines("karpathy");
+		expect(hints).toHaveLength(1);
+		expect(hints[0]).toContain("load karpathy-guidelines");
+		expect(hints[0].length).toBeLessThan(200);
+	});
+
+	it("returns no pointer for the default style", () => {
+		expect(getEngineeringStylePromptGuidelines("default")).toEqual([]);
 	});
 });
 

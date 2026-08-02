@@ -10,23 +10,44 @@ function send(msg) {
 	process.stdout.write(content);
 }
 
+// Ledger test hook: `DIAG_LINE <n>` in the document text moves the diagnostic
+// below to line <n> while leaving its message/source/severity untouched — the
+// shape a real server produces when an edit shifts a pre-existing error. Kept
+// per URI because didSave carries no text, and a real server likewise answers
+// from the document state it already holds.
+const diagnosticLineByUri = new Map();
+
+function rememberDiagnosticLine(uri, text) {
+	if (!uri || typeof text !== "string") return;
+	const m = text.match(/DIAG_LINE\s+(\d+)/);
+	if (m) diagnosticLineByUri.set(uri, Number(m[1]));
+	else diagnosticLineByUri.delete(uri);
+}
+
+function diagnosticsFor(uri) {
+	const line = diagnosticLineByUri.get(uri) ?? 0;
+	return [
+		{
+			range: { start: { line, character: 0 }, end: { line, character: 5 } },
+			severity: 1,
+			message: "fake diagnostic",
+			source: "fake",
+		},
+	];
+}
+
 function publishDiagnostics(uri) {
 	if (!uri) return;
-	send({
-		jsonrpc: "2.0",
-		method: "textDocument/publishDiagnostics",
-		params: {
-			uri,
-			diagnostics: [
-				{
-					range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } },
-					severity: 1,
-					message: "fake diagnostic",
-					source: "fake",
-				},
-			],
-		},
-	});
+	// A pull-only server answers on request and never volunteers.
+	if (PULL_ONLY) return;
+	const emit = () =>
+		send({
+			jsonrpc: "2.0",
+			method: "textDocument/publishDiagnostics",
+			params: { uri, diagnostics: diagnosticsFor(uri) },
+		});
+	if (PUBLISH_DELAY_MS > 0) setTimeout(emit, PUBLISH_DELAY_MS).unref?.();
+	else emit();
 }
 
 // Derive a sibling URI (same directory) from the edited file's URI.
@@ -79,6 +100,18 @@ function publishCrossFile(editedUri, text) {
 // still-warming-up client. Off unless FAKE_LSP_INIT_DELAY_MS is set.
 const INIT_DELAY_MS = Number.parseInt(process.env.FAKE_LSP_INIT_DELAY_MS ?? "0", 10) || 0;
 
+// `--pull` turns this into a PULL-ONLY server (LSP 3.17): it advertises
+// `diagnosticProvider`, answers `textDocument/diagnostic`, and never publishes on
+// its own. A push-only client gets nothing from it — which is exactly what makes
+// it a decisive fixture for the pull path.
+const PULL_ONLY = process.argv.includes("--pull");
+
+// `--pull-broken` advertises the same capability but FAILS every pull, then
+// publishes late. It exists to pin the one regression the pull race can cause:
+// a failed pull resolving early must not abandon a push still due to arrive.
+const PULL_BROKEN = process.argv.includes("--pull-broken");
+const PUBLISH_DELAY_MS = PULL_BROKEN ? 120 : 0;
+
 function handleInitialize(msg) {
 	send({
 		jsonrpc: "2.0",
@@ -95,6 +128,9 @@ function handleInitialize(msg) {
 				workspaceSymbolProvider: true,
 				codeActionProvider: true,
 				documentFormattingProvider: true,
+				...(PULL_ONLY || PULL_BROKEN
+					? { diagnosticProvider: { interFileDependencies: false, workspaceDiagnostics: false } }
+					: {}),
 			},
 		},
 	});
@@ -118,11 +154,23 @@ function handle(msg) {
 		case "textDocument/didChange":
 		case "textDocument/didSave": {
 			const uri = msg.params?.textDocument?.uri;
-			publishDiagnostics(uri);
 			// Full text arrives on didOpen (textDocument.text) and didChange
 			// (contentChanges[0].text); didSave carries none — drive cross-file off it.
 			const text = msg.params?.textDocument?.text ?? msg.params?.contentChanges?.[0]?.text;
+			rememberDiagnosticLine(uri, text);
+			publishDiagnostics(uri);
 			publishCrossFile(uri, text);
+			return;
+		}
+		case "textDocument/diagnostic": {
+			// Only the pull-only build answers. The default build stays push-only so it
+			// keeps proving the push path; the broken build fails on purpose.
+			if (!PULL_ONLY) {
+				send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "Method not found" } });
+				return;
+			}
+			const uri = msg.params?.textDocument?.uri;
+			send({ jsonrpc: "2.0", id: msg.id, result: { kind: "full", items: diagnosticsFor(uri) } });
 			return;
 		}
 		case "textDocument/hover":

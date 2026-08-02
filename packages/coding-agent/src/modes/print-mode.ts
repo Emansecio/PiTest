@@ -145,10 +145,11 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 	};
 
 	const registerSignalHandlers = (): void => {
-		const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
-		if (process.platform !== "win32") {
-			signals.push("SIGHUP");
-		}
+		// SIGHUP is registered on Windows too: closing the console window is the ONLY
+		// notice the process gets, and Node's default action for an unhandled SIGHUP is
+		// termination WITHOUT running process.on("exit") hooks — which is what leaks the
+		// shell-wrapped LSP grandchildren (see core/lsp/client.ts registerExitHook).
+		const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM", "SIGHUP"];
 
 		for (const signal of signals) {
 			const handler = () => {

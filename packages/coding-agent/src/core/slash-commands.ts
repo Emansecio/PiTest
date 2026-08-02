@@ -64,7 +64,11 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	},
 	{ name: "fusion", description: "Configure the Fusion panel (pick two models)", group: "Model" },
 	{ name: "theme", description: "Pick a color theme (live preview, Esc reverts)", group: "Config" },
-	{ name: "mouse", description: "Toggle mouse: click positions cursor · Shift+drag = native select", group: "Config" },
+	{
+		name: "mouse",
+		description: "Toggle mouse: click positions · drag selects+copies · right-click copies · Shift+drag native",
+		group: "Config",
+	},
 	{
 		name: "name",
 		description: "Set session display name",
@@ -73,6 +77,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		completeOnly: true,
 	},
 	{ name: "session", description: "Show session info and stats", group: "Info" },
+	{ name: "jobs", description: "Background tasks: view output, kill (also alt+j)", group: "Info" },
 	{ name: "tree", description: "Browse and jump around the session tree", group: "Session" },
 	{ name: "fork", description: "Fork a new session from an earlier message", group: "Session" },
 	{

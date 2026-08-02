@@ -20,7 +20,7 @@ import {
 	untrackDetachedChildPid,
 } from "../../utils/shell.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
-import { isVerificationJobCommand } from "../verification/pending-checks.ts";
+import { isVerificationJobCommand, isWatchOrServerCommand } from "../verification/pending-checks.ts";
 import { summarizeTestRun } from "../verification/test-summary.ts";
 import { applyKeyAliases } from "./argument-prep.js";
 import { classifyBashCommand } from "./bash-activity.js";
@@ -70,9 +70,9 @@ const bashSchema = Type.Object(
 			}),
 		),
 		action: Type.Optional(
-			Type.Union([Type.Literal("poll"), Type.Literal("kill")], {
+			Type.Union([Type.Literal("poll"), Type.Literal("wait"), Type.Literal("kill")], {
 				description:
-					"What to do with `jobId`: `poll` (default) reads the buffered output and status; `kill` terminates the job. Ignored without `jobId`.",
+					"What to do with `jobId`: `poll` (default) reads the buffered output and status; `wait` blocks until the job exits (or a deadline — 30s default, `timeout` overrides, max 600s) and then reads it, replacing a poll loop with one call; `kill` terminates the job. Ignored without `jobId`.",
 			}),
 		),
 	},
@@ -254,11 +254,89 @@ export interface BashBackgroundJob {
 	promotedAt: number;
 	exited: boolean;
 	exitCode: number | null;
+	/** Wall-clock of the last post-promotion output byte (promotedAt until any arrives). */
+	lastOutputAt: number;
+	/**
+	 * True once the job's terminal state has been surfaced (a poll/wait read it
+	 * after exit, or the session injected an exit notification). The footer uses
+	 * it to stop flagging a finished job as an unseen result.
+	 */
+	resultSeen: boolean;
 	/** Bounded post-promotion output (oldest bytes dropped past the cap). */
 	ringBuffer: string;
 	ringTruncated: boolean;
 	kill: () => void;
 }
+
+/** Who initiated a background-job kill — drives whether the agent is notified. */
+export type BashBackgroundJobKillSource = "tool" | "ui" | "shutdown";
+
+/**
+ * Lifecycle events for promoted background jobs. `killed` carries the kill
+ * source so a UI-initiated kill can be surfaced to the agent while the agent's
+ * own `action:"kill"` (and shutdown teardown) stay silent.
+ */
+export type BashBackgroundJobEvent =
+	| { type: "promoted"; job: BashBackgroundJob }
+	| { type: "exited"; job: BashBackgroundJob }
+	| { type: "killed"; job: BashBackgroundJob; source: BashBackgroundJobKillSource };
+
+const backgroundJobListeners = new Set<(event: BashBackgroundJobEvent) => void>();
+
+/**
+ * Subscribe to background-job lifecycle events. Returns the unsubscribe.
+ * Listeners are module-global (the registry itself is), so subscribers with a
+ * shorter lifecycle (session, TUI mode) MUST unsubscribe on dispose.
+ */
+export function onBashBackgroundJobEvent(listener: (event: BashBackgroundJobEvent) => void): () => void {
+	backgroundJobListeners.add(listener);
+	return () => backgroundJobListeners.delete(listener);
+}
+
+// A throwing listener must never break the exec/kill path it rides on.
+function emitBackgroundJobEvent(event: BashBackgroundJobEvent): void {
+	for (const listener of backgroundJobListeners) {
+		try {
+			listener(event);
+		} catch {
+			// Listener errors are the listener's problem, not the job's.
+		}
+	}
+}
+
+// Default stall threshold (seconds): a promoted job that is NOT a
+// watcher/dev-server (those idle legitimately) and has produced no output for
+// this long is flagged "stalled" — surfaced in poll results, the footer chip,
+// and the Esc interrupt picker. Detection only; nothing is auto-killed.
+// Override with PIT_BASH_STALL_SECONDS; 0 / non-positive disables.
+const BASH_BG_STALL_SECONDS = 300;
+
+function resolveBgStallSeconds(): number {
+	const raw = process.env.PIT_BASH_STALL_SECONDS;
+	if (raw === undefined || raw === "") return BASH_BG_STALL_SECONDS;
+	const parsed = Number(raw);
+	if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+	return parsed;
+}
+
+/**
+ * Whether a still-running job looks hung: no output for the stall window and
+ * the command is not a watcher/server (expected-quiet). Advisory only.
+ */
+export function isBashBackgroundJobStalled(job: BashBackgroundJob, now: number = Date.now()): boolean {
+	if (job.exited) return false;
+	const stallSeconds = resolveBgStallSeconds();
+	if (stallSeconds <= 0) return false;
+	if (isWatchOrServerCommand(job.command)) return false;
+	return now - Math.max(job.lastOutputAt, job.promotedAt) > stallSeconds * 1000;
+}
+
+// Default deadline for `action:"wait"` (seconds). The model's `timeout` arg
+// overrides it, hard-capped so one tool call can never block the loop for more
+// than 10 minutes on a job that refuses to exit.
+const BASH_BG_WAIT_DEFAULT_SECONDS = 30;
+const BASH_BG_WAIT_MAX_SECONDS = 600;
+const BASH_BG_WAIT_POLL_MS = 250;
 
 const backgroundJobs = new Map<string, BashBackgroundJob>();
 let backgroundJobSeq = 0;
@@ -273,13 +351,17 @@ export function getBashBackgroundJob(id: string): BashBackgroundJob | undefined 
 	return backgroundJobs.get(id);
 }
 
-/** Kill a promoted background job's tree and drop it from the registry. */
-export function killBashBackgroundJob(id: string): boolean {
+/** Kill a promoted background job's tree and drop it from the registry.
+ * `source` says who asked — a `"ui"` kill is surfaced to the agent by the
+ * session's event subscriber; `"tool"` (the agent's own kill) and `"shutdown"`
+ * stay silent. */
+export function killBashBackgroundJob(id: string, source: BashBackgroundJobKillSource = "tool"): boolean {
 	const job = backgroundJobs.get(id);
 	if (!job) return false;
 	job.kill();
 	if (job.pid) untrackDetachedChildPid(job.pid);
 	backgroundJobs.delete(id);
+	emitBackgroundJobEvent({ type: "killed", job, source });
 	return true;
 }
 
@@ -298,6 +380,7 @@ export function disposeBashBackgroundJobs(): void {
 			}
 		}
 		if (job.pid) untrackDetachedChildPid(job.pid);
+		emitBackgroundJobEvent({ type: "killed", job, source: "shutdown" });
 	}
 	backgroundJobs.clear();
 }
@@ -324,6 +407,8 @@ function registerBackgroundJob(job: BashBackgroundJob): void {
 		if (!victim) break;
 		if (!victim.exited) victim.kill();
 		backgroundJobs.delete(victim.id);
+		// Registry housekeeping, not a user/tool intent — "shutdown" keeps it silent.
+		emitBackgroundJobEvent({ type: "killed", job: victim, source: "shutdown" });
 	}
 	backgroundJobs.set(job.id, job);
 }
@@ -345,11 +430,23 @@ function describeJobState(job: BashBackgroundJob): string {
 
 /** Poll result for a tracked job: status + the output buffered since promotion. */
 function formatBackgroundJobPoll(job: BashBackgroundJob): string {
-	const startedAgo = ((Date.now() - job.startedAt) / 1000).toFixed(1);
-	const lines = [
-		`Job ${job.id} — ${describeJobState(job)} (started ${startedAgo}s ago).`,
-		`$ ${clampJobCommand(job.command)}`,
-	];
+	const now = Date.now();
+	const startedAgo = ((now - job.startedAt) / 1000).toFixed(1);
+	let headline = `Job ${job.id} — ${describeJobState(job)} (started ${startedAgo}s ago`;
+	if (!job.exited) {
+		const quietSeconds = (now - Math.max(job.lastOutputAt, job.promotedAt)) / 1000;
+		headline +=
+			job.ringBuffer.length > 0 || quietSeconds < 1
+				? `; last output ${quietSeconds.toFixed(1)}s ago`
+				: "; no output since promotion";
+	}
+	headline += ").";
+	const lines = [headline, `$ ${clampJobCommand(job.command)}`];
+	if (isBashBackgroundJobStalled(job, now)) {
+		lines.push(
+			`[Possibly hung: no output for ${Math.round((now - Math.max(job.lastOutputAt, job.promotedAt)) / 60000)}m and this is not a watcher/server. If it should have finished by now, kill it with bash({jobId:"${job.id}", action:"kill"}).]`,
+		);
+	}
 	if (!job.ringBuffer) {
 		lines.push("(no output buffered since promotion)");
 		return lines.join("\n");
@@ -786,20 +883,24 @@ export function createLocalBashOperations(options?: {
 					if (settled.done) return;
 					backgroundJobSeq += 1;
 					const id = `bg-${backgroundJobSeq}`;
+					const promotedAt = Date.now();
 					const job: BashBackgroundJob = {
 						id,
 						pid: child.pid,
 						command: label ?? command,
 						startedAt,
-						promotedAt: Date.now(),
+						promotedAt,
 						exited: false,
 						exitCode: null,
+						lastOutputAt: promotedAt,
+						resultSeen: false,
 						ringBuffer: "",
 						ringTruncated: false,
 						kill: killTree,
 					};
 					promoted = job;
 					registerBackgroundJob(job);
+					emitBackgroundJobEvent({ type: "promoted", job });
 					// NOTE: no runtime-diagnostics event is recorded on promotion. The
 					// closed DiagnosticCategory union is owned by @pit/ai (out of this lane)
 					// and has no "promoted"/"background" member; reusing an existing
@@ -821,6 +922,7 @@ export function createLocalBashOperations(options?: {
 					const appendRing = (data: Buffer) => {
 						const text = ringDecoder.decode(data, { stream: true });
 						if (!text) return;
+						job.lastOutputAt = Date.now();
 						const chunk = Buffer.from(text, "utf-8");
 						ringChunks.push(chunk);
 						ringBytes += chunk.length;
@@ -886,6 +988,11 @@ export function createLocalBashOperations(options?: {
 							promoted.exited = true;
 							promoted.exitCode = code;
 							if (child.pid) untrackDetachedChildPid(child.pid);
+							// Only a job still in the registry gets an exit event — one already
+							// killed/evicted (and thus dropped) already emitted its terminal event.
+							if (getBashBackgroundJob(promoted.id) === promoted) {
+								emitBackgroundJobEvent({ type: "exited", job: promoted });
+							}
 							return;
 						}
 						if (child.pid) untrackDetachedChildPid(child.pid);
@@ -908,6 +1015,9 @@ export function createLocalBashOperations(options?: {
 						if (promoted) {
 							promoted.exited = true;
 							if (child.pid) untrackDetachedChildPid(child.pid);
+							if (getBashBackgroundJob(promoted.id) === promoted) {
+								emitBackgroundJobEvent({ type: "exited", job: promoted });
+							}
 							return;
 						}
 						if (child.pid) untrackDetachedChildPid(child.pid);
@@ -1149,7 +1259,7 @@ function formatBashCall(args: BashCallDisplayArgs | undefined, expanded: boolean
 
 	// Job surface: no command to show, the id + verb is the whole call.
 	if (!command && typeof args?.jobId === "string" && args.jobId) {
-		const verb = args.action === "kill" ? "kill" : "poll";
+		const verb = args.action === "kill" ? "kill" : args.action === "wait" ? "wait" : "poll";
 		return theme.fg("toolTitle", theme.bold(`${verb} ${args.jobId}`));
 	}
 	if (command === null) {
@@ -1364,7 +1474,7 @@ export function createBashToolDefinition(
 					: "navigation",
 		description: `Execute a bash command in the current working directory. Use bash only for what no dedicated tool covers: build/test/install scripts, git, network requests, process management, shell pipelines/redirects. Prefer read/grep/find/ls/write/edit for file operations.
 
-Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BASH_MAX_BYTES / 1024}KB (whichever is hit first); full output is saved to a temp file when truncated. Pass one "command" string (join steps with " && "); each call runs in a fresh shell with no carried state. To run somewhere other than the session root, set the "cwd" parameter instead of prefixing "cd /path &&" — it keeps the command line clean. Optional timeout in seconds. To read or stop a background job, call this tool with "jobId" instead of "command" (add "action":"kill" to stop it) — a fresh shell cannot see those processes, so \`jobs\`/\`tail\` never will.`,
+Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BASH_MAX_BYTES / 1024}KB (whichever is hit first); full output is saved to a temp file when truncated. Pass one "command" string (join steps with " && "); each call runs in a fresh shell with no carried state. To run somewhere other than the session root, set the "cwd" parameter instead of prefixing "cd /path &&" — it keeps the command line clean. Optional timeout in seconds. To read or stop a background job, call this tool with "jobId" instead of "command" ("action":"wait" blocks until it exits or a deadline, replacing a poll loop; "action":"kill" stops it) — a fresh shell cannot see those processes, so \`jobs\`/\`tail\` never will.`,
 		promptSnippet: "Execute bash commands",
 		parameters: bashSchema,
 		prepareArguments: prepareBashArguments,
@@ -1383,7 +1493,7 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 				cwd?: string;
 				background?: boolean;
 				jobId?: string;
-				action?: "poll" | "kill";
+				action?: "poll" | "wait" | "kill";
 			},
 			signal?: AbortSignal,
 			onUpdate?,
@@ -1422,6 +1532,52 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 						: `Killed job ${job.id} ($ ${clampJobCommand(job.command)}) and dropped it from the registry.`;
 					return { content: [{ type: "text" as const, text }], details: undefined };
 				}
+				if (action === "wait" && !job.exited) {
+					// Block (bounded) until the job exits instead of burning a tool call per
+					// poll. The model's `timeout` arg overrides the default deadline, hard-
+					// capped; the turn's abort signal ends the wait early with a snapshot.
+					const waitSeconds = Math.min(
+						normalizeBashTimeout(timeout) ?? BASH_BG_WAIT_DEFAULT_SECONDS,
+						BASH_BG_WAIT_MAX_SECONDS,
+					);
+					const deadline = Date.now() + waitSeconds * 1000;
+					while (!job.exited && Date.now() < deadline && !signal?.aborted) {
+						if (getBashBackgroundJob(trimmedJobId) !== job) break;
+						await new Promise<void>((res) => {
+							const delay = Math.max(0, Math.min(BASH_BG_WAIT_POLL_MS, deadline - Date.now()));
+							const onAbort = () => {
+								clearTimeout(t);
+								res();
+							};
+							const t = setTimeout(() => {
+								signal?.removeEventListener("abort", onAbort);
+								res();
+							}, delay);
+							signal?.addEventListener("abort", onAbort, { once: true });
+						});
+					}
+					// Killed/evicted mid-wait: the registry entry is gone and the buffered
+					// output with it — report that instead of a stale snapshot.
+					if (getBashBackgroundJob(trimmedJobId) !== job) {
+						return {
+							content: [
+								{
+									type: "text" as const,
+									text: `Job ${trimmedJobId} was killed while waiting and dropped from the registry.`,
+								},
+							],
+							isError: true,
+							details: undefined,
+						};
+					}
+					if (job.exited) job.resultSeen = true;
+					const pollText = formatBackgroundJobPoll(job);
+					const text = job.exited
+						? pollText
+						: `Wait deadline (${waitSeconds}s) elapsed; the job is still running.\n${pollText}`;
+					return { content: [{ type: "text" as const, text }], details: undefined };
+				}
+				if (job.exited) job.resultSeen = true;
 				return { content: [{ type: "text" as const, text: formatBackgroundJobPoll(job) }], details: undefined };
 			}
 			if (!command) {

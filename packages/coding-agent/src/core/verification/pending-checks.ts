@@ -12,6 +12,15 @@ import type { BashBackgroundJob } from "../tools/bash.ts";
 // Watchers / servers never settle — never treat them as a check to wait on.
 const WATCH_OR_SERVER = /\b(?:--?watch|watch|nodemon|dev|serve|server|start|preview)\b/i;
 
+/**
+ * True when `command` reads as a long-lived watcher/dev-server. Such processes
+ * are EXPECTED to stay quiet for long stretches (a dev server idles between
+ * requests), so the background-job stall detector must never flag them.
+ */
+export function isWatchOrServerCommand(command: string): boolean {
+	return WATCH_OR_SERVER.test(command.trim());
+}
+
 // Direct invocations of a test runner / type-checker / linter (also catches the
 // `npx <runner>` / `pnpm dlx <runner>` form).
 const DIRECT_RUNNER =

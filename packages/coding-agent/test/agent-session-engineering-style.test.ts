@@ -3,7 +3,7 @@ import { getModel } from "@pit/ai";
 import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
-import { getEngineeringStyleGuidelines } from "../src/core/engineering-styles.js";
+import { getEngineeringStyleGuidelines, getEngineeringStylePromptGuidelines } from "../src/core/engineering-styles.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
@@ -34,11 +34,14 @@ function createSession(settingsManager: SettingsManager) {
 }
 
 describe("AgentSession threads engineeringStyle through to the system prompt", () => {
-	it("includes karpathy bullets by default (karpathy is the default style)", () => {
+	it("includes the compact karpathy pointer by default", () => {
 		const session = createSession(SettingsManager.inMemory());
 		try {
-			for (const b of getEngineeringStyleGuidelines("karpathy")) {
+			for (const b of getEngineeringStylePromptGuidelines("karpathy")) {
 				expect(session.systemPrompt).toContain(b);
+			}
+			for (const b of getEngineeringStyleGuidelines("karpathy")) {
+				expect(session.systemPrompt).not.toContain(b);
 			}
 		} finally {
 			session.dispose();
@@ -51,6 +54,16 @@ describe("AgentSession threads engineeringStyle through to the system prompt", (
 			for (const b of getEngineeringStyleGuidelines("karpathy")) {
 				expect(session.systemPrompt).not.toContain(b);
 			}
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("does not repeat tool-local guidance in the global system prompt", () => {
+		const session = createSession(SettingsManager.inMemory());
+		try {
+			expect(session.systemPrompt).not.toContain("Use read to examine files instead of cat or sed.");
+			expect(session.systemPrompt).not.toContain("Call only when the active tool list lacks a needed capability");
 		} finally {
 			session.dispose();
 		}

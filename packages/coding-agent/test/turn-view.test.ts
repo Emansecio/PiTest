@@ -198,54 +198,37 @@ describe("decideFusionMember / decideFusionStage", () => {
 });
 
 describe("subagent events", () => {
-	test("start is a sticky muted status line", () => {
-		expect(decideSubagentStart({ handle: "explorer" })).toEqual([
-			{
-				kind: "status",
-				text: "◐ Agent “explorer” started",
-				tone: "muted",
-				level: "sticky",
-				segments: [{ text: "◐ Agent " }, { text: "“explorer”", tone: "text" }, { text: " started" }],
-			},
+	// The strip owns one row per handle, so every lifecycle event is a plain
+	// upsert; the component renders itself (no explicit `render` effect).
+	test("start upserts the agent's row on the live strip", () => {
+		expect(decideSubagentStart({ handle: "explorer" })).toEqual([{ kind: "subagents-start", handle: "explorer" }]);
+	});
+
+	test("progress forwards the turn counter, last tool, and live token total", () => {
+		expect(decideSubagentProgress({ handle: "e", turn: 2, lastTool: "read", totalTokens: 9300 })).toEqual([
+			{ kind: "subagents-progress", handle: "e", turn: 2, lastTool: "read", totalTokens: 9300 },
+		]);
+		expect(decideSubagentProgress({ handle: "e", turn: 2 })).toEqual([
+			{ kind: "subagents-progress", handle: "e", turn: 2, lastTool: undefined, totalTokens: undefined },
 		]);
 	});
 
-	test("progress appends the last tool only when there is one", () => {
-		expect(decideSubagentProgress({ handle: "e", turn: 2, lastTool: "read" })[0]).toMatchObject({
-			text: "◐ Agent “e”·turn 2·read",
-			level: "sticky",
-		});
-		expect(decideSubagentProgress({ handle: "e", turn: 2 })[0]).toMatchObject({
-			text: "◐ Agent “e”·turn 2",
-		});
+	test("completion settles the row with its status and metrics", () => {
+		expect(decideSubagentComplete({ handle: "e", status: "done", turns: 3, totalTokens: 12_000 })).toEqual([
+			{ kind: "subagents-complete", handle: "e", status: "done", turns: 3, totalTokens: 12_000 },
+		]);
+		expect(decideSubagentComplete({ handle: "e", status: "error" })).toEqual([
+			{ kind: "subagents-complete", handle: "e", status: "error", turns: undefined, totalTokens: undefined },
+		]);
 	});
 
-	test("completion tones success vs failure and omits empty metadata", () => {
-		expect(decideSubagentComplete({ handle: "e", status: "done" })[0]).toEqual({
-			kind: "status",
-			text: "✓ Agent “e” finished",
-			tone: "success",
-			level: "info",
-			segments: [{ text: "✓ Agent " }, { text: "“e”", tone: "text" }, { text: " finished" }],
-		});
-		expect(decideSubagentComplete({ handle: "e", status: "error", turns: 1 })[0]).toMatchObject({
-			// Singular counts do not pluralize.
-			text: "✗ Agent “e” failed·1 turn",
-			tone: "warning",
-		});
-	});
-
-	test("the agent's name always renders in the primary text color", () => {
-		for (const effect of [
-			...decideSubagentStart({ handle: "e" }),
-			...decideSubagentProgress({ handle: "e", turn: 1 }),
-			...decideSubagentComplete({ handle: "e", status: "done" }),
+	test("no lifecycle event asks for a render — the strip paints on upsert", () => {
+		for (const effects of [
+			decideSubagentStart({ handle: "e" }),
+			decideSubagentProgress({ handle: "e", turn: 1 }),
+			decideSubagentComplete({ handle: "e", status: "done" }),
 		]) {
-			if (effect.kind !== "status") continue;
-			const named = effect.segments?.find((s) => s.text === "“e”");
-			expect(named?.tone).toBe("text");
-			// The plain `text` stays the concatenation of the segments.
-			expect(effect.segments?.map((s) => s.text).join("")).toBe(effect.text);
+			expect(kinds(effects)).not.toContain("render");
 		}
 	});
 });

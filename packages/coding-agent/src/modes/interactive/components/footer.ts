@@ -4,6 +4,7 @@ import type { AgentSession } from "../../../core/agent-session.ts";
 import type { ContextUsage } from "../../../core/extensions/index.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
 import type { RecoveryLevel } from "../../../core/session-recovery.ts";
+import { isBashBackgroundJobStalled, listBashBackgroundJobs } from "../../../core/tools/bash.ts";
 import { isReducedMotion } from "../../../utils/env-flags.ts";
 import { formatTokens } from "../../../utils/format-display.ts";
 import { buildWorkspaceCwdLabels, formatGitBranchWithDiff, type WorkspaceCwdLabels } from "../display-utils.ts";
@@ -346,6 +347,32 @@ export class FooterComponent implements Component {
 	}
 
 	/**
+	 * Dense `bg:N` chip for tracked background bash jobs — absent with none.
+	 * `warn` flips when any job looks hung (stalled) or finished non-zero without
+	 * its result having been surfaced yet; the panel (alt+j) has the detail.
+	 */
+	private getJobsSegment(): { text: string; warn: boolean } | null {
+		const jobs = listBashBackgroundJobs();
+		if (jobs.length === 0) return null;
+		const warn = jobs.some(
+			(job) =>
+				isBashBackgroundJobStalled(job) ||
+				(job.exited && job.exitCode !== 0 && job.exitCode !== null && !job.resultSeen),
+		);
+		return { text: `bg:${jobs.length}`, warn };
+	}
+
+	/** Job-state fingerprint for the render cache key (id/state/seen/stall per job). */
+	private getJobsCacheKey(): string {
+		return listBashBackgroundJobs()
+			.map(
+				(job) =>
+					`${job.id}:${job.exited ? 1 : 0}:${job.exitCode ?? "n"}:${job.resultSeen ? 1 : 0}:${isBashBackgroundJobStalled(job) ? 1 : 0}`,
+			)
+			.join(",");
+	}
+
+	/**
 	 * A session is "pristine" while the user has not yet submitted a turn. The
 	 * system prompt + tool schema live in `agent.state.systemPrompt` / tools, NOT
 	 * in `messages`, so `messages` is genuinely empty on a fresh launch even
@@ -455,6 +482,7 @@ export class FooterComponent implements Component {
 		const recoveryLevel = this.getRecoveryLevel();
 		const pinCount = this.getPinCount();
 		const gearboxRole = this.gearboxRole ?? "";
+		const jobsKey = this.getJobsCacheKey();
 		return [
 			width,
 			this.density,
@@ -483,6 +511,7 @@ export class FooterComponent implements Component {
 			recoveryLevel,
 			pinCount,
 			gearboxRole,
+			jobsKey,
 			this.hasUserTurn() ? 1 : 0,
 		].join("|");
 	}
@@ -703,6 +732,10 @@ export class FooterComponent implements Component {
 		}
 		if (gearboxSegment) {
 			modeBits.push(theme.fg("accent", gearboxSegment));
+		}
+		const jobsSegment = this.getJobsSegment();
+		if (jobsSegment) {
+			modeBits.push(theme.fg(jobsSegment.warn ? "warning" : "accent", jobsSegment.text));
 		}
 
 		// Assemble groups. Every join is the same dense ` · ` — intra-group items

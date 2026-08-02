@@ -141,8 +141,15 @@ import { BUILTIN_SLASH_COMMANDS, buildGroupedSlashHelp } from "../../core/slash-
 import type { SourceInfo } from "../../core/source-info.ts";
 import { getCurrentTokenGovernor } from "../../core/token-governor.ts";
 import { consumedTokens } from "../../core/token-usage.ts";
+import {
+	type BashBackgroundJob,
+	isBashBackgroundJobStalled,
+	killBashBackgroundJob,
+	listBashBackgroundJobs,
+	onBashBackgroundJobEvent,
+} from "../../core/tools/bash.ts";
 import { resolveReadPath } from "../../core/tools/path-utils.ts";
-import type { TruncationResult } from "../../core/tools/truncate.ts";
+import { collapseRepeatedLines, type TruncationResult, truncateTail } from "../../core/tools/truncate.ts";
 import {
 	type AskOptionsAnswer,
 	type AskOptionsRequest,
@@ -161,9 +168,11 @@ import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
 import { ActivityStacker } from "./activity-stacker.ts";
 import { prefixAutocompleteDescription } from "./autocomplete-source.ts";
+import { AgentsLiveComponent } from "./components/agents-live.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { createAskPicker } from "./components/ask-picker.ts";
 import { AssistantMessageComponent, messageHasVisibleContent } from "./components/assistant-message.ts";
+import { BackgroundJobsSelectorComponent, formatJobElapsed } from "./components/background-jobs-selector.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
@@ -509,6 +518,15 @@ export class InteractiveMode {
 	private chatVisibilityContainer: Container;
 	private pendingMessagesContainer: Container;
 	private statusContainer: Container;
+	/** Home of the AgentsLive strip; survives statusContainer loader swaps. */
+	private subagentsContainer: Container;
+	/** Live multi-row subagents strip (one row per parallel agent), or none. */
+	private agentsLive: AgentsLiveComponent | undefined;
+	/** Pending post-settle collapse of the strip (linger), if armed. */
+	private agentsLiveCollapseTimer: ReturnType<typeof setTimeout> | undefined;
+	/** Post-settle linger before the strip folds into its transcript summary.
+	 * Instance field (not a const) as the tests' escape hatch: 0 folds synchronously. */
+	private agentsCollapseLingerMs = 2000;
 	private defaultEditor: CustomEditor;
 	private editor: EditorComponent;
 	private editorComponentFactory: EditorFactory | undefined;
@@ -523,6 +541,8 @@ export class InteractiveMode {
 	private composerChrome: ComposerChrome;
 	private footer: FooterComponent;
 	private footerDataProvider: FooterDataProvider;
+	/** Unsubscribe for the background-job → footer repaint listener. */
+	private unsubscribeBashJobEvents: (() => void) | undefined;
 	// Stored so the same manager can be injected into custom editors, selectors, and extension UI.
 	private keybindings: KeybindingsManager;
 	private version: string;
@@ -911,6 +931,11 @@ export class InteractiveMode {
 		this.activityStacker = new ActivityStacker(this.ui, (component) => this.chatContainer.addChild(component));
 		this.pendingMessagesContainer = new Container();
 		this.statusContainer = new Container();
+		// Dedicated home for the multi-row subagents strip (AgentsLive). NOT the
+		// statusContainer: that one is cleared/rebuilt every time the working
+		// loader swaps (clearStatusContainer), and the strip must survive those
+		// swaps for the whole life of the parallel agents.
+		this.subagentsContainer = new Container();
 		this.ephemeralStatus = new EphemeralStatusController({
 			paint: (message, kind) => this.paintEphemeralStatus(message, kind),
 			clear: () => this.removeEphemeralStatusLine(),
@@ -932,17 +957,11 @@ export class InteractiveMode {
 			autocompleteMaxVisible,
 			embedded: true,
 			onPasteTruncated: (info) => this._onPasteTruncated(info),
-			// Copy the mouse selection to the clipboard (alt+c). Layering: the editor
-			// hands us the text; we own the clipboard helper. Fire-and-forget — a
-			// clipboard failure shouldn't wedge the keystroke; the status line is the
-			// only feedback.
-			copySelection: (text) => {
-				void copyToClipboard(text);
-				const summary = text.replace(/\s+/g, " ").trim();
-				const preview = truncateWithEllipsis(summary, 32);
-				const chars = text.length;
-				this.showStatus(`copied·${chars} char${chars === 1 ? "" : "s"}${preview ? `·${preview}` : ""}`);
-			},
+			// Copy the mouse selection to the clipboard (alt+c / right-click).
+			// Layering: the editor hands us the text; we own the clipboard helper.
+			// The callback stays synchronous; completion/failure is reported by the
+			// status line without blocking editor input.
+			copySelection: (text) => this.copySelectionToClipboard(text),
 			// Unframed composer (no boxed border): the mode/permission signal the
 			// border used to carry rides on the `❯` glyph (empty editor) and on a
 			// leading `!` shell-passthrough prefix (typed bash-mode text) instead —
@@ -961,6 +980,19 @@ export class InteractiveMode {
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footer.setDensity(this.settingsManager.getFooterDensity());
 		this.composerChrome = new ComposerChrome(this.editorContainer, this.footer, this.widgetContainerBelow);
+
+		// Keep the footer's `bg:N` chip live: a job being promoted, exiting, or
+		// getting killed repaints immediately — even while the session is idle,
+		// when no turn-driven render would otherwise pick the change up.
+		this.unsubscribeBashJobEvents = onBashBackgroundJobEvent(() => {
+			this.footer.invalidate();
+			this.ui.requestRender();
+		});
+
+		// Transcript text selection → clipboard (drag over the conversation area
+		// copies on release; right-click re-copies while highlighted). Same
+		// clipboard helper + status feedback as the editor's own selection copy.
+		this.ui.onCopySelection = (text) => this.copySelectionToClipboard(text);
 
 		// Load hide thinking block setting
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
@@ -1165,6 +1197,8 @@ export class InteractiveMode {
 		this.ui.addChild(this.chatVisibilityContainer);
 		this.ui.addChild(this.pendingMessagesContainer);
 		this.ui.addChild(this.statusContainer);
+		// Subagents strip right below the status band (loader), above goal/todos.
+		this.ui.addChild(this.subagentsContainer);
 		// Goal overlay above the todo overlay: goal commands, todos obey.
 		this.goalOverlay = createGoalOverlay(this.session);
 		this.ui.addChild(this.goalOverlay);
@@ -2100,6 +2134,11 @@ export class InteractiveMode {
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
 		this.pendingTools.clear();
+		// A full transcript rebuild (/new, resume, rewind, fork) invalidates the
+		// subagents strip: its rows belong to the previous view's turn, and the
+		// old session's agents die with it without ever emitting a settle event.
+		// Silent drop — a still-alive agent re-creates its row on the next event.
+		this.disposeAgentsLive(false);
 		this.renderInitialMessages();
 	}
 
@@ -2553,6 +2592,66 @@ export class InteractiveMode {
 			this.statusContainer.addChild(this.fusionLive);
 			this.footer.setFusionLiveActive(true);
 		}
+	}
+
+	/** Mount (or reuse) the multi-row subagents strip. Unlike the fusion strip it
+	 * COEXISTS with the working loader — the main turn keeps running while the
+	 * parallel agents report — so it lives in its own container, not the
+	 * loader-owned statusContainer. Any lifecycle event voids a pending collapse:
+	 * the strip is clearly still wanted. */
+	private ensureAgentsLive(): AgentsLiveComponent {
+		this.cancelAgentsLiveCollapse();
+		if (!this.agentsLive) {
+			this.agentsLive = new AgentsLiveComponent(this.ui);
+			this.subagentsContainer.addChild(this.agentsLive);
+		}
+		return this.agentsLive;
+	}
+
+	/** Arm the post-settle linger (2s by default; tests set 0 for a synchronous
+	 * fold). The timer never outlives the strip — cancelled by any new lifecycle
+	 * event (ensureAgentsLive) and by every dispose path. */
+	private scheduleAgentsLiveCollapse(): void {
+		this.cancelAgentsLiveCollapse();
+		if (this.agentsCollapseLingerMs <= 0) {
+			this.disposeAgentsLive(true);
+			return;
+		}
+		this.agentsLiveCollapseTimer = setTimeout(() => {
+			this.agentsLiveCollapseTimer = undefined;
+			this.disposeAgentsLive(true);
+		}, this.agentsCollapseLingerMs);
+		this.agentsLiveCollapseTimer.unref?.();
+	}
+
+	private cancelAgentsLiveCollapse(): void {
+		if (this.agentsLiveCollapseTimer) {
+			clearTimeout(this.agentsLiveCollapseTimer);
+			this.agentsLiveCollapseTimer = undefined;
+		}
+	}
+
+	/**
+	 * Retire the subagents strip. With `collapse` (every agent settled) the strip
+	 * folds into a one-line dense summary appended to the transcript; without it
+	 * (user interrupt) it just disappears — an agent that actually survives the
+	 * interrupt re-creates the strip on its next progress event, so dropping it
+	 * here is self-healing rather than lossy.
+	 */
+	private disposeAgentsLive(collapse: boolean): void {
+		this.cancelAgentsLiveCollapse();
+		if (!this.agentsLive) return;
+		if (collapse && this.agentsLive.hasAgents()) {
+			const summary = this.agentsLive.summaryLine();
+			if (summary) {
+				this.chatContainer.addChild(new Spacer(1));
+				this.chatContainer.addChild(new Text(summary, 1, 0));
+			}
+		}
+		this.agentsLive.dispose();
+		this.subagentsContainer.clear();
+		this.agentsLive = undefined;
+		this.ui.requestRender();
 	}
 
 	private disposeFusionLive(): void {
@@ -3310,15 +3409,29 @@ export class InteractiveMode {
 	 * Any cancel / timeout / empty answer falls back to stopping the whole task,
 	 * so Esc never gets stuck.
 	 */
-	private async promptInterruptChoice(tools: Array<{ id: string; name: string }>): Promise<void> {
+	private async promptInterruptChoice(
+		tools: Array<{ id: string; name: string }>,
+		stalledJobs: BashBackgroundJob[] = [],
+	): Promise<void> {
 		const STOP_ALL = "Stop the whole task";
 		const labelToId = new Map<string, string>();
+		const labelToJobId = new Map<string, string>();
 		const options: Array<{ label: string; recommended?: boolean }> = [{ label: STOP_ALL, recommended: true }];
 		tools.forEach((t, i) => {
 			const label = tools.length > 1 ? `Cancel only: ${t.name} (#${i + 1})` : `Cancel only: ${t.name}`;
 			labelToId.set(label, t.id);
 			options.push({ label });
 		});
+		// Stalled background jobs (no output past the stall window, not a
+		// watcher/server) ride along as kill options — the one Esc surface where a
+		// hung job is actually in the user's way. Healthy jobs stay out (alt+j).
+		for (const job of stalledJobs) {
+			const firstLine = job.command.split("\n", 1)[0];
+			const clamped = truncateWithEllipsis(firstLine, 40);
+			const label = `Kill stalled: ${job.id} ($ ${clamped})`;
+			labelToJobId.set(label, job.id);
+			options.push({ label });
+		}
 
 		let picked: string | undefined;
 		this.interruptAskSuperseded = false;
@@ -3348,11 +3461,19 @@ export class InteractiveMode {
 			// Same as the bare-Esc path: a Fusion turn has no agent_end, so dispose
 			// its live strip + ticker explicitly when the whole task is stopped.
 			this.disposeFusionLive();
+			this.disposeAgentsLive(false);
 			this.deferredTurnDone = null;
 			this.stopWorkingLoader();
 			this.showStatus("Interrupted");
 			this.petCompanion?.setMood("startled");
 			this.armInterruptWatchdog();
+			return;
+		}
+		const jobId = labelToJobId.get(picked);
+		if (jobId) {
+			// "ui" source → the session notifies the agent the user ended this job.
+			const killed = killBashBackgroundJob(jobId, "ui");
+			this.showStatus(killed ? `Killed ${jobId}` : `${jobId} already gone`);
 			return;
 		}
 		const id = labelToId.get(picked);
@@ -3394,12 +3515,17 @@ export class InteractiveMode {
 				// whole task immediately — no picker detour for the common case.
 				// Queued messages are returned to the editor so nothing is lost.
 				const interruptible = this.getInterruptiblePendingTools();
-				if (interruptible.length <= 1) {
+				// A stalled background job (hung, not a watcher/server) widens the
+				// choice: killing IT may be all the user wants. Healthy jobs never
+				// trigger the picker — the common Esc stays a one-keystroke stop.
+				const stalledJobs = listBashBackgroundJobs().filter((job) => isBashBackgroundJobStalled(job));
+				if (interruptible.length <= 1 && stalledJobs.length === 0) {
 					this.restoreQueuedMessagesToEditor();
 					this.session.interrupt();
 					// A Fusion turn returns before agent_end, so its live strip + ticker
 					// would leak when the user aborts mid-run. Tear it down explicitly.
 					this.disposeFusionLive();
+					this.disposeAgentsLive(false);
 					// showStatus alone does not stop the working loader — without this,
 					// Esc during verification left "Functional web check…" spinning after
 					// the gate aborted (watchdog no-ops once isBusy clears).
@@ -3410,7 +3536,7 @@ export class InteractiveMode {
 					this.petCompanion?.setMood("startled");
 					this.armInterruptWatchdog();
 				} else {
-					void this.promptInterruptChoice(interruptible);
+					void this.promptInterruptChoice(interruptible, stalledJobs);
 				}
 			} else if (this.isBashMode) {
 				this.editor.setText("");
@@ -3468,6 +3594,7 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.message.followUp", () => this.handleFollowUp());
 		this.defaultEditor.onAction("app.message.steer", () => this.handleSteer());
 		this.defaultEditor.onAction("app.message.dequeue", () => this.handleDequeue());
+		this.defaultEditor.onAction("app.jobs.toggle", () => this.showJobsSelector());
 		this.defaultEditor.onAction("app.session.new", () => this.handleClearCommand());
 		this.defaultEditor.onAction("app.session.tree", () => this.showTreeSelector());
 		this.defaultEditor.onAction("app.session.fork", () => this.showUserMessageSelector());
@@ -3757,6 +3884,7 @@ export class InteractiveMode {
 			toggleMouse: () => this.toggleMouse(),
 			showStatus: (line) => this.showStatus(line),
 			getTodoSummaryText: () => this.session.todoSummaryText(),
+			showJobsSelector: () => this.showJobsSelector(),
 			showSettingsSelector: () => this.showSettingsSelector(),
 			showThemeSelector: () => this.showThemeSelector(),
 			showConfigSelector: () => this.showConfigSelector(),
@@ -4195,6 +4323,35 @@ export class InteractiveMode {
 				case "cleanup-retry-ui":
 					this._cleanupRetryUI();
 					break;
+				case "subagents-start": {
+					const strip = this.ensureAgentsLive();
+					strip.upsertStart(effect.handle);
+					// ensureAgentsLive cancelled any pending collapse; if this event did
+					// not actually revive anything (defensive — start always revives),
+					// re-arm so a settled strip can never linger unfolded forever.
+					if (strip.allSettled()) this.scheduleAgentsLiveCollapse();
+					break;
+				}
+				case "subagents-progress": {
+					const strip = this.ensureAgentsLive();
+					strip.upsertProgress(effect.handle, effect.turn, effect.lastTool, effect.totalTokens);
+					// A STALE progress (reordered past its agent's completion) is ignored
+					// by the component, but ensureAgentsLive above already cancelled the
+					// pending collapse — re-arm it, or the settled strip would hang
+					// on-screen with nothing left to fold it.
+					if (strip.allSettled()) this.scheduleAgentsLiveCollapse();
+					break;
+				}
+				case "subagents-complete": {
+					const strip = this.ensureAgentsLive();
+					strip.complete(effect.handle, effect.status, effect.turns, effect.totalTokens);
+					// Last one settled → linger briefly with every row visibly ✓/✗ (the
+					// final settle should be SEEN, mirroring the todo overlay's complete
+					// linger), then fold the strip into a transcript summary. A new agent
+					// starting inside the window cancels the fold (ensureAgentsLive).
+					if (strip.allSettled()) this.scheduleAgentsLiveCollapse();
+					break;
+				}
 				case "fusion-ensure":
 					this.ensureFusionLive();
 					break;
@@ -5240,6 +5397,7 @@ export class InteractiveMode {
 			this.restoreQueuedMessagesToEditor();
 			this.session.interrupt();
 			this.disposeFusionLive();
+			this.disposeAgentsLive(false);
 			this.deferredTurnDone = null;
 			this.stopWorkingLoader();
 			this.showStatus("Interrupted");
@@ -5344,6 +5502,10 @@ export class InteractiveMode {
 		if (this.isShuttingDown) return;
 		this.isShuttingDown = true;
 		this.unregisterSignalHandlers();
+		// Detach the footer repaint listener before the teardown kills below fire
+		// job events — a render request against a stopping TUI is pure waste.
+		this.unsubscribeBashJobEvents?.();
+		this.unsubscribeBashJobEvents = undefined;
 
 		// Reap detached bash / background jobs before dispose. Signal handlers
 		// already call killTrackedDetachedChildren(); graceful /quit and Ctrl+D
@@ -5421,10 +5583,11 @@ export class InteractiveMode {
 		// which would otherwise terminate under Node's default without restoring the
 		// terminal. While suspended (Ctrl+Z), the temporary ignoreSigint handler must
 		// win, so the SIGINT branch is a no-op then (see handleCtrlZ / isSuspended).
-		const signals: NodeJS.Signals[] = ["SIGTERM", "SIGINT"];
-		if (process.platform !== "win32") {
-			signals.push("SIGHUP");
-		}
+		// SIGHUP is registered on Windows too: closing the console window is the only
+		// notice the process gets, and Node's default action for an unhandled SIGHUP
+		// terminates WITHOUT running process.on("exit") hooks, leaking the
+		// shell-wrapped LSP grandchildren (see core/lsp/client.ts registerExitHook).
+		const signals: NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SIGHUP"];
 
 		for (const signal of signals) {
 			const handler = () => {
@@ -9139,6 +9302,8 @@ Customize: \`${keybindingsPath}\` — \`/reload\` to apply.
 		// for the whole retry surface — countdown, loader and the editor's Esc
 		// handler — and is a no-op when no retry is in flight.
 		this._cleanupRetryUI();
+		// A pending post-settle collapse must not fire into a torn-down widget tree.
+		this.cancelAgentsLiveCollapse();
 		this.clearExtensionTerminalInputListeners();
 		this.footer.dispose();
 		this.footerDataProvider.dispose();

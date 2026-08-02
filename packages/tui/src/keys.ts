@@ -1359,12 +1359,12 @@ export function decodePrintableKey(data: string): string | undefined {
 //   - b: button/modifier bitfield of the first number (see bit contract below).
 //   - x, y: cell coordinates, 1-based.
 //   - trailing byte: 'M' = press/motion, 'm' = release.
-// SGR-only by design: we always request ?1006, so the legacy X10 ESC[M form
-// (three raw bytes after ESC[M) is intentionally NOT decoded here. SGR also
-// avoids the 223-column cap of the legacy encoding (coordinates are decimal, not
-// a single offset byte). Old-style ESC[M is left as a future increment; see plan.
+// SGR is preferred because it avoids the 223-column cap of the legacy byte-
+// encoded scheme. Some Windows consoles and terminal bridges still emit the
+// legacy ESC[M form despite ?1006, so decode both formats at the input boundary.
 
 const SGR_MOUSE_REGEX = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/;
+const LEGACY_MOUSE_PREFIX = "\x1b[M";
 
 /** Semantic classification of a mouse report. */
 export type MouseType = "press" | "release" | "drag" | "wheel";
@@ -1437,28 +1437,38 @@ function decodeWheelDirection(b: number): "up" | "down" | "left" | "right" {
 }
 
 /**
- * Cheap predictor: does `data` even look like an SGR mouse report? Prefix-only
- * (ESC [ <), no full parse. Intended for the input router (future PR3) to gate
- * the expensive `parseMouse` call. A true result does not guarantee a valid
+ * Cheap predictor: does `data` even look like an SGR or legacy X10 mouse
+ * report? Prefix-only, no full parse. A true result does not guarantee a valid
  * event — only `parseMouse` returning defined does.
  */
 export function isMouseSequence(data: string): boolean {
-	return data.startsWith("\x1b[<");
+	return data.startsWith("\x1b[<") || data.startsWith(LEGACY_MOUSE_PREFIX);
 }
 
 /**
- * Decode a single SGR mouse report into a MouseEvent. Pure; returns undefined
- * for anything that is not a complete, well-formed SGR sequence (including the
- * legacy ESC[M form and ordinary key sequences).
+ * Decode a single SGR or legacy X10 mouse report into a MouseEvent. Pure;
+ * returns undefined for anything that is not a complete, well-formed mouse
+ * sequence or an ordinary key sequence.
  */
 export function parseMouse(data: string): MouseEvent | undefined {
 	const match = data.match(SGR_MOUSE_REGEX);
-	if (!match) return undefined;
-
-	const b = Number.parseInt(match[1] ?? "", 10);
-	const x = Number.parseInt(match[2] ?? "", 10);
-	const y = Number.parseInt(match[3] ?? "", 10);
-	const final = match[4];
+	let b: number;
+	let x: number;
+	let y: number;
+	let final: "M" | "m" | undefined;
+	if (match) {
+		b = Number.parseInt(match[1] ?? "", 10);
+		x = Number.parseInt(match[2] ?? "", 10);
+		y = Number.parseInt(match[3] ?? "", 10);
+		final = match[4] as "M" | "m" | undefined;
+	} else {
+		if (!data.startsWith(LEGACY_MOUSE_PREFIX) || data.length !== LEGACY_MOUSE_PREFIX.length + 3) return undefined;
+		const bytes = [data.charCodeAt(3), data.charCodeAt(4), data.charCodeAt(5)];
+		if (bytes.some((value) => value < 32 || value > 255)) return undefined;
+		b = bytes[0]! - 32;
+		x = bytes[1]! - 32;
+		y = bytes[2]! - 32;
+	}
 	if (!Number.isFinite(b) || !Number.isFinite(x) || !Number.isFinite(y)) return undefined;
 
 	const isWheel = (b & MOUSE_WHEEL_BIT) !== 0;
@@ -1472,7 +1482,7 @@ export function parseMouse(data: string): MouseEvent | undefined {
 	} else if (isDrag) {
 		type = "drag";
 	} else {
-		type = final === "M" ? "press" : "release";
+		type = final === "m" || (b & MOUSE_BUTTON_MASK) === 3 ? "release" : "press";
 	}
 
 	// Wheel reports carry the direction in the low bits, not a button.

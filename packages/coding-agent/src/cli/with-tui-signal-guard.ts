@@ -40,7 +40,10 @@ export async function withTuiSignalGuard<T>(ui: { stop(): void }, run: () => Pro
 
 	add("SIGINT", onSignal("SIGINT"));
 	add("SIGTERM", onSignal("SIGTERM"));
-	if (process.platform !== "win32") add("SIGHUP", onSignal("SIGHUP"));
+	// SIGHUP fires on Windows when the console window is closed. Node’s default
+	// action for an unhandled SIGHUP terminates the process without restoring the
+	// terminal, so it is registered on every platform.
+	add("SIGHUP", onSignal("SIGHUP"));
 	add("uncaughtException", (error: Error) => {
 		restore();
 		throw error;

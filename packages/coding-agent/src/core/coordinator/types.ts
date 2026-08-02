@@ -36,6 +36,8 @@ export interface SubagentProgressInfo {
 	turn: number;
 	/** Name of the last tool the subagent called this turn, if any. */
 	lastTool?: string;
+	/** Cumulative token spend across the run so far (live cost feedback). */
+	totalTokens?: number;
 }
 
 export interface SubagentRecord {

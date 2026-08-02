@@ -85,6 +85,10 @@ export type TurnViewEffect =
 	| { kind: "fusion-stage"; stage: FusionStageName }
 	/** Arm the "writer owns the frame" flag so `message_start` retires the strip. */
 	| { kind: "fusion-writer-handoff" }
+	/** Upsert one subagent's row on the live Agents strip. The component requests its own render. */
+	| { kind: "subagents-start"; handle: string }
+	| { kind: "subagents-progress"; handle: string; turn: number; lastTool?: string; totalTokens?: number }
+	| { kind: "subagents-complete"; handle: string; status: "done" | "error"; turns?: number; totalTokens?: number }
 	/** Replace the status band with the retry countdown spinner. */
 	| { kind: "retry-loader"; attempt: number; maxAttempts: number; delayMs: number; reason: string | undefined }
 	/** Tear down retry loader + countdown + escape handler. */
@@ -247,65 +251,47 @@ export function decideFusionStage(event: EventOf<"fusion_stage">): TurnViewEffec
 // ---------------------------------------------------------------------------
 
 /*
- * Subagent lifecycle reads like the activity stack speaks — "Agent", capitalized
- * like the `Delegating`/`Agent N` rows — with a stable visual grammar: the icon
- * and verb carry the state color, the agent's name always renders in the primary
- * text color (it is the one thing worth finding in the band), and mechanics
- * (turn counter, tool, token/turn totals) retreat to `dim`. Lifecycle lines are
- * STICKY while the subagent lives: with an unknown run ahead of them, an
- * auto-dismissing "started" would make a long quiet agent look finished.
+ * Subagent lifecycle feeds a MULTI-LINE live strip (Agents), not the single
+ * status band. One line per agent means parallel delegations stop fighting over
+ * a shared sticky line — each row settles in place as its own agent progresses
+ * and reaches a terminal state, instead of the band flickering between whoever
+ * emitted last. The decisions here are pure upserts keyed by `handle`; the strip
+ * component requests its own render (same contract as `decideFusionMember`), so
+ * no explicit `render` effect. Collapsing the strip into a one-line summary once
+ * every agent has finished is the applier's call — it can ask the component
+ * whether any row is still running — not something this module can know from a
+ * single event.
  */
-function subagentName(handle: string): string {
-	return `“${handle}”`;
-}
-
-function subagentEffect(
-	icon: string,
-	event: { handle: string },
-	verb: string,
-	meta: string,
-): Extract<TurnViewEffect, { kind: "status" }> {
-	const name = subagentName(event.handle);
-	const segments: StatusSegment[] = [{ text: `${icon} Agent ` }, { text: name, tone: "text" }];
-	if (verb) segments.push({ text: ` ${verb}` });
-	if (meta) segments.push({ text: meta, tone: "dim" });
-	return {
-		kind: "status",
-		text: `${icon} Agent ${name}${verb ? ` ${verb}` : ""}${meta}`,
-		tone: "muted",
-		level: "sticky",
-		segments,
-	};
-}
-
 export function decideSubagentStart(event: Pick<EventOf<"subagent_start">, "handle">): TurnViewEffect[] {
-	return [subagentEffect("◐", event, "started", "")];
+	return [{ kind: "subagents-start", handle: event.handle }];
 }
 
 export function decideSubagentProgress(
-	event: Pick<EventOf<"subagent_progress">, "handle" | "turn" | "lastTool">,
+	event: Pick<EventOf<"subagent_progress">, "handle" | "turn" | "lastTool" | "totalTokens">,
 ): TurnViewEffect[] {
-	const tool = event.lastTool ? `·${event.lastTool}` : "";
-	return [subagentEffect("◐", event, "", `·turn ${event.turn}${tool}`)];
+	return [
+		{
+			kind: "subagents-progress",
+			handle: event.handle,
+			turn: event.turn,
+			lastTool: event.lastTool,
+			totalTokens: event.totalTokens,
+		},
+	];
 }
 
 export function decideSubagentComplete(
 	event: Pick<EventOf<"subagent_complete">, "handle" | "status" | "turns" | "totalTokens">,
 ): TurnViewEffect[] {
-	const meta: string[] = [];
-	if (event.turns !== undefined) meta.push(`${event.turns} ${event.turns === 1 ? "turn" : "turns"}`);
-	if (event.totalTokens !== undefined) meta.push(`${event.totalTokens.toLocaleString()} tok`);
-	const done = event.status === "done";
-	const effect = subagentEffect(
-		done ? "✓" : "✗",
-		event,
-		done ? "finished" : "failed",
-		meta.length > 0 ? `·${meta.join("·")}` : "",
-	);
-	// A terminal state is a report, not a process: flat tone, auto-dismiss.
-	effect.tone = done ? "success" : "warning";
-	effect.level = "info";
-	return [effect];
+	return [
+		{
+			kind: "subagents-complete",
+			handle: event.handle,
+			status: event.status,
+			turns: event.turns,
+			totalTokens: event.totalTokens,
+		},
+	];
 }
 
 // ---------------------------------------------------------------------------

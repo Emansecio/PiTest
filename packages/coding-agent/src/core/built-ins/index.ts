@@ -24,6 +24,7 @@ import {
 import { getCurrentTokenGovernor } from "../token-governor.ts";
 import type { ReadDedupeStore } from "../tools/read.ts";
 import type { WarmFileCache } from "../tools/warm-file-cache.ts";
+import { createBrowserToolRoutingExtension } from "./browser-tool-routing-extension.ts";
 import { createClarifyNudgeExtension } from "./clarify-nudge-extension.ts";
 import { createCoordinatorExtension } from "./coordinator-extension.ts";
 import { createDestructiveCommandGuardExtension } from "./destructive-command-guard-extension.ts";
@@ -38,6 +39,7 @@ import { createMcpExtension } from "./mcp-extension.ts";
 import { createMemoryExtension } from "./memory-extension.ts";
 import { createPatchAuditExtension } from "./patch-audit-extension.ts";
 import { createPermissionsExtension } from "./permissions-extension.ts";
+import { createSkillRoutingExtension } from "./skill-routing-extension.ts";
 import { createSubtreeContextExtension } from "./subtree-context-extension.ts";
 import { createTaskRigorExtension } from "./task-rigor-extension.ts";
 
@@ -63,6 +65,8 @@ export interface BuiltInExtensionsOptions {
 	getAvailableTools: () => AgentTool[];
 	/** Rebuilds cwd-sensitive tools with the session's configured options for worktree children. */
 	retargetToolsForCwd?: (tools: AgentTool[], cwd: string) => AgentTool[];
+	/** Whether the native browser subsystem is available for this session. */
+	isChromeDevtoolsEnabled?: () => boolean;
 	/** Returns the parent's loaded skills — used by the coordinator for `inherit_skills`. */
 	getSkills?: () => import("../skills.ts").Skill[];
 	/** Audit hook for permission decisions (telemetry / logs). */
@@ -154,6 +158,12 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 		// append concise rigor instructions. Model-agnostic, fail-open; opt out
 		// PIT_NO_TASK_RIGOR.
 		createTaskRigorExtension(),
+		// Skill routing: keep the stable prompt to a retrieval hint and append only
+		// the few skill cards relevant to the current request.
+		createSkillRoutingExtension({ cwd: options.cwd, getSkills: options.getSkills }),
+		// Browser routing: Chrome DevTools schemas stay off normal turns and are
+		// activated per prompt when the request clearly needs them.
+		createBrowserToolRoutingExtension({ isEnabled: options.isChromeDevtoolsEnabled }),
 		// Clarify nudge: when a mutating prompt looks under-specified AND an
 		// interactive answer surface is bound, append a `<clarify_first>` directive
 		// so the model asks up to 3 targeted questions via `ask` before its first

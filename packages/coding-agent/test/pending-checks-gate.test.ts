@@ -34,6 +34,8 @@ function bgJob(over: Partial<BashBackgroundJob>): BashBackgroundJob {
 		promotedAt: 0,
 		exited: false,
 		exitCode: null,
+		lastOutputAt: 0,
+		resultSeen: false,
 		ringBuffer: "",
 		ringTruncated: false,
 		kill: () => {},

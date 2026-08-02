@@ -18,6 +18,7 @@ import { resolveToCwd } from "../tools/path-utils.ts";
 import { formatSize, truncateHead } from "../tools/truncate.ts";
 import {
 	closeFile,
+	documentDiagnosticsPull,
 	ensureFileOpen,
 	getOrCreateClient,
 	refreshFile,
@@ -328,6 +329,7 @@ export async function runDiagnostics(
 						signal,
 						minVersion,
 						expectedDocumentVersion,
+						pull: documentDiagnosticsPull(client, uri),
 					});
 					return { serverName, result };
 				}),

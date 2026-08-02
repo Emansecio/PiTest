@@ -19,6 +19,7 @@ export interface SlashCommandHost {
 	getTodoSummaryText(): string;
 	showSettingsSelector(): void | Promise<void>;
 	showThemeSelector(): void | Promise<void>;
+	showJobsSelector(): void | Promise<void>;
 	showConfigSelector(): void | Promise<void>;
 	showTreeSelector(): void | Promise<void>;
 	showUserMessageSelector(): void | Promise<void>;
@@ -57,6 +58,7 @@ export const DISPATCHED_SLASH_COMMAND_NAMES = [
 	"pin",
 	"unpin",
 	"plan",
+	"jobs",
 	"settings",
 	"theme",
 	"mouse",
@@ -85,6 +87,7 @@ export const exactSlashCommands = new Map<string, (host: SlashCommandHost) => vo
 	// touching the checker directly, so mode-change side effects (footer status,
 	// role swap, fusion handling) run exactly as they do for `/permission-mode`.
 	["/plan", (host) => host.promptExtensionCommand("/permission-mode plan")],
+	["/jobs", (host) => host.showJobsSelector()],
 	["/settings", (host) => host.showSettingsSelector()],
 	["/theme", (host) => host.showThemeSelector()],
 	["/mouse", (host) => host.toggleMouse()],

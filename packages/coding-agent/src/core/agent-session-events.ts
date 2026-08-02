@@ -114,7 +114,7 @@ export type AgentSessionEvent =
 			unresolvedHigh?: number;
 	  }
 	| { type: "subagent_start"; handle: string }
-	| { type: "subagent_progress"; handle: string; turn: number; lastTool?: string }
+	| { type: "subagent_progress"; handle: string; turn: number; lastTool?: string; totalTokens?: number }
 	| { type: "subagent_complete"; handle: string; status: "done" | "error"; turns?: number; totalTokens?: number }
 	/** Fired when `prompt()` finishes post-turn gates (verification / pending checks / goal loop). */
 	| { type: "prompt_end" };

@@ -364,6 +364,8 @@ describe("bash job surface: bash({jobId}) polls and kills promoted jobs", () => 
 			promotedAt: Date.now() - 1_000,
 			exited: false,
 			exitCode: null,
+			lastOutputAt: Date.now() - 1_000,
+			resultSeen: false,
 			ringBuffer: "",
 			ringTruncated: false,
 			kill: () => {

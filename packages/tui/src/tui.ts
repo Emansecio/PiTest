@@ -23,8 +23,10 @@ import {
 import {
 	extractSegments,
 	normalizeTerminalOutput,
+	paintReverseSpan,
 	sliceByColumn,
 	sliceWithWidth,
+	stripAnsiCodes,
 	truncateToWidth,
 	visibleWidth,
 } from "./utils.ts";
@@ -733,6 +735,32 @@ export class TUI extends Container {
 	// only fires after the gesture actually pauses) while roughly halving the
 	// dead-click window the old 500ms left behind.
 	private static readonly MOUSE_IDLE_RESUME_MS = 300;
+	// --- In-app text selection over the committed frame ---
+	// Started by an unclaimed LEFT press (transcript / blank area): drags extend
+	// it, the release copies it via onCopySelection, right-click re-copies while
+	// it is highlighted. Coordinates are FRAME rows (indices into previousLines)
+	// + visible columns; frameLen/frameWidth/frameText pin the frame identity — any
+	// commit whose content or geometry differs (content shifted, resize reflow)
+	// drops the selection instead of highlighting the wrong text. Shift+drag remains the
+	// native-terminal escape hatch (shifted presses bypass in-app selection).
+	private textSelection: {
+		anchorRow: number;
+		anchorCol: number;
+		headRow: number;
+		headCol: number;
+		frameLen: number;
+		frameWidth: number;
+		frameText: readonly string[];
+	} | null = null;
+	// True while the selection's button is still held (press seen, no release).
+	private textSelecting = false;
+	/**
+	 * Consumer hook for the in-app text selection: receives the PLAIN text (ANSI
+	 * stripped, per-line right-trimmed) when a copy fires — on drag release, or
+	 * on right-click while a selection is highlighted. The TUI owns no clipboard;
+	 * the embedding app does (e.g. coding-agent's copyToClipboard + status line).
+	 */
+	onCopySelection?: (text: string) => void;
 
 	constructor(terminal: Terminal, showHardwareCursor?: boolean) {
 		super();
@@ -1267,6 +1295,12 @@ export class TUI extends Container {
 		if (this.mouseSuspended && !isMouseSequence(data)) {
 			this.resumeMouse();
 		}
+		// Typing invalidates the highlight: the frame is about to change under it
+		// (the geometry guard would catch most cases, but a same-length frame with
+		// different content would keep a stale highlight).
+		if (this.textSelection !== null && !isMouseSequence(data)) {
+			this.clearTextSelection();
+		}
 		const mouseEvent = parseMouse(data);
 		if (mouseEvent) {
 			this.consumeMouse(mouseEvent);
@@ -1318,6 +1352,8 @@ export class TUI extends Container {
 		this.terminal.setMouseEnabled?.(enabled);
 		this.clearMouseIdleTimer();
 		this.mouseSuspended = false;
+		// Tracking off → the in-app selection can no longer be extended or copied.
+		if (!enabled) this.clearTextSelection();
 	}
 
 	/**
@@ -1328,7 +1364,35 @@ export class TUI extends Container {
 	 */
 	private consumeMouse(ev: MouseEvent): void {
 		if (ev.type === "wheel") {
+			// Scrolling shifts the visible content out from under the highlight.
+			this.clearTextSelection();
 			this.autoSuspendMouse();
+			return;
+		}
+		// Active in-app text selection gesture (started by an unclaimed left
+		// press): drags move the head, the release finishes AND copies — the
+		// terminal idiom where lifting the button puts the selection on the
+		// clipboard. Handled before pointer capture: the two are mutually
+		// exclusive (a claimed press never starts a text selection).
+		if (this.textSelecting && (ev.type === "drag" || ev.type === "release")) {
+			const selection = this.textSelection;
+			if (selection) {
+				const viewportTop = Math.max(0, this.previousLines.length - this.terminal.rows);
+				selection.headRow = viewportTop + ev.y - 1;
+				selection.headCol = ev.x - 1;
+			}
+			if (ev.type === "release") {
+				this.textSelecting = false;
+				this.copyTextSelection();
+			}
+			this.requestInputRender();
+			return;
+		}
+		// Right-click with a finished selection still highlighted: copy it again
+		// (the terminal's own right-click-copy is unreachable while SGR tracking
+		// is on, so the TUI supplies it). The selection stays highlighted.
+		if (ev.type === "press" && ev.button === "right" && this.hasTextSelection()) {
+			this.copyTextSelection();
 			return;
 		}
 		// Active pointer capture: every drag/release of the gesture goes to the
@@ -1345,8 +1409,12 @@ export class TUI extends Container {
 			return;
 		}
 		// A press always starts a fresh gesture; a stale capture (release swallowed
-		// by a suspend, or lost mid-stream) must not leak into it.
-		if (ev.type === "press") this.mouseCapture = null;
+		// by a suspend, or lost mid-stream) must not leak into it — and any press
+		// supersedes a lingering highlight (a new selection re-anchors below).
+		if (ev.type === "press") {
+			this.mouseCapture = null;
+			this.clearTextSelection();
+		}
 		// A capturing modal owns the screen. Clicks INSIDE its composited rect are
 		// routed down its component tree (so a SelectList in an overlay is as
 		// clickable as one inline); everything else — outside the rect, unclaimed
@@ -1383,11 +1451,33 @@ export class TUI extends Container {
 		}
 		const hit = this.hitTest(ev.x, ev.y);
 		if (!hit || !hit.target.onMouse(ev, hit.localRow, hit.localCol)) {
-			// An unclaimed PRESS (transcript, blank area) means the user wants the
-			// terminal's own selection there — same escape hatch as the wheel:
-			// suspend tracking so the NEXT drag selects natively; any keypress (or
-			// the idle timer) re-arms. Only presses suspend — an unclaimed drag/
-			// release tail from a claimed gesture must not kill tracking mid-turn.
+			// An unclaimed LEFT press over rendered content anchors an IN-APP text
+			// selection (transcript copy): the drag extends it, the release copies.
+			// Native terminal selection stays reachable via shift+drag (shifted
+			// presses bypass in-app selection and suspend tracking).
+			if (ev.type === "press" && ev.button === "left" && !ev.shift && this.previousLines.length > 0) {
+				const viewportTop = Math.max(0, this.previousLines.length - this.terminal.rows);
+				const row = viewportTop + ev.y - 1;
+				const col = ev.x - 1;
+				this.textSelection = {
+					anchorRow: row,
+					anchorCol: col,
+					headRow: row,
+					headCol: col,
+					frameLen: this.previousLines.length,
+					frameWidth: this.terminal.columns,
+					frameText: this.previousLines.map(stripAnsiCodes),
+				};
+				this.textSelecting = true;
+				this.requestInputRender();
+				return;
+			}
+			// Any other unclaimed PRESS (middle/right with nothing selected, or a
+			// left press before anything rendered) falls back to the terminal: same
+			// escape hatch as the wheel — suspend tracking so the next gesture is
+			// native; any keypress (or the idle timer) re-arms. Only presses
+			// suspend — an unclaimed drag/release tail from a claimed gesture must
+			// not kill tracking mid-turn.
 			if (ev.type === "press") this.autoSuspendMouse();
 			return;
 		}
@@ -1467,6 +1557,86 @@ export class TUI extends Container {
 	 * the rest of the gesture. Idempotent within a gesture — a second wheel report
 	 * does not re-write the disable. Every tick refreshes the idle safety timer.
 	 */
+	/** Normalized selection span (start before end), or null when collapsed/absent. */
+	private getNormalizedTextSelection(): {
+		start: { row: number; col: number };
+		end: { row: number; col: number };
+	} | null {
+		const selection = this.textSelection;
+		if (!selection) return null;
+		const anchor = { row: selection.anchorRow, col: selection.anchorCol };
+		const head = { row: selection.headRow, col: selection.headCol };
+		if (anchor.row === head.row && anchor.col === head.col) return null;
+		const anchorFirst = anchor.row < head.row || (anchor.row === head.row && anchor.col <= head.col);
+		return anchorFirst ? { start: anchor, end: head } : { start: head, end: anchor };
+	}
+
+	private hasTextSelection(): boolean {
+		return this.getNormalizedTextSelection() !== null;
+	}
+
+	/** Drop the in-app text selection (if any) and repaint to clear the highlight. */
+	private clearTextSelection(): void {
+		if (this.textSelection === null) return;
+		this.textSelection = null;
+		this.textSelecting = false;
+		this.requestInputRender();
+	}
+
+	/**
+	 * Copy the current selection's PLAIN text through onCopySelection. The text
+	 * comes from the committed frame (previousLines) — the same lines the
+	 * highlight was painted over — with ANSI stripped and each line right-trimmed
+	 * (rows are padded/clamped cells, not meaningful trailing whitespace).
+	 * The end cell is inclusive, matching what the user sees highlighted.
+	 */
+	private copyTextSelection(): boolean {
+		const span = this.getNormalizedTextSelection();
+		if (!span) return false;
+		const lastRow = Math.min(span.end.row, this.previousLines.length - 1);
+		const lines: string[] = [];
+		for (let row = Math.max(0, span.start.row); row <= lastRow; row++) {
+			const startCol = row === span.start.row ? span.start.col : 0;
+			const endCol = row === span.end.row ? span.end.col + 1 : Number.MAX_SAFE_INTEGER;
+			const styled = sliceByColumn(this.previousLines[row] ?? "", startCol, Math.max(0, endCol - startCol));
+			lines.push(stripAnsiCodes(styled).replace(/\s+$/, ""));
+		}
+		const text = lines.join("\n");
+		if (text.trim().length === 0) return false;
+		this.onCopySelection?.(text);
+		return true;
+	}
+
+	/**
+	 * Paint the selection highlight over a freshly composed frame, right before
+	 * the diff/commit. A frame whose content or geometry no longer matches the one
+	 * the selection was made against drops the selection instead of highlighting
+	 * the wrong cells.
+	 */
+	private applyTextSelectionHighlight(lines: string[], width: number): string[] {
+		const selection = this.textSelection;
+		if (!selection) return lines;
+		const frameChanged =
+			lines.length !== selection.frameLen ||
+			width !== selection.frameWidth ||
+			lines.some((line, index) => stripAnsiCodes(line) !== selection.frameText[index]);
+		if (frameChanged) {
+			this.textSelection = null;
+			this.textSelecting = false;
+			return lines;
+		}
+		const span = this.getNormalizedTextSelection();
+		if (!span) return lines;
+		const out = lines.slice();
+		const lastRow = Math.min(span.end.row, out.length - 1);
+		for (let row = Math.max(0, span.start.row); row <= lastRow; row++) {
+			const startCol = row === span.start.row ? span.start.col : 0;
+			const endCol = row === span.end.row ? span.end.col + 1 : Number.MAX_SAFE_INTEGER;
+			out[row] = paintReverseSpan(out[row] ?? "", startCol, Math.max(0, endCol - startCol));
+		}
+		return out;
+	}
+
 	private autoSuspendMouse(): void {
 		if (!this.mouseSuspended) {
 			this.terminal.disableMouse?.();
@@ -2439,6 +2609,12 @@ export class TUI extends Container {
 		const cursorPos = cursor.pos;
 
 		newLines = this.applyLineResets(newLines, cursor.strippedRow, cursor.strippedLine);
+
+		// In-app text selection highlight, painted into the frame so the normal
+		// diff repaints exactly the affected rows (and un-paints them on clear).
+		if (this.textSelection !== null) {
+			newLines = this.applyTextSelectionHighlight(newLines, width);
+		}
 
 		// Helper to repaint every line. clearMode selects how much is wiped first:
 		//   "none"   → no clear (first render onto an assumed-clean screen)

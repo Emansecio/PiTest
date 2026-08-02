@@ -1052,6 +1052,7 @@ describe("InteractiveMode.onEscape mid-turn interrupt", () => {
 			getInterruptiblePendingTools: () => tools,
 			restoreQueuedMessagesToEditor: vi.fn(),
 			disposeFusionLive: vi.fn(),
+			disposeAgentsLive: vi.fn(),
 			deferredTurnDone: {},
 			stopWorkingLoader: vi.fn(),
 			showStatus: vi.fn(),
@@ -1093,7 +1094,8 @@ describe("InteractiveMode.onEscape mid-turn interrupt", () => {
 		];
 		const { fakeThis, onEscape } = captureOnEscape(tools);
 		onEscape();
-		expect(fakeThis.promptInterruptChoice).toHaveBeenCalledWith(tools);
+		// Second arg: stalled background jobs riding along as kill options (none here).
+		expect(fakeThis.promptInterruptChoice).toHaveBeenCalledWith(tools, []);
 		expect(fakeThis.session.interrupt).not.toHaveBeenCalled();
 		expect(fakeThis.restoreQueuedMessagesToEditor).not.toHaveBeenCalled();
 	});

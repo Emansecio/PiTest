@@ -721,7 +721,7 @@ async function runSpawned(
 				}
 			}
 			try {
-				options.onSubagentEvent?.({ turn: turnCount, lastTool });
+				options.onSubagentEvent?.({ turn: turnCount, lastTool, totalTokens: usage.totalTokens });
 			} catch {
 				// Lifecycle telemetry is best-effort; never fail the run because a TUI
 				// or event sink threw while consuming progress.

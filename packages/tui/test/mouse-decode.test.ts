@@ -203,9 +203,12 @@ describe("parseMouse", () => {
 			assert.strictEqual(parseMouse("\x1b[<0;10;5Mtrailing"), undefined);
 		});
 
-		it("rejects the legacy X10 ESC[M form (SGR-only by design)", () => {
-			// ESC [ M followed by 3 raw coordinate bytes.
-			assert.strictEqual(parseMouse("\x1b[M !!"), undefined);
+		it("decodes the legacy X10 ESC[M form for console compatibility", () => {
+			// ESC [ M followed by raw bytes: button 0, column 1, row 1.
+			assert.deepStrictEqual(
+				parseMouse("\x1b[M !!"),
+				ev("\x1b[M !!", { type: "press", button: "left", x: 1, y: 1 }),
+			);
 		});
 
 		it("rejects an ordinary key sequence (arrow up)", () => {
@@ -226,9 +229,12 @@ describe("isMouseSequence", () => {
 		assert.strictEqual(isMouseSequence("\x1b[<0;1"), true);
 	});
 
+	it("is true for the legacy X10 mouse prefix (ESC [ M)", () => {
+		assert.strictEqual(isMouseSequence("\x1b[M"), true);
+	});
+
 	it("is false for non-mouse sequences and text", () => {
 		assert.strictEqual(isMouseSequence("\x1b[A"), false);
-		assert.strictEqual(isMouseSequence("\x1b[M !!"), false); // legacy X10 form
 		assert.strictEqual(isMouseSequence("abc"), false);
 		assert.strictEqual(isMouseSequence(""), false);
 	});

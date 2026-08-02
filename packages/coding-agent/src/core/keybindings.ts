@@ -24,6 +24,8 @@ export interface AppKeybindings {
 	"app.tools.expand": true;
 	"app.thinking.toggle": true;
 	"app.session.toggleNamedFilter": true;
+	"app.jobs.toggle": true;
+	"app.jobs.kill": true;
 	"app.editor.external": true;
 	"app.message.followUp": true;
 	"app.message.steer": true;
@@ -92,6 +94,17 @@ export const KEYBINDINGS = {
 	"app.session.toggleNamedFilter": {
 		defaultKeys: "ctrl+n",
 		description: "Toggle named session filter",
+	},
+	// alt+j because ctrl+b (Claude Code's chord) is emacs cursor-left here.
+	"app.jobs.toggle": {
+		defaultKeys: "alt+j",
+		description: "Open background tasks panel",
+	},
+	// Selector-context only (no editor focused), so ctrl+k never collides with
+	// the editor's delete-to-line-end.
+	"app.jobs.kill": {
+		defaultKeys: "ctrl+k",
+		description: "Kill selected background task",
 	},
 	"app.editor.external": {
 		defaultKeys: "ctrl+g",

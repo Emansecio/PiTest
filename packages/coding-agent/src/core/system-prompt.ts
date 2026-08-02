@@ -13,7 +13,7 @@ import {
 } from "./frequent-files.ts";
 import { isWeakModelProfile } from "./repair-note-policy.ts";
 import { getCurrentSessionContract } from "./session-contract.ts";
-import { formatSkillsForPrompt, type Skill } from "./skills.ts";
+import { formatSkillsForPrompt, formatSkillsHintForPrompt, type Skill } from "./skills.ts";
 import { getCurrentToolDiscoveryIndex } from "./tool-discovery.ts";
 
 /**
@@ -26,6 +26,9 @@ import { getCurrentToolDiscoveryIndex } from "./tool-discovery.ts";
  * user content, not harness style guidance.
  */
 export type SystemPromptProfile = "full" | "compact";
+
+/** Skill catalog rendering mode. Full is retained for API compatibility. */
+export type SkillsPromptMode = "full" | "hint";
 
 /**
  * Resolve the system-prompt tier for `model`. `PIT_NO_TIERED_PROMPT` disables
@@ -79,6 +82,8 @@ export interface BuildSystemPromptOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Pre-loaded skills. */
 	skills?: Skill[];
+	/** Defer the full catalog to search_skills and per-turn routing. */
+	skillsMode?: SkillsPromptMode;
 	/**
 	 * Optional override for the number of hidden tools discoverable via
 	 * `search_tool_bm25`. When omitted, falls back to
@@ -163,6 +168,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		groundedContext,
 		contextOccupancyPercent,
 		profile,
+		skillsMode = "full",
 	} = options;
 	const promptCwd = cwd.replace(/\\/g, "/");
 	const resolvedHiddenToolCount = hiddenToolCount ?? getCurrentToolDiscoveryIndex()?.listHidden().length ?? 0;
@@ -191,7 +197,12 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			parts.push("</project_context>\n");
 		}
 		if (hasRead && skills.length > 0) {
-			parts.push(formatSkillsForPrompt(skills, undefined, cwd));
+			const hasSkillDiscovery = !selectedTools || selectedTools.includes("search_skills");
+			parts.push(
+				skillsMode === "hint" && hasSkillDiscovery
+					? formatSkillsHintForPrompt()
+					: formatSkillsForPrompt(skills, undefined, cwd),
+			);
 		}
 		// Marker separates cache-stable prefix from per-turn dynamic suffix.
 		// Providers (anthropic, bedrock) split here and attach cache_control to prefix only.
@@ -381,7 +392,6 @@ export function buildToolsAndGuidelinesSection(options: {
 	const hasFind = tools.includes("find");
 	const hasLs = tools.includes("ls");
 	const hasRead = tools.includes("read");
-	const hasPreviewTool = tools.includes("preview") || tools.some((name) => name.startsWith("chrome_devtools"));
 
 	if (!isCompact) {
 		addGuideline(
@@ -428,14 +438,17 @@ export function buildToolsAndGuidelinesSection(options: {
 			"Use edit for surgical changes to an existing file (multiple edits[] entries in one call). Use write only for new files or full rewrites.",
 		);
 	}
-	if ((tools.includes("edit") || tools.includes("write")) && hasBash) {
+	const hasInTurnVerification = (promptGuidelines ?? []).some((guideline) =>
+		guideline.trim().startsWith("Verify before replying:"),
+	);
+	if ((tools.includes("edit") || tools.includes("write")) && hasBash && !hasInTurnVerification) {
 		addGuideline(
 			"After a non-trivial code change, run the affected test/build/lint (or re-read); report exactly what passed, failed, or was skipped. Verify each step of multi-step work.",
 		);
 	}
-	if (!isCompact && (tools.includes("edit") || tools.includes("write")) && hasPreviewTool) {
+	if (tools.includes("edit") || tools.includes("write")) {
 		addGuideline(
-			"After changing rendered UI, open it, smoke-test relevant controls, and check console/network errors; a screenshot alone is not a verified functional UI.",
+			"Visual verification: after any change that may affect rendered UI (page, landing page, dashboard, component, style, layout, asset, or responsive behavior), inspect it before reporting done. Use `preview` or Chrome DevTools at relevant viewport(s), then check console/network; discover hidden tools when needed, or state why rendering was unavailable instead of assuming it looks right.",
 		);
 	}
 

@@ -63,6 +63,8 @@ describe("C1/H6: disposeBashBackgroundJobs", () => {
 			promotedAt: Date.now(),
 			exited: false,
 			exitCode: null,
+			lastOutputAt: Date.now(),
+			resultSeen: false,
 			ringBuffer: "",
 			ringTruncated: false,
 			kill: () => {
@@ -77,6 +79,8 @@ describe("C1/H6: disposeBashBackgroundJobs", () => {
 			promotedAt: Date.now(),
 			exited: true,
 			exitCode: 0,
+			lastOutputAt: Date.now(),
+			resultSeen: false,
 			ringBuffer: "",
 			ringTruncated: false,
 			kill: () => {

@@ -253,6 +253,7 @@ export async function createAgentSessionServices(
 			getParentModel: () => parentModelRef.current?.(),
 			getParentSessionId: () => parentSessionIdRef.current,
 			getAvailableTools: () => availableToolsRef.current?.() ?? [],
+			isChromeDevtoolsEnabled: () => settingsManager.getChromeDevtoolsSettings().enabled,
 			retargetToolsForCwd: (tools, targetCwd) =>
 				retargetToolsRef.current?.(tools, targetCwd) ?? retargetToolsForWorktree(tools, targetCwd),
 			// Resolved lazily at subagent-spawn time, well after resourceLoader init.

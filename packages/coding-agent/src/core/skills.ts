@@ -464,6 +464,90 @@ function firstSentence(desc: string, max = 80): string {
 	return truncateWithEllipsis(cut, max);
 }
 
+function shortenSkillPath(absPath: string, cwd?: string): string {
+	const agentDir = getAgentDir();
+	const roots: string[] = [];
+	if (cwd) roots.push(resolve(cwd));
+	if (agentDir) roots.push(resolve(agentDir));
+	const home = homedir();
+	if (home) roots.push(resolve(home));
+
+	let best = absPath;
+	for (const root of roots) {
+		if (!absPath.startsWith(root)) continue;
+		const rel = relative(root, absPath);
+		if (rel && !rel.startsWith("..") && rel.length + 2 < best.length) {
+			best = root === home ? `~/${toPosixPath(rel)}` : toPosixPath(rel);
+		}
+	}
+	return best;
+}
+
+const SKILL_MATCH_STOP_WORDS = new Set([
+	"about",
+	"after",
+	"before",
+	"check",
+	"from",
+	"into",
+	"make",
+	"that",
+	"this",
+	"with",
+	"when",
+	"work",
+]);
+
+function skillWords(value: string): string[] {
+	return [...new Set(value.toLowerCase().match(/[a-z0-9][a-z0-9-]{2,}/g) ?? [])].filter(
+		(word) => !SKILL_MATCH_STOP_WORDS.has(word),
+	);
+}
+
+/** Select a small, deterministic set of skills relevant to the current prompt. */
+export function selectSkillsForPrompt(skills: Skill[], prompt: string, maxSkills = 3): Skill[] {
+	const promptText = prompt.toLowerCase();
+	const promptWords = new Set(skillWords(prompt));
+	return skills
+		.filter((skill) => !skill.disableModelInvocation)
+		.map((skill, index) => {
+			const name = skill.name.toLowerCase();
+			const nameWords = skillWords(skill.name);
+			const descriptionWords = skillWords(skill.description);
+			const exactName = promptWords.has(name) || promptText.includes(`/${name}`) ? 100 : 0;
+			const nameHits = nameWords.filter((word) => promptWords.has(word)).length;
+			const descriptionHits = descriptionWords.filter((word) => promptWords.has(word)).length;
+			const score = exactName + nameHits * 20 + descriptionHits * 2;
+			const relevant = exactName > 0 || nameHits >= 2 || descriptionHits >= 2;
+			return { skill, index, score, relevant };
+		})
+		.filter((entry) => entry.relevant)
+		.sort((a, b) => b.score - a.score || a.index - b.index)
+		.slice(0, maxSkills)
+		.map((entry) => entry.skill);
+}
+
+/** Small cacheable hint used when the full skill catalog is deferred. */
+export function formatSkillsHintForPrompt(): string {
+	return [
+		"\n\nSpecialized skills are available on demand.",
+		"Use search_skills with the task keywords, then read the matching SKILL.md before applying it.",
+	].join(" ");
+}
+
+/** Compact per-turn skill cards. Keep this after the dynamic marker. */
+export function formatSelectedSkillsForPrompt(skills: Skill[], cwd?: string): string {
+	if (skills.length === 0) return "";
+	const lines = ["<relevant_skills>"];
+	for (const skill of skills) {
+		lines.push(
+			`  <skill><name>${escapeXml(skill.name)}</name><summary>${escapeXml(firstSentence(skill.description))}</summary><location>${escapeXml(shortenSkillPath(skill.filePath, cwd))}</location></skill>`,
+		);
+	}
+	lines.push("</relevant_skills>");
+	return lines.join("\n");
+}
+
 export function formatSkillsForPrompt(skills: Skill[], maxSkills = 100, cwd?: string): string {
 	const visibleSkills = skills.filter((s) => !s.disableModelInvocation);
 
@@ -473,30 +557,6 @@ export function formatSkillsForPrompt(skills: Skill[], maxSkills = 100, cwd?: st
 
 	const shown = visibleSkills.slice(0, maxSkills);
 	const omitted = visibleSkills.length - shown.length;
-
-	// Roots to relativize against. Most skill paths live under cwd or the
-	// agent dir (e.g. ~/.pit/skills). Shortest representation wins, falling
-	// back to absolute when not under either root.
-	const agentDir = getAgentDir();
-	const roots: string[] = [];
-	if (cwd) roots.push(resolve(cwd));
-	if (agentDir) roots.push(resolve(agentDir));
-	const home = homedir();
-	if (home) roots.push(resolve(home));
-
-	const shortenPath = (absPath: string): string => {
-		let best = absPath;
-		for (const root of roots) {
-			if (!absPath.startsWith(root)) continue;
-			const rel = relative(root, absPath);
-			if (rel && !rel.startsWith("..") && rel.length + 2 < best.length) {
-				// Tag home-relative with ~ so it stays unambiguous; cwd/agentDir
-				// resolve via the read tool's path aliases.
-				best = root === home ? `~/${toPosixPath(rel)}` : toPosixPath(rel);
-			}
-		}
-		return best;
-	};
 
 	const lines = [
 		"\n\nThe following skills provide specialized instructions for specific tasks.",
@@ -516,7 +576,7 @@ export function formatSkillsForPrompt(skills: Skill[], maxSkills = 100, cwd?: st
 		if (i >= SKILLS_FULL_LIMIT) {
 			indexCount++;
 			lines.push(
-				`  <skill><name>${escapeXml(skill.name)}</name><summary>${escapeXml(firstSentence(skill.description))}</summary><location>${escapeXml(shortenPath(skill.filePath))}</location></skill>`,
+				`  <skill><name>${escapeXml(skill.name)}</name><summary>${escapeXml(firstSentence(skill.description))}</summary><location>${escapeXml(shortenSkillPath(skill.filePath, cwd))}</location></skill>`,
 			);
 		} else {
 			lines.push("  <skill>");
@@ -524,7 +584,7 @@ export function formatSkillsForPrompt(skills: Skill[], maxSkills = 100, cwd?: st
 			lines.push(
 				`    <description>${escapeXml(truncateDescAtWordBoundary(skill.description, SKILLS_FULL_DESC_CAP))}</description>`,
 			);
-			lines.push(`    <location>${escapeXml(shortenPath(skill.filePath))}</location>`);
+			lines.push(`    <location>${escapeXml(shortenSkillPath(skill.filePath, cwd))}</location>`);
 			lines.push("  </skill>");
 		}
 	});

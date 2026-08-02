@@ -10,8 +10,9 @@ Behavioral guidelines to reduce common LLM coding mistakes, derived from [Andrej
 
 **Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
 
-> Tip: pit ships a condensed version of these bullets as an always-on system-prompt
-> pack. Enable it once via `settings.json`:
+> Tip: pit ships a compact pointer to this skill in the system prompt by default.
+> The full guidance is loaded on demand. Set `engineeringStyle` to `default` to
+> remove even that pointer:
 >
 > ```json
 > { "engineeringStyle": "karpathy" }

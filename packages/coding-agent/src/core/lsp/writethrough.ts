@@ -12,6 +12,7 @@ import * as fs from "node:fs/promises";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { LruMap } from "../lru-map.ts";
 import {
+	documentDiagnosticsPull,
 	getOrCreateClient,
 	notifySaved,
 	refreshFile,
@@ -20,7 +21,9 @@ import {
 	waitForProjectLoaded,
 } from "./client.ts";
 import { getServersForFile } from "./config.ts";
+import { reduceByDiagnosticsLedger } from "./diagnostics-ledger.ts";
 import { applyTextEditsToString } from "./edits.ts";
+import { resolveFormatOptions } from "./format-options.ts";
 import { getConfig, isProjectAwareLspServer } from "./manager.ts";
 import type { Diagnostic, LspClient, ServerConfig, TextEdit } from "./types.ts";
 import {
@@ -97,13 +100,6 @@ export function setFormatOnWrite(enabled: boolean): void {
 // =============================================================================
 
 const FORMAT_TIMEOUT_MS = 4000;
-const DEFAULT_FORMAT_OPTIONS = {
-	tabSize: 4,
-	insertSpaces: true,
-	trimTrailingWhitespace: true,
-	insertFinalNewline: true,
-	trimFinalNewlines: true,
-};
 
 /**
  * Format `content` for `absolutePath` via the first language server that
@@ -129,6 +125,9 @@ export async function maybeFormat(
 	const uri = fileToUri(absolutePath);
 	const deadline = AbortSignal.timeout(FORMAT_TIMEOUT_MS);
 	const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
+	// Per file, from the project's .editorconfig or the content itself — a fixed
+	// width here reindents every file that disagrees with it.
+	const options = resolveFormatOptions(absolutePath, content);
 
 	for (const [, serverConfig] of servers) {
 		try {
@@ -143,7 +142,7 @@ export async function maybeFormat(
 			const edits = (await sendRequest(
 				client,
 				"textDocument/formatting",
-				{ textDocument: { uri }, options: DEFAULT_FORMAT_OPTIONS },
+				{ textDocument: { uri }, options },
 				combined,
 			)) as TextEdit[] | null;
 			if (!edits || edits.length === 0) return { content, formatted: false };
@@ -457,6 +456,7 @@ export async function capturePreWriteDiagnostics(
 				signal: combined,
 				minVersion,
 				expectedDocumentVersion,
+				pull: documentDiagnosticsPull(client, uri),
 			});
 			recordDiagnosticsWaitOutcome(silenceKey, result.fresh);
 			if (!result.fresh) return;
@@ -544,6 +544,7 @@ export async function getPostWriteDiagnostics(
 				signal: combined,
 				minVersion,
 				expectedDocumentVersion,
+				pull: documentDiagnosticsPull(client, uri),
 			});
 			recordDiagnosticsWaitOutcome(silenceKey, result.fresh);
 			// Cross-file scan is independent of the edited-file wait outcome: read
@@ -583,9 +584,17 @@ export async function getPostWriteDiagnostics(
 	// identity) so that edit can skip its pre-write wait.
 	await rememberPostWriteBaseline(absolutePath, serversSignature(servers), unique);
 	const baselineUnique = baselineCompared ? dedupeDiagnostics(baseline) : [];
-	const reportable = (baselineCompared ? filterBaselineDiagnostics(unique, baselineUnique) : unique).filter(
+	const attributed = (baselineCompared ? filterBaselineDiagnostics(unique, baselineUnique) : unique).filter(
 		(d) => (d.severity ?? 1) === 1,
 	);
+	// Cross-write suppression. The baseline filter above fingerprints the RANGE, so
+	// a pre-existing error whose line merely moved survives it and gets re-reported
+	// as introduced by this change. The ledger keys on identity instead. It observes
+	// `unique` — the full post-write set — rather than `attributed`, so a diagnostic
+	// the baseline already filtered is still remembered and cannot resurface later.
+	// Reached only after the `serverNames.length === 0` return above, so `unique` is
+	// always a real observation and never an empty "wait timed out" set.
+	const reportable = reduceByDiagnosticsLedger(uri, unique, attributed);
 
 	if (reportable.length === 0) {
 		return {

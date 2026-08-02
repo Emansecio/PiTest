@@ -579,7 +579,7 @@ not want failures from an earlier step to trigger an early escalation later.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `engineeringStyle` | string | `"karpathy"` | Style pack appended to the system prompt's `Guidelines:` section. `"karpathy"` applies the Karpathy LLM-coding guideline bullets; `"default"` is a no-op. Unknown values resolve to `"karpathy"` |
+| `engineeringStyle` | string | `"karpathy"` | Compact style pointer appended to the system prompt's `Guidelines:` section. `"karpathy"` points to the on-demand `karpathy-guidelines` skill; `"default"` is a no-op. Unknown values resolve to `"karpathy"` |
 
 ### Autonomous Goal
 

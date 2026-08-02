@@ -343,6 +343,13 @@ export interface LspServerCapabilities {
 	documentSymbolProvider?: boolean;
 	workspaceSymbolProvider?: boolean;
 	documentFormattingProvider?: boolean;
+	/**
+	 * Pull-model diagnostics (LSP 3.17). Servers advertise an object, not a
+	 * boolean — only its presence is consulted.
+	 */
+	diagnosticProvider?:
+		| boolean
+		| { identifier?: string; interFileDependencies?: boolean; workspaceDiagnostics?: boolean };
 	[key: string]: unknown;
 }
 

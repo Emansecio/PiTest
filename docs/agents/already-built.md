@@ -40,6 +40,7 @@ The expensive, "obvious" wins are done. This subsystem is mature.
 - **Prompt cache** — 4 Anthropic cache breakpoints (tools / system-static / compaction-summary / last-user) in `packages/ai/src/providers/anthropic.ts`; stable `prompt_cache_key` for OpenAI. `SYSTEM_PROMPT_DYNAMIC_MARKER` (`packages/ai/src/types.ts`) keeps everything volatile (date, cwd, git branch, frequent-files, hot outlines) in the **suffix**, OUT of the cached prefix (`core/system-prompt.ts`).
 - **Cache telemetry** — `_trackPrefixStability` (`core/agent-session.ts`, counts prefix rebuilds by reason) + usage-derived `computeCacheStats` (`core/cache-stats.ts`, `instabilityTurn`, surfaced in the TUI). Measurement is already instrumented.
 - **Tool discovery** — hidden tools via `search_tool_bm25`: inactive tools are kept OUT of the prompt's tool schema until surfaced (`toolDiscovery`, default-ON).
+- **Turn-scoped capability routing** — `browser-tool-routing-extension.ts` keeps the Chrome/preview family out of normal turns and activates a small intent-specific subset for browser prompts; `skill-routing-extension.ts` keeps the full skill catalog out of the cacheable prefix and surfaces only matched cards.
 - **Schema-error echo cap** — `packages/ai/src/utils/validation.ts` truncates long string values in the echoed args (keeps keys/hints).
 
 ## Tools (single registry)

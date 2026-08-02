@@ -154,6 +154,9 @@ zero config; as variáveis abaixo são os kill-switches/knobs.
 | `PIT_NO_EDIT_BASE_CACHE` | Desativa o reuso, pelo `edit.execute()`, do base cache keyed por `(absolutePath, mtimeMs)` que o preview em streaming já popula — todo execute volta a ler o arquivo do disco. O reuso exige igualdade exata de `mtimeMs` (stat fresco); mismatch/miss cai no read de disco. Existe porque o reuso muda quais bytes o execute enxerga numa janela de corrida dentro do mesmo tick de mtime. | OFF (cache ligado) | `tools/edit.ts` (`baseCacheEnabled`) | `isTruthyEnvFlag` |
 | `PIT_BASH_SPARE_POOL` | Tamanho do pool de shells pré-aquecidos do tool `bash` (spares keyed por contexto shell+args+cwd+env, refill assíncrono após consumo, evicção LRU + TTL idle de 30 s — o TTL limita quanto tempo um processo ocioso segura handle de cwd no Windows). `0` (ou valor inválido/não positivo) desativa o pooling por completo. | `2` | `tools/bash.ts` `resolveSparePoolSize` | numérica (inteiro ≥ 0) |
 | `PIT_EXIT_STDIO_GRACE_MS` | Graça base (ms) pós-`exit` esperando o `end` de stdout/stderr antes de finalizar um comando (caso Windows de pipe herdado por descendente). A base curta é ESTENDIDA em fatias até o teto de 100 ms apenas enquanto output ainda chega (sinal de flush de daemon), então comando rápido finaliza em ~25 ms e flush de daemon nunca é clipado. Teto = `max(100, base)`. | `25` | `utils/child-process.ts` `resolveExitStdioBaseGraceMs` | numérica (ms ≥ 0) |
+| `PIT_BASH_AUTO_BACKGROUND_SECONDS` | Threshold (s) de auto-background do tool `bash`: comando SEM `timeout` explícito que ultrapassa o threshold é PROMOVIDO a job rastreado (`bg-N`, poll/kill via `jobId`) em vez de segurar o turno. `0`/não positivo desativa (comando sem timeout roda até terminar). Comandos de verificação (test/check/lint) nunca são promovidos. | `60` | `tools/bash.ts` `resolveAutoBackgroundSeconds` | numérica (s > 0) |
+| `PIT_BASH_BACKGROUND_STARTUP_MS` | Janela de startup (ms) do `background: true` explícito: o comando tem esse tempo para falhar rápido em foreground (flag errada, binário ausente) antes de ser destacado como job. | `250` | `tools/bash.ts` `resolveBackgroundStartupMs` | numérica (ms ≥ 0) |
+| `PIT_BASH_STALL_SECONDS` | Janela (s) de detecção de stall de job em background: job ainda rodando, que NÃO é watcher/dev-server, sem output há mais que a janela é marcado `stalled` — aparece no poll do modelo (com hint de kill), no chip `bg:N` do footer (warning) e como opção de kill no picker de Esc. Só detecção; nada é morto automaticamente. `0`/não positivo desativa. | `300` | `tools/bash.ts` `resolveBgStallSeconds` / `isBashBackgroundJobStalled` | numérica (s > 0) |
 | `PIT_COMPACT_SOFT_RATIO` | Multiplicador da banda soft preditiva que dispara a compactação em BACKGROUND (sibling model barato, durante idle) antes do hard wall síncrono. `1.0` = banda legada (`shouldCompactSoft`); maior dispara mais cedo, tornando mais provável que o resumo esteja pronto antes do próximo send (evita a espera visível de compactação síncrona). Clamp `[1.0, 4.0]`; não numérico cai no default. O caminho hard síncrono permanece intocado como safety net. | `1.5` | `agent-session-compaction.ts` `parseCompactSoftRatio` / `shouldStartBackgroundCompaction` | numérica |
 
 ### LSP — memória de falha/silêncio (auditoria adversarial 2026-07-17)
@@ -188,6 +191,83 @@ inexistente ou cache vazio caem no caminho antigo.
 | Variável | Efeito | Default | Onde é lida | Convenção |
 |---|---|---|---|---|
 | `PIT_NO_LSP_BASELINE_REUSE` | Desativa o reuso do último resultado pós-write como baseline pré-write — toda edição volta a pagar a espera de publish fresco do conteúdo ANTIGO antes de escrever. Sem a flag, o reuso exige igualdade exata de `(mtimeMs, size)` do arquivo e da assinatura dos servidores configurados; qualquer divergência descarta a entrada e cai na espera real. Cache LRU de 64 arquivos, só de sessão. | OFF (reuso ligado) | `lsp/writethrough.ts` `baselineReuseDisabled` | `isTruthyEnvFlag` |
+
+### Ledger de diagnostics cross-write (2026-08-01)
+
+O filtro de baseline pré-write compara o diagnostic INCLUINDO o range, o que
+responde "isso já estava aqui antes deste write?" — a pergunta certa para
+atribuição. Ela erra na repetição: inserir uma linha acima de um erro
+pré-existente move o range, o fingerprint deixa de casar com a baseline, e o
+erro é reportado de novo — sob o enquadramento imperativo do writethrough, como
+"This change introduced 1 error(s)". Não introduziu.
+
+O ledger indexa pela IDENTIDADE do diagnostic (severity + source + code +
+message, sem o range) e guarda, por arquivo, as identidades vistas no último
+conjunto pós-write. Observa o conjunto COMPLETO, não só o que foi reportado: um
+diagnostic que a baseline suprimiu precisa ficar lembrado, senão ressurge no
+primeiro edit que desloca a linha — exatamente o caso que o módulo existe para
+matar. As identidades são substituídas por inteiro a cada observação, então um
+erro corrigido e depois reintroduzido VOLTA a ser reportado. LRU de 64 arquivos,
+só de sessão.
+
+| Variável | Efeito | Default | Onde é lida | Convenção |
+|---|---|---|---|---|
+| `PIT_NO_LSP_DIAG_LEDGER` | Desativa a supressão cross-write — todo write volta a reportar o diagnostic repetido cujo range mudou. | OFF (ledger ligado) | `lsp/diagnostics-ledger.ts` `ledgerDisabled` | `isTruthyEnvFlag` |
+
+### Pull diagnostics (LSP 3.17) (2026-08-01)
+
+A espera de diagnostics era só push (`textDocument/publishDiagnostics`). Servidor
+que só responde `textDocument/diagnostic` sob demanda era indistinguível de um
+servidor mudo: a espera estourava, o memo de silêncio marcava o par
+arquivo+servidor, e o arquivo passava a ser tratado como sem diagnostics.
+
+Agora, quando o servidor anuncia `diagnosticProvider` estaticamente, um probe de
+pull corre EM PARALELO com o stream de push, dentro do mesmo orçamento — nunca o
+estende. O push continua autoritativo (carrega o version stamp do servidor, que o
+relatório de pull não tem); o pull só é adotado se a espera terminar sem push
+aceitável. Um pull que falha, aborta ou devolve relatório `unchanged` resolve
+como "sem resposta" e NÃO encurta a espera do push. O probe é cancelado
+(`$/cancelRequest`) assim que a espera termina, então servidor que faz os dois
+(rust-analyzer) não paga análise extra por edit. Registro dinâmico de capability
+não é consultado — este cliente responde `client/registerCapability` com
+method-not-found, então só a capability estática vale.
+
+| Variável | Efeito | Default | Onde é lida | Convenção |
+|---|---|---|---|---|
+| `PIT_NO_LSP_PULL_DIAGNOSTICS` | Desativa o probe de pull — a espera volta a ser só push, e servidor pull-only volta a parecer mudo. | OFF (pull ligado) | `lsp/client.ts` `supportsDocumentDiagnostics` | `isTruthyEnvFlag` |
+
+### Janela de quiescência para publishes sem versão (2026-08-01)
+
+Servidor que carimba o publish com a versão do documento é fácil: casamento
+exato é autoritativo e aceito na hora. Servidor que publica SEM versão — todos os
+linters do `defaults.ts` (biome, eslint, ruff, rubocop, swiftlint) — não dá nada
+para comparar, e o primeiro publish a chegar depois do nosso `didChange` era
+aceito como fresco. Quando o servidor tinha uma análise do conteúdo PRÉ-edit
+ainda em voo, esse publish é justamente o errado.
+
+A consequência não é só um diagnostic atrasado: o enquadramento pós-write é
+imperativo ("This change introduced N error(s) — fix them"), e o filtro de
+baseline compara contra ele — então um accept stale tanto reporta erro que não
+existe quanto ESCONDE o erro que a edição realmente introduziu.
+
+A aceitação passou a ter dois níveis. `authoritative` (versão casa, ou o caller
+não deu versão para checar) é aceito na chegada. `provisional` (publish sem
+versão) é segurado até o stream ficar quieto por `settleMs`, com a janela
+rearmada a cada novo publish, de modo que o publish em voo é superseded pelo
+fresco. O orçamento total continua limitando tudo: a janela pode atrasar a
+resposta, nunca estender a espera além do `timeoutMs` — e um provisional que
+nunca assentou (orçamento acabou no meio) ainda é devolvido, senão um servidor
+produtivo seria reportado como mudo e armaria o memo de silêncio.
+
+Default de 75ms, bem abaixo dos 250ms do oh-my-pi, porque esta espera acorda pelo
+evento de publish (~1-2ms) em vez de por poll de 100ms: a janela só precisa
+cobrir o intervalo entre o publish stale e o fresco, não um tick de polling em
+cima disso.
+
+| Variável | Efeito | Default | Onde é lida | Convenção |
+|---|---|---|---|---|
+| `PIT_NO_LSP_DIAG_SETTLE` | Desativa a janela — volta a aceitar o primeiro publish sem versão, com o risco de stale. | OFF (janela ligada) | `lsp/utils.ts` `settleDisabled` | `isTruthyEnvFlag` |
+| `PIT_LSP_DIAG_SETTLE_MS` | Largura da janela em ms. | `75` | `lsp/utils.ts` `unversionedSettleMs` | inteiro >= 0 |
 
 ### Absorções do forgecode — onda 1 (2026-07-17)
 

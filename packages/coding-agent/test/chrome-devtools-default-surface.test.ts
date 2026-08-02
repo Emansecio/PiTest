@@ -1,9 +1,7 @@
 /**
- * Regression: the chrome feature (chrome_devtools_* + preview) must be on the
- * default active tool surface so any session can drive Chrome without an
- * explicit allowlist. Previously sdk.ts pinned a lean default-active list that
- * silently dropped every gated feature; the default surface now comes from
- * AgentSession._buildRuntime (single source of truth) honoring the gate.
+ * Regression: the chrome feature (chrome_devtools_* + preview) is turn-scoped.
+ * Normal sessions should not pay its schemas; the browser routing extension
+ * activates a relevant subset from the user's prompt.
  */
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -51,14 +49,11 @@ describe("chrome devtools default active surface", () => {
 		return session;
 	}
 
-	it("activates chrome_devtools_* and preview by default so any session can drive Chrome", async () => {
+	it("keeps the chrome family off the default surface", async () => {
 		const session = await createDefaultSession();
 		const active = session.getActiveToolNames();
-		expect(active).toContain("chrome_devtools_navigate");
-		expect(active).toContain("chrome_devtools_close_page");
-		expect(active).toContain("chrome_devtools_screenshot");
-		expect(active).toContain("chrome_devtools_list_pages");
-		expect(active).toContain("preview");
+		expect(active.some((name) => name.startsWith("chrome_devtools"))).toBe(false);
+		expect(active).not.toContain("preview");
 		await session.dispose();
 	});
 

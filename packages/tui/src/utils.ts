@@ -1186,6 +1186,51 @@ export function sliceWithWidth(
 	return { text: result, width: resultWidth };
 }
 
+/**
+ * Remove every ANSI escape sequence (CSI/OSC/...) from `str`, leaving only the
+ * visible text. A lone/unterminated ESC is dropped as a zero-width byte,
+ * mirroring visibleWidth's treatment. Used by the in-app text selection to turn
+ * a styled frame line into clipboard-ready plain text.
+ */
+export function stripAnsiCodes(str: string): string {
+	if (!str.includes("\x1b")) return str;
+	let out = "";
+	let i = 0;
+	while (i < str.length) {
+		const ansi = extractAnsiCode(str, i);
+		if (ansi) {
+			i += ansi.length;
+			continue;
+		}
+		if (str[i] === "\x1b") {
+			i++;
+			continue;
+		}
+		const nextEsc = str.indexOf("\x1b", i);
+		const end = nextEsc === -1 ? str.length : nextEsc;
+		out += str.slice(i, end);
+		i = end;
+	}
+	return out;
+}
+
+/**
+ * Paint reverse-video over the visible-column span [startCol, startCol+len) of
+ * a styled line. Every SGR sequence embedded INSIDE the span is re-asserted
+ * with reverse (`\x1b[7m`) immediately after it, so a mid-span reset or color
+ * change cannot drop the highlight; the span closes with `\x1b[27m`. A span
+ * that lands entirely past the line's text paints nothing.
+ */
+export function paintReverseSpan(line: string, startCol: number, len: number): string {
+	if (len <= 0) return line;
+	const prefix = sliceByColumn(line, 0, startCol);
+	const mid = sliceByColumn(line, startCol, len);
+	if (mid.length === 0) return line;
+	const suffix = sliceByColumn(line, startCol + len, Number.MAX_SAFE_INTEGER - startCol - len);
+	const midReasserted = mid.replace(/\x1b\[[0-9;]*m/g, (code) => `${code}\x1b[7m`);
+	return `${prefix}\x1b[7m${midReasserted}\x1b[27m${suffix}`;
+}
+
 // Pooled tracker instance for extractSegments (avoids allocation per call)
 const pooledStyleTracker = new AnsiCodeTracker();
 

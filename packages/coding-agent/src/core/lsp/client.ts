@@ -29,6 +29,7 @@ import {
 	untilAborted,
 } from "./internal.ts";
 import type {
+	Diagnostic,
 	LspClient,
 	LspJsonRpcNotification,
 	LspJsonRpcRequest,
@@ -214,6 +215,14 @@ const CLIENT_CAPABILITIES = {
 			codeDescriptionSupport: true,
 			dataSupport: true,
 		},
+		// Pull-model diagnostics (LSP 3.17). Declared alongside publishDiagnostics,
+		// not instead of it: the pull is a fallback raced against the push stream
+		// for servers that answer on request and may never publish on their own.
+		// `dynamicRegistration: false` is honest — client/registerCapability is not
+		// handled here, so only a static `diagnosticProvider` is ever consulted.
+		// `relatedDocumentSupport: false` because only the requested URI's report is
+		// read; related-document entries would be silently dropped.
+		diagnostic: { dynamicRegistration: false, relatedDocumentSupport: false },
 	},
 	window: { workDoneProgress: true },
 	workspace: {
@@ -849,6 +858,63 @@ export async function notifySaved(client: LspClient, filePath: string, signal?: 
 	throwIfAborted(signal);
 	await sendNotification(client, "textDocument/didSave", { textDocument: { uri } });
 	client.lastActivity = Date.now();
+}
+
+// =============================================================================
+// Pull-model diagnostics (LSP 3.17)
+// =============================================================================
+
+/**
+ * True when the server statically advertises `textDocument/diagnostic`. Dynamic
+ * registration is deliberately not consulted: this client answers
+ * `client/registerCapability` with a method-not-found, so it never learns about
+ * a capability registered that way and must not pretend otherwise.
+ *
+ * PIT_NO_LSP_PULL_DIAGNOSTICS=1 forces this off, restoring the push-only wait.
+ */
+export function supportsDocumentDiagnostics(client: LspClient): boolean {
+	if (isTruthyEnvFlag(process.env.PIT_NO_LSP_PULL_DIAGNOSTICS)) return false;
+	return Boolean(client.serverCapabilities?.diagnosticProvider);
+}
+
+/**
+ * One `textDocument/diagnostic` probe. Resolves to the report's items, or to
+ * `undefined` when the server cannot answer — an error, an abort, or a report
+ * that is not a `full` kind (an `unchanged` report only says "same as the
+ * result you already hold under this resultId", which this client does not
+ * track, so it carries no diagnostics of its own).
+ *
+ * `undefined` and `[]` are meaningfully different to the caller: `[]` is the
+ * server stating the file is clean, `undefined` is no answer at all.
+ */
+export async function requestDocumentDiagnostics(
+	client: LspClient,
+	uri: string,
+	signal?: AbortSignal,
+	timeoutMs?: number,
+): Promise<Diagnostic[] | undefined> {
+	try {
+		const report = await sendRequest(client, "textDocument/diagnostic", { textDocument: { uri } }, signal, timeoutMs);
+		if (!report || typeof report !== "object") return undefined;
+		const full = report as { kind?: unknown; items?: unknown };
+		if (full.kind !== "full" || !Array.isArray(full.items)) return undefined;
+		return full.items as Diagnostic[];
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * The pull probe to race against the push stream for `client`, or `undefined`
+ * when the server has no pull support — in which case the wait stays exactly the
+ * push-only wait it was.
+ */
+export function documentDiagnosticsPull(
+	client: LspClient,
+	uri: string,
+): ((signal: AbortSignal | undefined, timeoutMs: number) => Promise<Diagnostic[] | undefined>) | undefined {
+	if (!supportsDocumentDiagnostics(client)) return undefined;
+	return (signal, timeoutMs) => requestDocumentDiagnostics(client, uri, signal, timeoutMs);
 }
 
 /** Refresh a file: drop cached diagnostics, didChange + didSave from disk. */

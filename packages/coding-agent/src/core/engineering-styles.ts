@@ -29,13 +29,25 @@ export function getEngineeringStyleGuidelines(style: EngineeringStyle): string[]
 }
 
 /**
- * Condensed bullets derived from Karpathy's LLM-coding observations
- * (https://x.com/karpathy/status/2015883857489522876). The full skill markdown
- * ships under `examples/skills/karpathy-guidelines/` for users who want the
- * long-form reference loadable as a skill file. The "identify before changing"
- * bullet extends Karpathy's original four with a root-cause grounding rule from
- * Pit's own failure-mode audits. The simplicity bullet includes Ponytail's
- * "prefer less code" decision rule without adding another runtime guard.
+ * Return the small always-on pointer for a style pack. The full guidance stays
+ * in the matching skill and is loaded only when the task needs it.
+ */
+export function getEngineeringStylePromptGuidelines(style: EngineeringStyle): string[] {
+	switch (style) {
+		case "karpathy":
+			return [
+				"Keep changes minimal, use existing project patterns, surface uncertainty, and verify the result; load karpathy-guidelines for the full workflow when needed.",
+			];
+		default:
+			return [];
+	}
+}
+
+/**
+ * Full bullets derived from Karpathy's LLM-coding observations
+ * (https://x.com/karpathy/status/2015883857489522876). The matching skill
+ * ships under `examples/skills/karpathy-guidelines/`; the runtime keeps only a
+ * short pointer in the system prompt and loads the long form on demand.
  *
  * Trade-off: biases toward caution and explicit verification over raw speed.
  * For trivial tasks the model should still use judgment and skip ceremony.

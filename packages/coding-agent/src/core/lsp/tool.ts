@@ -18,6 +18,7 @@ import { resolveToCwd } from "../tools/path-utils.ts";
 import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, formatSize, truncateHead } from "../tools/truncate.ts";
 import {
+	documentDiagnosticsPull,
 	ensureFileOpen,
 	getOrCreateClient,
 	killClient,
@@ -713,6 +714,7 @@ export function createLspToolDefinition(
 												signal,
 												minVersion,
 												expectedDocumentVersion,
+												pull: documentDiagnosticsPull(client, u),
 											});
 											return { uri: u, diagnostics };
 										} catch {

@@ -433,18 +433,81 @@ export interface WaitForDiagnosticsOptions {
 	minVersion?: number;
 	expectedDocumentVersion?: number;
 	allowUnversioned?: boolean;
+	/**
+	 * Optional pull-model probe (LSP 3.17) raced against the push stream. Injected
+	 * rather than called directly because it needs `sendRequest` from client.ts,
+	 * which imports this module — see `documentDiagnosticsPull` there.
+	 *
+	 * Resolving to `[]` is an answer ("clean"); resolving to `undefined` is not,
+	 * and must never cut the push wait short.
+	 */
+	pull?: (signal: AbortSignal | undefined, timeoutMs: number) => Promise<Diagnostic[] | undefined>;
 }
 
-function getAcceptedDiagnostics(
+/**
+ * How much a publish can be trusted.
+ *
+ * `authoritative` — the server stamped it with the document version we asked
+ * about (or the caller gave us no version to check), so it provably describes
+ * the content we synced. Accept at once.
+ *
+ * `provisional` — the server published without a version. It MIGHT describe the
+ * content we synced, or it might be an analysis of the previous content that was
+ * already in flight when our didChange landed. Indistinguishable on its own, so
+ * it is held until the publish stream goes quiet (see the settle window).
+ */
+type DiagnosticsAcceptance = { tier: "authoritative" | "provisional"; diagnostics: Diagnostic[] };
+
+function classifyPublished(
 	published: PublishedDiagnostics | undefined,
 	expectedDocumentVersion?: number,
 	allowUnversioned = true,
-): Diagnostic[] | undefined {
+): DiagnosticsAcceptance | undefined {
 	if (!published) return undefined;
-	if (expectedDocumentVersion === undefined) return published.diagnostics;
-	if (published.version === expectedDocumentVersion) return published.diagnostics;
-	if (allowUnversioned && published.version == null) return published.diagnostics;
+	if (expectedDocumentVersion === undefined) return { tier: "authoritative", diagnostics: published.diagnostics };
+	if (published.version === expectedDocumentVersion) {
+		return { tier: "authoritative", diagnostics: published.diagnostics };
+	}
+	if (allowUnversioned && published.version == null) {
+		return { tier: "provisional", diagnostics: published.diagnostics };
+	}
+	// A version that is present but does not match is a publish for OTHER content —
+	// never acceptable, at any tier.
 	return undefined;
+}
+
+// =============================================================================
+// Settle window for unversioned publishes
+// =============================================================================
+
+/**
+ * Quiet window an unversioned publish must survive before it is accepted.
+ *
+ * Paid ONLY by servers that publish without a version — every linter in
+ * `defaults.ts` (biome, eslint, ruff, rubocop, swiftlint). A server that echoes
+ * the document version is accepted on arrival and never waits.
+ *
+ * Kept far below oh-my-pi's 250ms because this wait is woken by the publish
+ * event (~1-2ms) rather than a 100ms poll: the window only has to outlast the
+ * gap between an in-flight stale publish and the fresh one that supersedes it,
+ * not a polling tick on top of it.
+ */
+const DEFAULT_UNVERSIONED_SETTLE_MS = 75;
+
+/** PIT_NO_LSP_DIAG_SETTLE=1 accepts the first unversioned publish again (stale risk). */
+function settleDisabled(): boolean {
+	return isTruthyEnvFlag(process.env.PIT_NO_LSP_DIAG_SETTLE);
+}
+
+/** Settle window in ms; test/tuning override via PIT_LSP_DIAG_SETTLE_MS. */
+function unversionedSettleMs(): number {
+	if (settleDisabled()) return 0;
+	const raw = process.env.PIT_LSP_DIAG_SETTLE_MS;
+	if (raw !== undefined && raw.trim() !== "") {
+		const parsed = Number(raw);
+		if (Number.isFinite(parsed) && parsed >= 0) return Math.floor(parsed);
+	}
+	return DEFAULT_UNVERSIONED_SETTLE_MS;
 }
 
 /** `fresh` is false when the budget expired without a qualifying publish. */
@@ -493,65 +556,157 @@ export async function waitForDiagnosticsResult(
 	uri: string,
 	options: WaitForDiagnosticsOptions = {},
 ): Promise<WaitForDiagnosticsResult> {
-	const { timeoutMs = 3000, signal, minVersion, expectedDocumentVersion, allowUnversioned = true } = options;
+	const { timeoutMs = 3000, signal, minVersion, expectedDocumentVersion, allowUnversioned = true, pull } = options;
 
-	const evaluate = (): WaitForDiagnosticsResult | undefined => {
+	const classify = (): DiagnosticsAcceptance | undefined => {
 		const versionOk = minVersion === undefined || client.diagnosticsVersion > minVersion;
-		const diagnostics = getAcceptedDiagnostics(
-			client.diagnostics.get(uri),
-			expectedDocumentVersion,
-			allowUnversioned,
-		);
-		if (diagnostics !== undefined && versionOk) return { diagnostics, fresh: true };
-		return undefined;
+		if (!versionOk) return undefined;
+		return classifyPublished(client.diagnostics.get(uri), expectedDocumentVersion, allowUnversioned);
 	};
 
 	// A non-positive budget never entered the old loop, so it never observed the
 	// abort either — it fell straight through to the final check. Preserved.
 	if (timeoutMs > 0) throwIfCancelled(signal);
-	const immediate = evaluate();
-	if (immediate) return immediate;
+	const settleMs = unversionedSettleMs();
+	// Only an authoritative publish short-circuits the wait. A provisional one has
+	// to go through the settle window below — unless the window is switched off, in
+	// which case this is exactly the pre-settle behaviour.
+	const immediate = classify();
+	if (immediate && (immediate.tier === "authoritative" || settleMs <= 0)) {
+		return { diagnostics: immediate.diagnostics, fresh: true };
+	}
 	// Nothing left to wait on: no budget, or the caller's deadline already expired
 	// during setup — waiting a fresh full budget past it would blow the very
 	// latency cap writethrough combined that deadline in to enforce.
 	if (timeoutMs <= 0 || signal?.aborted) return { diagnostics: [], fresh: false };
 
-	await awaitDiagnosticsPublish(client, timeoutMs, signal, () => evaluate() !== undefined);
+	// Fire the pull once, in parallel with the push wait. It shares the budget, so
+	// it cannot extend the wait; it can only end it earlier.
+	let pulled: Diagnostic[] | undefined;
+	// Cancelled the moment the wait ends. Without this, a push that wins in a few
+	// milliseconds would still leave a `textDocument/diagnostic` running against the
+	// server for the rest of the budget — and servers that do BOTH (rust-analyzer)
+	// would pay real analysis work on every edit for an answer nobody reads.
+	// `sendRequest`'s abort path sends `$/cancelRequest`, so the server hears it.
+	const pullAbort = pull ? new AbortController() : undefined;
+	const pullSignal = pullAbort && signal ? AbortSignal.any([signal, pullAbort.signal]) : pullAbort?.signal;
+	// `.catch` attached at creation, not inside the callback below: a probe that
+	// rejects before the callback runs would otherwise be an unhandled rejection.
+	const pullProbe = pull?.(pullSignal, timeoutMs).catch(() => undefined);
+	try {
+		await awaitDiagnosticsPublish(client, timeoutMs, signal, classify, settleMs, (wake) => {
+			// Only a real answer wakes the wait. A pull that fails, aborts, or returns
+			// an `unchanged` report resolves to undefined, and letting THAT end the wait
+			// would abandon a push still due to arrive inside the remaining budget —
+			// turning the pull from a fallback into a regression for servers that do both.
+			pullProbe?.then((items) => {
+				if (items === undefined) return;
+				pulled = items;
+				wake();
+			});
+		});
+	} finally {
+		pullAbort?.abort();
+	}
 
 	throwIfCancelled(signal);
-	return evaluate() ?? { diagnostics: [], fresh: false };
+	// Either tier is taken now. A provisional that never settled — the budget ran
+	// out mid-window — is still the only answer the server gave us, and discarding
+	// it would report a productive server as silent and arm the silence memo.
+	const published = classify();
+	// The push stream stays authoritative: it carries the server's own version
+	// stamp, which the pull report does not.
+	if (published) return { diagnostics: published.diagnostics, fresh: true };
+	if (pulled === undefined) return { diagnostics: [], fresh: false };
+	// Adopt the pull answer into the published map so everything downstream that
+	// reads `client.diagnostics` — the cross-file baseline snapshot, the next
+	// pre-write baseline — sees it exactly as if the server had pushed it.
+	adoptPulledDiagnostics(client, uri, pulled, expectedDocumentVersion);
+	return { diagnostics: pulled, fresh: true };
 }
 
 /**
- * Block until a publish batch makes `isDone()` true, the budget expires, or the
- * signal aborts. Every exit path removes the listener, the timer and the abort
- * handler: a leaked waiter would live as long as the client, and a leaked abort
- * handler accumulates on the long-lived caller signal across edits.
+ * Record a pull report as this client's published diagnostics for `uri`, mirroring
+ * what the `publishDiagnostics` handler does, and bump `diagnosticsVersion` so a
+ * concurrent `minVersion` wait counts it as a new observation. Versioned with the
+ * document version the caller expected when it has one — a pull report carries no
+ * version of its own, and `null` marks it unversioned for `getAcceptedDiagnostics`.
+ */
+function adoptPulledDiagnostics(
+	client: LspClient,
+	uri: string,
+	diagnostics: Diagnostic[],
+	expectedDocumentVersion?: number,
+): void {
+	client.diagnostics.set(canonicalUriKey(uri), {
+		diagnostics,
+		version: expectedDocumentVersion ?? null,
+	});
+	client.diagnosticsVersion += 1;
+}
+
+/**
+ * Block until the publish stream yields an acceptable answer, the budget
+ * expires, or the signal aborts. Every exit path removes the listener, both
+ * timers and the abort handler: a leaked waiter would live as long as the
+ * client, and a leaked abort handler accumulates on the long-lived caller signal
+ * across edits.
+ *
+ * An `authoritative` classification ends the wait on arrival. A `provisional`
+ * one (an unversioned publish) instead arms a `settleMs` quiet window, re-armed
+ * by every subsequent publish, so an in-flight analysis of the pre-edit content
+ * is superseded by the fresh one rather than accepted in its place. The overall
+ * budget still caps everything — the settle can delay an answer, never extend
+ * the wait past `timeoutMs`.
  */
 async function awaitDiagnosticsPublish(
 	client: LspClient,
 	timeoutMs: number,
 	signal: AbortSignal | undefined,
-	isDone: () => boolean,
+	classify: () => DiagnosticsAcceptance | undefined,
+	settleMs: number,
+	registerExternalWake?: (wake: () => void) => void,
 ): Promise<void> {
 	let unsubscribe: (() => void) | undefined;
 	let timer: NodeJS.Timeout | undefined;
+	let settleTimer: NodeJS.Timeout | undefined;
 	let onAbort: (() => void) | undefined;
 	try {
 		await new Promise<void>((resolve) => {
-			unsubscribe = onDiagnosticsPublished(client, () => {
-				if (isDone()) resolve();
-			});
+			const check = () => {
+				const acceptance = classify();
+				if (!acceptance) return;
+				if (acceptance.tier === "authoritative" || settleMs <= 0) {
+					resolve();
+					return;
+				}
+				// Restart the window: this publish may yet be superseded by a newer one.
+				if (settleTimer) clearTimeout(settleTimer);
+				settleTimer = setTimeout(resolve, settleMs);
+				settleTimer.unref?.();
+			};
+			unsubscribe = onDiagnosticsPublished(client, check);
 			timer = setTimeout(resolve, timeoutMs);
 			timer.unref?.();
 			if (signal) {
 				onAbort = () => resolve();
 				signal.addEventListener("abort", onAbort, { once: true });
 			}
+			// A second source that may satisfy the wait (the pull probe). Resolving an
+			// already-settled promise is a no-op, so racing with the paths above is safe.
+			registerExternalWake?.(resolve);
+			// A provisional publish may already be sitting there from before the wait
+			// (the caller's short-circuit only accepts authoritative ones), and no
+			// further publish is guaranteed to arrive to trigger `check` for it.
+			// Guarded on `settleMs > 0`: with no settle there is no provisional tier to
+			// rescue, and callers that wait for the NEXT publish (settleMs 0) must not
+			// be resolved by state that predates the wait.
+			if (settleMs > 0) check();
 		});
 	} finally {
 		unsubscribe?.();
 		if (timer) clearTimeout(timer);
+		if (settleTimer) clearTimeout(settleTimer);
 		if (signal && onAbort) signal.removeEventListener("abort", onAbort);
 	}
 }
@@ -574,10 +729,18 @@ export async function waitForNextDiagnosticsPublish(
 ): Promise<boolean> {
 	if (timeoutMs <= 0 || signal?.aborted) return false;
 	let published = false;
-	await awaitDiagnosticsPublish(client, timeoutMs, signal, () => {
-		published = true;
-		return true;
-	});
+	// This caller only cares THAT a publish landed, not what it said, so every
+	// publish counts as authoritative and no settle window applies.
+	await awaitDiagnosticsPublish(
+		client,
+		timeoutMs,
+		signal,
+		() => {
+			published = true;
+			return { tier: "authoritative", diagnostics: [] };
+		},
+		0,
+	);
 	return published;
 }
 
