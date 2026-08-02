@@ -468,9 +468,9 @@ Pit is aggressively extensible so it doesn't have to dictate your workflow. Feat
 
 **Native sub-agents.** The `task` tool spawns focused subagents — blocking, or detached (`spawn`/`join`) to fan out work in parallel — with reusable agent types in `.pit/agents/`, structured output, and resume of runs interrupted by ESC or a network drop. Want it to work differently? Build your own with [extensions](#extensions) or install a package.
 
-**No permission popups.** Run in a container, or build your own confirmation flow with [extensions](#extensions) inline with your environment and security requirements.
+**No permission popups by default.** The default `auto` mode never prompts — writes run behind a hard deny floor. Opt into `/permission-mode confirm` for a native per-mutation approval flow (Allow once / Allow for session / Deny), use `--allowlist-only` for a fail-closed CI preset, run in a container, or build your own confirmation flow with [extensions](#extensions).
 
-**Native plan mode.** A read-only permission mode (`/permission-mode plan`) that blocks mutations while the model investigates and proposes. Customize the flow further with [extensions](#extensions).
+**Native plan, ask, and confirm modes.** Two read-only permission modes block mutations: `/permission-mode plan`, where the model investigates and proposes a plan, and `/permission-mode ask`, where it just answers your question about the code — same enforcement, no plan ritual. `/permission-mode confirm` executes but pauses each mutation for your approval. Customize the flow further with [extensions](#extensions).
 
 **No built-in to-dos.** They confuse models. Use a TODO.md file, or build your own with [extensions](#extensions).
 

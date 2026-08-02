@@ -36,9 +36,10 @@ User prompt
 
 ## Activation
 
-- **Alt+P** cycles permission/orchestration: Plan → Auto → **Fusion·Plan** → Plan.
-  Fusion is always Plan (read-only). If the panel isn't configured yet, Alt+P
-  opens `/fusion` instead of entering an empty Fusion mode.
+- **Alt+P** cycles permission/orchestration: Plan → Ask → Auto → **Fusion·Plan**
+  → Plan. Fusion is always Plan (read-only) — there is no Fusion·Ask or
+  Fusion·Auto. If the panel isn't configured yet, Alt+P opens `/fusion` instead
+  of entering an empty Fusion mode.
 - **`/fusion`** opens a single setup screen: pick two advisors (searchable), see
   the synthesizer (active `/model`), and toggle `verify` / `brief`. Completing
   setup activates Fusion orchestration. The active `/model` is the synthesizer

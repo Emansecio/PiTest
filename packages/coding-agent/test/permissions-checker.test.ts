@@ -1,10 +1,11 @@
 /**
- * Tests for PermissionChecker — plan / auto (guarded) / no-rails
- * (auto + disableBuiltinDefaults).
+ * Tests for PermissionChecker — plan / ask (both read-only) / auto (guarded) /
+ * no-rails (auto + disableBuiltinDefaults).
  */
 
 import { describe, expect, it } from "vitest";
 import { describeToolAction, PermissionChecker } from "../src/core/permissions/checker.js";
+import { normalizePermissionMode, PERMISSION_MODES } from "../src/core/permissions/types.ts";
 
 const cwd = process.platform === "win32" ? "C:/proj" : "/proj";
 
@@ -488,5 +489,105 @@ describe("describeToolAction", () => {
 		expect(describeToolAction("chrome_devtools_evaluate", {}).type).toBe("exec");
 		expect(describeToolAction("chrome_devtools_click", {}).type).toBe("write");
 		expect(describeToolAction("chrome_devtools_screenshot", {}).type).toBe("tool");
+	});
+});
+
+describe("permission mode vocabulary", () => {
+	it("normalizes the four modes and rejects anything else", () => {
+		expect(normalizePermissionMode("plan")).toBe("plan");
+		expect(normalizePermissionMode("ask")).toBe("ask");
+		expect(normalizePermissionMode("confirm")).toBe("confirm");
+		expect(normalizePermissionMode("auto")).toBe("auto");
+		expect(normalizePermissionMode("yolo")).toBeUndefined();
+		expect(normalizePermissionMode("Ask")).toBeUndefined();
+		expect(normalizePermissionMode("Confirm")).toBeUndefined();
+		expect(normalizePermissionMode(undefined)).toBeUndefined();
+	});
+
+	it("lists the modes most-restrictive first", () => {
+		expect(PERMISSION_MODES).toEqual(["plan", "ask", "confirm", "auto"]);
+	});
+});
+
+describe("PermissionChecker — ask mode mirrors plan (same read-only gate)", () => {
+	/** Every enforcement assertion below is run against BOTH read-only modes. */
+	const readOnly = (settings = {}) => ({
+		plan: new PermissionChecker({ cwd, mode: "plan", settings }),
+		ask: new PermissionChecker({ cwd, mode: "ask", settings }),
+	});
+
+	it("blocks writes, shells and opaque tools exactly like plan", () => {
+		const { ask } = readOnly();
+		expect(ask.check({ type: "write", toolName: "write", paths: ["x"] }).decision).toBe("deny");
+		expect(ask.check({ type: "exec", toolName: "bash", command: "ls" }).decision).toBe("deny");
+		expect(ask.check(describeToolAction("eval", { code: "1+1" })).decision).toBe("deny");
+		expect(ask.check(describeToolAction("task", { prompt: "x" })).decision).toBe("deny");
+		expect(ask.check(describeToolAction("memory_append", { entry: "x" })).decision).toBe("deny");
+		expect(ask.check({ type: "tool", toolName: "totally_unknown_ext", args: {} }).decision).toBe("deny");
+	});
+
+	it("allows the read-only research surface", () => {
+		const { ask } = readOnly();
+		expect(ask.check(describeToolAction("read", { path: "index.ts" })).decision).toBe("allow");
+		expect(ask.check(describeToolAction("grep", { pattern: "x" })).decision).toBe("allow");
+		expect(ask.check(describeToolAction("ls", { directory: "src" })).decision).toBe("allow");
+		expect(ask.check(describeToolAction("lsp", { action: "diagnostics", file: "a.ts" })).decision).toBe("allow");
+	});
+
+	it("still enforces denyPaths / builtin sensitive reads", () => {
+		const { ask } = readOnly();
+		expect(ask.check({ type: "read", toolName: "read", paths: [".env"] }).decision).toBe("deny");
+		const withDeny = new PermissionChecker({
+			cwd,
+			mode: "ask",
+			settings: { denyPaths: [{ glob: "**/secret.key" }] },
+		});
+		expect(withDeny.check(describeToolAction("read", { path: "config/secret.key" })).decision).toBe("deny");
+	});
+
+	it("does not let allowTools bypass the read-only gate (but still short-circuits reads)", () => {
+		const bypass = new PermissionChecker({ cwd, mode: "ask", settings: { allowTools: ["bash", "read"] } });
+		expect(bypass.check({ type: "exec", toolName: "bash", command: "ls" }).decision).toBe("deny");
+		expect(bypass.check({ type: "read", toolName: "read", paths: [".env"] }).decision).toBe("allow");
+	});
+
+	it("denies MCP tools with an ask-specific reason (no allowTools opt-in)", () => {
+		const c = new PermissionChecker({ cwd, mode: "ask", settings: { allowTools: ["mcp__foo__*"] } });
+		const decision = c.check(describeToolAction("mcp__foo__list_files", { dir: "." }));
+		expect(decision.decision).toBe("deny");
+		const reason = decision.decision === "deny" ? decision.reason : "";
+		expect(reason).toContain("Ask mode blocks MCP tools");
+		expect(reason).toContain("auto mode");
+	});
+
+	it("names the ACTIVE mode in the deny reason (plan says Plan, ask says Ask)", () => {
+		const { plan, ask } = readOnly();
+		const reasonFor = (c: PermissionChecker) => {
+			const d = c.check({ type: "write", toolName: "write", paths: ["x"] });
+			return d.decision === "deny" ? d.reason : "";
+		};
+		expect(reasonFor(plan)).toBe('Plan mode is read-only — tool "write" is blocked.');
+		expect(reasonFor(ask)).toBe('Ask mode is read-only — tool "write" is blocked.');
+	});
+
+	it("reaches the same decision as plan for every probe (one gate, two labels)", () => {
+		const { plan, ask } = readOnly();
+		const probes = [
+			describeToolAction("write", { path: "a.ts", content: "x" }),
+			describeToolAction("edit", { path: "a.ts", edits: [{ oldText: "a", newText: "b" }] }),
+			describeToolAction("bash", { command: "npm test" }),
+			describeToolAction("lsp", { action: "rename", file: "a.ts", new_name: "B" }),
+			describeToolAction("chrome_devtools_navigate", { url: "http://x" }),
+			describeToolAction("chrome_devtools_screenshot", {}),
+			describeToolAction("read", { path: "index.ts" }),
+			describeToolAction("read", { path: ".env" }),
+			describeToolAction("plan", { action: "propose" }),
+			describeToolAction("todo", { action: "list" }),
+			describeToolAction("exit_plan", { title: "t" }),
+			describeToolAction("mcp__github__create_issue", { title: "x" }),
+		];
+		for (const probe of probes) {
+			expect(ask.check(probe).decision, `${probe.type}:${probe.toolName}`).toBe(plan.check(probe).decision);
+		}
 	});
 });

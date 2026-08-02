@@ -1,4 +1,23 @@
-export { BUILTIN_TOOL_SIDE_EFFECTS, describeToolAction, PermissionChecker } from "./checker.ts";
+export {
+	BUILTIN_TOOL_SIDE_EFFECTS,
+	describeToolAction,
+	PermissionChecker,
+	subagentConfirmDenyReason,
+} from "./checker.ts";
+export {
+	CONFIRM_ALLOW_ONCE_LABEL,
+	CONFIRM_ALLOW_SESSION_LABEL,
+	CONFIRM_DENY_LABEL,
+	type ConfirmResolution,
+	commandPrefixPattern,
+	describeSessionRule,
+	headlessConfirmDenyReason,
+	rememberSessionRule,
+	resolveConfirmDecision,
+	type SessionRule,
+	sessionRuleForAction,
+} from "./confirm-gate.ts";
+export { buildConfirmModeSection } from "./confirm-mode-prompt.ts";
 export {
 	findMatchingCommandRule,
 	findMatchingGlob,

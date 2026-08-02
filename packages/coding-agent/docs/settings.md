@@ -306,8 +306,10 @@ See [packages.md](packages.md) for package management details.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `permissions.mode` | string | `"auto"` | `"plan"` or `"auto"`. Override per-run with `--permission-mode`. |
-| `permissions.allowPaths` | array | `[]` | Paths always allowed (each entry: `{ glob, tools?, reason? }`). |
+| `permissions.mode` | string | `"auto"` | `"plan"`, `"ask"`, `"confirm"` or `"auto"`. `"plan"` and `"ask"` are both read-only (identical enforcement; `"ask"` is the Q&A stance, no plan ritual). `"confirm"` is `"auto"` with every uncovered mutation pausing for your approval — interactive only, and NOT part of the `alt+p` cycle. Override per-run with `--permission-mode`. |
+| `permissions.allowlistOnly` | boolean | `false` | Fail-closed preset for CI/headless runs: never prompts, and only `allowPaths` / `allowCommands` / `allowTools` run — everything else is denied. Orthogonal to `mode` (not a mode, not in the `alt+p` cycle). Force per-run with `--allowlist-only`. |
+| `permissions.allowPaths` | array | `[]` | Paths always allowed (each entry: `{ glob, tools?, reason? }`). Inert in `plan`/`ask`/`auto`; under `allowlistOnly` it IS the write allowlist, and in `confirm` it is the "don't ask me again" list. |
+| `permissions.allowCommands` | array | `[]` | Bash command regex allowlist (same shape as `denyCommands`). Consulted only under `allowlistOnly` (where it IS the exec allowlist) and in `confirm` (where it skips the approval prompt). |
 | `permissions.denyPaths` | array | `[]` | Paths always blocked. Built-in defaults (`.env`, `~/.ssh/**`, …) are appended unless disabled. |
 | `permissions.denyCommands` | array | `[]` | Bash command regex denylist (each entry: `{ pattern, flags?, reason? }`). Built-in dangerous-command defaults appended unless disabled. |
 | `permissions.allowTools` | string[] | `[]` | Tool names that bypass checks. |

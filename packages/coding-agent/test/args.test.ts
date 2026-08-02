@@ -189,7 +189,7 @@ describe("parseArgs", () => {
 			expect(result.diagnostics).toEqual([
 				{
 					type: "warning",
-					message: 'Invalid permission mode "unsafe". Valid values: plan, auto.',
+					message: 'Invalid permission mode "unsafe". Valid values: plan, ask, confirm, auto.',
 				},
 			]);
 		});
@@ -200,13 +200,42 @@ describe("parseArgs", () => {
 			expect(result.diagnostics).toEqual([]);
 		});
 
+		test("parses --permission-mode ask", () => {
+			const result = parseArgs(["--permission-mode", "ask"]);
+			expect(result.permissionMode).toBe("ask");
+			expect(result.diagnostics).toEqual([]);
+		});
+
+		test("parses --permission-mode confirm (off-cycle, CLI-reachable)", () => {
+			const result = parseArgs(["--permission-mode", "confirm"]);
+			expect(result.permissionMode).toBe("confirm");
+			expect(result.diagnostics).toEqual([]);
+		});
+
+		test("parses --allowlist-only (fail-closed CI preset)", () => {
+			const result = parseArgs(["--allowlist-only"]);
+			expect(result.allowlistOnly).toBe(true);
+			expect(result.diagnostics).toEqual([]);
+		});
+
+		test("leaves allowlistOnly undefined when the flag is absent", () => {
+			expect(parseArgs(["--permission-mode", "auto"]).allowlistOnly).toBeUndefined();
+		});
+
+		test("combines --allowlist-only with any --permission-mode (orthogonal facets)", () => {
+			const result = parseArgs(["--permission-mode", "plan", "--allowlist-only", "hello"]);
+			expect(result.permissionMode).toBe("plan");
+			expect(result.allowlistOnly).toBe(true);
+			expect(result.messages).toEqual(["hello"]);
+		});
+
 		test("warns on invalid --permission-mode (yolo removed)", () => {
 			const result = parseArgs(["--permission-mode", "yolo"]);
 			expect(result.permissionMode).toBeUndefined();
 			expect(result.diagnostics).toEqual([
 				{
 					type: "warning",
-					message: 'Invalid permission mode "yolo". Valid values: plan, auto.',
+					message: 'Invalid permission mode "yolo". Valid values: plan, ask, confirm, auto.',
 				},
 			]);
 		});

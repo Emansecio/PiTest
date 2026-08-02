@@ -34,7 +34,7 @@ import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { areSubagentGuardsDisabled, createSubagentGuardChain } from "../built-ins/subagent-guards.ts";
 import type { ToolCallEvent, ToolResultEvent } from "../extensions/types.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import { describeToolAction, type PermissionChecker } from "../permissions/index.ts";
+import { describeToolAction, type PermissionChecker, subagentConfirmDenyReason } from "../permissions/index.ts";
 import { formatSkillsForPrompt, type Skill } from "../skills.ts";
 import { aggregateAssistantUsage, mergeSubagentUsage } from "../token-usage.ts";
 import type { SubagentRegistry } from "./registry.ts";
@@ -241,7 +241,7 @@ export interface SpawnSubagentDependencies {
 	 * Parent's permission checker. When provided, every tool call the subagent
 	 * attempts is gated through the same policy as the parent (denyTools,
 	 * denyPaths, plan-mode mutation blocks, etc.). The subagent runs headless,
-	 * so an "ask" decision is treated as a denial — there is no UI to confirm.
+	 * so a `confirm` decision is treated as a denial — there is no UI to approve on.
 	 * When omitted, the subagent runs ungated (legacy behavior, e.g. tests).
 	 */
 	permissionChecker?: PermissionChecker;
@@ -294,6 +294,14 @@ export function evaluateSubagentToolPermission(
 	const decision = checker.check(describeToolAction(toolName, args));
 	if (decision.decision === "deny") {
 		return { block: true, reason: decision.reason ?? `Tool "${toolName}" is denied by permission policy.` };
+	}
+	// A subagent runs headless: it has no UI of its own, and the parent's approval
+	// prompt belongs to the parent's turn. So a deferral is a denial here — the same
+	// posture the doc comment on `permissionChecker` states for every non-allow
+	// outcome. The parent-side gate already blocks the spawn tools in confirm mode;
+	// this covers direct API callers that hand a confirm-mode checker to a spawn.
+	if (decision.decision === "confirm") {
+		return { block: true, reason: subagentConfirmDenyReason(toolName) };
 	}
 	return undefined;
 }
@@ -478,11 +486,13 @@ async function runSpawned(
 
 	let worktree: WorktreeHandle | undefined;
 	if (worktreeSpec) {
-		// Defense-in-depth: plan mode is read-only; creating a git worktree mutates
-		// the filesystem. The `task` tool is already blocked via sideEffect, but
-		// direct spawn callers must not bypass that invariant.
-		if (deps.permissionChecker?.mode === "plan") {
-			const message = "worktree is blocked in plan mode (read-only)";
+		// Defense-in-depth: the read-only modes (plan, ask) forbid mutation, and
+		// creating a git worktree mutates the filesystem. The `task` tool is already
+		// blocked via sideEffect, but direct spawn callers must not bypass that
+		// invariant.
+		const readOnlyMode = deps.permissionChecker?.mode;
+		if (readOnlyMode === "plan" || readOnlyMode === "ask") {
+			const message = `worktree is blocked in ${readOnlyMode} mode (read-only)`;
 			deps.registry.update(record.id, {
 				status: "failed",
 				endedAt: Date.now(),

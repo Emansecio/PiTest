@@ -53,7 +53,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/fusion` | Multi-model panel mode: brainstorm with multiple models, then synthesize |
 | `/memory` | Show resolved memory file paths and contents |
-| `/permission-mode <mode>` | Switch permission mode (`auto` or `plan`) mid-session |
+| `/permission-mode <mode>` | Switch permission mode (`plan`, `ask`, `confirm`, or `auto`) mid-session. `confirm` is only reachable here or via `--permission-mode` — it is not in the `alt+p` cycle |
 | `/mcp` | List configured MCP servers, connection state, and advertised tools |
 | `/goal` | Show active autonomous goal status, iterations, and budget usage |
 | `/quit` | Quit pit |
@@ -241,6 +241,8 @@ pit --no-extensions -e ./my-extension.ts
 | `--system-prompt <text>` | Replace default prompt; context files and skills are still appended |
 | `--append-system-prompt <text>` | Append to system prompt |
 | `--verbose` | Force verbose startup |
+| `--permission-mode <mode>` | Permission mode for this run: `plan`, `ask`, `confirm` or `auto` (see [permissions.md](permissions.md)). `confirm` = `auto` with every uncovered mutation waiting for your approval; interactive only |
+| `--allowlist-only` | Fail-closed (CI): never prompts, only `allowPaths` / `allowCommands` / `allowTools` run, everything else is denied. Orthogonal to `--permission-mode` |
 | `-h`, `--help` | Show help |
 | `-v`, `--version` | Show version |
 
@@ -342,6 +344,6 @@ The per-model fallback-chain cool-down (distinct from the per-key cool-down abov
 
 Pit keeps the core cohesive and pushes workflow-specific behavior into extensions, skills, prompt templates, and packages.
 
-The core ships with native support for the workflows an agent needs every day: an MCP client (`mcp.servers` in [Settings](settings.md)), sub-agents (the `task` tool), to-do tracking (the `todo` tool), and a permission system with `plan` and `auto` modes (see [permissions.md](permissions.md)). These built-ins are implemented as extensions on the same APIs available to you — anything beyond them you can build or install as extensions, skills, prompt templates, or packages.
+The core ships with native support for the workflows an agent needs every day: an MCP client (`mcp.servers` in [Settings](settings.md)), sub-agents (the `task` tool), to-do tracking (the `todo` tool), and a permission system with `plan`, `ask`, `confirm`, and `auto` modes (see [permissions.md](permissions.md)). These built-ins are implemented as extensions on the same APIs available to you — anything beyond them you can build or install as extensions, skills, prompt templates, or packages.
 
 For the full rationale, read the [blog post](https://pituned.at/posts/2025-11-30-pi-coding-agent/).

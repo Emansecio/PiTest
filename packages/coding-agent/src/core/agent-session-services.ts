@@ -8,7 +8,12 @@ import { retargetToolsForWorktree } from "./coordinator/worktree-tools.ts";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { composeMcpSettings, loadMcpConfigFiles } from "./mcp/config-files.ts";
 import { ModelRegistry } from "./model-registry.ts";
-import { normalizePermissionMode, PermissionChecker, type PermissionMode } from "./permissions/index.ts";
+import {
+	normalizePermissionMode,
+	PermissionChecker,
+	type PermissionMode,
+	type PermissionSettings,
+} from "./permissions/index.ts";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.ts";
 import { type CreateAgentSessionOptions, type CreateAgentSessionResult, createAgentSession } from "./sdk.ts";
 import type { SessionManager } from "./session-manager.ts";
@@ -45,6 +50,12 @@ export interface CreateAgentSessionServicesOptions {
 	resourceLoaderOptions?: Omit<DefaultResourceLoaderOptions, "cwd" | "agentDir" | "settingsManager">;
 	/** Override permission mode for this session (CLI --permission-mode). */
 	permissionModeOverride?: PermissionMode;
+	/**
+	 * Force the fail-closed CI preset on for this session (CLI --allowlist-only),
+	 * regardless of `permissions.allowlistOnly` in settings. Orthogonal to the mode
+	 * override — the two combine freely.
+	 */
+	allowlistOnlyOverride?: boolean;
 	/** Disable bundling of built-in extensions (permissions/hooks/mcp/memory/coordinator). */
 	disableBuiltInExtensions?: boolean;
 }
@@ -220,7 +231,13 @@ export async function createAgentSessionServices(
 	const warmFileCacheRef: { current?: () => WarmFileCache | undefined } = {};
 
 	let builtInFactories: import("./extensions/types.ts").ExtensionFactory[] = [];
-	const permissionSettings = settingsManager.getPermissionSettings();
+	// `--allowlist-only` is a one-way override: the flag can turn the fail-closed
+	// preset ON over settings, never off (a CI runner that asks for fail-closed must
+	// not be silently downgraded by a checked-in settings file).
+	const configuredPermissions = settingsManager.getPermissionSettings();
+	const permissionSettings: PermissionSettings = options.allowlistOnlyOverride
+		? { ...configuredPermissions, allowlistOnly: true }
+		: configuredPermissions;
 	const effectivePermissionMode: PermissionMode =
 		options.permissionModeOverride ?? normalizePermissionMode(permissionSettings.mode) ?? "auto";
 	let permissionChecker: PermissionChecker;

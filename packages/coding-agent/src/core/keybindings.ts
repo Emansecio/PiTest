@@ -83,7 +83,7 @@ export const KEYBINDINGS = {
 	// parity with shells — a repaint, not a /clear of the transcript). The branch
 	// lives in interactive-mode's "app.model.select" handler.
 	"app.model.select": { defaultKeys: "ctrl+l", description: "Open model selector" },
-	"app.permission.cycle": { defaultKeys: "alt+p", description: "Cycle mode (plan → auto → fusion)" },
+	"app.permission.cycle": { defaultKeys: "alt+p", description: "Cycle mode (plan → ask → auto → fusion)" },
 	"app.tools.expand": { defaultKeys: "ctrl+o", description: "Expand last tool output, then all (cycles)" },
 	"app.thinking.toggle": {
 		defaultKeys: "ctrl+t",

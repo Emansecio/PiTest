@@ -781,6 +781,7 @@ export async function main(args: string[], options?: MainOptions) {
 			settingsManager: startupSettingsManager,
 			extensionFlagValues: parsed.unknownFlags,
 			permissionModeOverride: parsed.permissionMode,
+			allowlistOnlyOverride: parsed.allowlistOnly,
 			resourceLoaderOptions: {
 				additionalExtensionPaths: resolvedExtensionPaths,
 				additionalSkillPaths: resolvedSkillPaths,

@@ -8,24 +8,46 @@ terms *mean*, not how they are implemented.
 **Mode**:
 The operating stance the user cycles in the interactive session (footer indicator, bound
 to a cycle key). A Mode is the combination of two facets: a **Permission** facet and an
-**Orchestration** facet — but not their full cross-product. Current Modes: `Plan`, `Auto`,
-`Fusion · Plan`. There is no `Fusion · Auto` in v1: the invariant is that Orchestration
-`fusion` implies Permission `plan` (enforced by `nextFusionCycleState` in
-`permissions-extension.ts`). The cycle key walks a pure 3-stop loop, not the cross-product:
-`Plan → Auto → Fusion · Plan → Plan`.
+**Orchestration** facet — but not their full cross-product. Current Modes: `Plan`, `Ask`,
+`Auto`, `Fusion · Plan`. There is no `Fusion · Ask` or `Fusion · Auto` in v1: the invariant
+is that Orchestration `fusion` implies Permission `plan` (enforced by `nextFusionCycleState`
+in `permissions-extension.ts`). The cycle key walks a pure 4-stop loop, not the
+cross-product: `Plan → Ask → Auto → Fusion · Plan → Plan`.
 _Avoid_: "permission mode" when you mean the whole stance — that is only one facet.
 
 **Permission** (facet of a Mode):
-What the agent is allowed to touch. `plan` = read-only (bash/edit/write blocked); `auto` =
+What the agent is allowed to touch, and — for the two read-only values — the stance the
+model takes while it is there. `plan` = read-only (bash/edit/write blocked) with the plan
+ritual: research, build a Plan, present it for approval; `ask` = the same read-only
+enforcement with a Q&A stance: answer the question directly, no Plan, no approval ritual,
+and point the user at another Mode when they ask for code changes; `confirm` = `auto`'s
+enforcement with a human gate on the terminal: reads run free, and a mutation no allowlist
+covers pauses for per-action approval (Allow once / Allow for session / Deny); `auto` =
 guarded writes (builtin deny rules enforced as hard blocks).
-_Avoid_: tier (the "tier" framing was dropped; permission is a facet, not a standalone axis).
+**The Mode cycle does NOT change**: it is still the same 4 stops
+(`Plan → Ask → Auto → Fusion · Plan`). `confirm` is a Permission value that is deliberately
+off-cycle — reachable only via `/permission-mode confirm` or `--permission-mode confirm`.
+_Avoid_: tier (the "tier" framing was dropped; permission is a facet, not a standalone axis);
+treating `ask` as a weaker or more permissive `plan` — what differs is the stance, not what
+is blocked; calling `confirm` a Mode stop or expecting the cycle key to reach it.
+
+**Fail-closed** (`permissions.allowlistOnly`, `--allowlist-only`):
+An orthogonal permission flag for headless Channels (`text`/`json`/`rpc`, CI), NOT a Mode
+and NOT a Permission facet value: it never appears in the cycle and combines with any
+Permission value. It flips the terminal decision from allow to deny — only reads, writes
+under `allowPaths`, commands under `allowCommands`, and side-effect-free tools (plus
+anything in `allowTools`) run; deny rules still win over the allowlists. It is the mirror
+of Permission `confirm`, which reads the SAME three lists but asks about what they do not
+cover instead of denying it; when both are active `allowlistOnly` wins (CI never prompts).
+_Avoid_: "allowlist mode", "CI mode" — it is a flag on top of a Mode, not a stance of its own;
+conflating it with `confirm`, which IS a Permission value and needs an interactive Channel.
 
 **Orchestration** (facet of a Mode):
 How many independent reasoning paths run and how they are reconciled. `solo` = one agent;
 `fusion` = a Panel of models plus a Synthesizer.
 _Avoid_: "fusion mode" as if it were a Permission value — and don't assume Fusion composes
-with both Permission values: in v1 `fusion` only ever rides on `plan` (there is no
-`Fusion · Auto`).
+with every Permission value: in v1 `fusion` only ever rides on `plan` (there is no
+`Fusion · Ask` and no `Fusion · Auto`).
 
 **Fusion**:
 The Orchestration facet value where the same prompt is dispatched to a **Panel** of two
@@ -88,6 +110,17 @@ _Avoid_: "todo nag"; do not describe it as auto-advancing the list.
   stays **Role**.
 - **"plan"** appears as both a Role and a Permission facet value. They are distinct: the
   Role `plan` selects a model/thinking config; the Permission facet `plan` means read-only.
+- **"ask"** appears as both a built-in tool and a Permission facet value. They are distinct:
+  the tool `ask` poses an interactive question to the user mid-turn; the Permission facet
+  `ask` is the read-only Q&A stance.
+- **"read-only"** covers exactly two Permission values, `plan` and `ask` — and NOT
+  `confirm`, which executes (it only pauses first). `plan` and `ask` are indistinguishable
+  in what they allow; they differ only in the stance expected of the model (plan ritual vs.
+  direct answer). Say which one you mean instead of "read-only mode".
+- **"confirm"** appears both as a Permission value and as the third variant of a
+  `PermissionDecision` (`allow` / `deny` / `confirm`). They are related but distinct: the
+  Permission value is the stance; the decision variant is a *deferral* the checker returns
+  and the layer above resolves into a real verdict (prompt when interactive, deny when not).
 - **Todo vs Plan** were two competing task-tracking systems injected into the same turn.
   Resolution (ADR-0007): **Todo** is the canonical universal tracker for interactive work;
   **Plan** is reserved for long, multi-phase work with dependencies/verification.
@@ -95,10 +128,15 @@ _Avoid_: "todo nag"; do not describe it as auto-advancing the list.
 ## Example dialogue
 
 > **Dev:** If I'm in Fusion · Plan and hit the cycle key, what do I get?
-> **Expert:** Plain `Plan` (solo, permission `plan`) — not Fusion · Auto. The cycle is a
-> pure 3-stop loop over the two facets, not their full cross-product:
-> `Plan → Auto → Fusion · Plan → Plan`. Fusion always rides on the `plan` Permission in v1,
-> so `fusion` + `auto` is never a reachable combination — there is no `Fusion · Auto` Mode.
+> **Expert:** Plain `Plan` (solo, permission `plan`) — not Fusion · Ask or Fusion · Auto.
+> The cycle is a pure 4-stop loop over the two facets, not their full cross-product:
+> `Plan → Ask → Auto → Fusion · Plan → Plan`. Fusion always rides on the `plan` Permission
+> in v1, so `fusion` + `ask` and `fusion` + `auto` are never reachable combinations.
+>
+> **Dev:** Then what does the Ask stop buy me over Plan, if both are read-only?
+> **Expert:** Nothing at the permission layer — the enforcement is identical. What changes
+> is the stance: in `Ask` the agent just answers you, with no Plan and no approval step; in
+> `Plan` it researches and comes back with a Plan to approve.
 >
 > **Dev:** And the two models answering — those come from `/model`?
 > **Expert:** No. The **Panel** (two models) is configured with `/fusion`. The model from

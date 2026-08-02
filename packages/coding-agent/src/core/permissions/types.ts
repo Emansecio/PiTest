@@ -3,18 +3,40 @@
  *
  * Modes — a single axis of increasing permissiveness:
  * - plan:   read-only; any tool that mutates the filesystem or runs a shell is blocked.
+ *           The prompt layer additionally imposes the plan ritual (build a DAG, end
+ *           with `exit_plan`).
+ * - ask:    read-only Q&A stance. IDENTICAL enforcement to plan (same read-only gate
+ *           in the checker) — only the prompt posture differs: answer the question
+ *           directly, no plan DAG, no `exit_plan`. Two modes rather than a mode+flag
+ *           because the cycle key must land on each stance as its own stop.
+ * - confirm: `auto` with the TERMINAL swapped. The whole auto chain runs unchanged
+ *           (denyTools → allowTools bypass → deny rules incl. the built-in floor);
+ *           what changes is where a non-matching mutation lands: instead of a
+ *           terminal `allow` it yields `{ decision: "confirm" }` and the layer above
+ *           asks the human. Reads stay free. Deliberately symmetric with
+ *           `allowlistOnly`: the SAME lists (`allowPaths`/`allowCommands`/
+ *           `allowTools`) are the "don't ask me again" surface — `allowlistOnly`
+ *           denies what they don't cover, `confirm` asks about it.
+ *           NOT part of the alt+p cycle: reachable only via `/permission-mode
+ *           confirm` and `--permission-mode confirm`.
  * - auto:   guarded default; writes/commands run without prompts, but built-in deny
  *           rules (sensitive paths, dangerous commands) are enforced as hard blocks.
  *
  * The built-in floor can still be dropped per-session via `disableBuiltinDefaults`
  * (surfaced loudly in the UI as "no-rails"); user-authored deny rules still apply.
+ *
+ * `allowlistOnly` is the opposite knob and is NOT a mode: an orthogonal fail-closed
+ * preset for headless channels (print/RPC/CI) that flips `auto`'s terminal from
+ * `allow` to `deny` for anything outside `allowPaths`/`allowCommands`/`allowTools`.
+ * When it is on it also wins over `confirm` — CI must never park on a prompt.
  */
-export type PermissionMode = "auto" | "plan";
+export type PermissionMode = "auto" | "plan" | "ask" | "confirm";
 
-export const PERMISSION_MODES: readonly PermissionMode[] = ["plan", "auto"] as const;
+/** Ordered most-restrictive → most-permissive (drives help text and the cycle copy). */
+export const PERMISSION_MODES: readonly PermissionMode[] = ["plan", "ask", "confirm", "auto"] as const;
 
 export function normalizePermissionMode(value: unknown): PermissionMode | undefined {
-	if (value === "auto" || value === "plan") return value;
+	if (value === "auto" || value === "plan" || value === "ask" || value === "confirm") return value;
 	return undefined;
 }
 
@@ -52,12 +74,31 @@ export interface PermissionSettings {
 	/** Default mode when no CLI override is set. */
 	mode?: PermissionMode;
 	/**
-	 * Paths explicitly allowed (precedence step 6 in `docs/permissions.md`). There is
-	 * no interactive prompt tier — modes are only `plan`/`auto`, and both end in a
-	 * terminal `allow`, so this list is consulted after the deny rules and can only
-	 * ever confirm a decision the default would already reach.
+	 * Fail-closed preset for headless channels (print/RPC/CI). ORTHOGONAL to `mode`
+	 * — it is not a mode, never enters the mode cycle, and combines with any of
+	 * them. When true, `auto` no longer ends in a terminal `allow`: writes must
+	 * match `allowPaths`, commands must match `allowCommands`, side-effecting tools
+	 * must be listed in `allowTools`, and everything else is denied (reads stay
+	 * free, after the deny rules). Nothing ever prompts. Default: false.
+	 * CLI: `--allowlist-only`.
+	 */
+	allowlistOnly?: boolean;
+	/**
+	 * Paths explicitly allowed (precedence step 6 in `docs/permissions.md`).
+	 * Inert in `plan`/`ask`/`auto`: those end in a terminal `allow`, so a match can
+	 * only confirm a decision the default would already reach. Load-bearing in the
+	 * two modes that swap that terminal — under `allowlistOnly` it IS the write
+	 * allowlist (uncovered write → deny), and in `confirm` it is the
+	 * "don't ask me again" list (uncovered write → prompt).
 	 */
 	allowPaths?: PathRule[];
+	/**
+	 * Commands explicitly allowed (same shape as `denyCommands`: a regex tested
+	 * against the raw command line). Consulted only where the terminal is swapped:
+	 * under `allowlistOnly` it IS the exec allowlist, and in `confirm` it is the
+	 * "don't ask me again" list. Ignored in `plan`/`ask`/`auto`.
+	 */
+	allowCommands?: CommandRule[];
 	/** Paths always blocked (highest priority). Combined with built-in defaults unless disabled. */
 	denyPaths?: PathRule[];
 	/** Commands always blocked. Combined with built-in dangerous-command defaults unless disabled. */
@@ -70,8 +111,19 @@ export interface PermissionSettings {
 	disableBuiltinDefaults?: boolean;
 }
 
-/** Result of a permission decision. */
-export type PermissionDecision = { decision: "allow" } | { decision: "deny"; reason: string };
+/**
+ * Result of a permission decision.
+ *
+ * `confirm` is NOT a verdict — it is a deferral: the checker stays pure/synchronous
+ * and hands the call to the layer above, which asks the human (interactive) or
+ * denies it (headless). Every consumer of a decision must handle it explicitly;
+ * treating it as `allow` by omission would silently un-gate every mutation in
+ * confirm mode.
+ */
+export type PermissionDecision =
+	| { decision: "allow" }
+	| { decision: "deny"; reason: string }
+	| { decision: "confirm"; reason: string };
 
 /** What kind of action the checker is evaluating. */
 export type PermissionAction =

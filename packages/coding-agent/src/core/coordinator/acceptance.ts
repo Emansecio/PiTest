@@ -80,7 +80,11 @@ async function runCheckCommand(
 ): Promise<{ pass: boolean; outputTail: string }> {
 	if (checker) {
 		const decision = checker.check(describeToolAction("bash", { command }));
-		if (decision.decision === "deny") {
+		// An acceptance check runs inside the coordinator, not inside a turn with a
+		// UI: there is no one to approve a `confirm` deferral, so it fails the gate
+		// exactly like a deny. Pre-approve the check command via `allowCommands` to
+		// run acceptance under confirm mode.
+		if (decision.decision !== "allow") {
 			return { pass: false, outputTail: decision.reason ?? "permission denied" };
 		}
 	}

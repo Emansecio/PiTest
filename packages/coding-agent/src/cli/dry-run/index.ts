@@ -185,10 +185,13 @@ export function buildDryRunReport(options: BuildDryRunReportOptions): DryRunRepo
 	// --- Permissions
 	const perm = settingsManager.getPermissionSettings();
 	const permissionMode = normalizePermissionMode(perm.mode) ?? "auto";
+	// `failClosed` comes from the live checker, not the settings file, so the
+	// `--allowlist-only` CLI override shows up in the report too.
+	const failClosed = services.permissionChecker.failClosed;
 	checks.push({
 		name: "Permissions",
 		status: "ready",
-		detail: `mode=${permissionMode}; allow=${perm.allowPaths?.length ?? 0}; deny=${perm.denyPaths?.length ?? 0}; denyCmd=${perm.denyCommands?.length ?? 0}`,
+		detail: `mode=${permissionMode}${failClosed ? "; fail-closed" : ""}; allow=${perm.allowPaths?.length ?? 0}; allowCmd=${perm.allowCommands?.length ?? 0}; deny=${perm.denyPaths?.length ?? 0}; denyCmd=${perm.denyCommands?.length ?? 0}`,
 	});
 
 	// --- Project context files

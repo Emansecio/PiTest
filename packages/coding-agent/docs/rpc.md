@@ -191,7 +191,7 @@ Response:
 }
 ```
 
-The `model` field is a full [Model](#model) object or `null`. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set. `orchestration` is `"solo"` or `"fusion"`. `permissionMode` is the live mode from the session permission checker (`"auto"` or `"plan"`), not a stale settings snapshot.
+The `model` field is a full [Model](#model) object or `null`. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set. `orchestration` is `"solo"` or `"fusion"`. `permissionMode` is the live mode from the session permission checker (`"plan"`, `"ask"`, or `"auto"`), not a stale settings snapshot. Over RPC there is no interactive surface, so a mutating action under `"plan"` or `"ask"` is denied with a reason instead of prompting.
 
 #### get_messages
 

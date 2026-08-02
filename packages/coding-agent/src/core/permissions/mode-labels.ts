@@ -18,6 +18,12 @@ export function humanModeNotifyLabel(orchestration: Orchestration, mode: Permiss
 	if (mode === "plan") {
 		return "Plan · research only — won't edit files";
 	}
+	if (mode === "ask") {
+		return "Ask · read-only Q&A — answers, won't edit files";
+	}
+	if (mode === "confirm") {
+		return "Confirm · asks before every mutation — reads run free";
+	}
 	return "Auto · can edit with built-in guard-rails";
 }
 
@@ -34,7 +40,11 @@ export function formatPermissionBlockedContent(
 	const modeHint =
 		mode === "plan"
 			? "plan mode (read-only) · cycle mode to allow"
-			: "blocked by permission rules · cycle mode or adjust rules";
+			: mode === "ask"
+				? "ask mode (read-only) · cycle mode to allow"
+				: mode === "confirm"
+					? "confirm mode · not approved · /permission-mode auto to stop asking"
+					: "blocked by permission rules · cycle mode or adjust rules";
 	const detail = reason?.trim();
 	if (detail) {
 		// Keep reason short for the one-line compact renderer.

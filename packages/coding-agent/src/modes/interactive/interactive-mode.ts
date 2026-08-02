@@ -868,7 +868,8 @@ export class InteractiveMode {
 		// approval) swap the model role: plan mode → "plan" role when configured,
 		// back to the pre-plan role (or "default") on exit — never clobbering a
 		// role the user picked manually mid-plan. Fail-open: no plan role
-		// configured → silent no-op.
+		// configured → silent no-op. `ask` is read-only but has no plan role, so it
+		// leaves plan exactly like `auto` does (see decideRoleForPermissionMode).
 		this.runtimeHost.services.bindPermissionModeChange?.((mode) => {
 			this.isPlanPermissionMode = mode === "plan";
 			if (mode === "plan" && this.activeRole !== "plan") {
@@ -879,7 +880,9 @@ export class InteractiveMode {
 			if (role) {
 				void this.applyModelRole(role, { silent: true });
 			}
-			if (mode === "auto") {
+			// Snapshot is consumed the moment we leave plan (to ask OR auto); a stale
+			// one would be re-read on the next plan exit after a manual role switch.
+			if (mode !== "plan") {
 				this.roleBeforePlan = undefined;
 			}
 			this.refreshModelIndicators();
@@ -8705,7 +8708,7 @@ Type \`/hotkeys\` for keyboard shortcuts.`;
 | \`${cycleThinkingLevel}\` | Cycle thinking level |
 | \`${cycleModelForward}\` / \`${cycleModelBackward}\` | Cycle models |
 | \`${selectModel}\` | Open model selector |
-| \`${cyclePermission}\` | Cycle mode (plan → auto → fusion) |
+| \`${cyclePermission}\` | Cycle mode (plan → ask → auto → fusion) |
 | \`${expandTools}\` | Expand last tool output, then all (cycles) |
 | \`${toggleThinking}\` | Toggle thinking block visibility |
 | \`${externalEditor}\` | Edit message in external editor |

@@ -210,6 +210,38 @@ describe("exit_plan tool", () => {
 		expect(checker.mode).toBe("auto"); // unchanged
 	});
 
+	it("errors in ask mode with an ask-specific steer (not the auto-mode phrasing)", async () => {
+		// Ask is read-only like plan but has no plan ritual. The message must avoid
+		// "only available in plan mode" — the tool-error hint rule matches that
+		// substring and would claim the session is in execution (auto) mode.
+		const dir = makeDir();
+		const checker = new PermissionChecker({ cwd: dir, mode: "ask", settings: {} });
+		proposePlan();
+		setCurrentUserInputBus(makeFakeBus({ picked: ["Approve & execute"] }));
+		const res = await runExitPlan(dir, checker, { title: "Scaffold module" });
+		expect(res.isError).toBe(true);
+		expect(res.details.outcome).toBe("not_plan_mode");
+		expect(checker.mode).toBe("ask"); // unchanged
+		expect(res.content[0].text).toContain("ask mode");
+		expect(res.content[0].text).not.toContain("only available in plan mode");
+	});
+
+	it("errors in confirm mode with a confirm-specific steer (not the auto-mode phrasing)", async () => {
+		// Confirm already executes — each mutation is approved as it happens — so
+		// there is no plan to exit. Same trap as ask: the message must avoid
+		// "only available in plan mode", which the hint rule reads as auto mode.
+		const dir = makeDir();
+		const checker = new PermissionChecker({ cwd: dir, mode: "confirm", settings: {} });
+		proposePlan();
+		setCurrentUserInputBus(makeFakeBus({ picked: ["Approve & execute"] }));
+		const res = await runExitPlan(dir, checker, { title: "Scaffold module" });
+		expect(res.isError).toBe(true);
+		expect(res.details.outcome).toBe("not_plan_mode");
+		expect(checker.mode).toBe("confirm"); // unchanged
+		expect(res.content[0].text).toContain("confirm mode");
+		expect(res.content[0].text).not.toContain("only available in plan mode");
+	});
+
 	it("errors when no structured plan has been proposed", async () => {
 		const dir = makeDir();
 		const checker = new PermissionChecker({ cwd: dir, mode: "plan", settings: {} });

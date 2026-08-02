@@ -4,12 +4,25 @@
  *
  * The checker is pure / synchronous.
  * - plan:   read-only — mutating tools are blocked; reads still honor deny rules.
+ * - ask:    read-only — the SAME gate as plan (they differ only in prompt posture,
+ *           see `ask-mode-prompt.ts`); deny reasons name the active mode.
  * - auto:   guarded — writes/commands run, but built-in + user deny rules apply.
+ * - confirm: the SAME chain as auto with a different terminal — see `checkConfirm`.
+ *           Mutations that no allowlist covers resolve to `{ decision: "confirm" }`,
+ *           which the caller turns into a human prompt (interactive) or a deny
+ *           (headless). Reads are untouched.
  *
  * The built-in floor can be dropped via `disableBuiltinDefaults` (no-rails);
  * user-authored deny rules still apply.
+ *
+ * Orthogonal to all of the above, `allowlistOnly` (fail-closed CI preset) flips
+ * auto's terminal from `allow` to `deny` for anything outside the allowlists —
+ * see `checkAllowlistOnly`. It never prompts and never changes the mode, and it
+ * wins over `confirm` when both are on (CI must never park on a prompt).
  */
 
+import { truncateWithEllipsis } from "../../utils/surrogate.ts";
+import { COORDINATOR_TOOL_NAMES } from "../coordinator/brand.ts";
 import { LruMap } from "../lru-map.ts";
 import { createRegexTestDeadline } from "../regex-budget.ts";
 import { PATH_KEY_ALIASES } from "../tools/argument-prep.ts";
@@ -165,6 +178,16 @@ export class PermissionChecker {
 		return this.ctx.mode;
 	}
 
+	/**
+	 * Working directory the path rules resolve against. Public so the confirm
+	 * resolver can build a session `allowPaths` rule from the SAME absolute path
+	 * the checker would match ("Allow for session" must not depend on how the
+	 * model happened to spell the path).
+	 */
+	get cwd(): string {
+		return this.ctx.cwd;
+	}
+
 	get settings(): PermissionSettings {
 		return this.ctx.settings;
 	}
@@ -216,6 +239,19 @@ export class PermissionChecker {
 		return this.ctx.settings.allowPaths ?? [];
 	}
 
+	private allowCommands(): readonly CommandRule[] {
+		return this.ctx.settings.allowCommands ?? [];
+	}
+
+	/**
+	 * Whether the fail-closed CI preset is on (`permissions.allowlistOnly`).
+	 * Orthogonal to {@link mode} — surfaced in the footer next to it, never in the
+	 * mode cycle.
+	 */
+	get failClosed(): boolean {
+		return this.ctx.settings.allowlistOnly === true;
+	}
+
 	/** Public entry point. */
 	check(action: PermissionAction): PermissionDecision {
 		const { settings, mode } = this.ctx;
@@ -225,11 +261,14 @@ export class PermissionChecker {
 			return { decision: "deny", reason: `Tool "${action.toolName}" is in denyTools.` };
 		}
 
-		if (mode === "plan") {
-			return this.checkPlan(action);
+		// plan and ask share ONE read-only gate — they differ only in the prompt
+		// posture injected by the permissions extension, never in enforcement.
+		if (mode === "plan" || mode === "ask") {
+			return this.checkReadOnly(action, mode);
 		}
 
-		// auto — writes and commands run; deny rules gate them.
+		// auto (and confirm, which shares this whole chain) — writes and commands
+		// run; deny rules gate them.
 		// allowTools is an explicit, deliberate bypass: skip all further checks.
 		if (matchesAnyToolRule(settings.allowTools, action.toolName)) {
 			return { decision: "allow" };
@@ -257,24 +296,157 @@ export class PermissionChecker {
 				};
 			}
 		}
-		// No `allowPaths` pass here: auto's terminal default is already `allow` and the
-		// deny checks above run first, so a match could never change the outcome. The
-		// rule list is only consulted in `checkPlan` (documented precedence step 6).
+		// Terminal. Default: auto ends in `allow` — the deny checks above are the whole
+		// gate, and no `allowPaths` pass is needed here because a match could never
+		// change that outcome (the list is otherwise only consulted in `checkReadOnly`,
+		// documented precedence step 6).
+		//
+		// `allowlistOnly` (fail-closed CI preset) and mode `confirm` each flip exactly
+		// this terminal: the order above — denyTools, read-only gate, allowTools
+		// bypass, deny rules — is untouched, only what happens when nothing matched
+		// changes. allowlistOnly is checked FIRST so it wins when both are on: it
+		// exists for headless CI, which must never park on a prompt.
+		if (settings.allowlistOnly) return this.checkAllowlistOnly(action);
+		if (mode === "confirm") return this.checkConfirm(action);
 		return { decision: "allow" };
 	}
 
-	/** Read-only mode: block mutations, still apply read deny/allow rules. */
-	private checkPlan(action: PermissionAction): PermissionDecision {
-		if (action.type === "write" || action.type === "exec") {
-			return { decision: "deny", reason: `Plan mode is read-only — tool "${action.toolName}" is blocked.` };
+	/**
+	 * Human-in-the-loop terminal for mode `confirm`. Reached only after the full
+	 * deny chain has already passed, so this is purely "did the user pre-approve
+	 * it?" — the mirror image of {@link checkAllowlistOnly} over the SAME lists:
+	 * - `read`  → allow. Deny rules (incl. the sensitive-path floor) already ran;
+	 *             confirm gates mutations, not reading.
+	 * - `write` → allow without a prompt when EVERY path matches `allowPaths`;
+	 *             otherwise confirm. A write that exposed no path still confirms
+	 *             (there is nothing to match, and a human can still read the tool).
+	 * - `exec`  → allow without a prompt when the command matches `allowCommands`;
+	 *             otherwise confirm. A regex budget overrun falls through to the
+	 *             prompt rather than to a silent allow.
+	 * - `tool`  → side-effect-free tools allow; everything else (workspace/exec/
+	 *             agent/opaque, every `mcp__*`) confirms. The one exception is the
+	 *             spawn family: a subagent runs headless and cannot raise a prompt
+	 *             of its own, so spawning is DENIED rather than confirmed —
+	 *             `allowTools` (checked earlier) is the deliberate way in.
+	 */
+	private checkConfirm(action: PermissionAction): PermissionDecision {
+		if (action.type === "read") return { decision: "allow" };
+
+		if (action.type === "write") {
+			if (
+				action.paths.length > 0 &&
+				this.firstNonMatchingPath(this.allowPaths(), action.paths, action.toolName) !== undefined
+			) {
+				return { decision: "confirm", reason: describeWriteForConfirm(action.toolName, action.paths) };
+			}
+			if (action.paths.length === 0) {
+				return { decision: "confirm", reason: `run "${action.toolName}" (mutating tool, no path exposed)` };
+			}
+			return { decision: "allow" };
 		}
 
-		// MCP is always denied in plan — allowTools cannot opt in (external servers
-		// may mutate; leave plan mode to use them).
+		if (action.type === "exec") {
+			const regexDeadline = createRegexTestDeadline();
+			const allowCmd = findMatchingCommandRule(this.allowCommands(), action.command, regexDeadline);
+			if (allowCmd && !wasRegexBudgetExceeded(regexDeadline)) return { decision: "allow" };
+			const command = action.command.trim();
+			return {
+				decision: "confirm",
+				reason: command
+					? `run \`${truncateCommandForReason(command)}\``
+					: `run "${action.toolName}" (code execution)`,
+			};
+		}
+
+		if (COORDINATOR_TOOL_NAMES.has(action.toolName)) {
+			return { decision: "deny", reason: subagentConfirmDenyReason(action.toolName) };
+		}
+
+		// Unclassified tools are opaque (fail-closed into the prompt, not past it).
+		const sideEffect = action.toolName.startsWith("mcp__")
+			? "opaque"
+			: (this.resolveSideEffect(action.toolName) ?? "opaque");
+		if (sideEffect === "none") return { decision: "allow" };
+		return { decision: "confirm", reason: `run tool "${action.toolName}" (side effect "${sideEffect}")` };
+	}
+
+	/**
+	 * Fail-closed terminal for `permissions.allowlistOnly` (CI preset). Reached only
+	 * after the full deny chain has already passed, so this is purely "is it on an
+	 * allowlist?":
+	 * - `read`  → allow. Deny rules (incl. the sensitive-path floor) already ran;
+	 *             free reads are the point of a CI preset.
+	 * - `write` → allow only if EVERY path of the action matches `allowPaths`.
+	 * - `exec`  → allow only if the command line matches an `allowCommands` rule.
+	 * - `tool`  → allow only side-effect-free tools; anything that touches the
+	 *             workspace/shell/subagents (including every `mcp__*`) has exactly
+	 *             one way in, `allowTools`, which is checked before this.
+	 * An action with nothing to match against (a `write` that exposed no path) is
+	 * denied: unverifiable is not the same as safe.
+	 */
+	private checkAllowlistOnly(action: PermissionAction): PermissionDecision {
+		if (action.type === "read") return { decision: "allow" };
+
+		if (action.type === "write") {
+			if (action.paths.length === 0) {
+				return {
+					decision: "deny",
+					reason: `${FAIL_CLOSED_PREFIX}tool "${action.toolName}" exposes no path to match against allowPaths.`,
+				};
+			}
+			const unmatched = this.firstNonMatchingPath(this.allowPaths(), action.paths, action.toolName);
+			if (unmatched !== undefined) {
+				return {
+					decision: "deny",
+					reason: `${FAIL_CLOSED_PREFIX}path "${unmatched}" does not match any allowPaths rule.`,
+				};
+			}
+			return { decision: "allow" };
+		}
+
+		if (action.type === "exec") {
+			const regexDeadline = createRegexTestDeadline();
+			const allowCmd = findMatchingCommandRule(this.allowCommands(), action.command, regexDeadline);
+			// Budget exhaustion resolves the same way as no match: deny.
+			if (wasRegexBudgetExceeded(regexDeadline)) {
+				return {
+					decision: "deny",
+					reason: `${FAIL_CLOSED_PREFIX}command allowlist check exceeded regex time budget.`,
+				};
+			}
+			if (allowCmd) return { decision: "allow" };
+			return {
+				decision: "deny",
+				reason: `${FAIL_CLOSED_PREFIX}command "${truncateCommandForReason(action.command)}" does not match any allowCommands rule.`,
+			};
+		}
+
+		// Unclassified tools are opaque (fail-closed), same posture as plan/ask.
+		const sideEffect = this.resolveSideEffect(action.toolName) ?? "opaque";
+		if (sideEffect === "none") return { decision: "allow" };
+		return {
+			decision: "deny",
+			reason: `${FAIL_CLOSED_PREFIX}tool "${action.toolName}" (side effect "${sideEffect}") is not in allowTools.`,
+		};
+	}
+
+	/**
+	 * Read-only modes (plan, ask): block mutations, still apply read deny/allow
+	 * rules. `mode` only shapes the deny REASON — the model is told which stance it
+	 * is actually in, so "switch to auto" advice is never misattributed.
+	 */
+	private checkReadOnly(action: PermissionAction, mode: "plan" | "ask"): PermissionDecision {
+		const label = mode === "ask" ? "Ask" : "Plan";
+		if (action.type === "write" || action.type === "exec") {
+			return { decision: "deny", reason: `${label} mode is read-only — tool "${action.toolName}" is blocked.` };
+		}
+
+		// MCP is always denied in a read-only mode — allowTools cannot opt in
+		// (external servers may mutate; leave the read-only mode to use them).
 		if (action.type === "tool" && action.toolName.startsWith("mcp__")) {
 			return {
 				decision: "deny",
-				reason: `Plan mode blocks MCP tools (they may mutate). Switch to auto mode to use "${action.toolName}".`,
+				reason: `${label} mode blocks MCP tools (they may mutate). Switch to auto mode to use "${action.toolName}".`,
 			};
 		}
 
@@ -282,7 +454,7 @@ export class PermissionChecker {
 			const sideEffect = this.resolveSideEffect(action.toolName);
 			// Unclassified tools are treated as opaque (fail-closed).
 			if (sideEffect === undefined || isPlanBlockingSideEffect(sideEffect)) {
-				return { decision: "deny", reason: `Plan mode is read-only — tool "${action.toolName}" is blocked.` };
+				return { decision: "deny", reason: `${label} mode is read-only — tool "${action.toolName}" is blocked.` };
 			}
 		}
 
@@ -305,6 +477,19 @@ export class PermissionChecker {
 		return { decision: "allow" };
 	}
 
+	/** First resolved path NOT covered by `rules` (fail-closed allowlist check). */
+	private firstNonMatchingPath(
+		rules: readonly PathRule[],
+		paths: readonly string[],
+		toolName: string,
+	): string | undefined {
+		for (const raw of paths) {
+			const target = normalizeTargetPath(raw, this.ctx.cwd);
+			if (!findMatchingGlob(rules, target, toolName)) return target;
+		}
+		return undefined;
+	}
+
 	private firstMatchingPath(
 		rules: readonly PathRule[],
 		paths: readonly string[],
@@ -319,6 +504,39 @@ export class PermissionChecker {
 		}
 		return undefined;
 	}
+}
+
+/** Shared prefix so a fail-closed deny is never mistaken for a rule hit. */
+const FAIL_CLOSED_PREFIX = "Fail-closed (permissions.allowlistOnly): ";
+
+/**
+ * Short, human-facing summary of a pending write for the confirm prompt. Names
+ * the first path and counts the rest so a 12-file edit still fits one line.
+ */
+function describeWriteForConfirm(toolName: string, paths: readonly string[]): string {
+	const first = paths[0] ?? "";
+	const rest = paths.length - 1;
+	const target = rest > 0 ? `"${first}" and ${rest} more path${rest === 1 ? "" : "s"}` : `"${first}"`;
+	return `${toolName} → ${target}`;
+}
+
+/**
+ * Why the spawn family is denied outright in confirm mode. A subagent runs
+ * headless — it has no UI of its own to raise an approval prompt — so letting one
+ * start would either park forever or silently execute unapproved mutations.
+ * `allowTools` (evaluated before this terminal) is the deliberate way in.
+ */
+export function subagentConfirmDenyReason(toolName: string): string {
+	return `Confirm mode blocks subagents — "${toolName}" runs headless and cannot prompt for approval. Switch to auto, or pre-approve via allowTools.`;
+}
+
+/**
+ * Keep a deny/confirm reason one line even when the command line is huge.
+ * Surrogate-safe: a raw `slice` can split an astral pair and emit a lone
+ * surrogate into a message that ends up in a prompt or a terminal.
+ */
+function truncateCommandForReason(command: string): string {
+	return truncateWithEllipsis(command.replace(/\s+/g, " ").trim(), 61);
 }
 
 function denyReasonForPath(denyTarget: { rule: PathRule; matchedPath: string }): PermissionDecision {

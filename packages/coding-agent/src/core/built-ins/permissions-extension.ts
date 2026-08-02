@@ -2,24 +2,33 @@
  * Built-in permissions extension.
  *
  * Subscribes to `tool_call` and gates execution through `PermissionChecker`.
- * plan = read-only, auto = guarded (built-in deny floor).
+ * plan = read-only (plan ritual), ask = read-only (Q&A stance, same gate),
+ * confirm = guarded + human approval per mutation, auto = guarded (built-in deny
+ * floor). A `confirm` decision from the checker is resolved here, asynchronously,
+ * through `permissions/confirm-gate.ts`.
  *
  * Settings layout (Settings.permissions):
  *   {
- *     "mode": "plan" | "auto",
+ *     "mode": "plan" | "ask" | "confirm" | "auto",
  *     "allowPaths": [{ "glob": "src/**", ... }],
  *     "denyPaths":  [{ "glob": "**\/.env*" }],
  *     "denyCommands": [{ "pattern": "rm\\s+-rf\\s+/" }],
  *     "allowTools": ["read"],
  *     "denyTools":  [],
- *     "disableBuiltinDefaults": false
+ *     "disableBuiltinDefaults": false,
+ *     "allowlistOnly": false,
+ *     "allowCommands": [{ "pattern": "^npm test" }]
  *   }
  *
- * CLI flag `--permission-mode` overrides `mode` for the session.
+ * CLI flag `--permission-mode` overrides `mode` for the session; `--allowlist-only`
+ * forces `allowlistOnly` on (fail-closed CI preset — orthogonal to the mode, and
+ * never part of the mode cycle).
  */
 
 import type { ExtensionAPI } from "../extensions/types.ts";
 import type { Orchestration } from "../fusion/types.ts";
+import { buildAskModeSection } from "../permissions/ask-mode-prompt.ts";
+import { buildConfirmModeSection } from "../permissions/confirm-mode-prompt.ts";
 import { createExitPlanToolDefinition } from "../permissions/exit-plan-tool.ts";
 import {
 	describeToolAction,
@@ -29,8 +38,10 @@ import {
 	type PermissionChecker,
 	type PermissionMode,
 	type PermissionSettings,
+	resolveConfirmDecision,
 } from "../permissions/index.ts";
 import { buildPlanModeSection } from "../permissions/plan-mode-prompt.ts";
+import { PERMISSION_MODES } from "../permissions/types.ts";
 
 /** Transcript custom-type for compact permission-deny lines (see custom-message.ts). */
 export const PERMISSION_BLOCKED_CUSTOM_TYPE = "pit.permission-blocked";
@@ -40,10 +51,18 @@ const STATUS_KEY = "permissions";
 /**
  * UI label for the current permission state. When the built-in floor is off
  * (a mode with `disableBuiltinDefaults`) we surface "no-rails" so the footer can
- * shout the dropped-floor state regardless of the literal mode.
+ * shout the dropped-floor state regardless of the literal mode — that alarm wins
+ * over every other facet, including fail-closed (the footer keys its red banner
+ * off the exact string "no-rails").
+ *
+ * The fail-closed CI preset (`allowlistOnly`) rides as a suffix on the mode
+ * (`auto·fail-closed`) — no space, so the footer's `permissions:\s*(\S+)` capture
+ * keeps it whole, and the composite is `!== "auto"` so the metrics line shows it
+ * instead of hiding it as the boring default.
  */
 function permissionDisplayLabel(checker: PermissionChecker): string {
-	return checker.builtinsActive ? checker.mode : "no-rails";
+	if (!checker.builtinsActive) return "no-rails";
+	return checker.failClosed ? `${checker.mode}·fail-closed` : checker.mode;
 }
 
 /**
@@ -56,37 +75,49 @@ export function modeDisplayLabel(checker: PermissionChecker, orchestration: Orch
 }
 
 /**
- * Pure 3-stop cycle over (orchestration × permission mode):
- *   Plan → Auto → Fusion·Plan → Plan.
- * Fusion always rides on plan-mode (read-only) in v1.
+ * Pure 4-stop cycle over (orchestration × permission mode):
+ *   Plan → Ask → Auto → Fusion·Plan → Plan.
+ * The two read-only stops come first (plan builds a DAG, ask answers questions),
+ * then the permissive one, then the multi-model panel. Fusion always rides on
+ * plan-mode (read-only) in v1 — there is no Fusion·Ask or Fusion·Auto.
+ *
+ * `confirm` is deliberately NOT a stop: it is a deliberate, sticky choice (every
+ * mutation costs a keystroke), not something to land on by cycling past. It is
+ * reachable only via `/permission-mode confirm` and `--permission-mode confirm`.
  */
 export function nextFusionCycleState(
 	orchestration: Orchestration,
 	mode: PermissionMode,
 ): { orchestration: Orchestration; mode: PermissionMode } {
 	if (orchestration === "fusion") return { orchestration: "solo", mode: "plan" }; // Fusion·Plan → Plan
-	if (mode === "plan") return { orchestration: "solo", mode: "auto" }; // Plan → Auto
+	if (mode === "plan") return { orchestration: "solo", mode: "ask" }; // Plan → Ask
+	if (mode === "ask") return { orchestration: "solo", mode: "auto" }; // Ask → Auto
+	// Off-cycle mode (confirm): re-enter the loop at its first stop rather than at
+	// the next one. A stray cycle key from a mode the loop does not contain must
+	// never make the session MORE permissive than it already was.
+	if (mode === "confirm") return { orchestration: "solo", mode: "plan" }; // Confirm → Plan
 	return { orchestration: "fusion", mode: "plan" }; // Auto → Fusion·Plan
 }
 
 /**
  * v1 Mode invariant — the single source of truth for the two-facet coupling.
- * Orchestration `fusion` implies permission `plan`: Fusion·Auto does not exist in
- * v1 (the cycle in {@link nextFusionCycleState} never produces it), so `(fusion,
- * auto)` is the only illegal pairing. Given the desired facet values and which
- * facet the caller is authoritatively setting, this returns the legal pair — the
- * authoritative facet is kept, the other bends. Every coupling site routes through
- * here (exit_plan approval, `/permission-mode`, session restore) so the rule lives
- * in one place instead of three ad-hoc resets that can drift apart.
+ * Orchestration `fusion` implies permission `plan`: neither Fusion·Auto nor
+ * Fusion·Ask exists in v1 (the cycle in {@link nextFusionCycleState} never
+ * produces them), so ANY pairing of `fusion` with a mode other than `plan` is
+ * illegal. Given the desired facet values and which facet the caller is
+ * authoritatively setting, this returns the legal pair — the authoritative facet
+ * is kept, the other bends. Every coupling site routes through here (exit_plan
+ * approval, `/permission-mode`, session restore) so the rule lives in one place
+ * instead of three ad-hoc resets that can drift apart.
  */
 export function reconcileFusionModeInvariant(
 	desired: { mode: PermissionMode; orchestration: Orchestration },
 	authority: "permission" | "orchestration",
 ): { mode: PermissionMode; orchestration: Orchestration } {
-	if (desired.orchestration === "fusion" && desired.mode === "auto") {
-		// Illegal Fusion·Auto: keep the facet the caller deliberately set, bend the other.
+	if (desired.orchestration === "fusion" && desired.mode !== "plan") {
+		// Illegal fusion pairing: keep the facet the caller deliberately set, bend the other.
 		return authority === "permission"
-			? { mode: "auto", orchestration: "solo" } // entering auto leaves fusion
+			? { mode: desired.mode, orchestration: "solo" } // deliberately leaving plan leaves fusion
 			: { mode: "plan", orchestration: "fusion" }; // restored fusion forces plan
 	}
 	return desired;
@@ -126,25 +157,45 @@ export function createPermissionsExtension(options: PermissionsExtensionOptions)
 			}
 		});
 
-		// Tell the model UP FRONT it is in plan mode so it researches + plans
-		// instead of fighting the permission layer. Pre-model band: appended after
-		// the system prompt's dynamic marker, so the cacheable prefix is preserved.
+		// Tell the model UP FRONT which stance it is in, so it researches (plan),
+		// answers (ask), or batches its mutations (confirm) instead of fighting the
+		// permission layer. Same checker, different posture — hence one section per
+		// non-default mode. Pre-model band: appended after the system prompt's
+		// dynamic marker, so the cacheable prefix is preserved.
 		pi.on("before_agent_start", (event) => {
-			if (checker.mode !== "plan") return undefined;
-			return { systemPrompt: `${event.systemPrompt}\n\n${buildPlanModeSection()}` };
+			const section =
+				checker.mode === "plan"
+					? buildPlanModeSection()
+					: checker.mode === "ask"
+						? buildAskModeSection()
+						: checker.mode === "confirm"
+							? buildConfirmModeSection()
+							: undefined;
+			if (!section) return undefined;
+			return { systemPrompt: `${event.systemPrompt}\n\n${section}` };
 		});
 
-		pi.on("tool_call", (event, _ctx) => {
+		// Async on purpose: a `confirm` decision parks here awaiting the user's
+		// answer. The host awaits this handler through `settleOrAbort`, so Esc/abort
+		// still unblocks the turn (the interrupt path also cancels the input bus) —
+		// the checker itself stays pure and synchronous.
+		pi.on("tool_call", async (event, _ctx) => {
 			const action = describeToolAction(event.toolName, event.input);
 			const decision = checker.check(action);
-			const reason = "reason" in decision ? decision.reason : undefined;
+			// Resolve the confirm deferral to a real verdict BEFORE anything is
+			// audited or blocked, so the audit callback and the transcript notice only
+			// ever see allow/deny. Never fall through: an unhandled "confirm" here
+			// would silently un-gate every mutation the mode exists to gate.
+			const resolved =
+				decision.decision === "confirm" ? await resolveConfirmDecision(checker, action, decision.reason) : decision;
+			const reason = "reason" in resolved ? resolved.reason : undefined;
 			onDecision?.({
 				toolName: event.toolName,
-				decision: decision.decision,
+				decision: resolved.decision,
 				reason,
 			});
 
-			if (decision.decision === "deny") {
+			if (resolved.decision === "deny") {
 				// Quiet one-line transcript notice so vibecoders see *why* (mode/rule),
 				// not only a failed tool row. Model still gets the block reason.
 				const content = formatPermissionBlockedContent(event.toolName, reason, checker.mode);
@@ -153,14 +204,14 @@ export function createPermissionsExtension(options: PermissionsExtensionOptions)
 					content,
 					display: true,
 				});
-				return { block: true, reason: decision.reason };
+				return { block: true, reason };
 			}
 			return undefined;
 		});
 
 		// Re-evaluate when the user changes mode mid-session via /permission-mode
 		pi.registerCommand("permission-mode", {
-			description: "Switch permission mode (plan | auto)",
+			description: `Switch permission mode (${PERMISSION_MODES.join(" | ")})`,
 			async handler(args, ctx) {
 				const trimmed = args.trim();
 				if (trimmed.length === 0) {
@@ -169,13 +220,13 @@ export function createPermissionsExtension(options: PermissionsExtensionOptions)
 				}
 				const mode = normalizePermissionMode(trimmed);
 				if (!mode) {
-					ctx.ui.notify(`Invalid mode "${trimmed}". Use plan | auto.`, "warning");
+					ctx.ui.notify(`Invalid mode "${trimmed}". Use ${PERMISSION_MODES.join(" | ")}.`, "warning");
 					return;
 				}
 				checker.updateMode(mode);
-				// v1 invariant: switching to auto from Fusion·Plan must drop fusion —
-				// Fusion·Auto is unreachable via the cycle and must stay unreachable
-				// here. Reconcile the two facets through the single coupling helper.
+				// v1 invariant: leaving plan (for ask or auto) from Fusion·Plan must drop
+				// fusion — Fusion·Ask/Fusion·Auto are unreachable via the cycle and must
+				// stay unreachable here. Reconcile the facets through the coupling helper.
 				const reconciled = reconcileFusionModeInvariant(
 					{ mode: checker.mode, orchestration: pi.getOrchestration() },
 					"permission",
@@ -190,9 +241,9 @@ export function createPermissionsExtension(options: PermissionsExtensionOptions)
 			},
 		});
 
-		// 3-stop cycle over orchestration × mode: plan → auto → fusion·plan (bound to a keybinding).
+		// 4-stop cycle over orchestration × mode: plan → ask → auto → fusion·plan (bound to a keybinding).
 		pi.registerCommand("permission-cycle", {
-			description: "Cycle mode: plan → auto → fusion·plan",
+			description: "Cycle mode: plan → ask → auto → fusion·plan",
 			async handler(_args, ctx) {
 				const current = pi.getOrchestration();
 				const next = nextFusionCycleState(current, checker.mode);

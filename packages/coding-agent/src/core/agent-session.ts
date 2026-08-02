@@ -200,7 +200,7 @@ import {
 } from "./messaging/index.ts";
 import type { ModelRegistry } from "./model-registry.js";
 import { type RoleResolution, resolveRole } from "./model-resolver.js";
-import { describeToolAction } from "./permissions/index.ts";
+import { describeToolAction, resolveConfirmDecision } from "./permissions/index.ts";
 import { getCurrentPinManager, PinManager, type PinStateSnapshot, setCurrentPinManager } from "./pins.ts";
 import { getCurrentPlanManager, PlanManager, type PlanState, setCurrentPlanManager } from "./plan/plan-manager.ts";
 import {
@@ -1918,13 +1918,21 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 				// Permissions run early in emitToolCall; grounding/hooks may rewrite
 				// args afterwards. Re-check the deny floor on the final args.
 				if (argsMutation?.mutated && this.permissionChecker) {
-					const decision = this.permissionChecker.check(
-						describeToolAction(toolCall.name, args as Record<string, unknown>),
-					);
-					if (decision.decision === "deny") {
+					const action = describeToolAction(toolCall.name, args as Record<string, unknown>);
+					const decision = this.permissionChecker.check(action);
+					// Confirm mode: the user approved the args the extension layer showed
+					// them, and those args have since been rewritten. Re-ask rather than
+					// inherit the stale approval — "Allow for session" already short-circuits
+					// this, so the extra prompt only appears when the grant was one-shot AND
+					// a later handler moved the target.
+					const resolved =
+						decision.decision === "confirm"
+							? await resolveConfirmDecision(this.permissionChecker, action, decision.reason)
+							: decision;
+					if (resolved.decision === "deny") {
 						return {
 							block: true,
-							reason: decision.reason ?? `Tool "${toolCall.name}" is denied by permission policy.`,
+							reason: resolved.reason ?? `Tool "${toolCall.name}" is denied by permission policy.`,
 						};
 					}
 				}

@@ -10,7 +10,7 @@ import type { ExtensionFlag } from "../core/extensions/types.ts";
 // barrel drags checker.ts → tools/argument-prep.ts → the full @pit/ai index
 // (typebox, models, register-builtins — hundreds of ms of module eval) into
 // every graph that only needs arg parsing.
-import { normalizePermissionMode, type PermissionMode } from "../core/permissions/types.ts";
+import { normalizePermissionMode, PERMISSION_MODES, type PermissionMode } from "../core/permissions/types.ts";
 
 export type Mode = "text" | "json" | "rpc";
 
@@ -51,6 +51,12 @@ export interface Args {
 	offline?: boolean;
 	verbose?: boolean;
 	permissionMode?: PermissionMode;
+	/**
+	 * `--allowlist-only`: force `permissions.allowlistOnly` on for this run,
+	 * overriding settings. Fail-closed CI preset — orthogonal to `--permission-mode`
+	 * and combinable with any of its values.
+	 */
+	allowlistOnly?: boolean;
 	dryRun?: boolean;
 	dryRunFormat?: "text" | "json";
 	messages: string[];
@@ -227,9 +233,11 @@ export function parseArgs(args: string[]): Args {
 			} else {
 				result.diagnostics.push({
 					type: "warning",
-					message: `Invalid permission mode "${rawMode}". Valid values: plan, auto.`,
+					message: `Invalid permission mode "${rawMode}". Valid values: ${PERMISSION_MODES.join(", ")}.`,
 				});
 			}
+		} else if (arg === "--allowlist-only") {
+			result.allowlistOnly = true;
 		} else if (arg === "--dry-run") {
 			result.dryRun = true;
 			const next = args[i + 1];
@@ -403,7 +411,11 @@ ${chalk.bold("Options:")}
   --list-models [search]         List available models (with optional fuzzy search)
   --verbose                      Force verbose startup (overrides quietStartup setting)
   --offline                      Disable startup network operations (same as PIT_OFFLINE=1)
-  --permission-mode <mode>       Permission mode: plan | auto (default = auto)
+  --permission-mode <mode>       Permission mode: plan | ask | confirm | auto (default = auto)
+                                 confirm = auto, but every mutation waits for your approval
+                                 (interactive only; denied in print/RPC)
+  --allowlist-only               Fail-closed (CI): never prompts, only allowPaths /
+                                 allowCommands / allowTools run, everything else is denied
   --dry-run [text|json]          Inspect resolved config/auth/tools/MCP and exit without running the agent
   --help, -h                     Show this help
   --version, -v                  Show version number

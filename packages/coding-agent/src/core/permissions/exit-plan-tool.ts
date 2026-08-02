@@ -14,10 +14,10 @@
  * no headless path can leave plan mode without a real human choice.
  * Two more layers keep that invariant when a listener IS bound: "Keep planning"
  * is deliberately the FIRST option (every auto-answer fallback picks
- * recommended-or-first — e.g. the interactive mode auto-resolves a second picker
- * request that arrives while one is already open), and the tool runs
- * `executionMode: "sequential"` so it never shares a parallel tool batch with
- * another UserInputBus prompt in the first place.
+ * recommended-or-first), and the tool runs `executionMode: "sequential"` so it
+ * never shares a parallel tool batch with another UserInputBus prompt in the
+ * first place — the interactive mode queues concurrent prompts rather than
+ * answering them, but sequential execution keeps the approval alone on screen.
  *
  * Fail-open on the durable artifact: the plan is written to
  * `.pit/plans/<timestamp>-<slug>.md` AFTER consent, which is the same harness-
@@ -142,21 +142,32 @@ export function createExitPlanToolDefinition(
 		],
 		parameters: exitPlanSchema,
 		sideEffect: "none",
-		// Never share a parallel batch with another UserInputBus prompt: a second
-		// concurrent picker request is auto-resolved with the first option, which
-		// must not be able to race an approval (see header).
+		// Never share a parallel batch with another UserInputBus prompt: a mode flip
+		// must not be queued behind (or ahead of) an unrelated prompt (see header).
 		executionMode: "sequential",
 		async execute(_toolCallId, input) {
 			const title = truncateWithEllipsis((input.title ?? "").trim(), TITLE_MAX);
 			const summary = input.summary?.trim() ? truncateWithEllipsis(input.summary.trim(), SUMMARY_MAX) : undefined;
 
 			// 1. Guard: only meaningful in plan mode. Tool stays registered in every
-			//    mode so the surface is stable; the guard is internal.
+			//    mode so the surface is stable; the guard is internal. Ask and confirm
+			//    deliberately have NO plan ritual, so they land here with their own
+			//    steer. Their wording must NOT contain the auto-mode phrase
+			//    ("only available in plan mode") — the `exit-plan-not-in-plan-mode`
+			//    hint rule matches on that substring and would tell an ask/confirm
+			//    session it is "already in execution (auto) mode", which names the
+			//    wrong mode and the wrong reason.
 			if (options.checker.mode !== "plan") {
+				const reason =
+					options.checker.mode === "ask"
+						? "exit_plan is not available in ask mode — ask is a read-only Q&A stance with no plan ritual. Answer the question directly instead of presenting a plan."
+						: options.checker.mode === "confirm"
+							? "exit_plan is not available in confirm mode — confirm already executes; each mutation is approved by the user as it happens, so there is no plan to exit. Make the change directly."
+							: "exit_plan is only available in plan mode.";
 				return {
-					content: [{ type: "text" as const, text: "exit_plan is only available in plan mode." }],
+					content: [{ type: "text" as const, text: reason }],
 					isError: true as const,
-					details: { outcome: "not_plan_mode", reason: "exit_plan is only available in plan mode." },
+					details: { outcome: "not_plan_mode", reason },
 				};
 			}
 
@@ -199,8 +210,8 @@ export function createExitPlanToolDefinition(
 
 			// 4. Ask. No option is `recommended` AND the safe choice is listed first —
 			//    every auto-answer fallback picks recommended-or-first, so any path
-			//    that bypasses a real human (headless bus, picker-collision
-			//    auto-resolve) lands on "Keep planning", never on approval.
+			//    that bypasses a real human (headless bus, prompt timeout) lands on
+			//    "Keep planning", never on approval.
 			//    The `a` hotkey is interactive-only sugar (one keystroke instead of
 			//    Down+Enter in the picker); auto-answer paths never read `hotkey`,
 			//    so the fail-closed ordering above is untouched.

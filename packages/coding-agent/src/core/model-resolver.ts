@@ -9,6 +9,7 @@ import { minimatch } from "minimatch";
 import { isValidThinkingLevel } from "../cli/args.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ModelRegistry } from "./model-registry.ts";
+import type { PermissionMode } from "./permissions/types.ts";
 import type { ModelRoleConfig, ModelRoleSettings } from "./settings-manager.ts";
 
 /**
@@ -769,21 +770,28 @@ function findDefaultModel(availableModels: Model<Api>[]): Model<Api> | undefined
  * role config — so it is unit-testable without a TUI or session.
  *
  *  - mode "plan" + a configured `plan` role → "plan"
- *  - mode "auto" + the active role is still "plan" → `roleBeforePlan` when
- *    provided, else "default" (never clobber a role the user picked manually
- *    mid-session — that path returns undefined because activeRole !== "plan")
+ *  - any mode other than "plan" ("auto"/"ask"/"confirm") + the active role is
+ *    still "plan" → `roleBeforePlan` when provided, else "default" (never clobber
+ *    a role the user picked manually mid-session — that path returns undefined
+ *    because activeRole !== "plan")
  *  - otherwise → undefined (no-op / fail-open)
+ *
+ * There is no dedicated `ask` or `confirm` role in v1: both leave the plan ritual
+ * behind, so they behave exactly like leaving plan — the plan role is a
+ * planning-strength model, not a read-only one, and keeping it in ask would bill
+ * the expensive model for plain Q&A (and in confirm, for work the user is already
+ * approving line by line).
  *
  * `planRoleConfig` is `settings.modelRoles?.plan`; pass undefined when absent.
  * `roleBeforePlan` is the role that was active before entering plan mode.
  */
 export function decideRoleForPermissionMode(
-	mode: "plan" | "auto",
+	mode: PermissionMode,
 	activeRole: ModelRole,
 	planRoleConfig: ModelRoleConfig | undefined,
 	roleBeforePlan?: ModelRole,
 ): ModelRole | undefined {
 	if (mode === "plan" && planRoleConfig) return "plan";
-	if (mode === "auto" && activeRole === "plan") return roleBeforePlan ?? "default";
+	if (mode !== "plan" && activeRole === "plan") return roleBeforePlan ?? "default";
 	return undefined;
 }

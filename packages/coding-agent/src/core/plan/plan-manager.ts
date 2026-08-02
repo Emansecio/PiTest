@@ -21,6 +21,7 @@
  */
 
 import { truncateWithEllipsis } from "../../utils/surrogate.ts";
+import type { PermissionMode } from "../permissions/types.ts";
 
 const PLAN_STEP_STATUSES = ["pending", "active", "done", "blocked"] as const;
 type PlanStepStatus = (typeof PLAN_STEP_STATUSES)[number];
@@ -432,9 +433,11 @@ export class PlanManager {
 	 * while the plan is active (mirrors TodoManager).
 	 *
 	 * When `permissionMode` is `"plan"`, wording is planning/read-only so it does
-	 * not conflict with the `<plan_mode>` READ-ONLY section.
+	 * not conflict with the `<plan_mode>` READ-ONLY section. Only `"plan"` — `"ask"`
+	 * is read-only too but has no plan ritual (a plan surviving from an earlier
+	 * turn is just context there), so it keeps the standard wording.
 	 */
-	systemPromptSection(opts?: { permissionMode?: "plan" | "auto" }): string {
+	systemPromptSection(opts?: { permissionMode?: PermissionMode }): string {
 		if (this.archived) return "";
 		const v = this.versions[this.versions.length - 1];
 		if (!v) return "";

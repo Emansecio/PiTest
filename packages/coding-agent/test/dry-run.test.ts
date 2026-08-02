@@ -5,6 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 import { buildDryRunReport, formatReportJson, formatReportText } from "../src/cli/dry-run/index.js";
+import { PermissionChecker } from "../src/core/permissions/checker.ts";
 
 function makeFakeServices(overrides?: Partial<Record<string, unknown>>) {
 	const settings = {
@@ -34,6 +35,9 @@ function makeFakeServices(overrides?: Partial<Record<string, unknown>>) {
 		resourceLoader,
 		authStorage: {},
 		diagnostics: [],
+		// Live checker: the report reads `failClosed` from it so the
+		// `--allowlist-only` CLI override (which never reaches settings.json) shows up.
+		permissionChecker: new PermissionChecker({ cwd: process.cwd(), mode: "auto", settings: {} }),
 		...overrides,
 	} as unknown as import("../src/core/agent-session-services.ts").AgentSessionServices;
 }
@@ -74,6 +78,21 @@ describe("dry-run builder", () => {
 			resolvedToolNames: ["read"],
 		});
 		expect(report.overallStatus).toBe("blocked");
+	});
+
+	it("flags the fail-closed preset from the live checker (CLI --allowlist-only)", () => {
+		const plain = buildDryRunReport({ services: makeFakeServices(), resolvedToolNames: [] });
+		expect(plain.checks.find((c) => c.name === "Permissions")?.detail).not.toContain("fail-closed");
+
+		const services = makeFakeServices({
+			permissionChecker: new PermissionChecker({
+				cwd: process.cwd(),
+				mode: "auto",
+				settings: { allowlistOnly: true },
+			}),
+		});
+		const report = buildDryRunReport({ services, resolvedToolNames: [] });
+		expect(report.checks.find((c) => c.name === "Permissions")?.detail).toContain("fail-closed");
 	});
 
 	it("text format includes overall status header", () => {

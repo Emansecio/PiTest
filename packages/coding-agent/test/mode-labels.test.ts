@@ -2,8 +2,9 @@ import { describe, expect, it } from "vitest";
 import { formatPermissionBlockedContent, humanModeNotifyLabel } from "../src/core/permissions/mode-labels.ts";
 
 describe("humanModeNotifyLabel", () => {
-	it("labels plan and auto in solo", () => {
+	it("labels plan, ask and auto in solo", () => {
 		expect(humanModeNotifyLabel("solo", "plan")).toBe("Plan · research only — won't edit files");
+		expect(humanModeNotifyLabel("solo", "ask")).toBe("Ask · read-only Q&A — answers, won't edit files");
 		expect(humanModeNotifyLabel("solo", "auto")).toBe("Auto · can edit with built-in guard-rails");
 	});
 
@@ -18,6 +19,12 @@ describe("formatPermissionBlockedContent", () => {
 		const s = formatPermissionBlockedContent("edit", undefined, "plan");
 		expect(s).toContain("blocked: edit");
 		expect(s).toContain("plan mode");
+	});
+
+	it("includes the ask mode hint when no reason", () => {
+		const s = formatPermissionBlockedContent("write", undefined, "ask");
+		expect(s).toContain("blocked: write");
+		expect(s).toContain("ask mode (read-only)");
 	});
 
 	it("prefers a short reason when provided", () => {
