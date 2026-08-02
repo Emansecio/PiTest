@@ -19,6 +19,11 @@ type HandleAskRequestThis = {
 	awaitingUserInputMessage: string;
 	showSelector: (factory: (done: () => void) => unknown) => void;
 	ui: { requestRender: () => void };
+	// Queue collaborators handleAskRequest delegates to (real prototype methods).
+	askQueue: AskOptionsRequest[];
+	presentAskRequest: unknown;
+	refreshAskQueueBadge: unknown;
+	advanceAskQueue: unknown;
 };
 
 function callHandleAskRequest(context: HandleAskRequestThis, req: AskOptionsRequest): void {
@@ -42,6 +47,7 @@ describe("Leak 1: ask auto-answer timer is unref'd", () => {
 		const fakeHandle = { unref } as unknown as ReturnType<typeof setTimeout>;
 		const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockReturnValue(fakeHandle);
 
+		const proto = InteractiveMode.prototype as unknown as Record<string, unknown>;
 		const context: HandleAskRequestThis = {
 			pendingAskRequest: undefined,
 			beginUserInputWait: () => () => undefined,
@@ -50,6 +56,10 @@ describe("Leak 1: ask auto-answer timer is unref'd", () => {
 				factory(() => undefined);
 			},
 			ui: { requestRender: vi.fn() },
+			askQueue: [],
+			presentAskRequest: proto.presentAskRequest,
+			refreshAskQueueBadge: proto.refreshAskQueueBadge,
+			advanceAskQueue: proto.advanceAskQueue,
 		};
 
 		const req: AskOptionsRequest = {

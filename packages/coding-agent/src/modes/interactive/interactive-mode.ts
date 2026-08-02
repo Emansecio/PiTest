@@ -733,10 +733,19 @@ export class InteractiveMode {
 	// User-input bus: tools (e.g. `ask`) request structured option picks via this.
 	private userInputBus: UserInputBus = createUserInputBus();
 	private userInputBusUnsubscribe?: () => void;
+	private userInputBusCancelUnsubscribe?: () => void;
 	private pendingAskRequest: AskOptionsRequest | undefined;
 	// Cancels the picker currently bound to `pendingAskRequest` (resolves the bus
 	// with cancelled:true and tears the UI down). Set/cleared by handleAskRequest.
 	private pendingAskCancel: (() => void) | undefined;
+	// FIFO of requests that arrived while a picker was already open. Presented one
+	// at a time as the open one resolves (see handleAskRequest).
+	private askQueue: AskOptionsRequest[] = [];
+	// Shallow copy of `pendingAskRequest` handed to the live picker, plus its
+	// original header. The queue badge is written onto the copy so the header stays
+	// live as the queue grows without mutating the request the bus owns.
+	private pendingAskView: AskOptionsRequest | undefined;
+	private pendingAskBaseHeader: string | undefined;
 	// Set when agent_end closes a still-open "Interrupt what?" picker: tells the
 	// awaiting promptInterruptChoice that the turn died under the picker, so the
 	// cancel must NOT fall back to stop-the-whole-task of a turn that no longer
@@ -6499,22 +6508,102 @@ export class InteractiveMode {
 		this.userInputBusUnsubscribe = this.userInputBus.onRequest((req) => {
 			this.handleAskRequest(req);
 		});
+		// The bus can be drained from outside the UI (`session.interrupt()` /
+		// `abort()` → cancelAll("interrupt")). Everything this mode was going to
+		// present is already answered by then, so close the open picker and drop
+		// the queue instead of leaving a ghost prompt whose answer goes nowhere.
+		this.userInputBusCancelUnsubscribe = this.userInputBus.onCancelAll?.(() => {
+			this.askQueue.length = 0;
+			this.pendingAskCancel?.();
+		});
 		this.signalCleanupHandlers.push(() => {
 			this.userInputBusUnsubscribe?.();
 			this.userInputBusUnsubscribe = undefined;
+			this.userInputBusCancelUnsubscribe?.();
+			this.userInputBusCancelUnsubscribe = undefined;
+			// Drop the queue BEFORE cancelAll so the drain cannot resurrect a prompt
+			// while the UI is being torn down; cancelAll still answers every waiter.
+			this.askQueue.length = 0;
+			this.pendingAskCancel?.();
 			this.userInputBus.cancelAll("shutdown");
 			setCurrentUserInputBus(undefined);
 		});
 	}
 
+	/**
+	 * Entry point for every `UserInputBus` request.
+	 *
+	 * Sequential queue: a request that arrives while a picker is already open
+	 * waits its turn (FIFO) and is presented when the open one resolves. It used
+	 * to be auto-answered with `computeAutoAnswer` instead — a collision cost the
+	 * user their choice, which in `confirm` mode turned a parallel batch of N
+	 * mutations into one prompt plus N-1 spurious Denies (Deny is listed first
+	 * precisely so that auto-answer lands somewhere safe). No caller ever WANTED
+	 * that answer: `exit_plan` is marked `executionMode: "sequential"` to dodge
+	 * the collision entirely, and both `exit_plan` and the confirm gate order
+	 * their options fail-closed to survive it. Those orderings stay — they are
+	 * still the guard for the headless auto-answer path (no listener bound) —
+	 * but no request is auto-answered by the interactive mode any more.
+	 *
+	 * Ordering is strictly arrival order, including the "Interrupt what?" picker:
+	 * every in-repo caller uses the inline display mode, which owns focus while it
+	 * is up, so Esc reaches the open picker rather than the editor's onEscape and
+	 * an interrupt ask cannot be raised behind another prompt.
+	 */
 	private handleAskRequest(req: AskOptionsRequest): void {
-		// Queue if another picker is already up; resolve immediately with
-		// the recommended/first option to avoid stacking overlays.
 		if (this.pendingAskRequest) {
-			this.userInputBus.resolve(req.requestId, computeAutoAnswer(req));
+			this.askQueue.push(req);
+			this.refreshAskQueueBadge();
 			return;
 		}
+		this.presentAskRequest(req);
+	}
+
+	/**
+	 * Live `(+N queued)` marker on the open picker's header chip, so the user can
+	 * see that answering is not the last decision of the batch. Written onto the
+	 * mode's private copy of the request (`pendingAskView`), never onto the object
+	 * the bus and the calling tool hold.
+	 */
+	private refreshAskQueueBadge(): void {
+		const view = this.pendingAskView;
+		if (!view) return;
+		const queued = this.askQueue.length;
+		const base = this.pendingAskBaseHeader;
+		const next = queued === 0 ? base : base ? `${base}·+${queued} queued` : `+${queued} queued`;
+		if (view.header === next) return;
+		view.header = next;
+		this.ui.requestRender();
+	}
+
+	/**
+	 * Hand the next queued request to the picker, or drop the whole queue when the
+	 * one that just closed was CANCELLED. Esc means "stop asking me", not "ask me
+	 * the same thing N more times": the drain rides `bus.cancelAll`, so every
+	 * waiter gets the same cancelled answer it would get from a turn interrupt
+	 * (fail-closed for the confirm gate, which reads cancel as deny).
+	 */
+	private advanceAskQueue(cancelled: boolean): void {
+		if (cancelled) {
+			if (this.askQueue.length === 0) return;
+			// Cleared FIRST: cancelAll re-enters this mode through the onCancelAll
+			// listener, which must find nothing left to do.
+			this.askQueue.length = 0;
+			this.userInputBus.cancelAll("ask-queue-drain");
+			return;
+		}
+		const next = this.askQueue.shift();
+		if (next) this.presentAskRequest(next);
+	}
+
+	private presentAskRequest(req: AskOptionsRequest): void {
 		this.pendingAskRequest = req;
+		// The picker reads `header` on every render, so the badge stays live as more
+		// requests pile up behind this one.
+		this.pendingAskBaseHeader = req.header;
+		const view: AskOptionsRequest = { ...req };
+		this.pendingAskView = view;
+		this.refreshAskQueueBadge();
 		const releaseAskWait = this.beginUserInputWait(this.awaitingUserInputMessage);
 
 		let timer: ReturnType<typeof setTimeout> | undefined;
@@ -6529,9 +6618,13 @@ export class InteractiveMode {
 			}
 			this.pendingAskRequest = undefined;
 			this.pendingAskCancel = undefined;
+			this.pendingAskView = undefined;
+			this.pendingAskBaseHeader = undefined;
 			releaseAskWait();
 			this.userInputBus.resolve(req.requestId, answer);
 			close?.();
+			// Last: the queue takes over the surface this teardown just released.
+			this.advanceAskQueue(answer.cancelled === true);
 		};
 		// Host-side cancellation (e.g. agent_end closing an interrupt picker whose
 		// turn just died) rides the same single funnel as user answers/timeouts.
@@ -6565,7 +6658,7 @@ export class InteractiveMode {
 				void this.showExtensionCustom<void>(
 					(_tui, _theme, _kb, done) => {
 						close = () => done(undefined);
-						const { component } = createAskPicker(req, resolveFromUser, hooks);
+						const { component } = createAskPicker(view, resolveFromUser, hooks);
 						return component;
 					},
 					{
@@ -6579,7 +6672,7 @@ export class InteractiveMode {
 			} else {
 				this.showSelector((done) => {
 					close = done;
-					const { component, focus } = createAskPicker(req, resolveFromUser, {
+					const { component, focus } = createAskPicker(view, resolveFromUser, {
 						onRequestRender: () => this.ui.requestRender(),
 					});
 					return { component, focus };
@@ -6863,6 +6956,82 @@ export class InteractiveMode {
 			);
 			return { component: selector, focus: selector };
 		});
+	}
+
+	/**
+	 * `/jobs` (or alt+j) — the background tasks panel. Lists tracked background
+	 * bash jobs; Enter prints the selected job's buffered output into the
+	 * transcript, ctrl+k kills it (the agent is notified via the job-event bus).
+	 * With no jobs it shows a status line instead of an empty panel.
+	 */
+	private showJobsSelector(): void {
+		if (listBashBackgroundJobs().length === 0) {
+			this.showStatus("No background tasks");
+			return;
+		}
+		this.showSelector((done) => {
+			const selector = new BackgroundJobsSelectorComponent({
+				tui: this.ui,
+				onView: (job) => {
+					selector.dispose();
+					done();
+					this.printJobOutput(job);
+				},
+				onKilled: (job) => {
+					// Panel stays open (kill several in a row); the row list refreshes itself.
+					this.showStatus(`Killed ${job.id}`);
+				},
+				onCancel: () => {
+					selector.dispose();
+					done();
+					this.ui.requestRender();
+				},
+			});
+			return { component: selector, focus: selector };
+		});
+	}
+
+	/** Copy selected text (editor or transcript) to the clipboard with outcome-aware
+	 * dense status feedback. The UI callback stays synchronous while the clipboard
+	 * result is handled asynchronously. */
+	private copySelectionToClipboard(text: string): void {
+		const summary = text.replace(/\s+/g, " ").trim();
+		const preview = truncateWithEllipsis(summary, 32);
+		const chars = text.length;
+		void copyToClipboard(text).then(
+			() => this.showStatus(`copied·${chars} char${chars === 1 ? "" : "s"}${preview ? `·${preview}` : ""}`),
+			(error) => this.showWarning(`copy failed·${errMsg(error)}`),
+		);
+	}
+
+	/** Dump a background job's state + buffered output tail into the transcript. */
+	private printJobOutput(job: BashBackgroundJob): void {
+		job.resultSeen = true;
+		const state = !job.exited
+			? isBashBackgroundJobStalled(job)
+				? theme.fg(
+						"warning",
+						`stalled ${formatJobElapsed(Date.now() - Math.max(job.lastOutputAt, job.promotedAt))}`,
+					)
+				: theme.fg("accent", `running ${formatJobElapsed(Date.now() - job.startedAt)}`)
+			: job.exitCode === 0
+				? theme.fg("success", "exit 0")
+				: theme.fg("error", job.exitCode === null ? "signaled" : `exit ${job.exitCode}`);
+		const lines = [
+			`${theme.fg("bashMode", theme.bold(`$ ${job.command.split("\n", 1)[0]}`))}${theme.fg("dim", "·")}${theme.fg("muted", job.id)}${theme.fg("dim", "·")}${state}`,
+		];
+		if (job.ringBuffer) {
+			const tail = truncateTail(collapseRepeatedLines(job.ringBuffer), { maxLines: 30, maxBytes: 8 * 1024 });
+			if (tail.truncated) {
+				lines.push(theme.fg("dim", `(last ${tail.outputLines} of ${tail.totalLines} buffered lines)`));
+			}
+			lines.push(...tail.content.split("\n").map((line) => theme.fg("toolOutput", line)));
+		} else {
+			lines.push(theme.fg("muted", "(no output buffered since promotion)"));
+		}
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(lines.join("\n"), 1, 0));
+		this.ui.requestRender();
 	}
 
 	/**

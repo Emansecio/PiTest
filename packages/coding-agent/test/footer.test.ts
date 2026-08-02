@@ -2,7 +2,11 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, beforeAll, beforeEach, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.js";
+import { modeDisplayLabel, nextFusionCycleState } from "../src/core/built-ins/permissions-extension.js";
 import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.js";
+import type { Orchestration } from "../src/core/fusion/types.js";
+import { PermissionChecker } from "../src/core/permissions/checker.js";
+import type { PermissionMode } from "../src/core/permissions/types.js";
 import { FooterComponent } from "../src/modes/interactive/components/footer.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
 import { stripAnsi } from "../src/utils/ansi.js";
@@ -59,6 +63,8 @@ interface MakeFooterOptions {
 	userTurns?: number;
 	/** Footer density; tests default to full so extension-status assertions stay valid. */
 	density?: "calm" | "full";
+	/** Session orchestration facet (fusion suppresses the duplicate mode chip). */
+	orchestration?: "solo" | "fusion";
 }
 
 function makeFooter({
@@ -77,6 +83,7 @@ function makeFooter({
 	diffStats = null,
 	userTurns,
 	density = "full",
+	orchestration = "solo",
 }: MakeFooterOptions = {}): FooterComponent {
 	// A subscription tag needs a truthy model for isUsingOAuth(state.model).
 	const needsModel = usingOAuth || providerCount > 1 || thinkingLevel !== undefined || modelId !== undefined;
@@ -116,6 +123,8 @@ function makeFooter({
 			getCwd: () => cwd,
 		},
 		messages,
+		orchestration,
+		settingsManager: { getFusionSettings: () => ({ panel: [] }) },
 		getContextUsage: () => contextUsage,
 		goalIsDriving: () => false,
 		goalStatusLine: () => null,
@@ -219,6 +228,77 @@ it("hides auto on the metrics line when it is the default permission mode", () =
 	const lines = footer.render(80).map(stripAnsi);
 	expect(lines.length).toBeGreaterThanOrEqual(2);
 	expect(lines.slice(1).join("\n")).not.toContain("auto");
+});
+
+// ---------------------------------------------------------------------------
+// Permission chip: the 4th facet (confirm) and the fail-closed preset, rendered
+// from the SAME label producer the extension publishes (modeDisplayLabel), so a
+// drift between producer and footer cannot pass.
+// ---------------------------------------------------------------------------
+
+const metricsLine = (footer: FooterComponent, width = 100) => footer.render(width).map(stripAnsi).slice(1).join("\n");
+
+const label = (mode: PermissionMode, settings: Record<string, unknown> = {}, orchestration: Orchestration = "solo") =>
+	modeDisplayLabel(new PermissionChecker({ cwd: "C:/x", mode, settings }), orchestration);
+
+const chipFooter = (permissions: string, orchestration: "solo" | "fusion" = "solo") =>
+	makeFooter({
+		permissions,
+		orchestration,
+		autoCompact: true,
+		contextUsage: { tokens: 1000, percent: 5, contextWindow: 200000 },
+	});
+
+it("shows the confirm mode chip (a sticky, deliberate stance — never hidden as a default)", () => {
+	const text = label("confirm");
+	expect(text).toBe("confirm");
+	expect(metricsLine(chipFooter(text))).toContain("confirm");
+});
+
+it("shows auto·fail-closed as one token when allowlistOnly is on", () => {
+	const text = label("auto", { allowlistOnly: true });
+	expect(text).toBe("auto·fail-closed");
+	// Bare `auto` is hidden as the boring default; the composite must NOT be.
+	expect(metricsLine(chipFooter(text))).toContain("auto·fail-closed");
+});
+
+it("keeps the fail-closed suffix on the confirm chip too", () => {
+	expect(metricsLine(chipFooter(label("confirm", { allowlistOnly: true })))).toContain("confirm·fail-closed");
+});
+
+it("lets no-rails win over confirm + fail-closed (the alarm outranks both)", () => {
+	const text = label("confirm", { allowlistOnly: true, disableBuiltinDefaults: true });
+	expect(text).toBe("no-rails");
+	const lines = chipFooter(text).render(100).map(stripAnsi);
+	expect(lines.some((l) => l.includes("NO-RAILS"))).toBe(true);
+	expect(lines.join("\n")).not.toContain("confirm");
+	expect(lines.join("\n")).not.toContain("fail-closed");
+});
+
+it("reflects each alt+p stop in the footer and never lands on confirm", () => {
+	// alt+p → app.permission.cycle → the `permission-cycle` command → this pure
+	// transition. Walk all four stops and render what the footer would show.
+	let state: { orchestration: Orchestration; mode: PermissionMode } = { orchestration: "solo", mode: "plan" };
+	const seen: Array<{ label: string; chip: string }> = [];
+	for (let i = 0; i < 4; i++) {
+		state = nextFusionCycleState(state.orchestration, state.mode);
+		const text = label(state.mode, {}, state.orchestration);
+		seen.push({
+			label: text,
+			chip: metricsLine(chipFooter(text, state.orchestration === "fusion" ? "fusion" : "solo")),
+		});
+	}
+
+	expect(seen.map((s) => s.label)).toEqual(["ask", "auto", "fusion · plan", "plan"]);
+	expect(seen.some((s) => s.label.includes("confirm"))).toBe(false);
+
+	expect(seen[0].chip).toContain("ask");
+	// `auto` is the boring default and is deliberately not drawn.
+	expect(seen[1].chip).not.toContain("auto");
+	// Fusion always rides plan: the `fusion:` segment owns the line, so the
+	// duplicate permission chip is suppressed.
+	expect(seen[2].chip).toContain("fusion:");
+	expect(seen[3].chip).toContain("plan");
 });
 
 it("shows git diff stats in the identity line", () => {

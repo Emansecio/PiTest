@@ -75,6 +75,18 @@ export interface UserInputBus {
 	onRequest(listener: (req: AskOptionsRequest) => void): () => void;
 	resolve(requestId: string, answer: Omit<AskOptionsAnswer, "requestId">): void;
 	cancelAll(reason?: string): void;
+	/**
+	 * Notified AFTER `cancelAll` has drained the pending map. The bus can be
+	 * drained from outside the UI (`session.interrupt()` / `abort()` call
+	 * `cancelAll("interrupt")`), and a mode that owns UI for those requests —
+	 * an open picker, a queue of requests waiting their turn — has no other way
+	 * to learn that the promises it was going to answer are already settled.
+	 * Without it the interactive mode would keep a ghost picker on screen after
+	 * Esc, and would later present queued prompts whose answers go nowhere.
+	 *
+	 * Optional so the structural `UserInputBus` stubs in tests stay valid.
+	 */
+	onCancelAll?(listener: (reason?: string) => void): () => void;
 	/** True when at least one listener has registered. */
 	hasListener(): boolean;
 }
@@ -109,6 +121,7 @@ function autoAnswer(req: AskOptionsRequest): AskOptionsAnswer {
 
 export function createUserInputBus(): UserInputBus {
 	const listeners: Array<(req: AskOptionsRequest) => void> = [];
+	const cancelListeners: Array<(reason?: string) => void> = [];
 	const pending = new Map<string, PendingEntry>();
 
 	const bus: UserInputBus = {
@@ -151,13 +164,31 @@ export function createUserInputBus(): UserInputBus {
 			entry.resolve({ requestId, ...answer });
 		},
 
+		onCancelAll(listener) {
+			cancelListeners.push(listener);
+			return () => {
+				const idx = cancelListeners.indexOf(listener);
+				if (idx !== -1) cancelListeners.splice(idx, 1);
+			};
+		},
+
 		cancelAll(reason) {
 			const entries = Array.from(pending.entries());
 			pending.clear();
 			for (const [requestId, entry] of entries) {
 				entry.resolve({ requestId, picked: [], cancelled: true });
 			}
-			void reason;
+			// Notified last, with `pending` already empty: a listener that tears down
+			// its picker re-enters `resolve()`, which must be a no-op by then instead
+			// of answering a request the drain already settled.
+			for (const listener of cancelListeners.slice()) {
+				try {
+					listener(reason);
+				} catch (err) {
+					// eslint-disable-next-line no-console
+					console.error("UserInputBus cancel listener error:", err);
+				}
+			}
 		},
 
 		hasListener() {

@@ -19,6 +19,14 @@ const handleAskRequest = Reflect.get(InteractiveMode.prototype, "handleAskReques
 	req: AskOptionsRequest,
 ) => void;
 
+/** Queue collaborators `handleAskRequest` delegates to; real prototype methods. */
+const askQueueMethods = (): Record<string, unknown> => ({
+	askQueue: [] as AskOptionsRequest[],
+	presentAskRequest: Reflect.get(InteractiveMode.prototype, "presentAskRequest"),
+	refreshAskQueueBadge: Reflect.get(InteractiveMode.prototype, "refreshAskQueueBadge"),
+	advanceAskQueue: Reflect.get(InteractiveMode.prototype, "advanceAskQueue"),
+});
+
 describe("H25: showSelector releases the input-pause even when the factory throws", () => {
 	test("a throwing factory still releases the pause (clock never freezes)", () => {
 		const release = vi.fn();
@@ -70,6 +78,7 @@ describe("H25: handleAskRequest releases + answers the bus when the picker wirin
 		const release = vi.fn();
 		const resolve = vi.fn();
 		const fakeThis: Record<string, unknown> = {
+			...askQueueMethods(),
 			pendingAskRequest: undefined,
 			beginUserInputWait: vi.fn(() => release),
 			awaitingUserInputMessage: "Waiting for your answer…",
@@ -102,6 +111,7 @@ describe("H25: handleAskRequest releases + answers the bus when the picker wirin
 		const release = vi.fn();
 		const resolve = vi.fn();
 		const fakeThis: Record<string, unknown> = {
+			...askQueueMethods(),
 			pendingAskRequest: undefined,
 			beginUserInputWait: vi.fn(() => release),
 			awaitingUserInputMessage: "Waiting for your answer…",

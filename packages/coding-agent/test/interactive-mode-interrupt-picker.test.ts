@@ -21,6 +21,13 @@ const promptInterruptChoice = proto.promptInterruptChoice as (
 	tools: Array<{ id: string; name: string }>,
 ) => Promise<void>;
 const handleAskRequest = proto.handleAskRequest as (this: unknown, req: AskOptionsRequest) => void;
+/** Collaborators handleAskRequest delegates to (queue + picker presentation). */
+const askQueueMethods = {
+	askQueue: [] as AskOptionsRequest[],
+	presentAskRequest: proto.presentAskRequest,
+	refreshAskQueueBadge: proto.refreshAskQueueBadge,
+	advanceAskQueue: proto.advanceAskQueue,
+};
 const cancelInterruptAskOnTurnEnd = proto.cancelInterruptAskOnTurnEnd as (this: unknown) => void;
 const handleEvent = proto.handleEvent as (this: unknown, event: Record<string, unknown>) => Promise<void>;
 
@@ -73,6 +80,7 @@ describe("agent_end closes a still-open interrupt picker", () => {
 			clearInterruptWatchdog: vi.fn(),
 			cancelInterruptAskOnTurnEnd: vi.fn(),
 			disposeFusionLive: vi.fn(),
+			disposeAgentsLive: vi.fn(),
 			clearThinkingPreview: vi.fn(),
 			shouldRetireWorkingLoaderOnAgentEnd: proto.shouldRetireWorkingLoaderOnAgentEnd,
 			loadingAnimation: {},
@@ -107,6 +115,8 @@ describe("promptInterruptChoice under turn-end supersession (real bus + real ask
 	function makePickerFakeThis() {
 		const closed = vi.fn();
 		const fakeThis: Record<string, any> = {
+			...askQueueMethods,
+			askQueue: [],
 			userInputBus: createUserInputBus(),
 			pendingAskRequest: undefined,
 			pendingAskCancel: undefined,
@@ -124,6 +134,7 @@ describe("promptInterruptChoice under turn-end supersession (real bus + real ask
 			restoreQueuedMessagesToEditor: vi.fn(),
 			session: { interrupt: vi.fn(), cancelTool: vi.fn() },
 			disposeFusionLive: vi.fn(),
+			disposeAgentsLive: vi.fn(),
 			deferredTurnDone: {},
 			stopWorkingLoader: vi.fn(),
 			showStatus: vi.fn(),
@@ -169,6 +180,7 @@ describe("promptInterruptChoice under turn-end supersession (real bus + real ask
 			restoreQueuedMessagesToEditor: vi.fn(),
 			session: { interrupt: vi.fn(), cancelTool: vi.fn() },
 			disposeFusionLive: vi.fn(),
+			disposeAgentsLive: vi.fn(),
 			deferredTurnDone: {},
 			stopWorkingLoader: vi.fn(),
 			showStatus: vi.fn(),

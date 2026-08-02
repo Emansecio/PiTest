@@ -61,6 +61,14 @@ export interface InteractiveHarness {
 	statusText(): string;
 	/** Rendered text of the chat transcript container. */
 	chatText(): string;
+	/**
+	 * Rendered text of the composer slot — the editor normally, or whatever
+	 * selector/picker has taken its place (`showSelector`). Not mounted in the TUI
+	 * tree by the harness, so it never shows up in `screen()`.
+	 */
+	editorText(): string;
+	/** Feed a raw key sequence through the real TUI input path (focused component). */
+	sendKey(data: string): void;
 	/** Whole virtual-terminal viewport after the throttled render pipeline settles. */
 	screen(): Promise<string>;
 	/** Current working-loader phase label, or undefined when no loader is live. */
@@ -152,6 +160,7 @@ export function createInteractiveHarness(options: HarnessOptions = {}): Interact
 	ui.addChild(internals.chatVisibilityContainer);
 	ui.addChild(internals.pendingMessagesContainer);
 	ui.addChild(internals.statusContainer);
+	ui.addChild(internals.subagentsContainer);
 	internals.isInitialized = true;
 	ui.start();
 
@@ -162,6 +171,8 @@ export function createInteractiveHarness(options: HarnessOptions = {}): Interact
 		emit: (event) => internals.handleEvent(event),
 		statusText: () => renderContainer(internals.statusContainer, columns),
 		chatText: () => renderContainer(internals.chatVisibilityContainer, columns),
+		editorText: () => renderContainer(internals.editorContainer, columns),
+		sendKey: (data) => terminal.sendInput(data),
 		screen: async () => {
 			await terminal.waitForRender();
 			return terminal.getViewport().join("\n");
