@@ -15,6 +15,7 @@ import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { recordDiagnostic } from "@pit/ai";
 import { killProcessTree } from "../../utils/shell.ts";
+import { resolvePython } from "./python-resolver.ts";
 import type { EvalKernel, EvalRequest, EvalResult } from "./types.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -61,6 +62,8 @@ class PythonKernel implements EvalKernel {
 	private proc: ChildProcessWithoutNullStreams | undefined;
 	private alive = false;
 	private spawnError: Error | undefined;
+	private starting = false;
+	private startup: Promise<void> | undefined;
 	private current: PendingCall | undefined;
 	private queue: Array<() => void> = [];
 	private cwd: string;
@@ -72,53 +75,82 @@ class PythonKernel implements EvalKernel {
 	}
 
 	private spawn(): void {
-		const candidates = process.platform === "win32" ? ["python", "python3"] : ["python3", "python"];
-		let lastErr: Error | undefined;
-		for (const cmd of candidates) {
-			try {
-				const child = spawn(cmd, ["-i", "-u"], {
-					cwd: this.cwd,
-					stdio: ["pipe", "pipe", "pipe"],
-					env: { ...process.env, PYTHONUNBUFFERED: "1", PYTHONIOENCODING: "utf-8" },
-				});
-				child.on("error", (err) => {
-					if (this.proc !== child) return; // a respawn superseded this child
-					this.spawnError = err as Error;
-					this.alive = false;
-					this.failPending(err as Error);
-				});
-				child.on("exit", () => {
-					if (this.proc !== child) return; // stale child from before a respawn
-					this.alive = false;
-					this.failPending(new Error("python kernel exited"));
-				});
-				child.stdout.setEncoding("utf8");
-				child.stderr.setEncoding("utf8");
-				child.stdout.on("data", (chunk: string) => {
-					if (this.proc !== child) return;
-					this.onStdout(chunk);
-				});
-				child.stderr.on("data", (chunk: string) => {
-					if (this.proc !== child) return;
-					this.onStderr(chunk);
-				});
-				// A write racing the interpreter's death (timeout/abort proc.kill, exit)
-				// hits a closed stdin → EPIPE as an async 'error' event. Without a listener
-				// Node makes it fatal (uncaughtException → process death). Swallow it; the
-				// exit handler above already fails the pending calls.
-				child.stdin.on("error", () => {});
-				this.proc = child;
-				this.alive = true;
-				// Seed the prelude so common modules are pre-imported. Use a no-op exec
-				// (no sentinel) — output is irrelevant; subsequent calls flush past it.
-				child.stdin.write(PRELUDE);
-				return;
-			} catch (err) {
-				lastErr = err as Error;
-			}
+		let resolved: ReturnType<typeof resolvePython>;
+		try {
+			resolved = resolvePython({ cwd: this.cwd });
+		} catch (err) {
+			this.spawnError = err as Error;
+			this.alive = false;
+			this.starting = false;
+			recordDiagnostic({
+				category: "error.isolated",
+				level: "error",
+				source: "eval-kernel.python",
+				context: { path: this.cwd, note: `python-resolution: ${err instanceof Error ? err.message : String(err)}` },
+			});
+			return;
 		}
-		this.spawnError = lastErr ?? new Error("python interpreter not found");
-		this.alive = false;
+		recordDiagnostic({
+			category: "error.isolated",
+			level: "info",
+			source: "eval-kernel.python",
+			context: { path: resolved.command, note: `python-source: ${resolved.source}` },
+		});
+
+		let resolveStartup: (() => void) | undefined;
+		let rejectStartup: ((error: Error) => void) | undefined;
+		this.starting = true;
+		this.startup = new Promise<void>((resolvePromise, rejectPromise) => {
+			resolveStartup = resolvePromise;
+			rejectStartup = rejectPromise;
+		});
+		this.startup.catch(() => undefined);
+		try {
+			const child = spawn(resolved.command, ["-i", "-u"], {
+				cwd: this.cwd,
+				stdio: ["pipe", "pipe", "pipe"],
+				env: { ...process.env, PYTHONUNBUFFERED: "1", PYTHONIOENCODING: "utf-8" },
+			});
+			child.on("spawn", () => {
+				if (this.proc !== child) return;
+				this.starting = false;
+				this.alive = true;
+				resolveStartup?.();
+				child.stdin.write(PRELUDE);
+			});
+			child.on("error", (err) => {
+				if (this.proc !== child) return;
+				this.spawnError = err as Error;
+				this.alive = false;
+				this.starting = false;
+				rejectStartup?.(err as Error);
+				this.failPending(err as Error);
+			});
+			child.on("exit", () => {
+				if (this.proc !== child) return;
+				this.alive = false;
+				this.starting = false;
+				if (this.startup) rejectStartup?.(new Error("python kernel exited"));
+				this.failPending(new Error("python kernel exited"));
+			});
+			child.stdout.setEncoding("utf8");
+			child.stderr.setEncoding("utf8");
+			child.stdout.on("data", (chunk: string) => {
+				if (this.proc !== child) return;
+				this.onStdout(chunk);
+			});
+			child.stderr.on("data", (chunk: string) => {
+				if (this.proc !== child) return;
+				this.onStderr(chunk);
+			});
+			child.stdin.on("error", () => {});
+			this.proc = child;
+		} catch (err) {
+			this.spawnError = err as Error;
+			this.alive = false;
+			this.starting = false;
+			rejectStartup?.(err as Error);
+		}
 	}
 
 	private failPending(err: Error): void {
@@ -263,13 +295,27 @@ class PythonKernel implements EvalKernel {
 	}
 
 	isAlive(): boolean {
-		return this.alive;
+		return this.alive || this.starting;
 	}
 
 	async exec(req: EvalRequest, signal?: AbortSignal): Promise<EvalResult> {
+		if (this.starting) {
+			try {
+				await this.startup;
+			} catch {
+				// The common error below includes the resolver/spawn diagnostic.
+			}
+		}
 		if (!this.alive) {
 			// Try one respawn (e.g. after a previous timeout killed the proc).
 			this.spawn();
+			if (this.starting) {
+				try {
+					await this.startup;
+				} catch {
+					// fall through to the actionable spawn error
+				}
+			}
 			if (!this.alive) {
 				throw this.spawnError ?? new Error("python kernel not alive");
 			}

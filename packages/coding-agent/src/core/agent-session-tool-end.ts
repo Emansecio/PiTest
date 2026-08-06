@@ -42,7 +42,10 @@ export interface VerificationGateState {
 export interface ArmVerificationGateOptions {
 	/** When false, only sets turnTouchedFiles (code-mode lite path). Default true. */
 	trackPaths?: boolean;
-	result?: { details?: { firstChangedLine?: number } };
+	result?: { details?: { firstChangedLine?: number; acceptedPaths?: string[] } };
+	/** Called once for each successful mutation, with an optional stable event key. */
+	onMutation?: (path: string | undefined, eventKey?: string) => void;
+	eventKey?: string;
 }
 
 export function isMutatingToolCall(toolName: string, args: unknown): boolean {
@@ -63,10 +66,20 @@ export function armVerificationGate(
 	options?: ArmVerificationGateOptions,
 ): void {
 	const trackPaths = options?.trackPaths !== false;
+	const input = args as { preview?: unknown; dry_run?: unknown } | undefined;
+	if (input?.preview === true || input?.dry_run === true) return;
+	const acceptedPaths = options?.result?.details?.acceptedPaths;
+	if (toolName === "resolve" && Array.isArray(acceptedPaths)) {
+		state.turnTouchedFiles = acceptedPaths.length > 0;
+		for (const path of acceptedPaths)
+			options?.onMutation?.(path, options.eventKey ? `${options.eventKey}:${path}` : undefined);
+		return;
+	}
 	const fileOp = extractToolFileOp(toolName, args);
 	if (fileOp) {
 		if (fileOp.op !== "read") {
 			state.turnTouchedFiles = true;
+			options?.onMutation?.(fileOp.path, options.eventKey ? `${options.eventKey}:${fileOp.path}` : undefined);
 			if (trackPaths) {
 				state.turnTouchedFilePaths.add(fileOp.path);
 				const firstChangedLine = options?.result?.details?.firstChangedLine;
@@ -83,6 +96,7 @@ export function armVerificationGate(
 	}
 	if (isMutatingToolCall(toolName, args)) {
 		state.turnTouchedFiles = true;
+		options?.onMutation?.(undefined, options.eventKey ? `${options.eventKey}:anonymous` : undefined);
 	}
 }
 

@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { GoalManager, parseTokenBudget } from "../src/core/goal/goal-manager.js";
+import {
+	DEFAULT_GOAL_MAX_ACTIVE_MS,
+	DEFAULT_GOAL_MAX_ITERATIONS,
+	DEFAULT_GOAL_TOKEN_BUDGET,
+	GoalManager,
+	parseGoalDuration,
+	parseTokenBudget,
+} from "../src/core/goal/goal-manager.js";
 
 function makeManager(startMs = 0) {
 	let now = startMs;
@@ -31,6 +38,24 @@ describe("parseTokenBudget", () => {
 });
 
 describe("GoalManager lifecycle", () => {
+	it("exposes zero-config limits on every new goal", () => {
+		const { mgr } = makeManager();
+		const snap = mgr.start("bounded", {});
+		expect(snap.tokenBudget).toBe(DEFAULT_GOAL_TOKEN_BUDGET);
+		expect(snap.maxIterations).toBe(DEFAULT_GOAL_MAX_ITERATIONS);
+		expect(snap.maxActiveMs).toBe(DEFAULT_GOAL_MAX_ACTIVE_MS);
+		expect(snap.activeElapsedMs).toBe(0);
+	});
+
+	it("parses active durations", () => {
+		expect(parseGoalDuration("30m")).toBe(30 * 60_000);
+		expect(parseGoalDuration("2h")).toBe(2 * 60 * 60_000);
+		expect(parseGoalDuration("30000")).toBe(30_000);
+		expect(parseGoalDuration("1.5m")).toBeUndefined();
+		expect(parseGoalDuration("0")).toBeUndefined();
+		expect(parseGoalDuration("2d")).toBeUndefined();
+	});
+
 	it("starts an active goal and tracks it", () => {
 		const { mgr } = makeManager();
 		const snap = mgr.start("Refactor the parser", {});
@@ -138,12 +163,60 @@ describe("GoalManager lifecycle", () => {
 		expect(mgr.get()?.status).toBe("active");
 	});
 
+	it("limits total iterations and reports the reason", () => {
+		const { mgr } = makeManager();
+		mgr.start("x", { maxIterations: 2 });
+		mgr.recordIteration();
+		expect(mgr.shouldAutoContinue()).toBe(true);
+		mgr.recordIteration();
+		expect(mgr.shouldAutoContinue()).toBe(false);
+		expect(mgr.get()?.status).toBe("iteration_limited");
+		expect(mgr.get()?.limitReason).toEqual({ type: "iterations", used: 2, limit: 2 });
+	});
+
+	it("counts only active time and requires raising the time limit", () => {
+		const { mgr, advance } = makeManager();
+		mgr.start("x", { maxActiveMs: 1000 });
+		advance(600);
+		mgr.pause();
+		advance(5000);
+		expect(mgr.get()?.activeElapsedMs).toBe(600);
+		mgr.resume();
+		advance(399);
+		expect(mgr.shouldAutoContinue()).toBe(true);
+		advance(2);
+		expect(mgr.shouldAutoContinue()).toBe(false);
+		expect(mgr.get()?.status).toBe("time_limited");
+		mgr.resume();
+		expect(mgr.get()?.status).toBe("time_limited");
+		mgr.setMaxActiveMs(2000);
+		expect(mgr.get()?.status).toBe("active");
+	});
+
+	it("restores legacy active goals with defaults and a fresh active interval", () => {
+		const { mgr } = makeManager(10_000);
+		mgr.restore({
+			id: "legacy",
+			objective: "restore",
+			status: "active",
+			tokensUsed: 12,
+			iterations: 1,
+			startedAt: 1,
+		});
+		const restored = mgr.get();
+		expect(restored?.tokenBudget).toBe(DEFAULT_GOAL_TOKEN_BUDGET);
+		expect(restored?.maxIterations).toBe(DEFAULT_GOAL_MAX_ITERATIONS);
+		expect(restored?.maxActiveMs).toBe(DEFAULT_GOAL_MAX_ACTIVE_MS);
+		expect(restored?.activeElapsedMs).toBe(0);
+		expect(restored?.activeSince).toBe(10_000);
+	});
+
 	it("renders a compact status line", () => {
 		const { mgr, advance } = makeManager();
 		mgr.start("x", {});
 		advance(3 * 60_000);
 		// Canonical formatElapsed (utils/format-display.ts) keeps seconds: 3m00s, not 3m.
-		expect(mgr.statusLine()).toBe("🎯 active 3m00s");
+		expect(mgr.statusLine()).toBe("🎯 active 0/80k");
 
 		mgr.clear();
 		mgr.start("y", { tokenBudget: 100_000 });
@@ -163,7 +236,7 @@ describe("GoalManager lifecycle", () => {
 		advance(80);
 		const second = mgr.statusLine(true);
 		expect(first).toBe(second);
-		expect(first).toBe("🎯 active 0s");
+		expect(first).toBe("🎯 active 0/80k");
 	});
 
 	it("splits the prompt: objective+status in the suffix, persistence rules in the prefix", () => {
@@ -229,6 +302,27 @@ describe("GoalManager lifecycle", () => {
 		expect(mgr2.get()?.objective).toBe("persist me");
 		expect(mgr2.get()?.tokensUsed).toBe(1234);
 		expect(mgr2.get()?.tokenBudget).toBe(5000);
+	});
+
+	it("restores snapshots while preserving forward-compatible gate fields", () => {
+		const { mgr } = makeManager();
+		mgr.restore(
+			JSON.parse(
+				JSON.stringify({
+					id: "legacy-gates",
+					objective: "legacy",
+					status: "active",
+					tokensUsed: 0,
+					iterations: 0,
+					startedAt: 1,
+					unknownFutureField: { ignored: true },
+					gateProgress: { revision: 4, passedGateIds: ["check"] },
+				}),
+			),
+		);
+		expect(mgr.get()?.objective).toBe("legacy");
+		expect(mgr.get()?.tokenBudget).toBe(DEFAULT_GOAL_TOKEN_BUDGET);
+		expect(mgr.gateProgressFor(4)).toEqual(["check"]);
 	});
 
 	it("only completes/edits when a goal exists", () => {

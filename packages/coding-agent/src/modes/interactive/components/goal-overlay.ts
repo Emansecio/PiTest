@@ -39,6 +39,10 @@ function statusWord(status: GoalSnapshot["status"]): string {
 			return "paused";
 		case "budget_limited":
 			return "budget";
+		case "iteration_limited":
+			return "iterations";
+		case "time_limited":
+			return "time";
 		case "complete":
 			return "complete";
 	}
@@ -51,6 +55,10 @@ function statusColorize(status: GoalSnapshot["status"]): (text: string) => strin
 		case "paused":
 			return (s) => theme.fg("warning", s);
 		case "budget_limited":
+			return (s) => theme.fg("error", s);
+		case "iteration_limited":
+			return (s) => theme.fg("error", s);
+		case "time_limited":
 			return (s) => theme.fg("error", s);
 		case "complete":
 			return (s) => theme.fg("success", s);
@@ -72,6 +80,10 @@ function hintForStatus(
 			return { text: "resume with /goal resume", colorize: (s) => theme.fg("warning", s) };
 		case "budget_limited":
 			return { text: "raise with /goal --tokens <n>", colorize: (s) => theme.fg("error", s) };
+		case "iteration_limited":
+			return { text: "raise with /goal --iterations <n>", colorize: (s) => theme.fg("error", s) };
+		case "time_limited":
+			return { text: "raise with /goal --time <duration>", colorize: (s) => theme.fg("error", s) };
 		case "complete": {
 			const base = summary && summary.length > 0 ? summary : "done";
 			const softExit =
@@ -86,7 +98,7 @@ function goalStructuralKey(snapshot: GoalSnapshot): string {
 	const split = snapshot.tokenSpendSplit
 		? `${snapshot.tokenSpendSplit.main}/${snapshot.tokenSpendSplit.subagent}/${snapshot.tokenSpendSplit.fusion}`
 		: "";
-	return `${snapshot.status}|${snapshot.iterations}|${snapshot.tokensUsed}|${snapshot.tokenBudget ?? ""}|${split}|${snapshot.objective}|${snapshot.summary ?? ""}`;
+	return `${snapshot.status}|${snapshot.iterations}|${snapshot.tokensUsed}|${snapshot.tokenBudget ?? ""}|${snapshot.maxIterations ?? ""}|${snapshot.maxActiveMs ?? ""}|${snapshot.activeElapsedMs ?? ""}|${snapshot.limitReason?.type ?? ""}|${split}|${snapshot.objective}|${snapshot.summary ?? ""}`;
 }
 
 function buildGoalHeaderLine(snapshot: GoalSnapshot, width: number): string {

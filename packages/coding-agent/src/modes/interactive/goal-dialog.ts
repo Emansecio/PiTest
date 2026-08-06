@@ -13,7 +13,7 @@
  * interactive-slash-commands.ts) so it is testable without booting the TUI.
  */
 
-import { type GoalSnapshot, parseTokenBudget } from "../../core/goal/goal-manager.ts";
+import { type GoalSnapshot, parseGoalDuration, parseTokenBudget } from "../../core/goal/goal-manager.ts";
 import type { AskOption } from "../../core/user-input-bus.ts";
 import { sliceSafe } from "../../utils/surrogate.ts";
 
@@ -21,12 +21,14 @@ export interface GoalDialogHost {
 	goalSnapshot(): GoalSnapshot | undefined;
 	goalSummaryText(): string;
 	goalShouldAutoContinue(): boolean;
-	startGoal(objective: string, opts: { tokenBudget?: number }): void;
+	startGoal(objective: string, opts: { tokenBudget?: number; maxIterations?: number; maxActiveMs?: number }): void;
 	editGoal(objective: string): void;
 	pauseGoal(): void;
 	resumeGoal(): void;
 	clearGoal(): void;
 	setGoalTokenBudget(tokenBudget: number): void;
+	setGoalMaxIterations?(maxIterations: number): void;
+	setGoalMaxActiveMs?(maxActiveMs: number): void;
 	/** Modal text input replacing the editor; resolves undefined on Esc. */
 	promptInput(title: string, placeholder?: string): Promise<string | undefined>;
 	/** Single-select picker; resolves the picked label, undefined on Esc. */
@@ -46,6 +48,8 @@ const ACTION_RESUME = "Resume";
 const ACTION_EDIT = "Edit objective";
 const ACTION_BUDGET = "Set token budget";
 const ACTION_RAISE_BUDGET = "Raise token budget";
+const ACTION_RAISE_ITERATIONS = "Raise iteration limit";
+const ACTION_RAISE_TIME = "Raise active-time limit";
 const ACTION_REPLACE = "Replace goal";
 const ACTION_CLEAR = "Clear goal";
 
@@ -76,11 +80,25 @@ function buildActions(goal: GoalSnapshot): AskOption[] {
 				recommended: true,
 			});
 			break;
+		case "iteration_limited":
+			actions.push({
+				label: ACTION_RAISE_ITERATIONS,
+				description: "Iteration limit reached — raise it to continue",
+				recommended: true,
+			});
+			break;
+		case "time_limited":
+			actions.push({
+				label: ACTION_RAISE_TIME,
+				description: "Active-time limit reached — raise it to continue",
+				recommended: true,
+			});
+			break;
 		case "complete":
 			break; // unreachable: runGoalDialog routes complete to the new-goal input
 	}
 	actions.push({ label: ACTION_EDIT, description: "Rewrite the objective without losing progress" });
-	if (goal.status !== "budget_limited") {
+	if (goal.status !== "budget_limited" && goal.status !== "iteration_limited" && goal.status !== "time_limited") {
 		actions.push({ label: ACTION_BUDGET, description: "Cap total token spend (e.g. 100k, 1.5m)" });
 	}
 	actions.push({ label: ACTION_REPLACE, description: "Discard this goal and set a new one" });
@@ -124,6 +142,31 @@ async function setBudget(host: GoalDialogHost): Promise<void> {
 	}
 }
 
+async function setIterations(host: GoalDialogHost): Promise<void> {
+	const raw = (await host.promptInput("🎯 Iteration limit", "positive integer — Esc to cancel"))?.trim();
+	if (!raw) return;
+	if (!/^\d+$/.test(raw) || Number(raw) <= 0) {
+		host.showWarning(`Invalid iteration limit: "${raw}". Use a positive integer.`);
+		return;
+	}
+	host.setGoalMaxIterations?.(Number(raw));
+	host.showStatus(host.goalSummaryText());
+	await resumeGoal(host);
+}
+
+async function setActiveTime(host: GoalDialogHost): Promise<void> {
+	const raw = (await host.promptInput("🎯 Active-time limit", "e.g. 30m or 2h — Esc to cancel"))?.trim();
+	if (!raw) return;
+	const parsed = parseGoalDuration(raw);
+	if (parsed === undefined) {
+		host.showWarning(`Invalid time limit: "${raw}". Use e.g. 30m or 2h.`);
+		return;
+	}
+	host.setGoalMaxActiveMs?.(parsed);
+	host.showStatus(host.goalSummaryText());
+	await resumeGoal(host);
+}
+
 async function resumeGoal(host: GoalDialogHost): Promise<void> {
 	host.resumeGoal();
 	host.showStatus(host.goalSummaryText());
@@ -152,6 +195,12 @@ export async function runGoalDialog(host: GoalDialogHost): Promise<void> {
 			return;
 		case ACTION_RESUME:
 			await resumeGoal(host);
+			return;
+		case ACTION_RAISE_ITERATIONS:
+			await setIterations(host);
+			return;
+		case ACTION_RAISE_TIME:
+			await setActiveTime(host);
 			return;
 		case ACTION_EDIT:
 			await editObjective(host, goal);

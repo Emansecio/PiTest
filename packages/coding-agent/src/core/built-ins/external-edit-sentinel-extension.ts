@@ -81,6 +81,8 @@ export interface ExternalEditSentinelOptions {
 	 * any stat error — every one of those is "nothing to track" to the caller.
 	 */
 	statFile?: (absPath: string) => Promise<FileStatSnapshot | undefined>;
+	/** Records confirmed external mutations for an active Goal, if one exists. */
+	onExternalMutation?: (path: string, eventKey?: string) => void;
 }
 
 export function isExternalEditSentinelDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -195,6 +197,7 @@ export function createExternalEditSentinelExtension(options: ExternalEditSentine
 						if (!stat) {
 							// Deleted (or replaced by a directory) since we last observed it.
 							findings.push({ note: `${entry.displayPath} (removed)` });
+							options.onExternalMutation?.(entry.displayPath, `external:${key}:removed`);
 							registry.delete(key);
 							dedupeStore?.invalidatePath(key);
 							continue;
@@ -202,6 +205,7 @@ export function createExternalEditSentinelExtension(options: ExternalEditSentine
 						if (stat.mtimeMs === entry.mtimeMs && stat.size === entry.size) continue;
 						const ageSeconds = Math.max(0, Math.round((now - stat.mtimeMs) / 1000));
 						findings.push({ note: `${entry.displayPath} (${formatAge(ageSeconds)})` });
+						options.onExternalMutation?.(entry.displayPath, `external:${key}:${stat.mtimeMs}:${stat.size}`);
 						// Update the baseline to the observed values so this same drift is
 						// never reported again on a later sweep.
 						remember(key, { ...entry, mtimeMs: stat.mtimeMs, size: stat.size });

@@ -14,7 +14,27 @@ import {
 } from "../../utils/format-display.ts";
 import { sliceSafe } from "../../utils/surrogate.ts";
 
-export type GoalStatus = "active" | "paused" | "budget_limited" | "complete";
+export type GoalStatus = "active" | "paused" | "budget_limited" | "iteration_limited" | "time_limited" | "complete";
+export type GoalLimitType = "tokens" | "iterations" | "time";
+export type GoalPauseReason = "manual" | "auto_iteration_cap" | "interrupted" | "gate_retry_limit" | "gate_cancelled";
+
+export interface GoalLimitReason {
+	type: GoalLimitType;
+	used: number;
+	limit: number;
+}
+
+export interface GoalGateProgress {
+	revision: number;
+	passedGateIds: string[];
+}
+
+export interface GoalGateFailure {
+	revision: number;
+	gateId: string;
+	fingerprint: string;
+	attempts: number;
+}
 
 /** Per-channel token spend persisted with the goal (K9b / G1). */
 export interface TokenSpendSplit {
@@ -33,6 +53,24 @@ export interface GoalState {
 	/** Optional ledger split when {@link TokenBudgetGovernor} is active. */
 	tokenSpendSplit?: TokenSpendSplit;
 	iterations: number;
+	/** Total iteration ceiling for the complete Goal lifecycle. */
+	maxIterations?: number;
+	/** Active-time ceiling for the complete Goal lifecycle. */
+	maxActiveMs?: number;
+	/** Accumulated time while the Goal was active, excluding pauses. */
+	activeElapsedMs?: number;
+	/** Start of the current active interval, if active. */
+	activeSince?: number;
+	limitReason?: GoalLimitReason;
+	pauseReason?: GoalPauseReason;
+	/** Monotonic workspace-mutation revision for the complete Goal lifecycle. */
+	mutationRevision?: number;
+	/** Normalized paths changed in the current/most recent Goal lifecycle, capped at 50. */
+	mutatedPaths?: string[];
+	/** Green gates cached for the current mutation revision. */
+	gateProgress?: GoalGateProgress;
+	/** Last repeatable gate failure for the current mutation revision. */
+	gateFailure?: GoalGateFailure;
 	/** Epoch ms when the goal started. */
 	startedAt: number;
 	/** Epoch ms when the goal completed, if it did. */
@@ -57,6 +95,14 @@ export interface GoalManagerOptions {
 }
 
 export const MAX_OBJECTIVE_CHARS = 4000;
+export const DEFAULT_GOAL_TOKEN_BUDGET = 80_000;
+export const DEFAULT_GOAL_MAX_ITERATIONS = 12;
+export const DEFAULT_GOAL_MAX_ACTIVE_MS = 30 * 60 * 1000;
+const MAX_MUTATED_PATHS = 50;
+
+function normalizeMutationPath(path: string): string {
+	return path.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+}
 
 /** Parse a token budget string like "100000", "100k" or "1.5m". */
 export function parseTokenBudget(raw: string): number | undefined {
@@ -67,6 +113,28 @@ export function parseTokenBudget(raw: string): number | undefined {
 	if (!Number.isFinite(n) || n <= 0) return undefined;
 	const mult = m[2] === "k" ? 1_000 : m[2] === "m" ? 1_000_000 : 1;
 	return Math.round(n * mult);
+}
+
+/** Parse an active-time limit such as 30m, 2h, 45s or a positive millisecond count. */
+export function parseGoalDuration(raw: string): number | undefined {
+	const value = raw.trim().toLowerCase();
+	if (/^0$/.test(value)) return undefined;
+	if (/^\d+$/.test(value)) {
+		const ms = Number(value);
+		return Number.isSafeInteger(ms) && ms > 0 ? ms : undefined;
+	}
+	const match = /^(\d+)(ms|s|m|h)$/.exec(value);
+	if (!match) return undefined;
+	const amount = Number(match[1]);
+	if (!Number.isSafeInteger(amount) || amount <= 0) return undefined;
+	const unit = match[2];
+	let multiplier: number;
+	if (unit === "ms") multiplier = 1;
+	else if (unit === "s") multiplier = 1_000;
+	else if (unit === "m") multiplier = 60_000;
+	else multiplier = 60 * 60_000;
+	const result = amount * multiplier;
+	return Number.isSafeInteger(result) ? result : undefined;
 }
 
 /**
@@ -89,19 +157,62 @@ export class GoalManager {
 	private state: GoalState | undefined;
 	private readonly now: () => number;
 	private readonly genId: () => string;
+	private readonly mutationEventKeys = new Set<string>();
 
 	constructor(options: GoalManagerOptions = {}) {
 		this.now = options.now ?? (() => Date.now());
 		this.genId = options.genId ?? (() => Math.random().toString(36).slice(2, 10));
 	}
 
+	private cloneState(): GoalState | undefined {
+		if (!this.state) return undefined;
+		return {
+			...this.state,
+			tokenSpendSplit: this.state.tokenSpendSplit ? { ...this.state.tokenSpendSplit } : undefined,
+			limitReason: this.state.limitReason ? { ...this.state.limitReason } : undefined,
+			mutatedPaths: this.state.mutatedPaths ? [...this.state.mutatedPaths] : undefined,
+			gateProgress: this.state.gateProgress
+				? { ...this.state.gateProgress, passedGateIds: [...this.state.gateProgress.passedGateIds] }
+				: undefined,
+			gateFailure: this.state.gateFailure ? { ...this.state.gateFailure } : undefined,
+		};
+	}
+
+	private accrueActiveTime(now: number): void {
+		if (!this.state || this.state.status !== "active" || this.state.activeSince === undefined) return;
+		const delta = Math.max(0, now - this.state.activeSince);
+		this.state.activeElapsedMs = Math.max(0, (this.state.activeElapsedMs ?? 0) + delta);
+		this.state.activeSince = now;
+	}
+
+	private evaluateLimits(now: number): void {
+		if (!this.state || this.state.status !== "active") return;
+		this.accrueActiveTime(now);
+		const maxIterations = this.state.maxIterations ?? DEFAULT_GOAL_MAX_ITERATIONS;
+		const maxActiveMs = this.state.maxActiveMs ?? DEFAULT_GOAL_MAX_ACTIVE_MS;
+		if (this.state.tokenBudget !== undefined && this.state.tokensUsed >= this.state.tokenBudget) {
+			this.state.status = "budget_limited";
+			this.state.limitReason = { type: "tokens", used: this.state.tokensUsed, limit: this.state.tokenBudget };
+			this.state.activeSince = undefined;
+		} else if (this.state.iterations >= maxIterations) {
+			this.state.status = "iteration_limited";
+			this.state.limitReason = { type: "iterations", used: this.state.iterations, limit: maxIterations };
+			this.state.activeSince = undefined;
+		} else if ((this.state.activeElapsedMs ?? 0) >= maxActiveMs) {
+			this.state.status = "time_limited";
+			this.state.limitReason = { type: "time", used: this.state.activeElapsedMs ?? 0, limit: maxActiveMs };
+			this.state.activeSince = undefined;
+		}
+	}
+
 	get(): GoalState | undefined {
-		return this.state ? { ...this.state } : undefined;
+		return this.cloneState();
 	}
 
 	snapshot(): GoalSnapshot | undefined {
 		if (!this.state) return undefined;
-		return { ...this.state, elapsedMs: this.now() - this.state.startedAt };
+		this.accrueActiveTime(this.now());
+		return { ...this.cloneState()!, elapsedMs: this.now() - this.state.startedAt };
 	}
 
 	isActive(): boolean {
@@ -110,19 +221,30 @@ export class GoalManager {
 
 	/** True only when the agent should keep going without user input. */
 	shouldAutoContinue(): boolean {
-		return this.state?.status === "active";
+		if (!this.state) return false;
+		this.evaluateLimits(this.now());
+		return this.state.status === "active";
 	}
 
-	start(objective: string, opts: { tokenBudget?: number }): GoalSnapshot {
+	start(
+		objective: string,
+		opts: { tokenBudget?: number; maxIterations?: number; maxActiveMs?: number } = {},
+	): GoalSnapshot {
+		const now = this.now();
+		this.mutationEventKeys.clear();
 		const trimmed = sliceSafe(objective.trim(), 0, MAX_OBJECTIVE_CHARS);
 		this.state = {
 			id: this.genId(),
 			objective: trimmed,
 			status: "active",
-			tokenBudget: opts.tokenBudget,
+			tokenBudget: opts.tokenBudget ?? DEFAULT_GOAL_TOKEN_BUDGET,
 			tokensUsed: 0,
 			iterations: 0,
-			startedAt: this.now(),
+			maxIterations: opts.maxIterations ?? DEFAULT_GOAL_MAX_ITERATIONS,
+			maxActiveMs: opts.maxActiveMs ?? DEFAULT_GOAL_MAX_ACTIVE_MS,
+			activeElapsedMs: 0,
+			activeSince: now,
+			startedAt: now,
 		};
 		return this.snapshot() as GoalSnapshot;
 	}
@@ -132,25 +254,43 @@ export class GoalManager {
 		this.state.objective = sliceSafe(objective.trim(), 0, MAX_OBJECTIVE_CHARS);
 	}
 
-	pause(): void {
-		if (this.state && this.state.status !== "complete") this.state.status = "paused";
+	recordMutation(path?: string, eventKey?: string): void {
+		if (!this.state || this.state.status === "complete") return;
+		const normalized = path ? normalizeMutationPath(path) : "";
+		const key = eventKey?.trim();
+		if (key && this.mutationEventKeys.has(key)) return;
+		if (key) this.mutationEventKeys.add(key);
+		this.state.mutationRevision = (this.state.mutationRevision ?? 0) + 1;
+		this.state.gateProgress = undefined;
+		this.state.gateFailure = undefined;
+		if (normalized) {
+			const paths = this.state.mutatedPaths ?? [];
+			if (!paths.includes(normalized)) paths.push(normalized);
+			this.state.mutatedPaths = paths.slice(-MAX_MUTATED_PATHS);
+		}
+	}
+
+	pause(reason: GoalPauseReason = "manual"): void {
+		if (!this.state || this.state.status === "complete") return;
+		this.accrueActiveTime(this.now());
+		this.state.status = "paused";
+		this.state.activeSince = undefined;
+		this.state.pauseReason = reason;
 	}
 
 	resume(): void {
 		if (!this.state) return;
-		if (this.state.status === "paused") {
-			this.state.status = "active";
-			return;
-		}
-		// budget_limited: only re-activate when there's headroom. Resuming a goal
-		// whose tokensUsed already meets the budget would re-trip budget_limited on
-		// the very next recordTurn (it yields ~1 turn then wedges). The user must
-		// raise the cap via setTokenBudget (/goal --tokens <n>) to make progress.
-		if (this.state.status === "budget_limited") {
-			if (this.state.tokenBudget === undefined || this.state.tokensUsed < this.state.tokenBudget) {
-				this.state.status = "active";
-			}
-		}
+		const canResume =
+			this.state.status === "paused" ||
+			(this.state.status === "budget_limited" &&
+				this.state.tokenBudget !== undefined &&
+				this.state.tokensUsed < this.state.tokenBudget);
+		if (!canResume) return;
+		this.state.status = "active";
+		this.state.pauseReason = undefined;
+		this.state.limitReason = undefined;
+		this.state.activeSince = this.now();
+		this.evaluateLimits(this.now());
 	}
 
 	/**
@@ -158,20 +298,77 @@ export class GoalManager {
 	 * goal when the new ceiling clears the tokens already spent — the only path to
 	 * unwedge a goal that hit its budget (resume() alone can't, by design above).
 	 */
+	gateProgressFor(revision: number): string[] {
+		if (!this.state || this.state.gateProgress?.revision !== revision) return [];
+		return [...this.state.gateProgress.passedGateIds];
+	}
+
+	setGateProgress(revision: number, passedGateIds: readonly string[]): void {
+		if (!this.state || this.state.status === "complete") return;
+		this.state.gateProgress = { revision, passedGateIds: [...new Set(passedGateIds)] };
+	}
+
+	recordGateFailure(revision: number, gateId: string, fingerprint: string): GoalGateFailure {
+		const previous = this.state?.gateFailure;
+		const attempts =
+			previous &&
+			previous.revision === revision &&
+			previous.gateId === gateId &&
+			previous.fingerprint === fingerprint
+				? previous.attempts + 1
+				: 1;
+		const failure = { revision, gateId, fingerprint, attempts };
+		if (this.state && this.state.status !== "complete") this.state.gateFailure = failure;
+		return failure;
+	}
+
+	clearGateFailure(): void {
+		if (this.state) this.state.gateFailure = undefined;
+	}
+
 	setTokenBudget(tokenBudget: number): void {
 		if (!this.state || this.state.status === "complete") return;
 		this.state.tokenBudget = tokenBudget;
 		if (this.state.status === "budget_limited" && this.state.tokensUsed < tokenBudget) {
 			this.state.status = "active";
+			this.state.limitReason = undefined;
+			this.state.activeSince = this.now();
+			this.evaluateLimits(this.now());
+		}
+	}
+
+	setMaxIterations(maxIterations: number): void {
+		if (!this.state || this.state.status === "complete" || !Number.isInteger(maxIterations) || maxIterations <= 0)
+			return;
+		this.state.maxIterations = maxIterations;
+		if (this.state.status === "iteration_limited" && this.state.iterations < maxIterations) {
+			this.state.status = "active";
+			this.state.limitReason = undefined;
+			this.state.activeSince = this.now();
+			this.evaluateLimits(this.now());
+		}
+	}
+
+	setMaxActiveMs(maxActiveMs: number): void {
+		if (!this.state || this.state.status === "complete" || !Number.isInteger(maxActiveMs) || maxActiveMs <= 0) return;
+		this.state.maxActiveMs = maxActiveMs;
+		if (this.state.status === "time_limited" && (this.state.activeElapsedMs ?? 0) < maxActiveMs) {
+			this.state.status = "active";
+			this.state.limitReason = undefined;
+			this.state.activeSince = this.now();
+			this.evaluateLimits(this.now());
 		}
 	}
 
 	clear(): void {
+		this.mutationEventKeys.clear();
 		this.state = undefined;
 	}
 
 	complete(summary?: string): void {
 		if (!this.state) return;
+		this.accrueActiveTime(this.now());
+		this.state.activeSince = undefined;
 		this.state.status = "complete";
 		this.state.completedAt = this.now();
 		this.state.completedAtIteration = this.state.iterations;
@@ -185,6 +382,7 @@ export class GoalManager {
 			return;
 		}
 		this.state.iterations += 1;
+		this.evaluateLimits(this.now());
 	}
 
 	/**
@@ -204,13 +402,7 @@ export class GoalManager {
 				fusion: Math.max(0, Math.round(split.fusion)),
 			};
 		}
-		if (
-			this.state.status === "active" &&
-			this.state.tokenBudget !== undefined &&
-			this.state.tokensUsed >= this.state.tokenBudget
-		) {
-			this.state.status = "budget_limited";
-		}
+		this.evaluateLimits(this.now());
 	}
 
 	/** Record a finished turn: bumps iterations + token usage, may exhaust budget. */
@@ -221,20 +413,14 @@ export class GoalManager {
 		}
 		this.state.iterations += 1;
 		this.state.tokensUsed += Math.max(0, Math.round(tokensDelta));
-		if (
-			this.state.status === "active" &&
-			this.state.tokenBudget !== undefined &&
-			this.state.tokensUsed >= this.state.tokenBudget
-		) {
-			this.state.status = "budget_limited";
-		}
+		this.evaluateLimits(this.now());
 	}
 
 	/** A turn ended abnormally: pause auto-continuation until the user resumes. */
 	onInterrupted(stopReason: string): void {
 		if (!this.state || this.state.status !== "active") return;
 		if (stopReason === "aborted" || stopReason === "error") {
-			this.state.status = "paused";
+			this.pause("interrupted");
 		}
 	}
 
@@ -258,6 +444,10 @@ export class GoalManager {
 				return "🎯 paused";
 			case "budget_limited":
 				return `🎯 budget ${budgetPart ?? formatTokens(g.tokensUsed)}`;
+			case "iteration_limited":
+				return `🎯 iterations ${g.iterations}/${g.maxIterations ?? DEFAULT_GOAL_MAX_ITERATIONS}`;
+			case "time_limited":
+				return `🎯 time ${formatElapsed(g.activeElapsedMs ?? 0)}/${formatElapsed(g.maxActiveMs ?? DEFAULT_GOAL_MAX_ACTIVE_MS)}`;
 			case "complete":
 				return "🎯 complete";
 		}
@@ -273,9 +463,15 @@ export class GoalManager {
 				g.tokenBudget !== undefined ? `/${formatTokens(g.tokenBudget)}` : ""
 			}`,
 		];
-		if (g.status === "paused") lines.push("   paused — resume with /goal resume");
+		if (g.status === "paused") lines.push(`   paused (${g.pauseReason ?? "manual"}) — resume with /goal resume`);
 		if (g.status === "budget_limited")
 			lines.push("   token budget reached — raise it with /goal --tokens <n> (resume alone won't progress)");
+		if (g.status === "iteration_limited")
+			lines.push(`   iteration limit reached — raise it with /goal --iterations <n> (resume alone won't progress)`);
+		if (g.status === "time_limited")
+			lines.push(
+				`   active-time limit reached — raise it with /goal --time <duration> (resume alone won't progress)`,
+			);
 		return lines.join("\n");
 	}
 
@@ -311,7 +507,7 @@ export class GoalManager {
 			"- Do not redefine or narrow the goal into a smaller task. Solve the whole thing.",
 			"- Only when every requirement is satisfied and verified requirement-by-requirement, call the `goal_complete` tool with a short summary. Never call it before the work is actually done and checked.",
 			"- If you are genuinely blocked and cannot proceed without the user, state exactly what you need and stop.",
-			"While it is `paused` or `budget_limited` the goal is NOT driving the session: answer the user's current request and do not auto-continue toward the objective.",
+			"While it is `paused`, `budget_limited`, `iteration_limited`, or `time_limited` the goal is NOT driving the session: answer the user's current request and do not auto-continue toward the objective.",
 			"</goal_rules>",
 		].join("\n");
 	}
@@ -339,7 +535,21 @@ export class GoalManager {
 	}
 
 	restore(data: GoalState | undefined): void {
-		this.state = data ? { ...data } : undefined;
+		if (!data) {
+			this.state = undefined;
+			return;
+		}
+		const now = this.now();
+		this.mutationEventKeys.clear();
+		this.state = {
+			...data,
+			tokenBudget: data.tokenBudget ?? DEFAULT_GOAL_TOKEN_BUDGET,
+			maxIterations: data.maxIterations ?? DEFAULT_GOAL_MAX_ITERATIONS,
+			maxActiveMs: data.maxActiveMs ?? DEFAULT_GOAL_MAX_ACTIVE_MS,
+			activeElapsedMs: data.activeElapsedMs ?? 0,
+			activeSince: data.status === "active" ? now : undefined,
+		};
+		if (this.state.status === "active") this.evaluateLimits(now);
 	}
 }
 

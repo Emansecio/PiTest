@@ -15,8 +15,9 @@ import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentGoalManager } from "../goal/goal-manager.ts";
 import { getCurrentSelfReviewFindings } from "../self-review.ts";
 import { summarizeCheckFailure } from "../verification/failure-summary.ts";
+import { detectGoalGateCommands, runGoalGates } from "../verification/goal-gates.ts";
 import { pendingVerificationJobs } from "../verification/pending-checks.ts";
-import { getCurrentVerificationProbe } from "../verification/verification.ts";
+import { getCurrentVerificationProbe, getCurrentVerificationSettings } from "../verification/verification.ts";
 import { listBashBackgroundJobs } from "./bash.ts";
 import { renderToolOutput } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -109,23 +110,38 @@ function formatCoveringTestsLine(coveringTests: readonly string[]): string {
 }
 
 export function createGoalCompleteToolDefinition(
-	_cwd: string,
+	cwd: string,
 	_options?: GoalCompleteToolOptions,
 ): ToolDefinition<typeof goalCompleteSchema, GoalCompleteToolDetails> {
 	return {
 		name: "goal_complete",
 		label: "goal_complete",
+		executionMode: "sequential",
 		description:
 			"Mark the current autonomous goal as complete. Call this ONLY after every requirement of the goal is satisfied AND verified requirement-by-requirement against real output (tests, files, command results). No-op if no goal is active.",
 		promptSnippet: "Mark the active goal complete (only after verifying every requirement)",
 		parameters: goalCompleteSchema,
-		async execute(_toolCallId: string, input: GoalCompleteToolInput) {
+		async execute(_toolCallId: string, input: GoalCompleteToolInput, signal?: AbortSignal) {
 			const mgr = getCurrentGoalManager();
 			const goal = mgr?.get();
 			if (!mgr || !goal || goal.status === "complete") {
 				return {
 					content: [{ type: "text" as const, text: "No active goal to complete." }],
 					details: { completed: false },
+				};
+			}
+			if (goal.status !== "active") {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text:
+								"Not completing the goal — it is " +
+								goal.status +
+								". Resume or raise the relevant limit before completing it.",
+						},
+					],
+					details: { completed: false, objective: goal.objective },
 				};
 			}
 			// R8: a test/check the agent backgrounded is still running — its result is
@@ -143,13 +159,63 @@ export function createGoalCompleteToolDefinition(
 					details: { completed: false, objective: goal.objective },
 				};
 			}
+			const mutationRevision = goal.mutationRevision ?? 0;
+			if (mutationRevision > 0) {
+				const verificationSettings = getCurrentVerificationSettings();
+				const gates = detectGoalGateCommands(
+					cwd,
+					verificationSettings?.command ?? undefined,
+					goal.mutatedPaths ?? [],
+				);
+				const gateRun = await runGoalGates(gates, cwd, {
+					timeoutMs: verificationSettings?.timeoutMs,
+					passedGateIds: mgr.gateProgressFor(mutationRevision),
+					signal,
+				});
+				const failed = gateRun.results.find((result) => result.status === "failed");
+				if (gateRun.status === "cancelled") {
+					mgr.pause("gate_cancelled");
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: "Not completing the goal — gate execution was cancelled. The Goal is paused; resume after deciding how to continue.",
+							},
+						],
+						details: { completed: false, objective: goal.objective },
+					};
+				}
+				if (failed) {
+					mgr.setGateProgress(mutationRevision, gateRun.passedGateIds);
+					const failure = mgr.recordGateFailure(mutationRevision, failed.gate.id, failed.fingerprint);
+					const repeated = failure.attempts >= 3;
+					if (repeated) mgr.pause("gate_retry_limit");
+					recordDiagnostic({
+						category: "quality.in-turn-check",
+						level: "warn",
+						source: "goal-complete.goal-gates",
+						context: { note: `${failed.gate.id} ${failed.status} attempt=${failure.attempts}` },
+					});
+					const output = failed.output || "(no output)";
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `Not completing the goal — gate ${failed.index}/${failed.total} (${failed.gate.label}) failed${repeated ? " three times; the Goal is paused" : ""}. Fix the cause, then call goal_complete again:\n\n${output}`,
+							},
+						],
+						details: { completed: false, objective: goal.objective },
+					};
+				}
+				mgr.setGateProgress(mutationRevision, gateRun.passedGateIds);
+			}
 			// R7: don't let the agent declare the goal done while the project check
 			// is red. Run the configured check once; refuse on failure with the output.
 			// A probe that merely TIMED OUT is inconclusive, not red: refusing on it
 			// would permanently block goal completion in any repo whose check outruns
 			// verification.timeoutMs (the agent can never make a slow check faster).
 			const probe = getCurrentVerificationProbe();
-			if (probe) {
+			if (probe && mutationRevision === 0) {
 				const result = await probe();
 				if (result && !result.ok && !result.timedOut) {
 					// Summarize the dominant failure (tsc/biome/vitest/thrown) instead of a raw

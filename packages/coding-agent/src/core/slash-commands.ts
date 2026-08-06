@@ -149,9 +149,10 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{
 		name: "goal",
 		description:
-			"Autonomous goal: open the panel, or status, <obj> to start, edit <obj>, pause, resume, clear, --tokens <budget> <obj>",
+			"Autonomous goal: open the panel, or status, <obj> to start, edit <obj>, pause, resume, clear, --tokens <budget>, --iterations <n>, --time <duration>",
 		group: "Session",
-		argumentHint: "status | edit <obj> | pause | resume | clear | --tokens <budget> <obj>",
+		argumentHint:
+			"status | edit <obj> | pause | resume | clear | [--tokens <budget>] [--iterations <n>] [--time <duration>] <obj>",
 	},
 	{ name: "todos", description: "Show the current todo list", group: "Session" },
 	{

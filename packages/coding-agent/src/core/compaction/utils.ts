@@ -86,6 +86,8 @@ const FILE_TOOL_OPS: Record<string, FileToolOp> = {
 	read: "read",
 	write: "write",
 	edit: "edit",
+	edit_v2: "edit",
+	ast_edit: "edit",
 };
 
 const BASH_COMMAND_KEYS = ["command", "cmd"] as const;

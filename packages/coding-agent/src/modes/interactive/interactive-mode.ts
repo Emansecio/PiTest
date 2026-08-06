@@ -90,7 +90,7 @@ import {
 } from "../../core/file-snapshots.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { detectCliAsync } from "../../core/fusion/cli-runner.ts";
-import { parseTokenBudget } from "../../core/goal/goal-manager.ts";
+import { parseGoalDuration, parseTokenBudget } from "../../core/goal/goal-manager.ts";
 import { sliceSafe, truncateWithEllipsis } from "../../utils/surrogate.ts";
 
 /**
@@ -4195,38 +4195,59 @@ export class InteractiveMode {
 			}
 		}
 
-		// Start a new goal, optionally with a token budget.
-		let objective = trimmed;
+		// Start a new goal, optionally with any combination of limit flags.
+		const objectiveParts: string[] = [];
 		let tokenBudget: number | undefined;
+		let maxIterations: number | undefined;
+		let maxActiveMs: number | undefined;
 		let budgetLabel = "";
-		if (sub === "--tokens") {
-			const budgetStr = parts[1] ?? "";
-			const parsed = parseTokenBudget(budgetStr);
-			if (parsed === undefined) {
-				this.showWarning(`Invalid token budget: "${budgetStr}". Use e.g. 100k or 1.5m.`);
+		for (let i = 0; i < parts.length; i += 1) {
+			const part = parts[i] ?? "";
+			if (part === "--tokens" || part === "--iterations" || part === "--time") {
+				const raw = parts[++i] ?? "";
+				if (part === "--tokens") {
+					tokenBudget = parseTokenBudget(raw);
+					if (tokenBudget === undefined) {
+						this.showWarning(`Invalid token budget: "${raw}". Use e.g. 100k or 1.5m.`);
+						return;
+					}
+					budgetLabel = ` (budget ${raw})`;
+				} else if (part === "--iterations") {
+					if (!/^\d+$/.test(raw) || Number(raw) <= 0) {
+						this.showWarning(`Invalid iteration limit: "${raw}". Use a positive integer.`);
+						return;
+					}
+					maxIterations = Number(raw);
+				} else {
+					maxActiveMs = parseGoalDuration(raw);
+					if (maxActiveMs === undefined) {
+						this.showWarning(`Invalid time limit: "${raw}". Use e.g. 30m or 2h.`);
+						return;
+					}
+				}
+				continue;
+			}
+			objectiveParts.push(part);
+		}
+		const objective = objectiveParts.join(" ").trim();
+		const current = this.session.goalSnapshot();
+		if (!objective && current && current.status !== "complete") {
+			if (tokenBudget !== undefined) this.session.setGoalTokenBudget(tokenBudget);
+			if (maxIterations !== undefined) this.session.setGoalMaxIterations(maxIterations);
+			if (maxActiveMs !== undefined) this.session.setGoalMaxActiveMs(maxActiveMs);
+			if (tokenBudget === undefined && maxIterations === undefined && maxActiveMs === undefined) {
+				this.showWarning("Usage: /goal <objective> | --tokens <n> | --iterations <n> | --time <duration>");
 				return;
 			}
-			tokenBudget = parsed;
-			budgetLabel = ` (budget ${budgetStr})`;
-			objective = parts.slice(2).join(" ").trim();
-			// `/goal --tokens <n>` with no objective raises the EXISTING goal's
-			// budget (the only way to lift a budget_limited goal) instead of
-			// discarding it. Falls through to the usage warning when no goal exists.
-			if (!objective) {
-				const current = this.session.goalSnapshot();
-				if (current && current.status !== "complete") {
-					this.session.setGoalTokenBudget(parsed);
-					this.showStatus(this.session.goalSummaryText());
-					if (this.session.goalShouldAutoContinue()) {
-						this._startGoalSpinner();
-						await this.session.prompt("Resume working toward the goal.", { expandPromptTemplates: false });
-					}
-					return;
-				}
+			this.showStatus(this.session.goalSummaryText());
+			if (this.session.goalShouldAutoContinue()) {
+				this._startGoalSpinner();
+				await this.session.prompt("Resume working toward the goal.", { expandPromptTemplates: false });
 			}
+			return;
 		}
 		if (!objective) {
-			this.showWarning("Usage: /goal <objective> | edit <obj> | pause | resume | clear | --tokens <budget> <obj>");
+			this.showWarning("Usage: /goal <objective> [--tokens <n>] [--iterations <n>] [--time <duration>]");
 			return;
 		}
 
@@ -4248,7 +4269,7 @@ export class InteractiveMode {
 			}
 		}
 
-		this.session.startGoal(objective, { tokenBudget });
+		this.session.startGoal(objective, { tokenBudget, maxIterations, maxActiveMs });
 		this.showStatus(`Goal started${budgetLabel}: ${objective}`);
 		this._startGoalSpinner();
 		await this.session.prompt(objective);
@@ -4324,6 +4345,8 @@ export class InteractiveMode {
 			resumeGoal: () => this.session.resumeGoal(),
 			clearGoal: () => this.session.clearGoal(),
 			setGoalTokenBudget: (tokenBudget) => this.session.setGoalTokenBudget(tokenBudget),
+			setGoalMaxIterations: (maxIterations) => this.session.setGoalMaxIterations(maxIterations),
+			setGoalMaxActiveMs: (maxActiveMs) => this.session.setGoalMaxActiveMs(maxActiveMs),
 			promptInput: (title, placeholder) => this.showExtensionInput(title, placeholder),
 			pickOption: async (question, options) => {
 				const answer = await this.userInputBus.askOptions({

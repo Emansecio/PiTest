@@ -378,6 +378,8 @@ Back-compat: explicit `enabled: false` resolves to `off`; explicit `enabled: tru
 | `verification.functionalWebTimeoutMs` | number | `45000` | Timeout for one functional web check pass |
 | `verification.functionalWebMaxInteractions` | number | `3` | Max click/fill interactions per functional web check |
 
+For an autonomous Goal that changed files, `goal_complete` automatically composes a deterministic quality pipeline. An explicit `verification.command` remains the sole command; otherwise Pit prefers `check`, then one each of `typecheck`/`type-check`, `lint`, and `test`. Gates run sequentially, stop at the first failure, and reuse the existing timeout/output/process-tree safeguards. Green gates are cached for the Goal's mutation revision and invalidated by a later mutation. A repeated identical failure pauses the Goal after three attempts; no activation flag or dependency download is required.
+
 ### Pending Checks
 
 Long-running project checks can be backgrounded and drained at end of turn; Pit waits for them to settle and self-corrects on failure. The drain only runs in `verification.mode: "post-turn"`; the bounded `in-turn` grounding fallback is separate and never drains background jobs.
@@ -394,6 +396,8 @@ Long-running project checks can be backgrounded and drained at end of turn; Pit 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `eval.enabled` | boolean | `true` | Register the `eval` tool. The session boots a persistent Python + JS kernel manager; each kernel is spawned lazily on first use |
+
+Python for `eval` is resolved automatically in this order: `PIT_EVAL_PYTHON`, active `VIRTUAL_ENV`, project `.venv`, project `venv`, then the platform's Python on `PATH`. `PIT_EVAL_PYTHON` is an advanced override, not an activation requirement. Pit never installs Python or project dependencies automatically.
 
 ### Fusion
 
@@ -586,6 +590,8 @@ not want failures from an earlier step to trigger an early escalation later.
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `goal.maxAutoIterations` | number | `50` | Safety cap on autonomous goal continuations spawned from a single user prompt. Hitting it pauses the goal so the user can resume. Coerced to a strictly-positive integer so a bad value cannot disable the backstop |
+
+Every new Goal also receives persistent zero-config limits: **80,000 tokens**, **12 total iterations**, and **30 minutes of active time**. Paused time does not count. Use `/goal --tokens <n>`, `/goal --iterations <n>`, or `/goal --time <duration>` to raise a specific limit; `resume` alone never bypasses an exhausted limit. These totals survive pause/resume and session restore; `goal.maxAutoIterations` remains only the per-`prompt()` legacy backstop.
 
 ### Time-Traveling Stream Rules (TTSR)
 

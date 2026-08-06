@@ -523,6 +523,22 @@ export function getCurrentVerificationProbe(): (() => Promise<CheckResult | null
 	return currentVerificationProbe;
 }
 
+export interface CurrentVerificationSettings {
+	enabled: boolean;
+	command?: string | null;
+	timeoutMs?: number;
+}
+
+let currentVerificationSettings: (() => CurrentVerificationSettings) | undefined;
+
+export function setCurrentVerificationSettings(settings: (() => CurrentVerificationSettings) | undefined): void {
+	currentVerificationSettings = settings;
+}
+
+export function getCurrentVerificationSettings(): CurrentVerificationSettings | undefined {
+	return currentVerificationSettings?.();
+}
+
 // ---------------------------------------------------------------------------
 // Debug-driven verify: detect whether the just-passed check has a runtime repro
 // that a native debugger can step through to confirm the fix actually covers the

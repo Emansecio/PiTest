@@ -30,6 +30,7 @@ export type ResolveToolInput = Static<typeof resolveSchema>;
 
 export interface ResolveToolDetails {
 	accepted: string[];
+	acceptedPaths?: string[];
 	discarded: string[];
 	failed: Array<{ id: string; error: string }>;
 }
@@ -62,7 +63,7 @@ export function createResolveToolDefinition(
 		parameters: resolveSchema,
 		async execute(_toolCallId, input: ResolveToolInput) {
 			const queue = options?.queue ?? getCurrentPreviewQueue();
-			const details: ResolveToolDetails = { accepted: [], discarded: [], failed: [] };
+			const details: ResolveToolDetails = { accepted: [], acceptedPaths: [], discarded: [], failed: [] };
 
 			if (!queue) {
 				return textResult("No preview queue active.", details);
@@ -86,6 +87,7 @@ export function createResolveToolDefinition(
 					const result = await queue.accept(item.id);
 					if (result.ok) {
 						details.accepted.push(item.id);
+						details.acceptedPaths?.push(item.path);
 					} else {
 						details.failed.push({ id: item.id, error: result.error });
 					}
@@ -112,6 +114,7 @@ export function createResolveToolDefinition(
 			const result = await queue.accept(id);
 			if (result.ok) {
 				details.accepted.push(id);
+				details.acceptedPaths?.push(item.path);
 				return textResult(`Accepted preview ${id} (${item.path}).`, details);
 			}
 			details.failed.push({ id, error: result.error });

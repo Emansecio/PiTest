@@ -11,6 +11,7 @@
 import type { AgentTool } from "@pit/agent-core";
 import type { Model } from "@pit/ai";
 import type { ExtensionFactory } from "../extensions/types.ts";
+import { getCurrentGoalManager } from "../goal/goal-manager.ts";
 import type { HooksSettings } from "../hooks/index.ts";
 import { learnedErrorsDirFor } from "../learned-error-store.ts";
 import type { McpSettings } from "../mcp/index.ts";
@@ -210,7 +211,11 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 		// surfaces proactively instead of only at the moment a stale edit is
 		// attempted. Also invalidates the read-dedupe entry for changed files so
 		// the next read is sent in full. Fail-open; opt out PIT_NO_EXTERNAL_EDIT_SENTINEL.
-		createExternalEditSentinelExtension({ cwd: options.cwd, getReadDedupeStore: options.getReadDedupeStore }),
+		createExternalEditSentinelExtension({
+			cwd: options.cwd,
+			getReadDedupeStore: options.getReadDedupeStore,
+			onExternalMutation: (path, eventKey) => getCurrentGoalManager()?.recordMutation(path, eventKey),
+		}),
 		// Graph prefetch (code-graph P6): post-exec, warms the on-disk content of
 		// a just-read/symbol/find_symbol file's grade-1 graph neighbors into an
 		// in-memory cache (`ReadToolOptions.warmFileCache`) that `read.ts`

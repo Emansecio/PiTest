@@ -314,6 +314,7 @@ import {
 	getCurrentVerificationProbe,
 	runCheckCommand,
 	setCurrentVerificationProbe,
+	setCurrentVerificationSettings,
 } from "./verification/verification.ts";
 
 export type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events.ts";
@@ -1238,6 +1239,10 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		// Publish a one-shot project-check runner so goal_complete can refuse while red.
 		this._verificationProbe = () => this.runConfiguredCheck();
 		setCurrentVerificationProbe(this._verificationProbe);
+		setCurrentVerificationSettings(() => {
+			const settings = this.settingsManager.getVerificationSettings();
+			return { enabled: settings.enabled, command: settings.command, timeoutMs: settings.timeoutMs };
+		});
 
 		// Chrome DevTools controller (endpoint from settings + env). Only constructed
 		// when chromeDevtools.enabled — tools join the surface on the same gate.
@@ -2700,7 +2705,9 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 				}
 			}
 			armVerificationGate(this._verificationGate, event.toolName, args, {
-				result: event.result as { details?: { firstChangedLine?: number } },
+				result: event.result as { details?: { firstChangedLine?: number; acceptedPaths?: string[] } },
+				eventKey: event.toolCallId,
+				onMutation: (path, eventKey) => this._goal.recordMutation(path, eventKey),
 			});
 			// Band P / P4: fold this mutation into the per-cycle risk aggregate. No-op
 			// for non-mutating results (measurePatch returns undefined).
@@ -3314,6 +3321,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		}
 		if (getCurrentVerificationProbe() === this._verificationProbe) {
 			setCurrentVerificationProbe(undefined);
+			setCurrentVerificationSettings(undefined);
 		}
 		this._verificationProbe = undefined;
 		// Band P / P4: drop any self-review findings so a torn-down session can't
@@ -3456,11 +3464,14 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	}
 
 	/** Start (or replace) the autonomous goal and surface the goal_complete tool. */
-	startGoal(objective: string, opts: { tokenBudget?: number } = {}): GoalSnapshot {
+	startGoal(
+		objective: string,
+		opts: { tokenBudget?: number; maxIterations?: number; maxActiveMs?: number } = {},
+	): GoalSnapshot {
 		const snap = this._goal.start(objective, opts);
 		this._tokenGovernor.reset();
 		this._tokenGovernor.bindGoal(this._goal);
-		this._tokenGovernor.setBudget(opts.tokenBudget);
+		this._tokenGovernor.setBudget(snap.tokenBudget);
 		this._activateGoalTool(true);
 		this._persistGoal();
 		return snap;
@@ -3471,8 +3482,10 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		this._persistGoal();
 	}
 
-	pauseGoal(): void {
-		this._goal.pause();
+	pauseGoal(
+		reason: "manual" | "auto_iteration_cap" | "interrupted" | "gate_retry_limit" | "gate_cancelled" = "manual",
+	): void {
+		this._goal.pause(reason);
 		this._persistGoal();
 	}
 
@@ -3484,7 +3497,17 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	/** Raise the active goal's token budget (lifts a budget_limited goal). */
 	setGoalTokenBudget(tokenBudget: number): void {
 		this._goal.setTokenBudget(tokenBudget);
-		this._tokenGovernor.setBudget(tokenBudget);
+		this._tokenGovernor.setBudget(this._goal.get()?.tokenBudget);
+		this._persistGoal();
+	}
+
+	setGoalMaxIterations(maxIterations: number): void {
+		this._goal.setMaxIterations(maxIterations);
+		this._persistGoal();
+	}
+
+	setGoalMaxActiveMs(maxActiveMs: number): void {
+		this._goal.setMaxActiveMs(maxActiveMs);
 		this._persistGoal();
 	}
 
@@ -3679,7 +3702,12 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 			}
 			if (latestGoal && latestGoal.status !== "complete") {
 				this._goal.restore(latestGoal);
-				this._tokenGovernor.restoreSpend(latestGoal.tokensUsed, latestGoal.tokenBudget, latestGoal.tokenSpendSplit);
+				const restoredGoal = this._goal.get();
+				this._tokenGovernor.restoreSpend(
+					restoredGoal?.tokensUsed ?? 0,
+					restoredGoal?.tokenBudget,
+					restoredGoal?.tokenSpendSplit,
+				);
 				this._activateGoalTool(true);
 			}
 			if (latestTodo) this._todo.restore(latestTodo);
@@ -4347,7 +4375,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 					const maxIterations = this.settingsManager.getGoalMaxAutoIterations();
 					while (!this._userInterrupted && this._goal.shouldAutoContinue()) {
 						if (iterations++ >= maxIterations) {
-							this.pauseGoal();
+							this.pauseGoal("auto_iteration_cap");
 							this._emitGoalCapNote(maxIterations);
 							break;
 						}
@@ -7168,7 +7196,10 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		return async (name, args, signal) => {
 			const result = await base(name, args, signal);
 			if (!result.isError) {
-				armVerificationGate(this._verificationGate, name, args, { trackPaths: false });
+				armVerificationGate(this._verificationGate, name, args, {
+					trackPaths: false,
+					onMutation: (path, eventKey) => this._goal.recordMutation(path, eventKey),
+				});
 			}
 			return result;
 		};
