@@ -2288,6 +2288,68 @@ describe("agent loop rejection guard", () => {
 		expect(sawAbort).toBe(true);
 	});
 
+	it("per-tool abort waits for an opted-in tool's partial cancellation result", async () => {
+		const toolAbortControllers = new Map<string, AbortController>();
+		const toolSchema = Type.Object({});
+		const partialTool: AgentTool<typeof toolSchema, undefined> = {
+			name: "partial",
+			label: "Partial",
+			description: "Returns captured output shortly after cancellation",
+			parameters: toolSchema,
+			executionMode: "sequential",
+			abortResultGraceMs: 100,
+			async execute(_toolCallId, _params, signal) {
+				await new Promise<void>((_resolve, reject) => {
+					signal?.addEventListener(
+						"abort",
+						() => setTimeout(() => reject(new Error("captured line\n\nCommand aborted")), 10),
+						{ once: true },
+					);
+				});
+				return { content: [], details: undefined };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [partialTool] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			toolAbortControllers,
+		};
+		let streamCalls = 0;
+		const stream = agentLoop([createUserMessage("run")], context, config, undefined, () => {
+			const mockStream = new MockAssistantStream();
+			const call = ++streamCalls;
+			queueMicrotask(() => {
+				const message =
+					call === 1
+						? createAssistantMessage(
+								[{ type: "toolCall", id: "tool-partial", name: "partial", arguments: {} }],
+								"toolUse",
+							)
+						: createAssistantMessage([{ type: "text", text: "continued" }], "stop");
+				mockStream.push({ type: "done", reason: call === 1 ? "toolUse" : "stop", message });
+			});
+			return mockStream;
+		});
+
+		const toolResults: Array<{ content: unknown }> = [];
+		const consume = (async () => {
+			for await (const event of stream) {
+				if (event.type === "message_end" && event.message.role === "toolResult") {
+					toolResults.push({ content: event.message.content });
+				}
+			}
+		})();
+
+		await vi.waitFor(() => expect(toolAbortControllers.has("tool-partial")).toBe(true));
+		toolAbortControllers.get("tool-partial")!.abort();
+		await consume;
+
+		expect(JSON.stringify(toolResults[0]?.content)).toContain("captured line");
+		expect(JSON.stringify(toolResults[0]?.content)).not.toContain("Request was aborted");
+	});
+
 	it("sequential abort synthesizes Operation aborted results for remaining tool calls", async () => {
 		const toolSchema = Type.Object({});
 		let firstStarted = false;
@@ -2888,5 +2950,160 @@ describe("round wall-clock watchdog", () => {
 		const messages = await loop.result();
 		const last = messages[messages.length - 1] as AssistantMessage;
 		expect(last.stopReason).toBe("stop");
+	});
+});
+
+// P0 (harness): a mutating tool call whose arguments were elided by the
+// history pruner must never be EXECUTED with the placeholder as the payload.
+// This is the regression test for the silent-corruption bug where a `write`/`edit`
+// call whose args carried `[N chars elided — applied to disk; …]` was dispatched
+// and wrote the marker to disk.
+describe("P0 elided-args mutation guard", () => {
+	const elidedMarker = (n: number): string => `[${n} chars elided — applied to disk; the file is the source of truth]`;
+
+	it("blocks a write call whose content was elided, without executing it", async () => {
+		let executed = false;
+		const writeTool: AgentTool = {
+			name: "write",
+			label: "write",
+			description: "",
+			parameters: Type.Object({ path: Type.String(), content: Type.String() }, { additionalProperties: true }),
+			mutationGuard: true,
+			async execute(_id, _args) {
+				executed = true;
+				return { content: [{ type: "text", text: "wrote" }], details: {}, terminate: true };
+			},
+		};
+		const context: AgentContext = { systemPrompt: "s", messages: [], tools: [writeTool] };
+		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const partial = createAssistantMessage([{ type: "text", text: "" }]);
+				stream.push({ type: "start", partial });
+				stream.push({
+					type: "toolcall_start",
+					contentIndex: 0,
+					partial,
+				});
+				stream.push({
+					type: "toolcall_delta",
+					contentIndex: 0,
+					delta: JSON.stringify({ path: "a.ts", content: elidedMarker(9000) }),
+					partial,
+				});
+				stream.push({
+					type: "toolcall_end",
+					contentIndex: 0,
+					toolCall: {
+						type: "toolCall",
+						id: "c1",
+						name: "write",
+						arguments: { path: "a.ts", content: elidedMarker(9000) },
+					},
+					partial,
+				});
+				const message = createAssistantMessage(
+					[
+						{
+							type: "toolCall",
+							id: "c1",
+							name: "write",
+							arguments: { path: "a.ts", content: elidedMarker(9000) },
+						},
+					],
+					"toolUse",
+				);
+				stream.push({ type: "done", reason: "toolUse", message });
+			});
+			return stream;
+		};
+
+		const loop = agentLoop([createUserMessage("go")], context, config, undefined, streamFn);
+		for await (const _event of loop) {
+			/* drain */
+		}
+		const messages = await loop.result();
+
+		// The tool must NOT have run — the marker must never reach disk.
+		expect(executed).toBe(false);
+		// The model receives an error result telling it to re-issue the call.
+		const result = messages.find((m) => m.role === "toolResult") as
+			| { isError?: boolean; content: { text: string }[] }
+			| undefined;
+		expect(result?.isError).toBe(true);
+		expect(result?.content?.[0]?.text).toMatch(/elided by the context pruner/);
+	});
+
+	it("does not block a write call with genuine content", async () => {
+		let executed = false;
+		const writeTool: AgentTool = {
+			name: "write",
+			label: "write",
+			description: "",
+			parameters: Type.Object({ path: Type.String(), content: Type.String() }, { additionalProperties: true }),
+			mutationGuard: true,
+			async execute(_id, _args) {
+				executed = true;
+				return { content: [{ type: "text", text: "wrote" }], details: {}, terminate: true };
+			},
+		};
+		const context: AgentContext = { systemPrompt: "s", messages: [], tools: [writeTool] };
+		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const partial = createAssistantMessage([{ type: "text", text: "" }]);
+				stream.push({ type: "start", partial });
+				stream.push({
+					type: "toolcall_start",
+					contentIndex: 0,
+					partial,
+				});
+				stream.push({
+					type: "toolcall_delta",
+					contentIndex: 0,
+					delta: JSON.stringify({ path: "a.ts", content: "REAL CONTENT" }),
+					partial,
+				});
+				stream.push({
+					type: "toolcall_end",
+					contentIndex: 0,
+					toolCall: {
+						type: "toolCall",
+						id: "c1",
+						name: "write",
+						arguments: { path: "a.ts", content: "REAL CONTENT" },
+					},
+					partial,
+				});
+				const message = createAssistantMessage(
+					[
+						{
+							type: "toolCall",
+							id: "c1",
+							name: "write",
+							arguments: { path: "a.ts", content: "REAL CONTENT" },
+						},
+					],
+					"toolUse",
+				);
+				stream.push({ type: "done", reason: "toolUse", message });
+			});
+			return stream;
+		};
+
+		const loop = agentLoop([createUserMessage("go")], context, config, undefined, streamFn);
+		for await (const _event of loop) {
+			/* drain */
+		}
+		const messages = await loop.result();
+
+		expect(executed).toBe(true);
+		const result = messages.find((m) => m.role === "toolResult") as
+			| { isError?: boolean; content: { text: string }[] }
+			| undefined;
+		expect(result?.isError).toBe(false);
+		expect(result?.content?.[0]?.text).toBe("wrote");
 	});
 });

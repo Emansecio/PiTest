@@ -200,7 +200,7 @@ import {
 } from "./messaging/index.ts";
 import type { ModelRegistry } from "./model-registry.js";
 import { type RoleResolution, resolveRole } from "./model-resolver.js";
-import { describeToolAction, resolveConfirmDecision } from "./permissions/index.ts";
+import { buildPermissionModeSection, describeToolAction, resolveConfirmDecision } from "./permissions/index.ts";
 import { getCurrentPinManager, PinManager, type PinStateSnapshot, setCurrentPinManager } from "./pins.ts";
 import { getCurrentPlanManager, PlanManager, type PlanState, setCurrentPlanManager } from "./plan/plan-manager.ts";
 import {
@@ -217,9 +217,10 @@ import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.j
 import {
 	clearCurrentSelfReviewFindings,
 	isSelfReviewDisabled,
+	resolveSelfReviewModel,
 	runSelfReviewLoop,
 	SELF_REVIEW_SCHEMA,
-	SELF_REVIEW_TIMEOUT_MS,
+	SELF_REVIEW_SESSION_THINKING,
 	type SelfReviewResult,
 	type SelfReviewRunner,
 	shouldRunSelfReview,
@@ -298,7 +299,11 @@ import { registerBuiltinSchemes } from "./url-schemes/index.ts";
 import { getCurrentUserInputBus } from "./user-input-bus.ts";
 import { summarizeCheckFailure } from "./verification/failure-summary.ts";
 import { functionalWebFixPrompt, runFunctionalWebCheck } from "./verification/functional-web.ts";
-import { decideInTurnCheckSteer, isInTurnCheckSteerDisabled } from "./verification/in-turn-check.ts";
+import {
+	decideInTurnCheckSteer,
+	IN_TURN_CHECK_MAX_IGNORED,
+	isInTurnCheckSteerDisabled,
+} from "./verification/in-turn-check.ts";
 import { isVerificationJobCommand, pendingVerificationJobs } from "./verification/pending-checks.ts";
 import {
 	type CheckResult,
@@ -459,8 +464,9 @@ function verificationExhaustedPrompt(
 	const tail = summarizeCheckFailure(result.output, command);
 	const status = result.timedOut ? "timed out" : `exited ${result.exitCode}`;
 	const attemptWord = attempts === 1 ? "attempt" : "attempts";
+	const attemptSuffix = attempts > 0 ? ` after ${attempts} fix ${attemptWord}` : " in the one-shot grounding fallback";
 	const lines = [
-		`The check \`${command}\` is STILL failing (${status}) after ${attempts} fix ${attemptWord}:`,
+		`The check \`${command}\` is STILL failing (${status})${attemptSuffix}:`,
 		"",
 		`$ ${command}`,
 		tail || "(no output)",
@@ -618,8 +624,34 @@ interface ToolDefinitionEntry {
 /** Standard thinking levels */
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
 
-/** Minimum abandoned-branch entries before `/tree` pays for an LLM summary. */
-const BRANCH_SUMMARY_MIN_ENTRIES = 3;
+/**
+ * Read de-dup kill-switch. `PIT_NO_READ_DEDUPE` is the repo-standard truthy form;
+ * `PIT_READ_DEDUPE=0` is kept as a legacy alias (the only inverted-polarity flag
+ * the repo ever shipped) so existing setups keep working. Either one disables.
+ */
+export function isReadDedupeDisabled(
+	env: NodeJS.ProcessEnv | undefined = typeof process !== "undefined" ? process.env : undefined,
+): boolean {
+	if (!env) return false;
+	if (isTruthyEnvFlag(env.PIT_NO_READ_DEDUPE)) return true;
+	return env.PIT_READ_DEDUPE === "0";
+}
+
+/** Stale-read warning kill-switch (`PIT_NO_STALE_READ_WARNING`, repo-standard truthy). */
+export function isStaleReadWarningDisabled(
+	env: NodeJS.ProcessEnv | undefined = typeof process !== "undefined" ? process.env : undefined,
+): boolean {
+	return env ? isTruthyEnvFlag(env.PIT_NO_STALE_READ_WARNING) : false;
+}
+
+/**
+ * Prompt-rebuild reasons whose prefix rewrite is the DEAL, not a defect: a
+ * permission-mode switch and a goal transition each buy a fixed block into the
+ * cacheable prefix, paying exactly one cache miss so every later request in that
+ * state is cheaper. They are still recorded (see `_recordPrefixRewriteDiagnostic`)
+ * but at `info`, so they never read as churn in `/diagnostics`.
+ */
+const DELIBERATE_PREFIX_REWRITE_REASONS: ReadonlySet<string> = new Set(["permission-mode", "goal-lifecycle"]);
 
 // Hoisted so it isn't recompiled on every error message checked for retry.
 const RETRYABLE_ERROR_RE =
@@ -665,6 +697,9 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	private _fusionAbort: AbortController | undefined = undefined;
 	// Resolved when the current Fusion turn clears its controller. See setFusionAbort.
 	private _fusionSettled: { promise: Promise<void>; resolve: () => void } | undefined = undefined;
+	// Serializes post-Fusion handoff with triggerTurn callers. A settled Fusion must
+	// drain queued messages before any concurrent caller starts a solo turn.
+	private _fusionHandoffTail: Promise<void> = Promise.resolve();
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: string[] = [];
@@ -883,6 +918,19 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	private _hiddenToolCountSnapshot = 0;
 	private readonly _cachePrefixReasons = new Map<string, number>();
 
+	// State the CACHEABLE PREFIX depends on, as of the last _rebuildSystemPrompt.
+	// Both blocks (permission-mode stance, goal persistence rules) are immutable
+	// text whose PRESENCE flips only on a rare deliberate event, so they belong in
+	// the prefix — but nothing rebuilds the prompt on those events by itself.
+	// `_syncPromptSessionState` compares these at turn start and rebuilds exactly
+	// once when they moved. Reconciling at turn start rather than from a
+	// mode-change callback covers every path that can move them (slash command,
+	// cycle key, exit_plan approval, session restore, /goal, goal_complete)
+	// without a callback per path, and lands the rebuild at the only moment the
+	// prompt is read anyway.
+	private _promptPermissionMode: import("./permissions/index.ts").PermissionMode | undefined;
+	private _promptGoalRules = false;
+
 	// Hindsight memory bank, opened in the constructor when settings enable it.
 	private _hindsightBank: HindsightBank | undefined;
 
@@ -921,6 +969,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	// AFTER the session is torn down; _deliverAsyncResult checks this to drop the late
 	// result instead of mutating a dead session (re-injecting a phantom turn).
 	private _disposed = false;
+	private _disposePromise: Promise<void> | undefined;
 	// Raised by interrupt() (Esc) and cleared when the next user prompt starts.
 	// Makes the goal auto-continuation loop and the verification gate stop
 	// re-dispatching the agent after the user cancels mid-task — without it, Esc
@@ -993,6 +1042,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		registerBuiltinSchemes();
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
+		this._todo.setSessionId(this.sessionManager.getSessionId());
 		this.settingsManager = config.settingsManager;
 		this._scopedModels = config.scopedModels ?? [];
 		this._resourceLoader = config.resourceLoader;
@@ -1006,16 +1056,14 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		this._disableHashlineAnchors = config.disableHashlineAnchors ?? false;
 		this._cacheRetention = config.cacheRetention;
 		this.permissionChecker = config.permissionChecker;
-		// Per-session de-dup of identical repeat reads. On by default; PIT_READ_DEDUPE=0
-		// disables. Content-hashed + LRU-bounded, so edited or long-ago reads re-send.
-		this._readDedupeStore =
-			typeof process !== "undefined" && process.env.PIT_READ_DEDUPE === "0" ? undefined : new ReadDedupeStore();
+		// Per-session de-dup of identical repeat reads. On by default; disable with
+		// PIT_NO_READ_DEDUPE (repo-standard truthy kill-switch) or the legacy
+		// inverted-polarity alias PIT_READ_DEDUPE=0 — either one turns it off.
+		// Content-hashed + LRU-bounded, so edited or long-ago reads re-send.
+		this._readDedupeStore = isReadDedupeDisabled() ? undefined : new ReadDedupeStore();
 		// Per-session file mtime tracking for the stale-read warning: edit/write flag
-		// a file that changed on disk since the model read it. PIT_NO_STALE_READ_WARNING=1 disables.
-		this._fileMtimeStore =
-			typeof process !== "undefined" && process.env.PIT_NO_STALE_READ_WARNING === "1"
-				? undefined
-				: new FileMtimeStore();
+		// a file that changed on disk since the model read it. PIT_NO_STALE_READ_WARNING disables.
+		this._fileMtimeStore = isStaleReadWarningDisabled() ? undefined : new FileMtimeStore();
 		// Graph-prefetch warm cache (P6): the graph-prefetch built-in extension
 		// warms grade-1 neighbors of a just-read file into this cache; read.ts
 		// consults it before its own disk read (mtime+size gated, silent miss).
@@ -1838,6 +1886,12 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	 */
 	async awaitFusionSettled(): Promise<void> {
 		await this._fusionSettled?.promise;
+	}
+
+	private _serializeFusionHandoff(task: () => Promise<void>): Promise<void> {
+		const run = this._fusionHandoffTail.then(task, task);
+		this._fusionHandoffTail = run.catch(() => undefined);
+		return run;
 	}
 
 	get userInterrupted(): boolean {
@@ -3066,9 +3120,20 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	 * Call this when completely done with the session.
 	 */
 	async dispose(): Promise<void> {
+		if (this._disposePromise) return this._disposePromise;
+		// First synchronous step: mark disposed so a subagent
+		// settlement during teardown is dropped immediately.
+		this._disposed = true;
+		this._disposePromise = this._disposeAfterAbort();
+		return this._disposePromise;
+	}
+
+	private async _disposeAfterAbort(): Promise<void> {
+		// Abort the Agent principal, Fusion, branch summary, and cooperative tools;
+		// waitForIdle is bounded inside abort() so teardown cannot deadlock.
+		await this.abort();
 		// First synchronous step: mark disposed so a subagent that settles during/after
 		// teardown is dropped by _deliverAsyncResult instead of mutating a dead session.
-		this._disposed = true;
 		// Disarm the cache-keepalive: its unref'd idle timer would otherwise survive
 		// dispose and fire a provider ping against a dead session (up to ~55min later
 		// under long retention). onActivity() clears the timer and bumps the ping
@@ -3085,12 +3150,12 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		// children before spare-pool dispose so session replace (/new, /fork) and
 		// graceful process exit do not leave orphan process groups (Unix) or
 		// directory-locking grandchildren (Windows).
-		disposeBashBackgroundJobs();
-		killTrackedDetachedChildren();
+		disposeBashBackgroundJobs(this.sessionId);
+		killTrackedDetachedChildren(this.sessionId);
 		// Same reasoning for the bash spare-shell pool (see bash.ts): an unconsumed
 		// spare is a live process pinned to a cwd that may be a temp dir the caller
 		// is about to delete. Kill it here rather than waiting for process shutdown.
-		disposeBashSparePool();
+		disposeBashSparePool(this.sessionId);
 		// Abort and drain any in-flight background (predictive) compaction BEFORE we
 		// flush and disconnect below. A compaction started at the end of the prior
 		// turn can otherwise append a CompactionEntry and reassign agent.state.messages
@@ -3449,7 +3514,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	private _recordGoalTurn(message: unknown): void {
 		if (!this._goal.get()) return;
 		const m = message as { usage?: TokenUsageComponents; stopReason?: string } | undefined;
-		this._tokenGovernor.recordMain(consumedTokens(m?.usage));
+		this._tokenGovernor.recordMain(consumedTokens(m?.usage), m?.usage?.cost?.total);
 		this._goal.recordIteration();
 		if (typeof m?.stopReason === "string") this._goal.onInterrupted(m.stopReason);
 		// Persist progress so token/iteration counts survive /reload. Status
@@ -3784,9 +3849,12 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	}
 
 	/**
-	 * Keep extension/SDK tool guidance supported without re-injecting Pit's own
-	 * built-in tool bullets into the global prompt. Built-in guidance belongs in
-	 * the tool contract; user-provided guidance remains useful session context.
+	 * Guidance from extension/SDK tools only. Built-in tool guidance belongs in the
+	 * tool contract (description/promptSnippet), so built-in definitions no longer
+	 * carry `promptGuidelines` at all — this `source === "builtin"` guard is the
+	 * backstop that keeps it that way (an override registered by an extension is
+	 * NOT builtin and still contributes). User-provided guidance remains useful
+	 * session context.
 	 */
 	private _getCustomToolPromptGuidelines(name: string): string[] {
 		const entry = this._toolDefinitions.get(name);
@@ -3829,8 +3897,8 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		promptGuidelines.push(...getEngineeringStylePromptGuidelines(this.settingsManager.getEngineeringStyle()));
 
 		// In-turn verification (default mode): the model verifies BEFORE its final
-		// reply, so the harness runs nothing after the turn — no post-reply check,
-		// no injected fix turns, no self-review pass (see VerificationSettings.mode).
+		// reply. A bounded post-cycle grounding fallback and risk-gated self-review
+		// cover ignored verification instructions (see VerificationSettings.mode).
 		if (this.settingsManager.getVerificationSettings().mode === "in-turn" && validToolNames.includes("bash")) {
 			const checkCmd = this._resolveInTurnCheckCommand();
 			const checkRef = checkCmd
@@ -3879,6 +3947,16 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 		const gitBranch = readGitBranch(this._cwd);
 
+		// Cacheable-prefix session state. Snapshot what we build with so
+		// _syncPromptSessionState can tell, at the next turn start, whether a
+		// rebuild is owed (see the field declarations).
+		this._promptPermissionMode = this.permissionChecker?.mode;
+		this._promptGoalRules = this._goal.hasPromptRules();
+		const permissionModeSection = this._promptPermissionMode
+			? buildPermissionModeSection(this._promptPermissionMode, validToolNames)
+			: undefined;
+		const goalRulesSection = this._promptGoalRules ? this._goal.systemPromptPrefixSection() : undefined;
+
 		this._baseSystemPromptOptions = {
 			cwd: this._cwd,
 			skills: loadedSkills,
@@ -3921,10 +3999,36 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 			// never re-resolved here, so unrelated rebuilds (tool-surface,
 			// extensions-reload, frequent-files-index, …) can never flip the tier.
 			profile: this._promptProfile,
+			// Cacheable-prefix stance/goal blocks — fixed text per state, so they are
+			// paid once per switch instead of on every request of every turn.
+			permissionModeSection,
+			goalRulesSection,
 		};
 		const prompt = buildSystemPrompt(this._baseSystemPromptOptions);
 		this._trackPrefixStability(prompt, reason);
 		return prompt;
+	}
+
+	/**
+	 * Rebuild the system prompt when a cacheable-prefix input moved since the last
+	 * build: the permission mode (the `<plan_mode>`/`<ask_mode>`/`<confirm_mode>`
+	 * stance) or the presence of a goal (the `<goal_rules>` block). Called once per
+	 * turn, before the prompt is handed to the provider.
+	 *
+	 * Each of these costs exactly one cache miss per real transition — the trade
+	 * this whole arrangement buys: a mode switch or a `/goal` is rare and
+	 * deliberate, whereas the un-cached suffix is re-billed on every tool round of
+	 * every turn. At most one rebuild happens here: the first branch snapshots
+	 * BOTH values, so a turn that moved both still pays once.
+	 */
+	private _syncPromptSessionState(): void {
+		if (this.permissionChecker?.mode !== this._promptPermissionMode) {
+			this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames(), "permission-mode");
+			return;
+		}
+		if (this._goal.hasPromptRules() !== this._promptGoalRules) {
+			this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames(), "goal-lifecycle");
+		}
 	}
 
 	/**
@@ -3946,6 +4050,15 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	 * before SYSTEM_PROMPT_DYNAMIC_MARKER). Only prefix changes invalidate the
 	 * prompt cache; dynamic-suffix churn (date, cwd, frequent-files) is free. The
 	 * first observed prefix is the baseline and never counts as a rewrite.
+	 *
+	 * Counting is BY CONTENT, not by call: a rebuild whose prefix comes out
+	 * byte-identical (the common case — most rebuild reasons only move the dynamic
+	 * suffix) costs nothing and is not counted. Every counted rewrite also lands on
+	 * the diagnostics channel, because this is the single most expensive event in
+	 * the system: the whole prefix is re-billed as a cache write on the next
+	 * request. The comparison is one string equality against the retained previous
+	 * prefix and reuses the split this method already performs — no second split,
+	 * no hashing pass.
 	 */
 	private _trackPrefixStability(prompt: string, reason: string): void {
 		const { staticPart } = splitSystemPromptOnDynamic(prompt);
@@ -3959,6 +4072,41 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		this._cachePrefixBaseline = staticPart;
 		this._cachePrefixRebuilds++;
 		this._cachePrefixReasons.set(reason, (this._cachePrefixReasons.get(reason) ?? 0) + 1);
+		this._recordPrefixRewriteDiagnostic(reason, staticPart.length);
+	}
+
+	/**
+	 * Surface one counted prefix rewrite on the runtime-diagnostics channel.
+	 * Deliberate transitions still record (visibility is the point) but at `info`,
+	 * so a mode switch never reads as churn; everything else is a `warn` worth
+	 * chasing. The wire estimate comes from `getContextUsage()`, which
+	 * `_rebuildSystemPrompt` just called for `contextOccupancyPercent` — same memo
+	 * key, so this is a map lookup, not a second O(n) walk. Fail-open: telemetry
+	 * must never break a prompt rebuild.
+	 */
+	private _recordPrefixRewriteDiagnostic(reason: string, prefixChars: number): void {
+		try {
+			const deliberate = DELIBERATE_PREFIX_REWRITE_REASONS.has(reason);
+			const wireTokens = this.getContextUsage()?.wireTokens;
+			recordDiagnostic({
+				category: "quality.cache-prefix-rewrite",
+				level: deliberate ? "info" : "warn",
+				source: "agent-session.systemPrompt",
+				context: {
+					reason,
+					rebuildCount: this._cachePrefixRebuilds,
+					// Prefix size is always known; the history estimate needs a model
+					// with a context window, so it can legitimately be absent.
+					bytes: prefixChars,
+					...(typeof wireTokens === "number"
+						? { historyTokens: wireTokens }
+						: { note: "wire estimate unavailable (no model or no context window)" }),
+					...(deliberate ? { deliberate: true } : {}),
+				},
+			});
+		} catch {
+			// Fail-open: visibility only, never load-bearing.
+		}
 	}
 
 	/**
@@ -4216,11 +4364,10 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 				}
 			}
 
-			// Post-reply verification pipeline — legacy `post-turn` mode only. In the
-			// default `in-turn` mode nothing runs after the reply (Claude Code-like):
-			// the model is instructed via system prompt to run the check BEFORE its
-			// final answer, so the harness injects no post-reply commands or fix
-			// turns. See VerificationSettings.mode.
+			// Post-reply verification pipeline — legacy `post-turn` mode only. The
+			// default `in-turn` path stays lighter: instruction-first, with one bounded
+			// grounding fallback after repeated non-compliance and no automatic fix loop.
+			// See VerificationSettings.mode.
 			if (this.settingsManager.getVerificationSettings().mode === "post-turn") {
 				// Background-check guard: if the agent backgrounded a test/check, make sure it
 				// has finished and passed before the turn hands back — never report done or
@@ -4283,8 +4430,9 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 
 	/**
 	 * Background-job lifecycle → model notifications. An exit is reported once
-	 * (`resultSeen` latches); verification jobs are excluded because the
-	 * pending-checks gate owns their story and would double-report. A `killed`
+	 * (`resultSeen` latches). A verification exit is suppressed only while the
+	 * pending-checks drain owns it; outside that bounded window the result must
+	 * still reach the model, including in the default `in-turn` mode. A `killed`
 	 * event is reported only for `source: "ui"` — the user ended the job from the
 	 * jobs panel / Esc picker, and the model must not keep polling a ghost.
 	 */
@@ -4292,13 +4440,25 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		if (this._disposed) return;
 		if (event.type === "promoted") return;
 		const job = event.job;
+		if (job.ownerSessionId !== this.sessionId) return;
 		const commandLine = job.command.split("\n", 1)[0];
 		if (event.type === "killed") {
 			if (event.source !== "ui") return;
+			const stopped = event.stopResult;
+			const content = stopped
+				? [
+						`[background job] The user interrupted job ${job.id} ($ ${commandLine}) from the UI after ${((Date.now() - job.startedAt) / 1000).toFixed(1)}s. ${stopped.alreadyExited ? "It had already finished." : stopped.terminationConfirmed ? "Process termination was confirmed. The job is no longer pollable." : "Process termination could not be confirmed before the cleanup deadline. The job remains pollable and the stop can be retried."}`,
+						stopped.outputTruncated
+							? "Partial output (oldest or excess lines were truncated):"
+							: "Partial output:",
+						stopped.output || "(no output captured since the job moved to background)",
+						"Use this partial result and continue from the work completed so far; rerun only what remains necessary.",
+					].join("\n")
+				: `[background job] The user killed job ${job.id} ($ ${commandLine}) from the UI. It is gone from the registry — do not poll it; rerun the command if its work is still needed.`;
 			void this.sendCustomMessage(
 				{
 					customType: "pit.background-job",
-					content: `[background job] The user killed job ${job.id} ($ ${commandLine}) from the UI. It is gone from the registry — do not poll it; rerun the command if its work is still needed.`,
+					content,
 					display: true,
 				},
 				{ deliverAs: this.isStreaming ? "steer" : "nextTurn" },
@@ -4306,7 +4466,12 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 			return;
 		}
 		if (job.resultSeen) return;
-		if (isVerificationJobCommand(job.command)) return;
+		if (isVerificationJobCommand(job.command) && this._inPendingChecksDrain) {
+			// The drain will consume the terminal outcome in this turn. Mark it seen
+			// here so a successful check does not remain stale in the footer forever.
+			job.resultSeen = true;
+			return;
+		}
 		job.resultSeen = true;
 		const outcome =
 			job.exitCode === 0
@@ -4327,7 +4492,9 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 
 	/** Verification jobs still running that no drain this session has handed off yet. */
 	private _undrainedVerificationJobs(): BashBackgroundJob[] {
-		return pendingVerificationJobs(listBashBackgroundJobs()).filter((j) => !this._handledCheckJobIds.has(j.id));
+		return pendingVerificationJobs(listBashBackgroundJobs(this.sessionId)).filter(
+			(j) => !this._handledCheckJobIds.has(j.id),
+		);
 	}
 
 	/**
@@ -4337,7 +4504,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	 * must not be re-awaited (or re-reported) by a future unrelated prompt.
 	 */
 	private _markLingeringCheckJobsHandled(): void {
-		const live = listBashBackgroundJobs();
+		const live = listBashBackgroundJobs(this.sessionId);
 		const liveIds = new Set(live.map((j) => j.id));
 		for (const id of this._handledCheckJobIds) {
 			if (!liveIds.has(id)) this._handledCheckJobIds.delete(id);
@@ -4381,7 +4548,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 							command: label,
 							elapsedMs: Date.now() - startMs,
 						});
-						if (listBashBackgroundJobs().every((j) => !ids.has(j.id) || j.exited)) break;
+						if (listBashBackgroundJobs(this.sessionId).every((j) => !ids.has(j.id) || j.exited)) break;
 						await new Promise<void>((res) => {
 							const onAbort = () => {
 								clearTimeout(t);
@@ -4400,7 +4567,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 
 				if (abort.signal.aborted || this._userInterrupted) return;
 
-				const jobs = listBashBackgroundJobs().filter((j) => ids.has(j.id));
+				const jobs = listBashBackgroundJobs(this.sessionId).filter((j) => ids.has(j.id));
 				// An exited job whose exitCode stayed `null` (spawn error / waitForChildProcess
 				// rejection — see tools/bash.ts .catch) never actually succeeded, so it must
 				// count as a non-success, not a silent pass.
@@ -4869,7 +5036,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	 */
 	_emitSubagentComplete(
 		handle: string,
-		status: "done" | "error",
+		status: "done" | "error" | "cancelled",
 		meta?: { turns?: number; totalTokens?: number },
 	): void {
 		this.emit({
@@ -4912,7 +5079,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	_deliverAsyncResult(
 		handle: string,
 		text: string,
-		status: "done" | "error",
+		status: "done" | "error" | "cancelled",
 		meta?: { turns?: number; totalTokens?: number },
 	): boolean {
 		// Session torn down: an orphaned subagent settled late. Drop it without mutating
@@ -4967,19 +5134,20 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 
 	/**
 	 * The whole post-cycle surface of the DEFAULT `in-turn` mode. Deliberately thin
-	 * next to the `post-turn` pipeline: the harness runs no check, no fix loop and
-	 * no drain. It does exactly two things the honour-based prompt cannot do by
+	 * next to the `post-turn` pipeline: there is no fix loop or pending-check drain.
+	 * It does exactly two things the honour-based prompt cannot do by
 	 * itself —
 	 *
-	 *   1. {@link _maybeSteerInTurnCheck} — record + correct once when the cycle
-	 *      edited files and ran no check at all.
+	 *   1. {@link _maybeSteerInTurnCheck} — record + correct when the cycle edited
+	 *      files and ran no check; after two ignored corrections, run one bounded
+	 *      mechanical check for ordinary (non-goal) tasks.
 	 *   2. Self-review (Band P / P4) — on a HIGH-risk diff only. Before this, P4 was
 	 *      reachable ONLY from `post-turn`, i.e. dead code under the default mode
 	 *      it was shipped with; its own risk gate and `PIT_NO_SELF_REVIEW` kill-switch
 	 *      keep it a no-op on ordinary cycles.
 	 */
 	private async _runInTurnPostCycle(options?: PromptOptions): Promise<void> {
-		await this._maybeSteerInTurnCheck(options);
+		if (await this._maybeSteerInTurnCheck(options)) return;
 		if (this._inVerification || !this._turnTouchedFiles) return;
 		if (this._userInterrupted || this._lastTurnAborted()) return;
 		const settings = this.settingsManager.getVerificationSettings();
@@ -4988,7 +5156,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		const abort = new AbortController();
 		this._verificationAbort = abort;
 		try {
-			// No check phase ran here, so the review starts with the FULL fix budget.
+			// The grounding fallback consumes no fix attempt, so review keeps the FULL budget.
 			await this._runSelfReviewPhase(maxAttempts, 0, abort, options);
 		} finally {
 			this._inVerification = false;
@@ -4997,27 +5165,27 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	}
 
 	/**
-	 * In-turn grounding (DEFAULT mode): correct ONE cycle that modified files and
-	 * never ran a verification-class command. The harness still runs no check
-	 * itself — it injects a single corrective turn asking the model to run it, and
-	 * records `quality.in-turn-check` so the honour-gap is measurable either way.
+	 * In-turn grounding (DEFAULT mode): correct a cycle that modified files and
+	 * never ran a verification-class command. After two unheeded corrections, an
+	 * ordinary task gets one bounded mechanical check so the gap cannot remain
+	 * permanently honour-based.
 	 *
-	 * Never blocks completion (no `goal_complete` veto): the model may still be
-	 * right, it just cannot claim so on an unrun check without leaving a trace.
-	 * Bounded — after `IN_TURN_CHECK_MAX_IGNORED` unheeded corrections it stops for
-	 * the session instead of paying context every turn. `PIT_NO_INTURN_CHECK_STEER=1`
-	 * restores the pure honour-based behavior.
+	 * Active autonomous goals retain their stronger `goal_complete` verification
+	 * veto and do not run this fallback. `PIT_NO_INTURN_CHECK_STEER=1` restores the
+	 * pure honour-based behavior. Returns true only when a red fallback injected a
+	 * terminal honesty prompt, so the self-review phase must not continue.
 	 */
-	private async _maybeSteerInTurnCheck(options?: PromptOptions): Promise<void> {
-		if (this._inInTurnCheckSteer || isInTurnCheckSteerDisabled()) return;
+	private async _maybeSteerInTurnCheck(options?: PromptOptions): Promise<boolean> {
+		if (this._inInTurnCheckSteer || isInTurnCheckSteerDisabled()) return false;
 		const decision = decideInTurnCheckSteer({
 			touchedFiles: this._turnTouchedFiles,
 			ranCheck: this._turnRanVerificationCommand,
 			checkCommand: this._resolveInTurnCheckCommand(),
 			ignoredStreak: this._inTurnCheckIgnored,
 			aborted: this._userInterrupted || this._lastTurnAborted(),
+			autonomousGoalActive: this._goal.isActive(),
 		});
-		if (decision.action === "none") return;
+		if (decision.action === "none") return false;
 		if (decision.action === "give-up") {
 			recordDiagnostic({
 				category: "quality.in-turn-check",
@@ -5025,7 +5193,10 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 				source: "agent-session",
 				context: { ruleId: "in-turn-check-gave-up", count: this._inTurnCheckIgnored },
 			});
-			return;
+			return false;
+		}
+		if (decision.action === "run-check") {
+			return this._runInTurnFallbackCheck(decision.command, options);
 		}
 		recordDiagnostic({
 			category: "quality.in-turn-check",
@@ -5042,6 +5213,87 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		// The corrective turn shares this cycle's flag, so a check run during it
 		// clears the streak; silence counts as unheeded and moves toward giving up.
 		this._inTurnCheckIgnored = this._turnRanVerificationCommand ? 0 : this._inTurnCheckIgnored + 1;
+		if (this._inTurnCheckIgnored >= IN_TURN_CHECK_MAX_IGNORED && !this._goal.isActive()) {
+			return this._runInTurnFallbackCheck(decision.command, options);
+		}
+		return false;
+	}
+
+	/** One-shot safety net after the model ignores the in-turn check correction twice. */
+	private async _runInTurnFallbackCheck(command: string, options?: PromptOptions): Promise<boolean> {
+		this._inTurnCheckIgnored = 0;
+		if (this._inVerification || this._sessionTimedOutChecks.has(command)) return false;
+		const settings = this.settingsManager.getVerificationSettings();
+		const maxAttempts = 1;
+		const attempt = 1;
+		const abort = new AbortController();
+		this._inVerification = true;
+		this._verificationAbort = abort;
+		this._verificationAttemptsTotal += 1;
+		this.emit({ type: "verification", phase: "running", command, attempt, maxAttempts });
+		try {
+			const result = await runCheckCommand(command, this._cwd, {
+				signal: abort.signal,
+				timeoutMs: settings.timeoutMs,
+			});
+			if (abort.signal.aborted) return true;
+			if (result.timedOut) {
+				this._sessionTimedOutChecks.add(command);
+				this.emit({ type: "verification", phase: "timeout", command, attempt, maxAttempts });
+				recordDiagnostic({
+					category: "quality.in-turn-check",
+					level: "warn",
+					source: "agent-session",
+					context: { ruleId: "in-turn-check-fallback-timeout", count: 1 },
+				});
+				return false;
+			}
+			if (result.ok) {
+				this.emit({ type: "verification", phase: "passed", command, attempt, maxAttempts });
+				this._recovery.noteCleanTool();
+				getCurrentSessionContract()?.noteVerificationPass();
+				recordDiagnostic({
+					category: "quality.in-turn-check",
+					level: "info",
+					source: "agent-session",
+					context: { ruleId: "in-turn-check-fallback-passed", count: 1 },
+				});
+				return false;
+			}
+
+			this._verificationFailuresTotal += 1;
+			this.emit({
+				type: "verification",
+				phase: "failed",
+				command,
+				attempt,
+				maxAttempts,
+				exitCode: result.exitCode,
+				willRetry: false,
+			});
+			this._recordCrossFileEscape(result.output);
+			recordDiagnostic({
+				category: "quality.in-turn-check",
+				level: "warn",
+				source: "agent-session",
+				context: { ruleId: "in-turn-check-fallback-failed", count: 1 },
+			});
+			this._recovery.noteSignal("verification_exhausted");
+			this._steering.maybeInjectNarrationSteer();
+			this._inInTurnCheckSteer = true;
+			try {
+				await this._promptOnce(
+					verificationExhaustedPrompt(command, result, 0, this._lastAssistantClaimedCompletion()),
+					{ expandPromptTemplates: false, source: options?.source },
+				);
+			} finally {
+				this._inInTurnCheckSteer = false;
+			}
+			return true;
+		} finally {
+			this._inVerification = false;
+			this._verificationAbort = undefined;
+		}
 	}
 
 	/**
@@ -5313,7 +5565,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 				mgr: this._chromeDevtools,
 				lastVisualFile: this._lastVisualFile,
 				touchedVisual: this._turnTouchedVisual,
-				backgroundJobs: listBashBackgroundJobs(),
+				backgroundJobs: listBashBackgroundJobs(this.sessionId),
 				maxInteractions: settings.functionalWebMaxInteractions,
 				timeoutMs: settings.functionalWebTimeoutMs,
 				signal: abort.signal,
@@ -5418,17 +5670,23 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	/**
 	 * Build the concrete review runner: one read-only `spawnSubagent` pass in the
 	 * fusion-verify mould (read/grep/find/ls, maxTurns 6, strict SELF_REVIEW_SCHEMA).
-	 * Throws on schema mismatch / timeout / abort — `runSelfReviewLoop` treats a throw
+	 * Throws on schema mismatch or abort — `runSelfReviewLoop` treats a throw
 	 * as fail-open. Returns `{ findings: [] }` only when there is no usable model.
+	 *
+	 * Runs on the session model's small-class sibling by default (see
+	 * `resolveSelfReviewModel`), failing open to the session model when the sibling
+	 * has no credentials — mirroring compaction's sibling routing so a HIGH cycle
+	 * doesn't spend 6 read/grep turns of Opus-class tokens on a schema-shaped review.
 	 */
 	private _selfReviewRunner(abort: AbortController): SelfReviewRunner {
 		return async (args) => {
 			const model = this.model;
 			if (!model) return { findings: [] };
+			const { model: reviewModel, thinkingLevel } = await this._resolveSelfReviewModel(model);
 			const result = await spawnSubagent(
 				{
 					registry: new SubagentRegistry(),
-					model,
+					model: reviewModel,
 					modelRegistry: this.modelRegistry,
 					availableTools: this.agent.state.tools as AgentTool[],
 					convertToLlm: (m) => m as never,
@@ -5439,14 +5697,35 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 					allowedTools: ["read", "grep", "find", "ls"],
 					resultSchema: SELF_REVIEW_SCHEMA,
 					cwd: this._cwd,
-					timeoutMs: SELF_REVIEW_TIMEOUT_MS,
 					maxTurns: 6,
-					thinkingLevel: "medium",
+					thinkingLevel,
 					signal: abort.signal,
 				},
 			);
 			return (result.value as SelfReviewResult | undefined) ?? { findings: [] };
 		};
+	}
+
+	/**
+	 * Pick the model for one self-review pass: the pure sibling policy
+	 * (`resolveSelfReviewModel`) plus the auth fail-open the pure part cannot do.
+	 * A sibling without credentials degrades to the session model rather than to a
+	 * thrown stream (which `runSelfReviewLoop` would swallow as "no findings",
+	 * silently deleting the review instead of paying for it).
+	 */
+	private async _resolveSelfReviewModel(
+		sessionModel: Model<any>,
+	): Promise<{ model: Model<any>; thinkingLevel: ThinkingLevel }> {
+		const sessionChoice = { model: sessionModel, thinkingLevel: SELF_REVIEW_SESSION_THINKING };
+		try {
+			const choice = resolveSelfReviewModel(sessionModel, this.modelRegistry.getAll());
+			if (!choice.usedSibling) return sessionChoice;
+			const auth = await this.modelRegistry.getApiKeyAndHeaders(choice.model);
+			if (!auth.ok || !auth.apiKey) return sessionChoice;
+			return { model: choice.model, thinkingLevel: choice.thinkingLevel };
+		} catch {
+			return sessionChoice;
+		}
 	}
 
 	/**
@@ -5516,7 +5795,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 					// A Fusion turn runs outside the agent loop, so anything queued during it
 					// (a mid-turn submit routed to the queue) is never drained by the loop —
 					// deliver it now through the normal prompt path (Bug 1).
-					await this._drainQueuedAfterFusion();
+					await this._serializeFusionHandoff(() => this._drainQueuedAfterFusion());
 					return;
 				}
 			}
@@ -5606,6 +5885,11 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 				}
 			}
 
+			// Reconcile the cacheable-prefix session state (permission-mode stance,
+			// goal persistence rules) before the prompt is read below. No-op unless
+			// the user actually switched mode or started/cleared a goal.
+			this._syncPromptSessionState();
+
 			// Band P: capture this turn's prompt and rebuild so the context-composer
 			// block (dynamic suffix, cache-neutral) reflects the current request
 			// before emitBeforeAgentStart hands the prompt to the provider. Fire a
@@ -5672,8 +5956,12 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 				// Ensure we're using the base prompt (in case previous turn had modifications)
 				this.agent.state.systemPrompt = this._baseSystemPrompt;
 			}
-			// Inject the autonomous-goal persistence section (per-turn, dynamic so
-			// it tracks pause/clear/complete without a full system-prompt rebuild).
+			// Inject the goal's live objective + status (one line, per-turn, so it
+			// tracks pause/resume/complete without a system-prompt rebuild). The
+			// persistence rules it refers to are NOT here: they are immutable text and
+			// ride the cacheable prefix (`goalRulesSection`), rebuilt only when a goal
+			// appears or disappears. Same split for `<todos>` below — the list is
+			// dynamic, the how-to-use-it is a prefix guideline.
 			const goalSection = this._goal.systemPromptSection();
 			if (goalSection) {
 				this.agent.state.systemPrompt = `${this.agent.state.systemPrompt}\n\n${goalSection}`;
@@ -6009,8 +6297,10 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 			// back, not alongside it. Waiting is the honest reading of the request —
 			// dropping it would lose the message, and running it now would interleave
 			// two writers into one message list.
-			await this.awaitFusionSettled();
-			await this._runAgentPrompt(appMessage);
+			await this._serializeFusionHandoff(async () => {
+				await this.awaitFusionSettled();
+				await this._runAgentPrompt(appMessage);
+			});
 		} else if (this.isFusing && options?.deliverAs) {
 			// A steer/follow-up cannot reach a Fusion turn — its members are separate
 			// CLIs with no steering channel. Delivering it with the next turn keeps the
@@ -6127,7 +6417,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	 */
 	async abort(): Promise<void> {
 		this.abortRetry();
-		getCurrentUserInputBus()?.cancelAll("interrupt");
+		getCurrentUserInputBus(this.sessionId)?.cancelAll("interrupt");
 		this.agent.abort();
 		// Hard ceiling: non-cooperative tools used to leave waitForIdle pending forever.
 		const ABORT_IDLE_WAIT_MS = 15_000;
@@ -6201,7 +6491,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		this._abortDetachedSubagents?.();
 		// Unblock the `ask` tool (and any other UserInputBus waiter). agent.abort()
 		// alone does not cancel bus.askOptions, so Esc would leave the turn parked.
-		getCurrentUserInputBus()?.cancelAll("interrupt");
+		getCurrentUserInputBus(this.sessionId)?.cancelAll("interrupt");
 		this.agent.abort();
 	}
 
@@ -6921,7 +7211,12 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 			edit: { mtimeStore: this._fileMtimeStore },
 			edit_v2: { mtimeStore: this._fileMtimeStore },
 			write: { mtimeStore: this._fileMtimeStore },
-			bash: { commandPrefix: shellCommandPrefix, shellPath, enableSparePool: true },
+			bash: {
+				commandPrefix: shellCommandPrefix,
+				shellPath,
+				enableSparePool: true,
+				ownerSessionId: this.sessionId,
+			},
 			grep: { engine: this.settingsManager.getGrepSettings().engine },
 			find: { engine: this.settingsManager.getGrepSettings().engine === "fff" ? "fff" : "fd" },
 			ast_grep: { engine: this.settingsManager.getAstGrepSettings().engine },
@@ -7525,10 +7820,13 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 				}
 			}
 
-			// Run default summarizer if needed (skip tiny abandoned paths — C6).
+			// Run the default summarizer whenever the caller requested a summary and
+			// there is an abandoned path to describe. A requested summary is part of
+			// navigation semantics even for a one- or two-entry branch; silently
+			// dropping it loses the only context the user asked to preserve.
 			let summaryText: string | undefined;
 			let summaryDetails: unknown;
-			if (options.summarize && entriesToSummarize.length >= BRANCH_SUMMARY_MIN_ENTRIES && !extensionSummary) {
+			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
 				const sessionModel = this.model!;
 				const sessionAuth = await this._getRequiredRequestAuth(sessionModel);
 				const compact = await resolveCompactModel(
@@ -7725,6 +8023,10 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 			totalCacheWrite += assistantMsg.usage.cacheWrite;
 			totalCost += assistantMsg.usage.cost.total;
 		}
+		// Detached/resumed subagents are billed in the coordinator ledger and do
+		// not create assistant entries in the parent transcript. Include that live
+		// child spend without adding the parent's persisted cost a second time.
+		totalCost += this._tokenGovernor.snapshot().subagentCostUsd;
 
 		return {
 			sessionFile: this.sessionFile,
@@ -7808,7 +8110,12 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	private applyBudgetFields(usage: ContextUsage | undefined): ContextUsage | undefined {
 		if (!usage) return undefined;
 		const snap = this._tokenGovernor.snapshot();
-		if (snap.budgetLimit === undefined && snap.subagentTokens === 0 && snap.fusionTokens === 0) {
+		if (
+			snap.budgetLimit === undefined &&
+			snap.subagentTokens === 0 &&
+			snap.fusionTokens === 0 &&
+			snap.costUsd === 0
+		) {
 			return usage;
 		}
 		return {
@@ -7817,6 +8124,8 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 			budgetLimit: snap.budgetLimit,
 			subagentSpent: snap.subagentTokens,
 			fusionSpent: snap.fusionTokens,
+			budgetCostUsd: snap.costUsd,
+			subagentCostUsd: snap.subagentCostUsd,
 		};
 	}
 

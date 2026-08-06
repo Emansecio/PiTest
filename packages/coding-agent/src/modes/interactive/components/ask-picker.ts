@@ -47,14 +47,24 @@ import {
 } from "./keybinding-hints.ts";
 import { paintSelectedRow } from "./selectable-row.ts";
 
-const RECOMMENDED_BADGE = " (recommended)";
-const FREEFORM_ROW_LABEL = "✎ Other — type a custom answer…";
+/**
+ * Quiet default marker. Bold label + initial focus already signal the pick;
+ * a long "(recommended)" stole columns from the label and read as chrome.
+ */
+const RECOMMENDED_BADGE = " ★";
+/** Synthetic freeform row — short so it never crowds the model's options. */
+const FREEFORM_ROW_LABEL = "✎ Other…";
 /** Detail connector under the focused option; continuations align to its text. */
 const DESC_CONNECTOR = "   └─ ";
 const DESC_CONTINUATION = "      ";
 const COMMENT_PREFIX = "Note: ";
 /** Max option rows rendered at once; window centers on the selected index. */
 const MAX_VISIBLE_OPTIONS = 12;
+/**
+ * Focused-option description budget. Two lines is enough to frame a choice;
+ * longer model blurbs used to push the freeform row and hint off-screen.
+ */
+const MAX_DESC_LINES = 2;
 /** Card frame + padding columns consumed around the body (│ + 1 pad each side). */
 const CARD_CHROME_WIDTH = 4;
 
@@ -405,12 +415,17 @@ class AskPicker implements Component, Focusable, MouseTarget {
 	 * always, in both inline and overlay modes. The transcript's `ask …` call
 	 * line may be scrolled away or truncated; the card is what the user is
 	 * looking at, so it must carry the question.
+	 *
+	 * Hierarchy: accent dot anchors the block; scope (when present) is a quiet
+	 * chip; the question is bold primary. Context sits under as a tree, then a
+	 * blank row before options so labels don't fuse into the ask.
 	 */
 	private renderQuestion(width: number, lines: string[]): void {
 		const scope = this.req.header?.trim();
 		const dot = defaultTheme.fg("accent", "●");
 		if (scope) {
-			lines.push(`${dot} ${defaultTheme.bold(scope)}`);
+			// Scope is orientation, not the ask — muted chip, never bold.
+			lines.push(`${dot} ${defaultTheme.fg("muted", scope)}`);
 			for (const line of wrapPlain(this.req.question, width)) {
 				lines.push(defaultTheme.bold(defaultTheme.fg("text", line)));
 			}
@@ -456,31 +471,53 @@ class AskPicker implements Component, Focusable, MouseTarget {
 			this.rowToListRow.set(lines.length, i);
 			const focused = i === this.index && this.mode === "list";
 			const cursor = selectionCursor(focused);
-			// Quick-select ordinal, `1·` dim (dense, matching the hint separator
-			// idiom) — the number IS the discoverability of the digit shortcut, so
-			// no extra hint line is spent on it. Rendered only when digits are live.
-			const num = this.quickSelect ? defaultTheme.fg("dim", `${i + 1}·`) : "";
+			// Quick-select ordinal, `1· ` dim — trailing space keeps the digit from
+			// welding to the label. The number IS the discoverability of the digit
+			// shortcut, so no extra hint line is spent on it. Only when digits live.
+			const num = this.quickSelect ? defaultTheme.fg("dim", `${i + 1}· `) : "";
 			const box = this.checkboxPrefix(i);
-			// The badge marks the default pick quietly: dim, never bold — the label
-			// owns the row. Width reserved separately so clamping never eats it.
-			// Same for the hotkey tag: `[a]` dim right after the label makes the
-			// letter shortcut discoverable without a hint entry.
+			// Badge: dim star, never bold — label owns the row. Width reserved
+			// separately so clamping never eats it. Hotkey tag `[a]` rides dim
+			// after the label so the letter shortcut is discoverable without a
+			// hint entry.
 			const badge = opt.recommended ? defaultTheme.fg("dim", RECOMMENDED_BADGE) : "";
 			const hotkeyTag = opt.hotkey ? defaultTheme.fg("dim", ` [${opt.hotkey}]`) : "";
 			const suffix = hotkeyTag + badge;
 			const labelText = opt.recommended ? defaultTheme.bold(opt.label) : opt.label;
-			const head =
-				truncateToWidth(`${cursor}${num}${box}${labelText}`, Math.max(0, width - visibleWidth(suffix)), "…") +
-				suffix;
+			// Accent paints only the navigable spine (cursor + ordinal + label).
+			// Hotkey tag and recommended star stay dim chrome on both sides of focus.
+			const spine = truncateToWidth(
+				`${cursor}${num}${box}${labelText}`,
+				Math.max(0, width - visibleWidth(suffix)),
+				"…",
+			);
+			const head = (focused ? defaultTheme.fg("accent", spine) : spine) + suffix;
 			// Full-width selectedBg on the focused row (same idiom as other selectors).
-			lines.push(paintSelectedRow(focused ? defaultTheme.fg("accent", head) : head, width, focused));
+			lines.push(paintSelectedRow(head, width, focused));
 			// Detail pane: ONLY the focused option shows its description, wrapped
-			// under a └─ connector. Unfocused rows stay clean single-line labels —
-			// the eye scans labels, the cursor reveals detail.
+			// under a └─ connector and capped at MAX_DESC_LINES so a long model
+			// blurb cannot push freeform/hint off-screen. Unfocused rows stay
+			// clean single-line labels — the eye scans labels, the cursor reveals.
 			const desc = opt.description?.replace(/\s+/g, " ").trim();
 			if (focused && desc) {
 				const descWidth = Math.max(10, width - DESC_CONTINUATION.length);
-				wrapPlain(desc, descWidth).forEach((line, lineIdx) => {
+				const wrapped = wrapPlain(desc, descWidth);
+				const overflow = wrapped.length > MAX_DESC_LINES;
+				const shown = wrapped.slice(0, MAX_DESC_LINES);
+				if (overflow && shown.length > 0) {
+					// More lines were hidden: put a trailing … on the last visible row.
+					const lastIdx = shown.length - 1;
+					const last = shown[lastIdx] ?? "";
+					if (visibleWidth(last) + 1 <= descWidth) {
+						shown[lastIdx] = `${last}…`;
+					} else {
+						// Free one column for the ellipsis; drop truncateToWidth's
+						// trailing reset so it is not counted as text.
+						const head = truncateToWidth(last, Math.max(1, descWidth - 1), "").replace(/\x1b\[0m$/, "");
+						shown[lastIdx] = `${head}…`;
+					}
+				}
+				shown.forEach((line, lineIdx) => {
 					const prefix = lineIdx === 0 ? defaultTheme.fg("dim", DESC_CONNECTOR) : DESC_CONTINUATION;
 					lines.push(`${prefix}${defaultTheme.fg("muted", line)}`);
 				});
@@ -512,7 +549,7 @@ class AskPicker implements Component, Focusable, MouseTarget {
 		this.renderQuestion(width, lines);
 
 		if (this.mode === "freeform" && this.input) {
-			lines.push(defaultTheme.fg("dim", "Custom answer"));
+			lines.push(defaultTheme.fg("dim", "Your answer"));
 			this.input.focused = this.focused;
 			lines.push(...this.input.render(width));
 			return lines;
@@ -528,7 +565,7 @@ class AskPicker implements Component, Focusable, MouseTarget {
 
 		if (this.mode === "comment" && this.commentInput) {
 			lines.push("");
-			lines.push(defaultTheme.fg("dim", "Add a note (optional)"));
+			lines.push(defaultTheme.fg("dim", "Note (optional)"));
 			this.commentInput.focused = this.focused;
 			lines.push(...this.commentInput.render(width));
 		}
@@ -539,7 +576,7 @@ class AskPicker implements Component, Focusable, MouseTarget {
 	render(width: number): string[] {
 		this.bodyLines = this.renderBody(Math.max(1, width - CARD_CHROME_WIDTH));
 		const lines = this.card.render(width);
-		lines.push(defaultTheme.fg("dim", `  ${this.hint()}`));
+		lines.push(defaultTheme.fg("muted", `  ${this.hint()}`));
 		this.scheduleCountdownTick();
 
 		// Defensive final clamp: no rendered line may exceed `width`, or

@@ -7,7 +7,7 @@ import assert from "node:assert";
 import { afterEach, describe, it } from "node:test";
 import { renderPetCells } from "../src/pet-cells.js";
 import { mixRgb, type PetColors, petCoverage, shadePet, toLocalPoint } from "../src/pet-geometry.js";
-import { encodeSixel, renderPetSixel, SIXEL_INTRO } from "../src/sixel.js";
+import { encodeSixel, PET_SIXEL_MAX_HEIGHT, PET_SIXEL_MAX_WIDTH, renderPetSixel, SIXEL_INTRO } from "../src/sixel.js";
 import {
 	getSixelSupport,
 	isSixelForcedOff,
@@ -222,6 +222,22 @@ describe("renderPetSixel", () => {
 		for (const moved of [{ bobY: 0.08 }, { bobX: 0.08 }, { tilt: 0.2 }, { squash: 0.2 }]) {
 			assert.notEqual(renderPetSixel(60, 30, { blinkK: 1, colors: COLORS, ...moved }), rest, JSON.stringify(moved));
 		}
+	});
+
+	it("caps huge pixel dimensions while preserving aspect and band-aligning height", () => {
+		// Far past the safety valve — raster attrs must report the capped size.
+		// Invariant paired with renderPetSixel's "Size policy" JSDoc: after cap,
+		// height is floored to SIXEL_BAND_HEIGHT (never a partial last band).
+		const out = renderPetSixel(400, 200, { blinkK: 1, colors: COLORS });
+		const m = out.match(/"1;1;(\d+);(\d+)/);
+		assert.ok(m, "expected raster attributes");
+		const w = Number(m![1]);
+		const h = Number(m![2]);
+		assert.ok(w <= PET_SIXEL_MAX_WIDTH, `width ${w} exceeds cap ${PET_SIXEL_MAX_WIDTH}`);
+		assert.ok(h <= PET_SIXEL_MAX_HEIGHT, `height ${h} exceeds cap ${PET_SIXEL_MAX_HEIGHT}`);
+		assert.equal(h % 6, 0, `height ${h} must be a multiple of 6 (band floor)`);
+		// 400×200 is 2:1; after scale + band-floor, aspect stays ~2:1.
+		assert.ok(Math.abs(w / h - 2) < 0.05, `expected ~2:1 aspect, got ${w}×${h}`);
 	});
 });
 

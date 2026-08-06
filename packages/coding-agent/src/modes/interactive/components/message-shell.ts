@@ -41,6 +41,7 @@
  */
 
 import { Container, truncateToWidth, visibleWidth } from "@pit/tui";
+import { theme } from "../theme/theme.ts";
 
 /** Single character used for the left gutter. Thin vertical (`│`) per P3. */
 export const SHELL_GUTTER_CHAR = "│";
@@ -331,7 +332,7 @@ export class MessageShell extends Container {
 			if (hasLabel && visibleWidth(assembled) > width) {
 				assembled = assembled.replace(/ +$/, "");
 				if (visibleWidth(assembled) > width) {
-					assembled = truncateToWidth(assembled, width, "…");
+					assembled = truncateToWidth(assembled, width, theme.ellipsis());
 				}
 			}
 			result.push(assembled);

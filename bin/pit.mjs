@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { superviseChildProcess } from "./lib/child-lifecycle.mjs";
 import { decideTarget } from "./lib/resolve-launch.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -40,10 +41,7 @@ if (target === "bundle") {
 	const child = spawn(
 		process.execPath,
 		["--import", pathToFileURL(tsxLoader).href, srcCli, ...process.argv.slice(2)],
-		{ stdio: "inherit", env: process.env },
+		{ stdio: "inherit", env: process.env, detached: process.platform !== "win32" },
 	);
-	child.on("exit", (code, signal) => {
-		if (signal) process.kill(process.pid, signal);
-		else process.exit(code ?? 0);
-	});
+	process.exitCode = await superviseChildProcess(child);
 }

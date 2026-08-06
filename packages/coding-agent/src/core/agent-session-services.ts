@@ -211,14 +211,18 @@ export async function createAgentSessionServices(
 		current?: (
 			handle: string,
 			text: string,
-			status: "done" | "error",
+			status: "done" | "error" | "cancelled",
 			meta?: { turns?: number; totalTokens?: number },
 		) => boolean;
 	} = {};
 	const subagentStartRef: { current?: (handle: string) => void } = {};
 	const subagentProgressRef: { current?: (handle: string, info: { turn: number; lastTool?: string }) => void } = {};
 	const subagentCompleteRef: {
-		current?: (handle: string, status: "done" | "error", meta?: { turns?: number; totalTokens?: number }) => void;
+		current?: (
+			handle: string,
+			status: "done" | "error" | "cancelled",
+			meta?: { turns?: number; totalTokens?: number },
+		) => void;
 	} = {};
 	const abortDetachedRef: { current?: (abortFn: () => void) => void } = {};
 	const permissionModeChangeRef: { current?: (mode: import("./permissions/types.ts").PermissionMode) => void } = {};
@@ -321,14 +325,14 @@ export async function createAgentSessionServices(
 				deliverAsync: (
 					handle: string,
 					text: string,
-					status: "done" | "error",
+					status: "done" | "error" | "cancelled",
 					meta?: { turns?: number; totalTokens?: number },
 				) => boolean,
 				emitSubStart: (handle: string) => void,
 				emitSubProgress: (handle: string, info: { turn: number; lastTool?: string }) => void,
 				emitSubComplete: (
 					handle: string,
-					status: "done" | "error",
+					status: "done" | "error" | "cancelled",
 					meta?: { turns?: number; totalTokens?: number },
 				) => void,
 				registerAbortDetached: (abortFn: () => void) => void,
@@ -467,14 +471,14 @@ export async function createAgentSessionFromServices(
 				deliverAsync: (
 					handle: string,
 					text: string,
-					status: "done" | "error",
+					status: "done" | "error" | "cancelled",
 					meta?: { turns?: number; totalTokens?: number },
 				) => boolean,
 				emitSubStart: (handle: string) => void,
 				emitSubProgress: (handle: string, info: { turn: number; lastTool?: string }) => void,
 				emitSubComplete: (
 					handle: string,
-					status: "done" | "error",
+					status: "done" | "error" | "cancelled",
 					meta?: { turns?: number; totalTokens?: number },
 				) => void,
 				registerAbortDetached: (abortFn: () => void) => void,

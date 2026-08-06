@@ -1,7 +1,8 @@
 # Pit — Domain Language
 
-Glossary for Pit, an agentic coding CLI. This file is a glossary only: it defines what
-terms *mean*, not how they are implemented.
+Authoritative domain language for Pit, an agentic coding CLI. It defines what terms
+mean, not their implementation; the Todo and Plan entries also define their normative
+selection boundary for contributors and coding agents.
 
 ## Language
 

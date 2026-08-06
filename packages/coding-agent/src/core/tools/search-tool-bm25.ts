@@ -78,10 +78,6 @@ export function createSearchToolBm25Definition(
 		description:
 			"Retrieve specialized tools that are NOT in the default tool surface. BM25-search a hidden tool index and optionally activate the top match (see `activate_top`). Use when you need a capability that does not appear in the active tool list. This retrieves specialized/hidden TOOLS by capability — it is NOT code search (use `grep`) nor memory search (use `recall`).",
 		promptSnippet: "BM25-search hidden tools and optionally activate the top match",
-		promptGuidelines: [
-			"Call only when the active tool list lacks a needed capability — describe the capability, not a tool name.",
-			"Skip if the active tools already cover the task; this is a fallback, not the first move.",
-		],
 		parameters: searchToolBm25Schema,
 		async execute(_toolCallId, input: SearchToolBm25Input) {
 			const index = options?.index ?? getCurrentToolDiscoveryIndex();

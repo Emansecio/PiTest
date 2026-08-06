@@ -5,8 +5,10 @@ import {
 	classifyTurn,
 	decideStagnationReminder,
 	MUTATING_TOOL_NAMES,
+	STAGNATION_STEER_MARKER,
 	StagnationTracker,
 } from "../src/core/stagnation.js";
+import { LOOP_STEER_ADVICE } from "../src/core/tool-call-feedback.js";
 
 const model = getModel("anthropic", "claude-sonnet-5")!;
 
@@ -250,11 +252,13 @@ describe("decideStagnationReminder", () => {
 describe("buildStagnationReminder", () => {
 	it("builds the soft reminder", () => {
 		const out = buildStagnationReminder({ count: 12, paused: false });
-		expect(out).toContain("<stagnation-reminder>");
+		// Emitted as a collapsible <system-reminder> block (N8 in compaction/prune.ts).
+		expect(out.startsWith(STAGNATION_STEER_MARKER)).toBe(true);
 		expect(out).toContain("12 consecutive turns");
-		expect(out).toContain("make the edit now");
+		expect(out).toContain("never edited a file");
+		expect(out).toContain(LOOP_STEER_ADVICE);
 		expect(out).not.toContain("paused execution");
-		expect(out).toContain("</stagnation-reminder>");
+		expect(out.endsWith("</system-reminder>")).toBe(true);
 	});
 
 	it("builds the pause variant", () => {

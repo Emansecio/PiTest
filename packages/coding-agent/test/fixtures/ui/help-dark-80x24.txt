@@ -1,0 +1,15 @@
+pit · dark · <repo>
+────────────────────────────────────────────────────────────────────────────────
+Help
+
+Slash commands
+
+- /help — show this guide
+- /resume — reopen a session
+- /new — start a clean session
+
+Use ↑/↓ to scroll and Esc to close.
+
+Esc close
+
+ctrl+c sair · /help ajuda

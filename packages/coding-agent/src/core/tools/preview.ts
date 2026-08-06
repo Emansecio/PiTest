@@ -169,10 +169,6 @@ export function createPreviewToolDefinition(
 		description:
 			"Render a web UI/site and return a screenshot plus console errors and failed network requests — the one-call way to actually look at rendered work. Serves a local HTML file or directory on an ephemeral port (so file:// blocking does not apply), or opens a dev-server/remote URL directly. Use after changing any rendered artifact, before reporting it done.",
 		promptSnippet: "Render a UI/site → screenshot + console + network",
-		promptGuidelines: [
-			"Pass a URL (e.g. http://localhost:5173), a local .html file, or a directory to serve as a static site. For a framework dev server, start it (bash) and pass its URL.",
-			"Console errors or failed requests count as defects even when the screenshot looks right — fix and re-preview.",
-		],
 		parameters: previewSchema,
 		async execute(_toolCallId: string, input: PreviewToolInput, signal: AbortSignal | undefined) {
 			const mgr = getCurrentChromeDevtoolsManager();

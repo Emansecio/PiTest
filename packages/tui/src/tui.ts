@@ -419,12 +419,21 @@ export class Container implements Component, MouseHitContainer {
 	// flattenCacheChildOffsets below.
 	private flattenCacheWidth = -1;
 	private flattenCacheChildOutputs: string[][] = [];
+	// Child output arrays are not enough to detect a same-sized replacement when
+	// two components share a stable render result (for example, a cached empty
+	// array). Keep the component identities alongside the output refs so direct
+	// `children[index] = ...` mutations cannot reuse stale transcript lines.
+	private flattenCacheChildRefs: Component[] = [];
 	private flattenCacheLines: string[] = [];
 	// Per-child starting offset into flattenCacheLines from the last flatten
 	// (full rebuild or prefix-reused — see render()). Always resized/recomputed
 	// in lockstep with flattenCacheChildOutputs, so it is safe to index once
 	// `flattenCacheChildOutputs.length === children.length` holds.
 	private flattenCacheChildOffsets: number[] = [];
+	// Scratch filled during render(); only snapshot'd into flattenCacheChildOutputs
+	// when the frame is not fully reusable — the steady-state spinner path returns
+	// the cached flatten without allocating a new childOutputs array every frame.
+	private flattenRenderScratch: string[][] = [];
 
 	addChild(component: Component): void {
 		this.children.push(component);
@@ -449,16 +458,19 @@ export class Container implements Component, MouseHitContainer {
 
 	render(width: number): string[] {
 		const children = this.children;
-		const childOutputs = new Array<string[]>(children.length);
+		const n = children.length;
 		// sameShape: width and child count match last frame, so flattenCacheChildOffsets
 		// (computed against that same shape) is valid for prefix reuse below.
-		const sameShape = this.flattenCacheWidth === width && this.flattenCacheChildOutputs.length === children.length;
+		const sameShape = this.flattenCacheWidth === width && this.flattenCacheChildOutputs.length === n;
 		let reusable = sameShape;
 		// First index (in left-to-right scan order) whose child output array reference
 		// changed. Only meaningful when sameShape held for the whole scan, since the
 		// `reusable &&` guard below stops updating it the moment shape mismatches.
 		let minChangedIndex = -1;
-		for (let i = 0; i < children.length; i++) {
+		// Fill a reused scratch first; only snapshot into an owned array when the
+		// frame is not fully reusable (fast path returns without allocating).
+		const scratch = this.flattenRenderScratch;
+		for (let i = 0; i < n; i++) {
 			let childLines: string[];
 			try {
 				childLines = children[i].render(width);
@@ -466,13 +478,18 @@ export class Container implements Component, MouseHitContainer {
 				childLines = [formatComponentRenderError(children[i], error, width)];
 			}
 			if (renderAssertEnabled) assertComponentWidth(children[i], childLines, width);
-			childOutputs[i] = childLines;
-			if (reusable && childLines !== this.flattenCacheChildOutputs[i]) {
+			scratch[i] = childLines;
+			if (
+				reusable &&
+				(childLines !== this.flattenCacheChildOutputs[i] || children[i] !== this.flattenCacheChildRefs[i])
+			) {
 				reusable = false;
 				minChangedIndex = i;
 			}
 		}
 		if (reusable) return this.flattenCacheLines;
+
+		const childOutputs = scratch.slice(0, n);
 
 		// Prefix reuse: every child before minChangedIndex produced byte-identical
 		// output to last frame (same width/child-count, and the scan above never
@@ -496,6 +513,7 @@ export class Container implements Component, MouseHitContainer {
 			}
 			this.flattenCacheWidth = width;
 			this.flattenCacheChildOutputs = childOutputs;
+			this.flattenCacheChildRefs = children.slice();
 			this.flattenCacheLines = lines;
 			this.flattenCacheChildOffsets = offsets;
 			return lines;
@@ -512,6 +530,7 @@ export class Container implements Component, MouseHitContainer {
 		}
 		this.flattenCacheWidth = width;
 		this.flattenCacheChildOutputs = childOutputs;
+		this.flattenCacheChildRefs = children.slice();
 		this.flattenCacheLines = lines;
 		this.flattenCacheChildOffsets = offsets;
 		return lines;
@@ -754,6 +773,11 @@ export class TUI extends Container {
 	} | null = null;
 	// True while the selection's button is still held (press seen, no release).
 	private textSelecting = false;
+	// Pointer-identity memo for stripAnsiCodes during selection highlight compare.
+	// Unchanged line string objects (steady-state transcript) skip re-stripping;
+	// mirrors the resetInputCache trick for applyLineResets.
+	private selectionStripMemoIn: string[] = [];
+	private selectionStripMemoOut: string[] = [];
 	/**
 	 * Consumer hook for the in-app text selection: receives the PLAIN text (ANSI
 	 * stripped, per-line right-trimmed) when a copy fires — on drag release, or
@@ -1292,19 +1316,23 @@ export class TUI extends Container {
 		// tracking that a prior wheel gesture suspended; then decode-and-route SGR
 		// mouse reports. Placed after the response consumers (a mouse sequence never
 		// matches those) and ahead of focused dispatch so a click can retarget focus.
-		if (this.mouseSuspended && !isMouseSequence(data)) {
+		// Prefix gate first: parseMouse is a regex; skip it for ordinary keypresses.
+		const looksLikeMouse = isMouseSequence(data);
+		if (this.mouseSuspended && !looksLikeMouse) {
 			this.resumeMouse();
 		}
 		// Typing invalidates the highlight: the frame is about to change under it
 		// (the geometry guard would catch most cases, but a same-length frame with
 		// different content would keep a stale highlight).
-		if (this.textSelection !== null && !isMouseSequence(data)) {
+		if (this.textSelection !== null && !looksLikeMouse) {
 			this.clearTextSelection();
 		}
-		const mouseEvent = parseMouse(data);
-		if (mouseEvent) {
-			this.consumeMouse(mouseEvent);
-			return;
+		if (looksLikeMouse) {
+			const mouseEvent = parseMouse(data);
+			if (mouseEvent) {
+				this.consumeMouse(mouseEvent);
+				return;
+			}
 		}
 
 		// Global debug key handler (Shift+Ctrl+D)
@@ -1612,18 +1640,41 @@ export class TUI extends Container {
 	 * the diff/commit. A frame whose content or geometry no longer matches the one
 	 * the selection was made against drops the selection instead of highlighting
 	 * the wrong cells.
+	 *
+	 * Geometry (length/width) is checked first so a resize drops selection without
+	 * stripping. Content compare uses a pointer-identity strip memo: unchanged
+	 * line string objects re-use last frame's stripped form instead of re-running
+	 * stripAnsiCodes over the whole transcript every drag frame.
 	 */
 	private applyTextSelectionHighlight(lines: string[], width: number): string[] {
 		const selection = this.textSelection;
 		if (!selection) return lines;
-		const frameChanged =
-			lines.length !== selection.frameLen ||
-			width !== selection.frameWidth ||
-			lines.some((line, index) => stripAnsiCodes(line) !== selection.frameText[index]);
-		if (frameChanged) {
+		// Geometry short-circuit — no strip work when the frame shape moved.
+		if (lines.length !== selection.frameLen || width !== selection.frameWidth) {
 			this.textSelection = null;
 			this.textSelecting = false;
 			return lines;
+		}
+		const memoIn = this.selectionStripMemoIn;
+		const memoOut = this.selectionStripMemoOut;
+		const frameText = selection.frameText;
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i] ?? "";
+			if (memoIn[i] !== line) {
+				memoIn[i] = line;
+				memoOut[i] = stripAnsiCodes(line);
+			}
+			if (memoOut[i] !== frameText[i]) {
+				this.textSelection = null;
+				this.textSelecting = false;
+				return lines;
+			}
+		}
+		// Trim memo tails after a shorter prior selection so stale entries cannot
+		// pin old string objects.
+		if (memoIn.length > lines.length) {
+			memoIn.length = lines.length;
+			memoOut.length = lines.length;
 		}
 		const span = this.getNormalizedTextSelection();
 		if (!span) return lines;
@@ -2748,8 +2799,11 @@ export class TUI extends Container {
 			firstChanged = prevLen - 1;
 			lastChanged = prevLen - 1;
 		} else if (prevLen === newLen && prevLen > 0 && this.previousLines[prevLen - 1] !== newLines[newLen - 1]) {
+			// Prefix [0, resetDirty) is known-stable from applyLineResets — start there
+			// instead of 0 so a spinner/tail tick does not re-scan the whole transcript.
 			let onlyLastLine = true;
-			for (let i = 0; i < prevLen - 1; i++) {
+			const scanFrom = Math.min(Math.max(0, resetDirty), prevLen - 1);
+			for (let i = scanFrom; i < prevLen - 1; i++) {
 				this.diffScanCountForTest += 1;
 				if (this.previousLines[i] !== newLines[i]) {
 					onlyLastLine = false;

@@ -118,10 +118,6 @@ export function createGoalCompleteToolDefinition(
 		description:
 			"Mark the current autonomous goal as complete. Call this ONLY after every requirement of the goal is satisfied AND verified requirement-by-requirement against real output (tests, files, command results). No-op if no goal is active.",
 		promptSnippet: "Mark the active goal complete (only after verifying every requirement)",
-		promptGuidelines: [
-			"Call goal_complete only when the whole goal is done — not a partial result — and you have checked each requirement against real output.",
-			"Pass a short summary of what was accomplished and how it was verified.",
-		],
 		parameters: goalCompleteSchema,
 		async execute(_toolCallId: string, input: GoalCompleteToolInput) {
 			const mgr = getCurrentGoalManager();

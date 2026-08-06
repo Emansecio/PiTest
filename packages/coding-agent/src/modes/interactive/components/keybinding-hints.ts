@@ -40,11 +40,11 @@ export function keyDisplayText(keybinding: Keybinding): string {
 }
 
 export function keyHint(keybinding: Keybinding, description: string): string {
-	return theme.fg("muted", keyText(keybinding)) + theme.fg("dim", ` ${description}`);
+	return theme.fg("muted", keyText(keybinding)) + theme.fg("muted", ` ${description}`);
 }
 
 export function rawKeyHint(key: string, description: string): string {
-	return theme.fg("muted", formatKeyText(key)) + theme.fg("dim", ` ${description}`);
+	return theme.fg("muted", formatKeyText(key)) + theme.fg("muted", ` ${description}`);
 }
 
 /** Standard separator between inline key hints, shared across all selectors. Dense on purpose. */

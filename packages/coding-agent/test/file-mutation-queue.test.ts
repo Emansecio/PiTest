@@ -154,16 +154,20 @@ describe("withFileMutationQueue (continued)", () => {
  * the slot so subsequent mutations proceed.
  */
 describe("withFileMutationQueue timeout", () => {
-	it("times out a hung operation and frees the queue for the next op", async () => {
+	it("times out the caller but keeps the lock until the mutation settles", async () => {
 		const path = "/tmp/file-mutation-queue-timeout";
-		const hung = withFileMutationQueue(path, () => new Promise<void>(() => {}), 20);
+		const mutation = deferred<void>();
+		const hung = withFileMutationQueue(path, () => mutation.promise, 20);
 		await expect(hung).rejects.toThrow(/timed out after 20ms/);
 
-		// The slot was released despite the hung op, so a later op still runs.
 		let ran = false;
-		await withFileMutationQueue(path, async () => {
+		const next = withFileMutationQueue(path, async () => {
 			ran = true;
 		});
+		await delay(10);
+		expect(ran).toBe(false);
+		mutation.resolve();
+		await next;
 		expect(ran).toBe(true);
 	});
 });

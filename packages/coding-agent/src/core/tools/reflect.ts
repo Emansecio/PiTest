@@ -103,9 +103,6 @@ export function createReflectToolDefinition(
 		description:
 			"Give me everything I know about X. Returns up to 20 hindsight entries relevant to the question as a single Markdown block for you to synthesize. Use when you want broad context, not a targeted lookup (for that, use `recall`).",
 		promptSnippet: "Dump all hindsight entries relevant to a question",
-		promptGuidelines: [
-			"When starting broad or unfamiliar work, reflect up front to load every relevant memory at once and synthesize the answer yourself.",
-		],
 		parameters: reflectSchema,
 		async execute(_toolCallId: string, input: ReflectToolInput) {
 			const bank = options?.bank ?? getCurrentHindsightBank();

@@ -181,7 +181,7 @@ describe("InteractiveMode.updatePendingMessagesDisplay", () => {
 		// Spacer + one component per message; the old standalone hint line is gone.
 		expect(container.children).toHaveLength(3);
 		const last = lines[lines.length - 1] ?? "";
-		expect(last).toContain(`then this·${dequeueKey} edit`);
+		expect(last).toContain(`then this · ${dequeueKey} edit`);
 		// Only the LAST row carries the hint.
 		expect(lines.filter((l) => l.includes(`${dequeueKey} edit`))).toHaveLength(1);
 		expect(lines.join("\n")).not.toContain("to edit all queued messages");

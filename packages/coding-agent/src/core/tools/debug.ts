@@ -510,9 +510,6 @@ debug(action: "launch", adapter: "debugpy", program: "scripts/job.py", args: ["-
 </examples>`;
 
 const PROMPT_SNIPPET = "Drive a real debugger (DAP): breakpoints, stepping, variable/stack inspection, evaluate.";
-const PROMPT_GUIDELINES = [
-	"Use debug instead of print/bash when you need live program state: breakpoints, stepping, threads, stack, variables.",
-];
 
 // =============================================================================
 // Tool Definition
@@ -527,7 +524,6 @@ export function createDebugToolDefinition(
 		label: "debug",
 		description: DEBUG_DESCRIPTION,
 		promptSnippet: PROMPT_SNIPPET,
-		promptGuidelines: PROMPT_GUIDELINES,
 		parameters: debugSchema,
 		// Debug sessions are stateful and single-instance — never run concurrently.
 		executionMode: "sequential",

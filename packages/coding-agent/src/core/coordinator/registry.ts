@@ -15,7 +15,7 @@ export class SubagentRegistry {
 	/**
 	 * Cap on retained TERMINAL records (running/pending are never evicted). Without
 	 * this the map grew once per subagent for the whole session — each record pins
-	 * the full prompt + output. Evicted on every create(), oldest terminal first.
+	 * the full prompt + output. Evicted on create and terminal transitions, oldest first.
 	 */
 	private static readonly MAX_TERMINAL_RECORDS = 64;
 
@@ -72,16 +72,26 @@ export class SubagentRegistry {
 		}
 	}
 
+	/** Retain the newly settled record and order terminal eviction by settlement recency. */
+	private settleRecord(id: string, record: SubagentRecord): void {
+		this.records.delete(id);
+		this.records.set(id, record);
+		this.evictTerminal();
+	}
+
 	update(id: string, patch: Partial<SubagentRecord>): SubagentRecord | undefined {
 		const record = this.records.get(id);
 		if (!record) return undefined;
 		Object.assign(record, patch);
+		if (TERMINAL_STATUSES.has(record.status)) this.settleRecord(id, record);
 		return record;
 	}
 
 	setStatus(id: string, status: SubagentStatus): void {
 		const record = this.records.get(id);
-		if (record) record.status = status;
+		if (!record) return;
+		record.status = status;
+		if (TERMINAL_STATUSES.has(status)) this.settleRecord(id, record);
 	}
 
 	get(id: string): SubagentRecord | undefined {

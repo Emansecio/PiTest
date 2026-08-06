@@ -17,7 +17,7 @@ import { redactSecrets } from "../secret-redactor.ts";
 import { isJsonCrushEnabled, maybeCrushJsonOutput } from "./json-crush.ts";
 import { getTextOutput } from "./render-utils.ts";
 import { withOutputCap } from "./tool-definition-wrapper.ts";
-import { collapseRepeatedLines } from "./truncate.ts";
+import { collapseRepeatedLines, RECALL_OUTPUT_CAP_BYTES } from "./truncate.ts";
 
 export interface ChromeDevtoolsToolOptions {}
 
@@ -49,18 +49,8 @@ interface ChromeToolSpec<S extends TSchema> {
 	activity?: "navigation" | "action";
 	description: string;
 	snippet: string;
-	guidelines: string[];
 	schema: S;
 	run: (mgr: Manager, input: Static<S>, signal: AbortSignal | undefined) => Promise<ChromeResult>;
-}
-
-const CHROME_PROMPT_GUIDELINES = [
-	"Browser flow: navigate, inspect with snapshot/get_text, interact, wait or check console/network as needed, then close_page when done.",
-	"Prefer snapshot/get_text for structure or content; use screenshots only for visual evidence.",
-];
-
-function chromeGuidelines(...specific: string[]): string[] {
-	return [...CHROME_PROMPT_GUIDELINES, ...specific];
 }
 
 function buildChromeTool<S extends TSchema>(spec: ChromeToolSpec<S>): ToolDefinition<S, ChromeToolDetails> {
@@ -70,7 +60,6 @@ function buildChromeTool<S extends TSchema>(spec: ChromeToolSpec<S>): ToolDefini
 		label: spec.name,
 		description: spec.description,
 		promptSnippet: spec.snippet,
-		promptGuidelines: spec.guidelines,
 		parameters: spec.schema,
 		async execute(_toolCallId: string, input: Static<S>, signal: AbortSignal | undefined) {
 			const mgr = getCurrentChromeDevtoolsManager();
@@ -103,16 +92,22 @@ function buildChromeTool<S extends TSchema>(spec: ChromeToolSpec<S>): ToolDefini
 
 const GET_TEXT_DEFAULT_LIMIT = 20_000;
 // Dedicated output ceiling for the two big text readers (get_text and
-// get_network_body), mirroring recall_tool_output's RECALL_OUTPUT_CAP_BYTES:
-// page text and API bodies are exactly the outputs whose useful signal often
-// exceeds the generic 64KB head-only net. Both definitions opt in via
-// withOutputCap (head+tail), so the wrapper bounds their BYTES at 256KB while
-// keeping head AND tail instead of head-cutting at 64KB with a second,
+// get_network_body): page text and API bodies are exactly the outputs whose
+// useful signal often exceeds the generic 64KB head-only net. Both definitions
+// opt in via withOutputCap (head+tail), so the wrapper bounds their BYTES here
+// while keeping head AND tail instead of head-cutting at 64KB with a second,
 // contradictory truncation note.
-const GET_TEXT_OUTPUT_CAP_BYTES = 256 * 1024;
+//
+// Set to PARITY with recall_tool_output's RECALL_OUTPUT_CAP_BYTES (96KB). The
+// previous 256KB let a single page read inject ~78k tokens into one tool
+// result — more than a whole compaction budget for output that is mostly
+// boilerplate. 96KB is the same ceiling the deliberately-larger recall path
+// uses (~24k tokens worst case), and anything the head+tail cut elides is still
+// spilled to the deferred store and reachable via recall_tool_output.
+const GET_TEXT_OUTPUT_CAP_BYTES = RECALL_OUTPUT_CAP_BYTES;
 // Advertised `limit` ceiling (chars), kept equal to the byte cap so the schema
 // promise stays honest for ASCII-dominated text; multi-byte overflow is caught
-// by the SAME dedicated 256KB head+tail cap, never by a divergent second cut.
+// by the SAME dedicated 96KB head+tail cap, never by a divergent second cut.
 const GET_TEXT_MAX_LIMIT = GET_TEXT_OUTPUT_CAP_BYTES;
 
 const emptySchema = Type.Object({}, { additionalProperties: false });
@@ -231,7 +226,7 @@ const getTextSchema = Type.Object(
 	{
 		limit: Type.Optional(
 			Type.Number({
-				description: "Max characters to return (default 20000; capped at 256KB — this tool's output ceiling).",
+				description: "Max characters to return (default 20000; capped at 96KB — this tool's output ceiling).",
 				minimum: 1,
 				maximum: GET_TEXT_MAX_LIMIT,
 			}),
@@ -282,7 +277,7 @@ const networkBodySchema = Type.Object(
 		limit: Type.Optional(
 			Type.Number({
 				description:
-					"Max characters of body to return (default 20000; capped at 256KB — this tool's output ceiling).",
+					"Max characters of body to return (default 20000; capped at 96KB — this tool's output ceiling).",
 				minimum: 1,
 				maximum: GET_TEXT_MAX_LIMIT,
 			}),
@@ -299,7 +294,6 @@ export function createChromeListPagesDefinition(): ToolDefinition<typeof emptySc
 		activity: "navigation",
 		description: "List the inspectable Chrome tabs/pages (id, title, url).",
 		snippet: "List open Chrome tabs",
-		guidelines: chromeGuidelines(),
 		schema: emptySchema,
 		run: async (mgr, _input, signal) => {
 			const pages = await mgr.listPages(signal);
@@ -314,7 +308,6 @@ export function createChromeSelectPageDefinition(): ToolDefinition<typeof select
 		name: "chrome_devtools_select_page",
 		description: "Select the active page for subsequent chrome_devtools operations.",
 		snippet: "Select the active Chrome page",
-		guidelines: chromeGuidelines(),
 		schema: selectSchema,
 		run: async (mgr, input, signal) => {
 			const t = await mgr.selectPage(input.id, signal);
@@ -329,7 +322,6 @@ export function createChromeNavigateDefinition(): ToolDefinition<typeof navigate
 		description:
 			"Navigate to a URL. Auto-starts Chrome if needed (no manual setup) and opens a new tab when newTab is set or no page is selected.",
 		snippet: "Open a URL in Chrome (new tab)",
-		guidelines: chromeGuidelines("Chrome launches automatically; set newTab to avoid reusing the selected page."),
 		schema: navigateSchema,
 		run: async (mgr, input, signal) => {
 			const r = await mgr.navigate({ url: input.url, newTab: input.newTab }, signal);
@@ -345,7 +337,6 @@ export function createChromeClosePageDefinition(): ToolDefinition<typeof closePa
 		description:
 			"Close a Chrome tab/page (the selected one by default, or a given id). Use to finish a browser task and return to a clean state.",
 		snippet: "Close a Chrome tab",
-		guidelines: chromeGuidelines(),
 		schema: closePageSchema,
 		run: async (mgr, input, signal) => {
 			const r = await mgr.closePage(input.id, signal);
@@ -357,9 +348,8 @@ export function createChromeClosePageDefinition(): ToolDefinition<typeof closePa
 export function createChromeEvaluateDefinition(): ToolDefinition<typeof evaluateSchema, ChromeToolDetails> {
 	return buildChromeTool({
 		name: "chrome_devtools_evaluate",
-		description: "Evaluate JavaScript in the selected page and return the result.",
+		description: "Evaluate JavaScript in the selected page and return the last value (await is supported).",
 		snippet: "Evaluate JS in the page",
-		guidelines: chromeGuidelines("Page evaluation supports await and returns the last value."),
 		schema: evaluateSchema,
 		run: async (mgr, input, signal) => {
 			const r = await mgr.evaluate(input.expression, signal);
@@ -377,7 +367,6 @@ export function createChromeScreenshotDefinition(): ToolDefinition<typeof screen
 		description:
 			"Capture a screenshot of the selected page (optionally the full page). Defaults to a compact JPEG at CSS-pixel resolution; pass format:'png' (and/or a quality) for lossless/pixel-exact detail.",
 		snippet: "Screenshot the page",
-		guidelines: chromeGuidelines("Screenshots default to compact JPEG; request PNG only for lossless detail."),
 		schema: screenshotSchema,
 		run: async (mgr, input, signal) => {
 			const shot = await mgr.screenshot(
@@ -400,7 +389,6 @@ export function createChromeReadConsoleDefinition(): ToolDefinition<typeof conso
 		activity: "navigation",
 		description: "Read buffered console messages from the selected page.",
 		snippet: "Read the page console",
-		guidelines: chromeGuidelines("Filter console messages by level when diagnosing errors."),
 		schema: consoleSchema,
 		run: async (mgr, input) => {
 			// CDP stores levels lowercase; normalize the filter so 'Error'/'WARNING'
@@ -421,9 +409,6 @@ export function createChromeReadNetworkDefinition(): ToolDefinition<typeof netwo
 		description:
 			"Read buffered network requests from the selected page, or return full redacted request/response detail for one requestId and redirect hop.",
 		snippet: "Read network requests",
-		guidelines: chromeGuidelines(
-			"Filter network requests by type, URL, or failing status; pass requestId for full request details.",
-		),
 		schema: networkSchema,
 		run: async (mgr, input) => {
 			if (input.requestId) {
@@ -458,7 +443,6 @@ export function createChromeClickDefinition(): ToolDefinition<typeof clickSchema
 		activity: "action",
 		description: "Click an element in the selected page by CSS selector (real mouse events).",
 		snippet: "Click an element",
-		guidelines: chromeGuidelines(),
 		schema: clickSchema,
 		run: async (mgr, input, signal) => {
 			await mgr.click(input.selector, signal);
@@ -473,7 +457,6 @@ export function createChromeFillDefinition(): ToolDefinition<typeof fillSchema, 
 		activity: "action",
 		description: "Fill an input/textarea/contenteditable in the selected page (replaces current content).",
 		snippet: "Fill a form field",
-		guidelines: chromeGuidelines(),
 		schema: fillSchema,
 		run: async (mgr, input, signal) => {
 			await mgr.fill(input.selector, input.value, signal);
@@ -488,7 +471,6 @@ export function createChromePressKeyDefinition(): ToolDefinition<typeof pressKey
 		activity: "action",
 		description: "Press a key on the focused element of the selected page (e.g. Enter to submit).",
 		snippet: "Press a key in the page",
-		guidelines: chromeGuidelines(),
 		schema: pressKeySchema,
 		run: async (mgr, input, signal) => {
 			await mgr.pressKey(input.key, signal);
@@ -498,8 +480,8 @@ export function createChromePressKeyDefinition(): ToolDefinition<typeof pressKey
 }
 
 export function createChromeGetTextDefinition(): ToolDefinition<typeof getTextSchema, ChromeToolDetails> {
-	// Dedicated 256KB head+tail output cap (same opt-in mechanism as
-	// recall_tool_output) so the advertised GET_TEXT_MAX_LIMIT is backed by the
+	// Dedicated 96KB head+tail output cap (same opt-in mechanism and same ceiling
+	// as recall_tool_output) so the advertised GET_TEXT_MAX_LIMIT is backed by the
 	// wrapper instead of being silently re-cut by the generic 64KB head-only net.
 	return withOutputCap(
 		buildChromeTool({
@@ -507,7 +489,6 @@ export function createChromeGetTextDefinition(): ToolDefinition<typeof getTextSc
 			activity: "navigation",
 			description: "Read the visible text of the selected page (cheaper than a screenshot for content checks).",
 			snippet: "Read the page text",
-			guidelines: chromeGuidelines(),
 			schema: getTextSchema,
 			run: async (mgr, input, signal) => {
 				// N2: collapse repeated consecutive lines (duplicated nav/sidebar/footer
@@ -516,7 +497,7 @@ export function createChromeGetTextDefinition(): ToolDefinition<typeof getTextSc
 				// repeated run is byte-identical (fast path returns the original), and the
 				// fuzzy `×N similar` collapse (masked numeric/hex tokens) rides along for
 				// free. Applied before the byte cap too, so a huge boilerplate-heavy page
-				// keeps more real signal under the same 256KB head+tail ceiling.
+				// keeps more real signal under the same 96KB head+tail ceiling.
 				const text = collapseRepeatedLines(await mgr.getPageText(signal));
 				const limit = Math.max(1, Math.min(GET_TEXT_MAX_LIMIT, input.limit ?? GET_TEXT_DEFAULT_LIMIT));
 				if (text.length <= limit) return textResult(text);
@@ -535,7 +516,6 @@ export function createChromeWaitForDefinition(): ToolDefinition<typeof waitForSc
 		activity: "navigation",
 		description: "Wait until a CSS selector is visible or a text appears in the selected page.",
 		snippet: "Wait for an element/text",
-		guidelines: chromeGuidelines(),
 		schema: waitForSchema,
 		run: async (mgr, input, signal) => {
 			const r = await mgr.waitFor(
@@ -555,7 +535,6 @@ export function createChromeHoverDefinition(): ToolDefinition<typeof hoverSchema
 		activity: "action",
 		description: "Hover an element in the selected page by CSS selector (triggers mouseover/tooltips/menus).",
 		snippet: "Hover an element",
-		guidelines: chromeGuidelines(),
 		schema: hoverSchema,
 		run: async (mgr, input, signal) => {
 			await mgr.hover(input.selector, signal);
@@ -570,7 +549,6 @@ export function createChromeSelectOptionDefinition(): ToolDefinition<typeof sele
 		activity: "action",
 		description: "Select an option of a <select> element by value, label or visible text.",
 		snippet: "Select a dropdown option",
-		guidelines: chromeGuidelines(),
 		schema: selectOptionSchema,
 		run: async (mgr, input, signal) => {
 			const r = await mgr.selectOption(input.selector, input.value, signal);
@@ -587,7 +565,6 @@ export function createChromeUploadFileDefinition(
 		activity: "action",
 		description: 'Attach local files to an <input type="file"> in the selected page.',
 		snippet: "Upload files to a file input",
-		guidelines: chromeGuidelines("Upload paths are local; relative paths resolve from the session cwd."),
 		schema: uploadFileSchema,
 		run: async (mgr, input, signal) => {
 			const resolved = input.files.map((f) => path.resolve(cwd ?? process.cwd(), f));
@@ -604,7 +581,6 @@ export function createChromeSnapshotDefinition(): ToolDefinition<typeof snapshot
 		description:
 			"Accessibility-tree snapshot of the selected page (roles + names, indented). Cheaper than a screenshot for understanding structure and finding targets.",
 		snippet: "Snapshot the page structure",
-		guidelines: chromeGuidelines("Scope large snapshots with selector."),
 		schema: snapshotSchema,
 		run: async (mgr, input, signal) => {
 			return textResult(await mgr.a11ySnapshot(input.selector, signal));
@@ -613,7 +589,7 @@ export function createChromeSnapshotDefinition(): ToolDefinition<typeof snapshot
 }
 
 export function createChromeGetNetworkBodyDefinition(): ToolDefinition<typeof networkBodySchema, ChromeToolDetails> {
-	// Shares get_text's dedicated 256KB head+tail cap: it advertises the same
+	// Shares get_text's dedicated 96KB head+tail cap: it advertises the same
 	// GET_TEXT_MAX_LIMIT, so it must be backed by the same wrapper ceiling.
 	return withOutputCap(
 		buildChromeTool({
@@ -622,9 +598,6 @@ export function createChromeGetNetworkBodyDefinition(): ToolDefinition<typeof ne
 			description:
 				"Fetch the response body of a request listed by chrome_devtools_read_network. Text/JSON/XML bodies are captured when the request finishes, so they stay readable for the page's lifetime even after Chrome would have evicted them.",
 			snippet: "Read a network response body",
-			guidelines: chromeGuidelines(
-				"Use a requestId from read_network; binary or oversized bodies may be unavailable after Chrome evicts them.",
-			),
 			schema: networkBodySchema,
 			run: async (mgr, input, signal) => {
 				const r = await mgr.getResponseBody(input.requestId, signal);
@@ -644,9 +617,9 @@ export function createChromeGetNetworkBodyDefinition(): ToolDefinition<typeof ne
 				const crushed = maybeCrushJsonOutput({
 					text: r.body,
 					shouldAttempt: isJsonCrushEnabled(),
-					// A larger limit is a dead end (output is capped at 256KB regardless) and
+					// A larger limit is a dead end (output is capped at 96KB regardless) and
 					// there is no offset param — point at extracting the one field you need.
-					recoveryHint: "Body exceeds the 256KB cap; read a specific field via chrome_devtools_evaluate.",
+					recoveryHint: "Body exceeds the 96KB cap; read a specific field via chrome_devtools_evaluate.",
 				});
 				if (crushed !== undefined) return textResult(crushed);
 				return textResult(
@@ -686,9 +659,6 @@ export function createChromeElementToSourceDefinition(): ToolDefinition<
 		description:
 			"Map an element (CSS selector) to the source-code handler(s) bound to it: resolves each event listener to file:line in the ORIGINAL source via CDP getEventListeners + source maps. Degrades to the transpiled position when no dev source map exists.",
 		snippet: "Locate an element's handler in source",
-		guidelines: chromeGuidelines(
-			"Use a specific selector to locate its handler; mapped:false reports the transpiled position.",
-		),
 		schema: elementToSourceSchema,
 		run: async (mgr, input, signal) => {
 			return textResult(formatElementToSource(await mgr.elementToSource(input.selector, signal)));

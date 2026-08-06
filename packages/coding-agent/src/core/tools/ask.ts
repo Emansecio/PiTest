@@ -140,9 +140,6 @@ export function createAskToolDefinition(
 		description:
 			"Ask the user a question mid-turn. Provide up to 8 options for the user to pick one (or several with allowMultiple), and/or allow a freeform typed answer. Use to resolve ambiguity, not to confirm safe actions. In non-interactive runs the recommended (or first) option is auto-selected.",
 		promptSnippet: "Ask the user to choose options and/or type an answer",
-		promptGuidelines: [
-			"Set allowMultiple when several options can be picked together; set allowFreeform to also accept a typed answer.",
-		],
 		parameters: askSchema,
 		prepareArguments: prepareAskArguments,
 		// One picker at a time: a second concurrent UserInputBus request is

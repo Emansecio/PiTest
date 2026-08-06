@@ -385,11 +385,6 @@ export function createRecipeToolDefinition(
 		description:
 			"Invoke a build/test/lint target from the detected task runner — no need to remember which (npm/bun/pnpm/yarn/just/make/cargo/poe). Auto-detects from manifest files in cwd.",
 		promptSnippet: "Run a target via the detected task runner.",
-		promptGuidelines: [
-			"Use recipe instead of guessing which package manager / build tool runs a target.",
-			"Pass extra flags via `args` (forwarded after the target; `--` is inserted for npm-like runners).",
-			"Falls back with a clear error if no manifest is found.",
-		],
 		parameters: recipeSchema,
 		async execute(_toolCallId, input: RecipeToolInput, signal) {
 			const extraArgs = input.args ?? [];

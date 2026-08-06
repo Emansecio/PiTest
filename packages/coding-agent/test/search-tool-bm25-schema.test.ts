@@ -17,13 +17,14 @@ describe("search_tool_bm25 schema", () => {
 			properties: { activate_top: { description?: string } };
 		};
 		const fieldDescription = schema.properties.activate_top.description ?? "";
-		const guidelineText = (def.promptGuidelines ?? []).join(" ");
 		const toolDescription = def.description ?? "";
 
 		// Canonical statement of the condition + effect lives on the field itself.
 		expect(fieldDescription).toContain("joins the active tool surface");
-		// The top-level description and guidelines no longer restate the mechanics.
-		expect(guidelineText).not.toContain("active surface");
+		// Built-ins carry no promptGuidelines (dead for builtins), and the
+		// top-level description does not restate the activation mechanics.
+		expect(def.promptGuidelines).toBeUndefined();
+		expect(toolDescription).not.toContain("active tool surface");
 		expect(toolDescription).not.toContain("becomes callable");
 	});
 });

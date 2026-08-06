@@ -27,8 +27,6 @@
 
 import type { ExtensionAPI } from "../extensions/types.ts";
 import type { Orchestration } from "../fusion/types.ts";
-import { buildAskModeSection } from "../permissions/ask-mode-prompt.ts";
-import { buildConfirmModeSection } from "../permissions/confirm-mode-prompt.ts";
 import { createExitPlanToolDefinition } from "../permissions/exit-plan-tool.ts";
 import {
 	describeToolAction,
@@ -40,7 +38,6 @@ import {
 	type PermissionSettings,
 	resolveConfirmDecision,
 } from "../permissions/index.ts";
-import { buildPlanModeSection } from "../permissions/plan-mode-prompt.ts";
 import { PERMISSION_MODES } from "../permissions/types.ts";
 
 /** Transcript custom-type for compact permission-deny lines (see custom-message.ts). */
@@ -157,23 +154,15 @@ export function createPermissionsExtension(options: PermissionsExtensionOptions)
 			}
 		});
 
-		// Tell the model UP FRONT which stance it is in, so it researches (plan),
+		// The model is told UP FRONT which stance it is in — so it researches (plan),
 		// answers (ask), or batches its mutations (confirm) instead of fighting the
-		// permission layer. Same checker, different posture — hence one section per
-		// non-default mode. Pre-model band: appended after the system prompt's
-		// dynamic marker, so the cacheable prefix is preserved.
-		pi.on("before_agent_start", (event) => {
-			const section =
-				checker.mode === "plan"
-					? buildPlanModeSection()
-					: checker.mode === "ask"
-						? buildAskModeSection()
-						: checker.mode === "confirm"
-							? buildConfirmModeSection()
-							: undefined;
-			if (!section) return undefined;
-			return { systemPrompt: `${event.systemPrompt}\n\n${section}` };
-		});
+		// permission layer — but NOT from here. The stance section is a pure function
+		// of `checker.mode`, so the host renders it into the system prompt's cacheable
+		// PREFIX (`BuildSystemPromptOptions.permissionModeSection`) and rebuilds when
+		// the mode changes. Appending it from `before_agent_start`, as this extension
+		// used to, landed it after the dynamic marker — where the provider relocates it
+		// past the cache breakpoint and re-bills ~260 tokens on every request of every
+		// turn, for text that only changes when the user switches mode.
 
 		// Async on purpose: a `confirm` decision parks here awaiting the user's
 		// answer. The host awaits this handler through `settleOrAbort`, so Esc/abort

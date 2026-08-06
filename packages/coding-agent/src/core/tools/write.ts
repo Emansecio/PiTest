@@ -246,10 +246,11 @@ export function createWriteToolDefinition(
 	return {
 		name: "write",
 		label: "write",
+		// P0: refuse to execute args pruned by the history elision marker.
+		mutationGuard: true,
 		description:
 			'Write content to a file. Creates the file if it doesn\'t exist, overwrites if it does. Automatically creates parent directories.\n\nRIGHT: { "path": "foo.ts", "content": "..." }\n\n- Use write only for new files or full rewrites (use "edit" for small changes); include a trailing newline if the file convention expects one.',
-		promptSnippet: "Create or overwrite files",
-		promptGuidelines: ["Use write only for new files or complete rewrites."],
+		promptSnippet: "Create or overwrite files (parent dirs auto-created; preview:true stages instead of applying)",
 		parameters: writeSchema,
 		prepareArguments: prepareWriteArguments,
 		async execute(

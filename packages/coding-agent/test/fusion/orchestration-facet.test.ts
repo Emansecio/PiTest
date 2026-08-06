@@ -34,18 +34,18 @@ function createSession(sessionManager = SessionManager.inMemory(), permissionChe
 }
 
 describe("orchestration facet", () => {
-	it("defaults to solo and toggles to fusion", () => {
+	it("defaults to solo and toggles to fusion", async () => {
 		const session = createSession();
 		try {
 			expect(session.orchestration).toBe("solo");
 			session.setOrchestration("fusion");
 			expect(session.orchestration).toBe("fusion");
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 	});
 
-	it("persists orchestration and restores it on a new session over the same journal", () => {
+	it("persists orchestration and restores it on a new session over the same journal", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const session = createSession(sessionManager);
 		try {
@@ -57,27 +57,27 @@ describe("orchestration facet", () => {
 			expect(orch.length).toBeGreaterThan(0);
 			expect((orch[orch.length - 1] as { data?: { orchestration?: string } }).data?.orchestration).toBe("fusion");
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 
 		const resumed = createSession(sessionManager);
 		try {
 			expect(resumed.orchestration).toBe("fusion");
 		} finally {
-			resumed.dispose();
+			await resumed.dispose();
 		}
 	});
 
-	it("stays solo when the journal has no orchestration entry", () => {
+	it("stays solo when the journal has no orchestration entry", async () => {
 		const session = createSession();
 		try {
 			expect(session.orchestration).toBe("solo");
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 	});
 
-	it("restoring orchestration=fusion forces the permission mode to plan (no Fusion·Auto on resume)", () => {
+	it("restoring orchestration=fusion forces the permission mode to plan (no Fusion·Auto on resume)", async () => {
 		// The permission mode is not persisted, so on resume it falls back to the
 		// default (auto). Restoring a fusion orchestration must reconcile the checker
 		// down to plan — otherwise resume revives the unreachable Fusion·Auto state.
@@ -89,7 +89,7 @@ describe("orchestration facet", () => {
 		try {
 			first.setOrchestration("fusion");
 		} finally {
-			first.dispose();
+			await first.dispose();
 		}
 
 		const resumedChecker = new PermissionChecker({ cwd: process.cwd(), mode: "auto", settings: {} });
@@ -98,11 +98,11 @@ describe("orchestration facet", () => {
 			expect(resumed.orchestration).toBe("fusion");
 			expect(resumedChecker.mode).toBe("plan");
 		} finally {
-			resumed.dispose();
+			await resumed.dispose();
 		}
 	});
 
-	it("restoring orchestration=solo leaves the permission mode untouched", () => {
+	it("restoring orchestration=solo leaves the permission mode untouched", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const first = createSession(
 			sessionManager,
@@ -112,7 +112,7 @@ describe("orchestration facet", () => {
 			first.setOrchestration("fusion");
 			first.setOrchestration("solo");
 		} finally {
-			first.dispose();
+			await first.dispose();
 		}
 
 		const resumedChecker = new PermissionChecker({ cwd: process.cwd(), mode: "auto", settings: {} });
@@ -121,7 +121,7 @@ describe("orchestration facet", () => {
 			expect(resumed.orchestration).toBe("solo");
 			expect(resumedChecker.mode).toBe("auto");
 		} finally {
-			resumed.dispose();
+			await resumed.dispose();
 		}
 	});
 });

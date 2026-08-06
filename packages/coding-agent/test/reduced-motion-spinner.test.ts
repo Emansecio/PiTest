@@ -43,7 +43,8 @@ describe("reduced motion spinner freeze (#E)", () => {
 		delete process.env.PIT_NO_MOTION;
 		delete process.env.PIT_REDUCED_MOTION;
 		process.env.TERM = "dumb";
-		expect(spinnerGlyphAt(5000)).toBe(SPINNER_FRAMES[0]);
+		// TERM=dumb also selects the ASCII-safe glyph set, whose static frame is `|`.
+		expect(spinnerGlyphAt(5000)).toBe("|");
 	});
 
 	it("todo overlay keeps a static in_progress glyph across clock steps", () => {

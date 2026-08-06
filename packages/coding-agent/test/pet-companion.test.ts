@@ -14,6 +14,7 @@ import {
 	PET_PERCH_CELL_ROWS,
 	PET_PERCH_SIXEL_DRAW_ROWS,
 	PET_PERCH_SIXEL_ROWS,
+	petFrameIntervalMsForTransport,
 } from "../src/modes/interactive/components/pet-companion.ts";
 import { petFrameIntervalMs } from "../src/modes/interactive/components/pet-mood.ts";
 
@@ -190,6 +191,50 @@ describe("PetCompanion perch — sixel", () => {
 		setCellDimensions(CELL);
 		expect(pet.render(WIDTH)).toHaveLength(PET_PERCH_SIXEL_ROWS);
 	});
+
+	test("idle with sixel still emits SIXEL_INTRO", () => {
+		setSixelSupport(true);
+		setCellDimensions(CELL);
+		const { clock } = makeClock();
+		const pet = createPetCompanion({ getColors: () => COLORS, clock });
+		// Default mood is idle — long-running, sixel is the crisp path.
+		expect(pet.moodState).toBe("idle");
+		const lines = pet.render(WIDTH);
+		expect(lines.at(-1)!.includes(SIXEL_INTRO)).toBe(true);
+	});
+
+	test("holds cells briefly after terminal backpressure clears", () => {
+		setSixelSupport(true);
+		setCellDimensions(CELL);
+		let backpressured = true;
+		const { clock, state } = makeClock();
+		const pet = createPetCompanion({
+			getColors: () => COLORS,
+			isBackpressured: () => backpressured,
+			clock,
+		});
+
+		expect(pet.render(WIDTH).join("")).not.toContain(SIXEL_INTRO);
+		backpressured = false;
+		state.now = 499;
+		expect(pet.render(WIDTH).join("")).not.toContain(SIXEL_INTRO);
+		state.now = 500;
+		expect(pet.render(WIDTH).at(-1)).toContain(SIXEL_INTRO);
+	});
+
+	test("done (short hop) prefers cells even when sixel is available", () => {
+		// Short high-motion moods force half-block cells so the perch does not
+		// full-row-erase + rewrite sixel every hop frame (flicker).
+		setSixelSupport(true);
+		setCellDimensions(CELL);
+		const { clock } = makeClock();
+		const pet = createPetCompanion({ getColors: () => COLORS, clock });
+		pet.setMood("done", 0);
+		const joined = pet.render(WIDTH).join("\n");
+		expect(joined.includes(SIXEL_INTRO)).toBe(false);
+		expect(joined.includes("▀") || joined.includes("▄")).toBe(true);
+		expect(pet.render(WIDTH)).toHaveLength(PET_PERCH_CELL_ROWS);
+	});
 });
 
 describe("PetCompanion reduced motion", () => {
@@ -342,6 +387,10 @@ describe("PetCompanion frame gate", () => {
 		for (let t = 40; t <= 800; t += 40) if (pet.tick(t)) dirty += 1; // one full sweep+hop cycle
 		expect(dirty).toBeGreaterThanOrEqual(4);
 	});
+	test("samples a sixel crossfade at 30 fps before returning to its steady cap", () => {
+		expect(petFrameIntervalMsForTransport("idle", true, true)).toBe(33);
+		expect(petFrameIntervalMsForTransport("idle", true, false)).toBe(66);
+	});
 });
 
 describe("PetCompanion frame governor", () => {
@@ -356,6 +405,20 @@ describe("PetCompanion frame governor", () => {
 		expect(pet.tick(32)).toBe(false);
 		// The next slot samples a new frame of the sweep.
 		expect(pet.tick(60)).toBe(true);
+	});
+	test("anchors an unaligned mood change to its first animation frame", () => {
+		setSixelSupport(true);
+		setCellDimensions({ widthPx: 10, heightPx: 20 });
+		const { clock, state } = makeClock();
+		state.now = 1010;
+		const pet = createPetCompanion({ getColors: () => COLORS, clock });
+		pet.setMood("working", state.now);
+		const first = pet.render(WIDTH);
+
+		state.now += 33;
+		expect(pet.render(WIDTH)).not.toBe(first);
+		setSixelSupport(false);
+		resetCellDimensions();
 	});
 
 	test("renders the same sprite for two clocks in the same slot", () => {

@@ -84,8 +84,8 @@ export interface BuiltInExtensionsOptions {
 	onAsyncComplete?: (
 		handle: string,
 		text: string,
-		status: "done" | "error",
-		meta?: { turns?: number; totalTokens?: number },
+		status: "done" | "error" | "cancelled",
+		meta?: { turns?: number; totalTokens?: number; costUsd?: number },
 	) => boolean;
 	/** Forwarded to the coordinator: fires once when a subagent (run or spawn) starts. */
 	onSubagentStart?: (handle: string) => void;
@@ -94,8 +94,8 @@ export interface BuiltInExtensionsOptions {
 	/** Forwarded to the coordinator: fires when a blocking run/resume/continue settles. */
 	onSubagentComplete?: (
 		handle: string,
-		status: "done" | "error",
-		meta?: { turns?: number; totalTokens?: number },
+		status: "done" | "error" | "cancelled",
+		meta?: { turns?: number; totalTokens?: number; costUsd?: number },
 	) => void;
 	/** Called once with a function that aborts all detached spawns (wired to session.interrupt). */
 	registerAbortDetached?: (abortFn: () => void) => void;
@@ -106,7 +106,7 @@ export interface BuiltInExtensionsOptions {
 	 * sentinel to invalidate dedupe entries for files that changed outside the
 	 * session. Resolved lazily (the session doesn't exist yet when extensions are
 	 * bundled); undefined in contexts that never construct one (tests, dedupe
-	 * disabled via PIT_READ_DEDUPE=0).
+	 * disabled via PIT_NO_READ_DEDUPE).
 	 */
 	getReadDedupeStore?: () => ReadDedupeStore | undefined;
 	/**

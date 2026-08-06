@@ -1,5 +1,5 @@
 import { performance } from "node:perf_hooks";
-import type { AutocompleteProvider, AutocompleteSuggestions } from "../autocomplete.ts";
+import type { AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions } from "../autocomplete.ts";
 import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, type MouseEvent, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
@@ -3286,16 +3286,20 @@ export class Editor implements Component, Focusable, MouseTarget {
 		return firstPrefixIndex;
 	}
 
-	private createAutocompleteList(
-		prefix: string,
-		items: Array<{ value: string; label: string; description?: string }>,
-	): SelectList {
+	private createAutocompleteList(prefix: string, items: AutocompleteItem[]): SelectList {
 		// Enable the trailing key hint so the dropdown spells out how to accept /
 		// navigate / dismiss. The slash-command layout keeps its column sizing; the
 		// hint is layered on top of whichever base layout applies.
-		const baseLayout: SelectListLayoutOptions = prefix.startsWith("/") ? SLASH_COMMAND_SELECT_LIST_LAYOUT : {};
-		const layout: SelectListLayoutOptions = { ...baseLayout, showKeyHints: true };
-		return new SelectList(items, this.autocompleteMaxVisible, this.theme.selectList, layout);
+		const isSlashCommand = prefix.startsWith("/");
+		const baseLayout: SelectListLayoutOptions = isSlashCommand ? SLASH_COMMAND_SELECT_LIST_LAYOUT : {};
+		const layout: SelectListLayoutOptions = { ...baseLayout, ...(isSlashCommand && { showKeyHints: true }) };
+		// Slash palettes are command surfaces, so use the available terminal height
+		// instead of truncating to the editor's small file-completion default. The
+		// SelectList still clamps to a safe minimum for very short terminals.
+		const maxVisible = prefix.startsWith("/")
+			? Math.min(12, Math.max(this.autocompleteMaxVisible, this.tui.terminal.rows - 12))
+			: this.autocompleteMaxVisible;
+		return new SelectList(items, maxVisible, this.theme.selectList, layout);
 	}
 
 	private tryTriggerAutocomplete(explicitTab: boolean = false): void {

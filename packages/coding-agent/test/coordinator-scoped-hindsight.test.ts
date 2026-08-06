@@ -127,7 +127,15 @@ describe("coordinator agent-scoped hindsight", () => {
 			[],
 		);
 
-		const res = await exec(task, { op: "run", type: "explore", name: "exp", prompt: "find and remember" });
+		const res = await exec(task, {
+			op: "run",
+			type: "explore",
+			name: "exp",
+			prompt: "find and remember",
+			// Keep the faux-provider harness deterministic when ambient credentials make
+			// the builtin explore model (haiku) resolvable in the test environment.
+			model: "faux/faux-1",
+		});
 		expect((res as { isError: boolean }).isError).toBe(false);
 
 		// The child saw the auto-added memory tools, despite the builtin `tools` list
@@ -139,32 +147,39 @@ describe("coordinator agent-scoped hindsight", () => {
 		expect(stored?.agentScope).toBe("explore");
 	});
 
-	it("with PIT_NO_SCOPED_HINDSIGHT=1 a retain in a typed subagent lands global (agentScope undefined)", async () => {
-		const bank = openTempBank();
-		const cwd = root as string;
-		process.env.PIT_NO_SCOPED_HINDSIGHT = "1";
-		const task = makeCoordinator(
-			cwd,
-			[
-				fauxAssistantMessage([fauxToolCall("retain", { body: "unscoped fact body" })], { stopReason: "toolUse" }),
-				fauxAssistantMessage("done"),
-			],
-			[createRetainTool(cwd), createRecallTool(cwd)],
-		);
+	// Both spellings: the flag parses via isTruthyEnvFlag, so `=true` must not be a
+	// silent no-op (it was, while the check compared against the literal "1").
+	it.each(["1", "true"])(
+		"with PIT_NO_SCOPED_HINDSIGHT=%s a retain in a typed subagent lands global (agentScope undefined)",
+		async (flagValue) => {
+			const bank = openTempBank();
+			const cwd = root as string;
+			process.env.PIT_NO_SCOPED_HINDSIGHT = flagValue;
+			const task = makeCoordinator(
+				cwd,
+				[
+					fauxAssistantMessage([fauxToolCall("retain", { body: "unscoped fact body" })], {
+						stopReason: "toolUse",
+					}),
+					fauxAssistantMessage("done"),
+				],
+				[createRetainTool(cwd), createRecallTool(cwd)],
+			);
 
-		// allowed_tools must permit retain: scoping is off, so the auto-widening that
-		// normally lets a memory type keep retain does not apply.
-		const res = await exec(task, {
-			op: "run",
-			type: "review",
-			name: "rev",
-			prompt: "remember unscoped",
-			allowed_tools: ["retain"],
-		});
-		expect((res as { isError: boolean }).isError).toBe(false);
+			// allowed_tools must permit retain: scoping is off, so the auto-widening that
+			// normally lets a memory type keep retain does not apply.
+			const res = await exec(task, {
+				op: "run",
+				type: "review",
+				name: "rev",
+				prompt: "remember unscoped",
+				allowed_tools: ["retain"],
+			});
+			expect((res as { isError: boolean }).isError).toBe(false);
 
-		const stored = bank.all().find((e) => e.body.includes("unscoped fact body"));
-		expect(stored).toBeDefined();
-		expect(stored?.agentScope).toBeUndefined();
-	});
+			const stored = bank.all().find((e) => e.body.includes("unscoped fact body"));
+			expect(stored).toBeDefined();
+			expect(stored?.agentScope).toBeUndefined();
+		},
+	);
 });

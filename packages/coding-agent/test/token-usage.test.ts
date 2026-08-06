@@ -136,6 +136,7 @@ describe("main Goal token accounting", () => {
 			});
 
 			expect(session.getTokenBudgetSnapshot().mainTokens).toBe(18);
+			expect(session.getTokenBudgetSnapshot().costUsd).toBeCloseTo(0.25);
 		} finally {
 			await session.dispose();
 		}

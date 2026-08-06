@@ -493,14 +493,20 @@ describe("AuthStorage", () => {
 	});
 
 	describe("credential alias groups (opencode ↔ opencode-go)", () => {
-		let savedEnv: string | undefined;
+		const savedEnv: Record<string, string | undefined> = {};
+		const isolatedEnvKeys = ["OPENCODE_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"];
 		beforeEach(() => {
-			savedEnv = process.env.OPENCODE_API_KEY;
-			delete process.env.OPENCODE_API_KEY;
+			for (const key of isolatedEnvKeys) {
+				savedEnv[key] = process.env[key];
+				delete process.env[key];
+			}
 		});
 		afterEach(() => {
-			if (savedEnv === undefined) delete process.env.OPENCODE_API_KEY;
-			else process.env.OPENCODE_API_KEY = savedEnv;
+			for (const key of isolatedEnvKeys) {
+				const value = savedEnv[key];
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
 		});
 
 		test("login stored under opencode-go authenticates opencode (zen)", async () => {

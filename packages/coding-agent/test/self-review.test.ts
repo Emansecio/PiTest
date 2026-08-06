@@ -1,11 +1,14 @@
-import { getRuntimeDiagnostics, resetRuntimeDiagnostics } from "@pit/ai";
+import { type Api, getRuntimeDiagnostics, type Model, resetRuntimeDiagnostics } from "@pit/ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { GoalManager, setCurrentGoalManager } from "../src/core/goal/goal-manager.js";
 import {
 	buildSelfReviewPrompt,
 	clearCurrentSelfReviewFindings,
 	getCurrentSelfReviewFindings,
+	resolveSelfReviewModel,
 	runSelfReviewLoop,
+	SELF_REVIEW_SESSION_THINKING,
+	SELF_REVIEW_SIBLING_THINKING,
 	SELF_REVIEW_SYSTEM_PROMPT,
 	type SelfReviewFinding,
 	type SelfReviewResult,
@@ -262,7 +265,68 @@ describe("runSelfReviewLoop", () => {
 	});
 });
 
+describe("resolveSelfReviewModel — small-class sibling routing", () => {
+	function model(id: string, provider: string, inputCost?: number): Model<Api> {
+		return {
+			id,
+			name: id,
+			api: "anthropic-messages",
+			provider,
+			baseUrl: "https://example.invalid",
+			reasoning: true,
+			input: ["text"],
+			cost: inputCost === undefined ? undefined : { input: inputCost, output: inputCost * 5 },
+			contextWindow: 200_000,
+			maxTokens: 8192,
+		} as Model<Api>;
+	}
+
+	const opus = model("claude-opus-4-8", "anthropic", 15);
+	const haiku = model("claude-haiku-4-5", "anthropic", 1);
+	const otherProviderMini = model("gpt-5-mini", "openai", 0.25);
+
+	it("picks the same-provider sibling and drops thinking to low", () => {
+		const r = resolveSelfReviewModel(opus, [opus, haiku, otherProviderMini], {});
+		expect(r.model.id).toBe("claude-haiku-4-5");
+		expect(r.thinkingLevel).toBe(SELF_REVIEW_SIBLING_THINKING);
+		expect(r.usedSibling).toBe(true);
+	});
+
+	it("falls back to the session model when the provider has no sibling", () => {
+		const r = resolveSelfReviewModel(opus, [opus, otherProviderMini], {});
+		expect(r.model.id).toBe(opus.id);
+		expect(r.thinkingLevel).toBe(SELF_REVIEW_SESSION_THINKING);
+		expect(r.usedSibling).toBe(false);
+	});
+
+	it("does not route a session model that is already small-class", () => {
+		const r = resolveSelfReviewModel(haiku, [opus, haiku], {});
+		expect(r.model.id).toBe(haiku.id);
+		expect(r.usedSibling).toBe(false);
+	});
+
+	it("PIT_NO_SELF_REVIEW_SIBLING restores the session model (any truthy spelling)", () => {
+		for (const value of ["1", "true", "yes"]) {
+			const r = resolveSelfReviewModel(opus, [opus, haiku], { PIT_NO_SELF_REVIEW_SIBLING: value });
+			expect(r.model.id).toBe(opus.id);
+			expect(r.thinkingLevel).toBe(SELF_REVIEW_SESSION_THINKING);
+			expect(r.usedSibling).toBe(false);
+		}
+	});
+
+	it("a falsy kill-switch leaves the sibling default on", () => {
+		const r = resolveSelfReviewModel(opus, [opus, haiku], { PIT_NO_SELF_REVIEW_SIBLING: "0" });
+		expect(r.usedSibling).toBe(true);
+	});
+});
+
 describe("self-review prompts", () => {
+	it("allows explicitly listed impacted files without widening the review scope", () => {
+		expect(SELF_REVIEW_SYSTEM_PROMPT).toContain("explicitly listed impacted files");
+		expect(SELF_REVIEW_SYSTEM_PROMPT).toContain("Do NOT review unrelated files");
+		expect(SELF_REVIEW_SYSTEM_PROMPT).not.toContain("Do NOT review anything outside the touched files");
+	});
+
 	it("system prompt carries the high-risk rubric and forbids style nits", () => {
 		expect(SELF_REVIEW_SYSTEM_PROMPT).toContain("Edge cases covered");
 		expect(SELF_REVIEW_SYSTEM_PROMPT).toContain("EMPTY findings array");

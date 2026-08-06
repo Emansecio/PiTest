@@ -14,6 +14,11 @@ import type { AgentTool } from "@pit/agent-core";
 import type { ImageContent, Model, TextContent } from "@pit/ai";
 import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
+import {
+	encodedImageBytes,
+	MAX_IMAGE_ATTACH_BASE64_BYTES,
+	MAX_IMAGE_FILE_BYTES,
+} from "../../utils/image-attachment-limits.ts";
 import { formatDimensionNote, resizeImage } from "../../utils/image-resize.ts";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
 import { sliceSafe } from "../../utils/surrogate.ts";
@@ -21,11 +26,6 @@ import type { ToolDefinition } from "../extensions/types.ts";
 import { renderToolOutput, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { formatSize } from "./truncate.ts";
-
-/** Largest image file we will load into memory; above this, fail fast and tell the model to downscale. */
-const MAX_IMAGE_FILE_BYTES = 25 * 1024 * 1024;
-/** Largest base64 payload we will attach; above this providers reject the image, so error instead of sending. */
-const MAX_ATTACH_BASE64_BYTES = 7 * 1024 * 1024;
 
 const inspectImageSchema = Type.Object(
 	{
@@ -73,13 +73,8 @@ export function createInspectImageToolDefinition(
 		activity: "navigation",
 		label: "inspect_image",
 		description:
-			"Attach a local image to the next assistant turn so the model can describe or answer questions about it. Use when you need the vision model to look at a screenshot, chart, photo, or diagram on disk.",
+			"Attach a local image to the next assistant turn so the model can describe or answer questions about it. Use when you need the vision model to look at a screenshot, chart, photo, or diagram on disk. Requires a vision-capable model.",
 		promptSnippet: "Attach a local image for the next turn to inspect.",
-		promptGuidelines: [
-			"Use inspect_image when you need the model to *see* a local image — screenshots, charts, photos.",
-			"Pass a focused question; otherwise the model just describes the image.",
-			"Requires a vision-capable model. If the active model lacks image input the call errors out.",
-		],
 		parameters: inspectImageSchema,
 		async execute(_toolCallId, input: InspectImageToolInput, _signal, _onUpdate, ctx) {
 			const question = (input.question ?? "describe this image").trim();
@@ -151,12 +146,12 @@ export function createInspectImageToolDefinition(
 				}
 			}
 
-			if (Buffer.byteLength(finalData, "utf8") > MAX_ATTACH_BASE64_BYTES) {
+			if (encodedImageBytes(finalData) > MAX_IMAGE_ATTACH_BASE64_BYTES) {
 				return {
 					content: [
 						{
 							type: "text" as const,
-							text: `inspect_image error: ${basename(resolvedPath)} is too large to attach (${formatSize(Buffer.byteLength(finalData, "utf8"))} encoded)${autoResize ? " and could not be downscaled" : " (auto-resize is off)"}. Crop or downscale it first.`,
+							text: `inspect_image error: ${basename(resolvedPath)} is too large to attach (${formatSize(encodedImageBytes(finalData))} encoded)${autoResize ? " and could not be downscaled" : " (auto-resize is off)"}. Crop or downscale it first.`,
 						},
 					],
 					isError: true,

@@ -28,6 +28,11 @@ const awaitFusionSettled = Reflect.get(AgentSession.prototype, "awaitFusionSettl
 	this: unknown,
 ) => Promise<void>;
 
+const serializeFusionHandoff = Reflect.get(AgentSession.prototype, "_serializeFusionHandoff") as (
+	this: unknown,
+	task: () => Promise<void>,
+) => Promise<void>;
+
 const isFusingDescriptor = Object.getOwnPropertyDescriptor(AgentSession.prototype, "isFusing");
 
 /** Minimal stand-in carrying only what sendCustomMessage touches. */
@@ -35,10 +40,12 @@ function fakeSession(options: { streaming?: boolean } = {}) {
 	const self = {
 		_fusionAbort: undefined as AbortController | undefined,
 		_fusionSettled: undefined as { promise: Promise<void>; resolve: () => void } | undefined,
+		_fusionHandoffTail: Promise.resolve(),
 		_pendingNextTurnMessages: [] as unknown[],
 		isStreaming: options.streaming ?? false,
 		setFusionAbort,
 		awaitFusionSettled,
+		_serializeFusionHandoff: serializeFusionHandoff,
 		_runAgentPrompt: vi.fn(async () => {}),
 		agent: { state: { messages: [] as unknown[] }, steer: vi.fn(), followUp: vi.fn() },
 		sessionManager: { appendCustomMessageEntry: vi.fn() },

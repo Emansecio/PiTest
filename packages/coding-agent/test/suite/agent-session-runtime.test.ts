@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@pit/ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
@@ -35,10 +35,27 @@ const lightSettings = () => SettingsManager.inMemory({ lsp: { enabled: false }, 
 
 describe("AgentSessionRuntime characterization", () => {
 	const cleanups: Array<() => Promise<void> | void> = [];
+	const isolatedEnvKeys = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN", "OPENCODE_API_KEY", "XAI_API_KEY"];
+	const savedEnv: Record<string, string | undefined> = {};
+
+	// These tests provide their own in-memory credentials. Ambient provider keys
+	// would make an unrelated built-in model win initial model resolution, which
+	// would make the last-used-model assertions depend on the host environment.
+	beforeEach(() => {
+		for (const key of isolatedEnvKeys) {
+			savedEnv[key] = process.env[key];
+			delete process.env[key];
+		}
+	});
 
 	afterEach(async () => {
 		while (cleanups.length > 0) {
 			await cleanups.pop()?.();
+		}
+		for (const key of isolatedEnvKeys) {
+			const value = savedEnv[key];
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
 		}
 		// 30s: dispose under full-suite contention on Windows can exceed the 10s default.
 	}, 60_000);

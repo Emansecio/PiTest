@@ -112,6 +112,41 @@ describe("Loader elapsed with frozen indicator", () => {
 		assert.doesNotMatch(loader.render(80).join("\n"), /partial thought/);
 	});
 
+	it("preserves pre-colored trailing and detail suffixes (chip hierarchy / thinking tone)", () => {
+		const t = trackingTui();
+		const muted = (s: string) => `M(${s})`;
+		const loader = new Loader(t.ui, (s) => s, muted, "Working…", { frames: ["⠋"] });
+		// Pre-colored (contains CSI) must not be rewrapped by messageColorFn.
+		const detail = "\x1b[38;2;1;2;3m  monologue\x1b[39m";
+		const trailing = "\x1b[38;2;4;5;6m · esc interrupt\x1b[39m";
+		loader.setDetailSuffix(detail);
+		loader.setTrailingSuffix(trailing);
+		const text = loader.render(80).join("\n");
+		// Message still uses messageColorFn.
+		assert.match(text, /M\(Working…\)/);
+		// Suffixes are embedded verbatim (their CSI markers survive).
+		assert.ok(text.includes(detail), "detail suffix kept its ANSI");
+		assert.ok(text.includes(trailing), "trailing suffix kept its ANSI");
+	});
+
+	it("setElapsedColorFn paints the clock independently of the message color", () => {
+		const t = trackingTui();
+		const loader = new Loader(
+			t.ui,
+			(s) => s,
+			(s) => `msg(${s})`,
+			"Working…",
+			{ frames: ["⠋"] },
+		);
+		loader.setElapsedColorFn((s) => `clk(${s})`);
+		loader.setElapsedEnabled(true);
+		(loader as unknown as { startedAtMs: number }).startedAtMs = Date.now() - 5000;
+		t.tick(0);
+		const text = loader.render(80).join("\n");
+		assert.match(text, /clk\( 5s\)/);
+		assert.match(text, /msg\(Working…\)/);
+	});
+
 	it("getElapsedMs discounts paused intervals", () => {
 		const t = trackingTui();
 		const loader = new Loader(

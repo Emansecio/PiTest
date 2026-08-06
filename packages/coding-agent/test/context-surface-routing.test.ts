@@ -48,7 +48,7 @@ describe("context surface routing", () => {
 		expect(formatSelectedSkillsForPrompt(selected)).toContain("<relevant_skills>");
 	});
 
-	it("removes Chrome from a normal turn and activates a small browser subset", () => {
+	it("activates a small browser subset and keeps it on the next normal turn", () => {
 		const available = [
 			"read",
 			"bash",
@@ -71,7 +71,8 @@ describe("context surface routing", () => {
 		expect(browser).toContain("chrome_devtools_click");
 		expect(browser).not.toContain("chrome_devtools_read_console");
 
+		// Append-only: a later turn without browser intent must not rewrite the surface.
 		const normal = routeBrowserTools("Summarize this TypeScript function", available, browser);
-		expect(normal).toEqual(["read", "bash"]);
+		expect(normal).toEqual(browser);
 	});
 });

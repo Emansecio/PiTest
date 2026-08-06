@@ -14,6 +14,8 @@ type StepArg = {
 	depends_on?: string[];
 	produces?: string;
 	verify?: string;
+	verify_command?: string;
+	verify_description?: string;
 };
 
 async function runPlan(input: {
@@ -424,6 +426,21 @@ describe("plan tool — brief", () => {
 		expect(() => mgr.restore(legacy as any)).not.toThrow();
 		expect(mgr.current()?.brief).toBeUndefined();
 		expect(mgr.current()?.steps.map((s) => s.id)).toEqual(["s1"]);
+	});
+});
+
+describe("plan tool — structured verify fields", () => {
+	beforeEach(() => setCurrentPlanManager(new PlanManager()));
+	afterEach(() => setCurrentPlanManager(undefined));
+
+	it("keeps the description informational and executes only verify_command", async () => {
+		const res = await runPlan({
+			op: "propose",
+			steps: [{ id: "s1", intent: "verify", verify_command: "npm test", verify_description: "Run the unit suite" }],
+		});
+		expect(res.isError).toBeFalsy();
+		expect(res.content[0].text).toContain("npm test");
+		expect(res.content[0].text).toContain("Run the unit suite");
 	});
 });
 

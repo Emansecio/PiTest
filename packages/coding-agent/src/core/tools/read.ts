@@ -11,6 +11,12 @@ import { getReadmePath } from "../../config.js";
 import { collapseAnnotatedBlocks } from "../../modes/interactive/components/annotated-block-collapse.js";
 import { keyHint, keyText } from "../../modes/interactive/components/keybinding-hints.js";
 import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.js";
+import {
+	encodedImageBytes,
+	formatImageLimitNote,
+	MAX_IMAGE_ATTACH_BASE64_BYTES,
+	MAX_IMAGE_FILE_BYTES,
+} from "../../utils/image-attachment-limits.ts";
 import { formatDimensionNote, resizeImage } from "../../utils/image-resize.js";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.js";
 import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.js";
@@ -231,7 +237,20 @@ function tryWarmBuffer(
 	if (!cache || !stat || stat.mtimeMs === undefined) return undefined;
 	const entry = cache.get(absolutePath);
 	if (!entry) return undefined;
-	if (entry.mtimeMs !== stat.mtimeMs || entry.size !== stat.size) return undefined;
+	if (entry.mtimeMs !== stat.mtimeMs || entry.size !== stat.size) {
+		cache.delete(absolutePath);
+		recordDiagnostic({
+			category: "graph.prefetch.stale",
+			level: "info",
+			source: "read.warm-cache",
+		});
+		return undefined;
+	}
+	recordDiagnostic({
+		category: "graph.prefetch.hit",
+		level: "info",
+		source: "read.warm-cache",
+	});
 	return Buffer.from(entry.content, "utf-8");
 }
 
@@ -293,7 +312,8 @@ export interface ReadOperations {
 	/**
 	 * Optional: file size lookup. Together with createByteStream it enables the
 	 * large-file streaming fast path. Remote operations (e.g. SSH) may omit both
-	 * and keep the buffered readFile path.
+	 * and keep the buffered readFile path for text. Image reads require this
+	 * metadata so the tool can enforce its pre-read memory limit safely.
 	 */
 	stat?: (absolutePath: string) => Promise<{ size: number; mtimeMs?: number; isDirectory?: () => boolean }>;
 	/** Optional: open a raw byte stream over the file (see stat). */
@@ -753,9 +773,12 @@ export function createReadToolDefinition(
 		},
 		description: `Read the contents of a file. Supports text files, images (jpg, png, gif, webp), and PDFs. Images are sent as attachments. PDFs are converted to markdown (embedded text only — no OCR, so a scanned/image-only PDF is reported as unreadable rather than empty) and page with offset/limit like any text file. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete. Set outline:true for a symbol outline (names + line ranges) instead of file content; path also accepts pr://, issue://, and conflict:// virtual schemes to pull a GitHub PR, issue, or merge-conflict directly.
 
-Never call read on a directory (use "ls") or twice with the same offset (increment it by the previous limit).`,
-		promptSnippet: "Read file contents",
-		promptGuidelines: ["Use read to examine files instead of cat or sed."],
+Never read a file through bash (cat/sed/head), never call read on a directory (use "ls"), and never call read twice with the same offset (increment it by the previous limit).`,
+		// Wire-facing summary (T01): this IS the description the provider sees, so
+		// it names the capabilities the long description's first line hides —
+		// outline mode and the virtual path schemes.
+		promptSnippet:
+			"Read file contents (text, images, PDFs); outline:true for a symbol map; pr:// issue:// conflict:// paths",
 		parameters: readSchema,
 		prepareArguments: prepareWithPathAliases,
 		async execute(
@@ -909,8 +932,25 @@ Never call read on a directory (use "ls") or twice with the same offset (increme
 							};
 							const nonVisionImageNote = getNonVisionImageNote(ctx?.model);
 							if (mimeType) {
+								if (!earlyStat) {
+									const note =
+										`Read image file [${mimeType}]\n` +
+										"[Image omitted: the configured reader did not provide image size metadata, so the image was not loaded safely. Provide stat metadata or downscale it before reading.]";
+									resolveNote(nonVisionImageNote ? `${note}\n${nonVisionImageNote}` : note);
+									return;
+								}
+								if (earlyStat.size > MAX_IMAGE_FILE_BYTES) {
+									const note = `Read image file [${mimeType}]\n${formatImageLimitNote(path, earlyStat.size)}`;
+									resolveNote(nonVisionImageNote ? `${note}\n${nonVisionImageNote}` : note);
+									return;
+								}
 								// Read image as binary.
 								const buffer = await ops.readFile(absolutePath);
+								if (buffer.length > MAX_IMAGE_FILE_BYTES) {
+									const note = `Read image file [${mimeType}]\n${formatImageLimitNote(path, buffer.length)}`;
+									resolveNote(nonVisionImageNote ? `${note}\n${nonVisionImageNote}` : note);
+									return;
+								}
 								const base64 = buffer.toString("base64");
 								if (autoResizeImages) {
 									// Resize image if needed before sending it back to the model.
@@ -929,6 +969,11 @@ Never call read on a directory (use "ls") or twice with the same offset (increme
 											{ type: "image", data: resized.data, mimeType: resized.mimeType },
 										];
 									}
+								} else if (encodedImageBytes(base64) > MAX_IMAGE_ATTACH_BASE64_BYTES) {
+									let textNote = `Read image file [${mimeType}]\n[Image omitted: encoded payload exceeds ${formatSize(MAX_IMAGE_ATTACH_BASE64_BYTES)}. Downscale it first.]`;
+									if (nonVisionImageNote) textNote += `\n${nonVisionImageNote}`;
+									resolveNote(textNote);
+									return;
 								} else {
 									let textNote = `Read image file [${mimeType}]`;
 									if (nonVisionImageNote) textNote += `\n${nonVisionImageNote}`;
@@ -936,6 +981,13 @@ Never call read on a directory (use "ls") or twice with the same offset (increme
 										{ type: "text", text: textNote },
 										{ type: "image", data: base64, mimeType },
 									];
+								}
+								const image = content.find((item): item is ImageContent => item.type === "image");
+								if (image && encodedImageBytes(image.data) > MAX_IMAGE_ATTACH_BASE64_BYTES) {
+									let textNote = `Read image file [${mimeType}]\n[Image omitted: encoded payload exceeds ${formatSize(MAX_IMAGE_ATTACH_BASE64_BYTES)} after resizing.]`;
+									if (nonVisionImageNote) textNote += `\n${nonVisionImageNote}`;
+									resolveNote(textNote);
+									return;
 								}
 							} else {
 								// Read text content. Output is capped at DEFAULT_MAX_LINES/

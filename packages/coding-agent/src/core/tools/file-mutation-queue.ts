@@ -33,10 +33,10 @@ function getMutationQueueKey(filePath: string): string {
  * Upper bound on a single queued mutation. A `writeFile` that never settles (a
  * dead network mount, or a custom `fs` override with a hung promise) would
  * otherwise leave `releaseNext` uncalled forever, wedging every later mutation
- * of the same file behind it. On timeout the current op rejects AND the queue
- * slot is released, so subsequent mutations proceed — the hung write may still
- * land later, which is the lesser evil versus a permanently stuck file. Set
- * generously so no real disk write ever hits it.
+ * of the same file behind it. On timeout the caller rejects, but the queue slot
+ * remains held until the underlying mutation settles. Releasing it early would
+ * allow a second writer to race a still-running first writer. Set generously so
+ * no real disk write ever hits it.
  */
 const FILE_MUTATION_TIMEOUT_MS = 120_000;
 
@@ -55,6 +55,9 @@ export interface SnapshotIntent {
  */
 export interface MutationQueueOptions {
 	timeoutMs?: number;
+	/** Abort waiting/racing the operation. The mutation itself is not forcibly
+	 * stopped: its queue slot remains held until `fn` settles. */
+	signal?: AbortSignal;
 	/**
 	 * When set, capture the file's current bytes as a pre-image inside the
 	 * critical section, BEFORE `fn` runs — atomic with the write `fn` performs.
@@ -89,26 +92,53 @@ export async function withFileMutationQueue<T>(
 	const chainedQueue = currentQueue.then(() => nextQueue);
 	fileMutationQueues.set(key, chainedQueue);
 
-	await currentQueue;
+	let released = false;
+	const release = () => {
+		if (released) return;
+		released = true;
+		releaseNext();
+		if (fileMutationQueues.get(key) === chainedQueue) fileMutationQueues.delete(key);
+	};
+	const abortError = () => {
+		const reason = options.signal?.reason;
+		return reason instanceof Error ? reason : new Error(typeof reason === "string" ? reason : "aborted");
+	};
+	const abort = options.signal
+		? new Promise<never>((_resolve, reject) => {
+				if (options.signal?.aborted) reject(abortError());
+				else options.signal?.addEventListener("abort", () => reject(abortError()), { once: true });
+			})
+		: undefined;
 	let timer: NodeJS.Timeout | undefined;
+	let operation: Promise<T> | undefined;
 	try {
+		// An aborted waiter must not strand its successor behind currentQueue.
+		try {
+			await (abort ? Promise.race([currentQueue, abort]) : currentQueue);
+		} catch (error) {
+			if (options.signal?.aborted) currentQueue.then(release, release);
+			throw error;
+		}
+		if (options.signal?.aborted) throw abortError();
 		// Capture the pre-image while we hold the file's lock, before the mutation
 		// runs — so nothing can slip a write in between the snapshot and `fn`.
-		if (options.snapshot) {
-			await captureSnapshot(resolve(filePath), options.snapshot.tool);
-		}
+		if (options.snapshot) await captureSnapshot(resolve(filePath), options.snapshot.tool);
+		// Convert synchronous throws into a settled operation as well.
+		operation = Promise.resolve().then(fn);
+		// Timeout/abort only rejects this caller. The physical lock is released by
+		// this settlement hook, never by the race below.
+		operation.then(release, release);
 		const timeout = new Promise<never>((_resolve, reject) => {
 			timer = setTimeout(() => {
 				reject(new Error(`File mutation for ${filePath} timed out after ${timeoutMs}ms`));
 			}, timeoutMs);
 		});
-		return await Promise.race([fn(), timeout]);
+		return await Promise.race([operation, timeout, ...(abort ? [abort] : [])]);
 	} finally {
 		if (timer) clearTimeout(timer);
-		releaseNext();
-		if (fileMutationQueues.get(key) === chainedQueue) {
-			fileMutationQueues.delete(key);
-		}
+		// Before the mutation starts, there is no real writer to protect. Once
+		// operation exists, its settlement hook owns release even after timeout.
+		if (!operation && !released) release();
 	}
 }
 

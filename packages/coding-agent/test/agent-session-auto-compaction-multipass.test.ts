@@ -103,11 +103,23 @@ describe("AgentSession auto-compaction multipass", () => {
 		}
 	});
 
-	async function collectCompactionEvents(): Promise<Array<{ type: string; reason: string }>> {
-		const events: Array<{ type: string; reason: string }> = [];
+	async function collectCompactionEvents(): Promise<
+		Array<{ type: "compaction_start" | "compaction_end"; reason: string; operationId: string; modelId?: string }>
+	> {
+		const events: Array<{
+			type: "compaction_start" | "compaction_end";
+			reason: string;
+			operationId: string;
+			modelId?: string;
+		}> = [];
 		session.subscribe((event) => {
 			if (event.type === "compaction_start" || event.type === "compaction_end") {
-				events.push({ type: event.type, reason: event.reason });
+				events.push({
+					type: event.type,
+					reason: event.reason,
+					operationId: event.operationId,
+					modelId: event.modelId,
+				});
 			}
 		});
 		await compactionModule.runAutoCompaction(session.compaction, "threshold", false);
@@ -122,6 +134,11 @@ describe("AgentSession auto-compaction multipass", () => {
 
 		expect(events.filter((event) => event.type === "compaction_start")).toHaveLength(2);
 		expect(events.filter((event) => event.type === "compaction_end")).toHaveLength(2);
+		const starts = events.filter((event) => event.type === "compaction_start");
+		const ends = events.filter((event) => event.type === "compaction_end");
+		expect(starts[0]?.operationId).not.toBe(starts[1]?.operationId);
+		expect(ends.map((event) => event.operationId)).toEqual(starts.map((event) => event.operationId));
+		expect(ends.map((event) => event.modelId)).toEqual(["claude-haiku-4-5", "claude-haiku-4-5"]);
 	});
 
 	it("does NOT run a second pass when only soft residual pressure remains (T08)", async () => {

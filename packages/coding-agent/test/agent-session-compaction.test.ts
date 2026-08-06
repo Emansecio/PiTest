@@ -40,7 +40,7 @@ describe.skipIf(!API_KEY)("AgentSession compaction e2e", () => {
 
 	afterEach(async () => {
 		if (session) {
-			session.dispose();
+			await session.dispose();
 		}
 		if (tempDir && existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true });
@@ -213,10 +213,16 @@ describe.skipIf(!API_KEY)("AgentSession compaction e2e", () => {
 
 			const compactionEvents = events.filter((e) => e.type === "compaction_start" || e.type === "compaction_end");
 			expect(compactionEvents).toHaveLength(2);
-			expect(compactionEvents[0]).toEqual({ type: "compaction_start", reason: "manual" });
+			expect(compactionEvents[0]).toMatchObject({
+				type: "compaction_start",
+				reason: "manual",
+				operationId: expect.any(String),
+			});
 			expect(compactionEvents[1]).toMatchObject({
 				type: "compaction_end",
 				reason: "manual",
+				operationId: compactionEvents[0]?.operationId,
+				modelId: expect.any(String),
 				aborted: false,
 				willRetry: false,
 			});

@@ -216,12 +216,14 @@ describe("AgentSession auto-compaction queue resume", () => {
 		await compactionModule.checkCompaction(ctx, { ...overflowMessage, timestamp: Date.now() + 1 });
 
 		expect(compactionStarts).toEqual(["overflow"]);
-		expect(events).toContainEqual({
-			type: "compaction_end",
-			reason: "overflow",
-			errorMessage:
-				"Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.",
-		});
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				type: "compaction_end",
+				reason: "overflow",
+				errorMessage:
+					"Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.",
+			}),
+		);
 	});
 
 	it("should ignore stale pre-compaction assistant usage on pre-prompt compaction checks", async () => {

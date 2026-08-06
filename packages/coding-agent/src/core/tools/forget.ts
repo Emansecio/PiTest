@@ -84,9 +84,6 @@ export function createForgetToolDefinition(
 		description:
 			"Delete a single entry from the project's hindsight memory bank — by id (the `[id: ...]` shown by `recall`/`reflect`), by exact `subject`, or by `tags`. Use to prune stale, wrong, or no-longer-relevant memories. Deletion is permanent.",
 		promptSnippet: "Delete a hindsight memory entry by id, subject, or tags",
-		promptGuidelines: [
-			"Use forget to remove memories that are stale, wrong, or superseded. Pass `id` (from `recall`/`reflect`), or `subject`/`tags` to delete by content without recalling first.",
-		],
 		parameters: forgetSchema,
 		async execute(_toolCallId: string, input: ForgetToolInput) {
 			const bank = options?.bank ?? getCurrentHindsightBank();

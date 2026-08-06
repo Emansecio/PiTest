@@ -51,6 +51,12 @@ export interface SelectItem {
 	value: string;
 	label: string;
 	description?: string;
+	/** Optional non-selectable section label rendered before this item. */
+	section?: string;
+	/** Compact metadata badge rendered with the description column. */
+	badge?: string;
+	/** Optional alternate text used by the fuzzy filter. */
+	filterText?: string;
 }
 
 export interface SelectListTheme {
@@ -61,6 +67,8 @@ export interface SelectListTheme {
 	noMatch: (text: string) => string;
 	/** Optional full-row background for the selected item. */
 	selectedBg?: (text: string) => string;
+	/** Optional style for non-selectable section headers. */
+	section?: (text: string) => string;
 }
 
 export interface SelectListTruncatePrimaryContext {
@@ -100,6 +108,8 @@ export interface SelectListLayoutOptions {
 	 * every item unambiguously. Off by default to keep existing pickers unchanged.
 	 */
 	digitSelect?: boolean;
+	/** Optional alternate text used for fuzzy filtering. */
+	filterText?: (item: SelectItem) => string;
 }
 
 export class SelectList implements Component, MouseTarget {
@@ -110,11 +120,9 @@ export class SelectList implements Component, MouseTarget {
 	private theme: SelectListTheme;
 	private layout: SelectListLayoutOptions;
 	private cachedColumnWidth?: { length: number; firstValue: string; width: number };
-	// First filtered index and item-row count of the last rendered frame, so
-	// onMouse can translate a clicked row back to the item it showed. The rows
-	// AFTER the items (scroll info, key hint) are not items and never match.
-	private lastRenderStartIndex = 0;
-	private lastRenderItemRows = 0;
+	// Rendered row -> filtered item index. Null marks a non-selectable section
+	// header; rows after the items (scroll info/key hint) are not represented.
+	private lastRenderRows: Array<number | null> = [];
 
 	public onSelect?: (item: SelectItem) => void;
 	public onCancel?: () => void;
@@ -132,7 +140,9 @@ export class SelectList implements Component, MouseTarget {
 		// Empty filter keeps the original order; otherwise rank by fuzzy match
 		// quality (best first) and drop non-matches. fuzzyFilter lowercases and
 		// caches per-item text internally, so no precomputed lowercase array is needed.
-		this.filteredItems = filter.trim() ? fuzzyFilter(this.items, filter, (item) => item.value) : this.items;
+		this.filteredItems = filter.trim()
+			? fuzzyFilter(this.items, filter, (item) => this.layout.filterText?.(item) ?? item.filterText ?? item.value)
+			: this.items;
 		this.cachedColumnWidth = undefined;
 		this.selectedIndex = 0;
 	}
@@ -160,7 +170,7 @@ export class SelectList implements Component, MouseTarget {
 
 		// If no items match filter, show message
 		if (this.filteredItems.length === 0) {
-			this.lastRenderItemRows = 0;
+			this.lastRenderRows = [];
 			lines.push(this.theme.noMatch(`  ${this.layout.emptyText ?? "No matches"}`));
 			return lines;
 		}
@@ -171,25 +181,45 @@ export class SelectList implements Component, MouseTarget {
 		const showOrdinals = this.digitSelectActive();
 
 		// Calculate visible range with scrolling
-		const startIndex = Math.max(
+		let startIndex = Math.max(
 			0,
 			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.filteredItems.length - this.maxVisible),
 		);
-		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredItems.length);
-		this.lastRenderStartIndex = startIndex;
-		this.lastRenderItemRows = endIndex - startIndex;
+		let endIndex = Math.min(startIndex + this.maxVisible, this.filteredItems.length);
+		// Section labels consume real terminal rows. Keep the total list body within
+		// maxVisible so a command palette cannot push its scroll/hint rows below the
+		// overlay viewport when many sections are present. Preserve the selected item
+		// while trimming from the farther edge first.
+		while (this.countRenderedRows(startIndex, endIndex) > this.maxVisible) {
+			if (endIndex - 1 > this.selectedIndex) {
+				endIndex--;
+			} else if (startIndex < this.selectedIndex) {
+				startIndex++;
+			} else {
+				break;
+			}
+		}
+		this.lastRenderRows = [];
 
 		// Render visible items
 		for (let i = startIndex; i < endIndex; i++) {
 			const item = this.filteredItems[i];
 			if (!item) continue;
+			if (item.section && (i === startIndex || item.section !== this.filteredItems[i - 1]?.section)) {
+				lines.push(this.theme.section?.(`  ${item.section}`) ?? this.theme.description(`  ${item.section}`));
+				this.lastRenderRows.push(null);
+			}
 
 			const isSelected = i === this.selectedIndex;
-			const descriptionSingleLine = item.description ? normalizeToSingleLine(item.description) : undefined;
+			const description = [item.badge ? `[${item.badge}]` : undefined, item.description]
+				.filter((part): part is string => Boolean(part))
+				.join(" ");
+			const descriptionSingleLine = description ? normalizeToSingleLine(description) : undefined;
 			// Ordinal reflects the 1-based position in the filtered list so it lines
 			// up with the digit that selects it, independent of the scroll window.
 			const ordinal = showOrdinals ? i + 1 : undefined;
 			lines.push(this.renderItem(item, isSelected, width, descriptionSingleLine, primaryColumnWidth, ordinal));
+			this.lastRenderRows.push(i);
 		}
 
 		// Add scroll indicators if needed. ↑ shows items exist above the visible
@@ -212,6 +242,18 @@ export class SelectList implements Component, MouseTarget {
 		return lines;
 	}
 
+	private countRenderedRows(startIndex: number, endIndex: number): number {
+		let rows = 0;
+		for (let i = startIndex; i < endIndex; i++) {
+			rows++;
+			const item = this.filteredItems[i];
+			if (item?.section && (i === startIndex || item.section !== this.filteredItems[i - 1]?.section)) {
+				rows++;
+			}
+		}
+		return rows;
+	}
+
 	/**
 	 * Build the dim key-hint string, truncated to the available width. Returns ""
 	 * when there isn't enough room to show even the truncated hint legibly.
@@ -220,6 +262,8 @@ export class SelectList implements Component, MouseTarget {
 		const apply = `${keyHintLabel("tui.input.tab", "Tab")}/${keyHintLabel("tui.select.confirm", "↵")}`;
 		const cancel = keyHintLabel("tui.select.cancel", "Esc");
 		const hint = `  ${apply} apply · ↑↓ navigate · ${cancel} close`;
+		// Plain ellipsis: select-list is theme-agnostic (tui package). Callers that
+		// need a muted tone wrap the whole hint themselves.
 		const truncated = truncateToWidth(hint, width - 2, "…");
 		// Below a tiny floor the hint is unreadable; suppress rather than show "…".
 		return visibleWidth(truncated) >= 6 ? truncated : "";
@@ -234,8 +278,10 @@ export class SelectList implements Component, MouseTarget {
 	 */
 	onMouse(ev: MouseEvent, localRow: number, _localCol: number): boolean {
 		if (ev.type !== "press" || ev.button !== "left") return false;
-		if (localRow < 0 || localRow >= this.lastRenderItemRows) return false;
-		this.selectedIndex = this.lastRenderStartIndex + localRow;
+		if (localRow < 0 || localRow >= this.lastRenderRows.length) return false;
+		const itemIndex = this.lastRenderRows[localRow];
+		if (itemIndex === null || itemIndex === undefined) return false;
+		this.selectedIndex = itemIndex;
 		const item = this.filteredItems[this.selectedIndex];
 		if (!item) return false;
 		this.notifySelectionChange();

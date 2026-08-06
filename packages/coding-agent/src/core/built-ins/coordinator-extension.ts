@@ -24,6 +24,7 @@ import type { Agent, AgentMessage, AgentTool, ThinkingLevel } from "@pit/agent-c
 import type { Model } from "@pit/ai";
 import { type Static, type TSchema, Type } from "typebox";
 import { isValidThinkingLevel } from "../../cli/args.ts";
+import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import {
 	brandCoordinatorTool,
 	COORDINATOR_TOOL_BRAND,
@@ -41,6 +42,7 @@ import {
 	loadAgentTypes,
 	loadResumeState,
 	type ParallelTaskResult,
+	type ResumeState,
 	resumeStateStem,
 	retargetToolsForWorktree,
 	runFanout,
@@ -60,7 +62,7 @@ import { agentMessageBus, makeAgentDelivery, makeAgentResponder } from "../messa
 import type { ModelRegistry } from "../model-registry.ts";
 import { parseModelPattern } from "../model-resolver.ts";
 import type { Skill } from "../skills.ts";
-import type { TokenBudgetGovernor } from "../token-governor.ts";
+import type { SubagentTokenReservation, TokenBudgetGovernor } from "../token-governor.ts";
 import { aggregateAssistantUsage, mergeSubagentUsage } from "../token-usage.ts";
 import { withAgentScope } from "../tools/hindsight-scope.ts";
 import { createMessageTool } from "../tools/message.ts";
@@ -104,7 +106,7 @@ function resolveAgentType(map: Map<string, AgentTypeDef>, rawType: string | unde
 /** A subagent launched via `task({op:"spawn"})` — runs detached, collected later via poll/join. */
 interface PendingTask {
 	handle: string;
-	status: "running" | "done" | "error";
+	status: "running" | "done" | "error" | "cancelled";
 	promise: Promise<void>;
 	/** Abort controller for the detached run, so session teardown / Esc can stop it. */
 	controller: AbortController;
@@ -114,6 +116,20 @@ interface PendingTask {
 	delivered?: boolean;
 	turns?: number;
 	totalTokens?: number;
+	costUsd?: number;
+}
+
+function formatCancelledPending(handle: string, entry: PendingTask): string {
+	const header = `### ${handle}\n[cancelled: ${entry.error ?? "cancelled"}]`;
+	return entry.result ? `${header}\n\n${entry.result}` : header;
+}
+
+/** Compact marker for a settled detached task evicted from the in-memory result cache. */
+interface EvictedPendingTask {
+	handle: string;
+	status: "done" | "error" | "cancelled";
+	error?: string;
+	delivered?: boolean;
 }
 
 /** Shared result shape for every `task` op so the inferred tool `details` type unifies. */
@@ -163,6 +179,7 @@ const taskSchema = Type.Object({
 				Type.Literal("spawn"),
 				Type.Literal("poll"),
 				Type.Literal("join"),
+				Type.Literal("cancel"),
 				Type.Literal("list"),
 				Type.Literal("resume"),
 				Type.Literal("continue"),
@@ -171,7 +188,7 @@ const taskSchema = Type.Object({
 			],
 			{
 				description:
-					"run (default, blocking — returns the answer) | spawn (non-blocking — returns a handle so you can keep working) | poll (status of handles) | join (await handles and collect their outputs) | list (active + resumable subagents) | agents (list the reusable agent types loaded from .pit/agents) | resume (continue a subagent cut short by ESC or a network drop, by its `name`/handle, with its transcript intact; pass `prompt` to steer the continuation) | continue (ask a follow-up of a subagent that FINISHED successfully, by its `name`/handle, reusing its transcript; `prompt` required) | read (fetch a settled subagent's INTEGRAL output by its `name`/handle — the join payload is only a small head+tail digest, so use this to recover the elided middle instead of re-spawning). Use spawn+join to fan out N independent tasks in parallel and gather them.",
+					"run (default, blocking — returns the answer) | spawn (non-blocking — returns a handle so you can keep working) | poll (status of handles) | join (await handles and collect their outputs) | cancel (request cancellation of running handles) | list (active + resumable subagents) | agents (list the reusable agent types loaded from .pit/agents) | resume (continue a subagent cut short by ESC or a network drop, by its `name`/handle, with its transcript intact; pass `prompt` to steer the continuation) | continue (ask a follow-up of a subagent that FINISHED successfully, by its `name`/handle, reusing its transcript; `prompt` required) | read (fetch a settled subagent's INTEGRAL output by its `name`/handle — the join payload is only a small head+tail digest, so use this to recover the elided middle instead of re-spawning). Use spawn+join to fan out N independent tasks in parallel and gather them.",
 			},
 		),
 	),
@@ -239,7 +256,15 @@ const taskSchema = Type.Object({
 		}),
 	),
 	worktree: Type.Optional(worktreeSchema),
-	timeout_ms: Type.Optional(Type.Number({ description: "Hard wall-clock timeout for the subagent in ms." })),
+	policy: Type.Optional(
+		Type.Object({
+			allowedPaths: Type.Optional(Type.Array(Type.String())),
+			deniedPaths: Type.Optional(Type.Array(Type.String())),
+			forbidTestChanges: Type.Optional(Type.Boolean()),
+			forbidTimeoutIncrease: Type.Optional(Type.Boolean()),
+			forbidAssertionRemoval: Type.Optional(Type.Boolean()),
+		}),
+	),
 	acceptance: Type.Optional(
 		Type.Object({
 			criteria: Type.Optional(
@@ -248,7 +273,20 @@ const taskSchema = Type.Object({
 			check: Type.Optional(
 				Type.String({ description: "Shell command; passes iff exit code 0 (permission-gated)." }),
 			),
-			max_attempts: Type.Optional(Type.Number({ description: "Worker attempts including the first; default 2." })),
+			max_attempts: Type.Optional(
+				Type.Integer({
+					minimum: 1,
+					maximum: 8,
+					description: "Worker attempts including the first; default 2 (maximum 8).",
+				}),
+			),
+			check_timeout_ms: Type.Optional(
+				Type.Integer({
+					minimum: 1000,
+					maximum: 600000,
+					description: "Timeout for the acceptance shell check in milliseconds; default 120000 (maximum 600000).",
+				}),
+			),
 		}),
 	),
 });
@@ -414,8 +452,8 @@ export interface CoordinatorExtensionOptions {
 	onAsyncComplete?: (
 		handle: string,
 		text: string,
-		status: "done" | "error",
-		meta?: { turns?: number; totalTokens?: number },
+		status: "done" | "error" | "cancelled",
+		meta?: { turns?: number; totalTokens?: number; costUsd?: number },
 	) => boolean;
 	/** Fired just before a subagent (run or spawn) starts, so the parent can surface it as live. */
 	onSubagentStart?: (handle: string) => void;
@@ -424,8 +462,8 @@ export interface CoordinatorExtensionOptions {
 	/** Fired when a blocking run/resume/continue settles (turns/tokens for the TUI). */
 	onSubagentComplete?: (
 		handle: string,
-		status: "done" | "error",
-		meta?: { turns?: number; totalTokens?: number },
+		status: "done" | "error" | "cancelled",
+		meta?: { turns?: number; totalTokens?: number; costUsd?: number },
 	) => void;
 	/** Called once with a function that aborts all detached op:"spawn" controllers (Esc). */
 	registerAbortDetached?: (abortFn: () => void) => void;
@@ -457,39 +495,83 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	// on session teardown.
 	const outputStore = createSubagentOutputStore();
 	const scopedHindsightEnabled = () => {
-		if (process.env.PIT_NO_SCOPED_HINDSIGHT === "1") return false;
+		if (isTruthyEnvFlag(process.env.PIT_NO_SCOPED_HINDSIGHT)) return false;
 		return options.isScopedHindsightEnabled?.() ?? true;
 	};
 
 	// Detached subagents launched via op:"spawn", keyed by handle. Collected via
 	// op:"poll"/"join"; a joined handle is freed once settled.
 	const pending = new Map<string, PendingTask>();
+	// When a settled pending entry is evicted, retain only enough state to make
+	// poll/join explicit and keep its name reserved until the caller acknowledges
+	// it with join. The integral output remains in outputStore for op:"read".
+	const evictedPending = new Map<string, EvictedPendingTask>();
+	// Identity reservations outlive the compact tombstone display cache, up to a
+	// bounded cap. Preserve the last status too, so poll does not turn an evicted
+	// error/cancellation into a successful `done` result.
+	const reservedAsyncHandles = new Map<string, PendingTask["status"]>();
 	let asyncTaskCounter = 0;
 	let runTaskCounter = 0;
 
-	// Bound the async-task map: auto-delivered results (delivered=true) are never
-	// joined, so without pruning they'd accumulate (handle + result, up to ~24KB
-	// each) for the whole session. Evict the OLDEST COLLECTED entries past the cap
-	// (insertion-order iteration). Running tasks are never evicted, and neither is a
-	// settled-but-undelivered result: by default async re-injection is OFF, so
-	// onAsyncComplete returns false and a finished task stays
-	// `status==="done" && !delivered` and the model is expected to poll/join it.
-	// Dropping such an entry would make its output unreachable (poll/join would then
-	// report `unknown handle`). Errored entries are collectible-once but safe to drop
-	// under pressure since their payload is small.
+	// Bound all detached bookkeeping. Running tasks remain protected even if that
+	// temporarily puts `pending` over PENDING_MAX; settled entries move to a compact
+	// tombstone rather than retaining their digest/result indefinitely. Tombstones
+	// preserve a clear poll/join outcome and collision protection, while outputStore
+	// keeps full text recoverable through op:"read" when its best-effort disk write
+	// succeeded.
 	const PENDING_MAX = 64;
-	function prunePending(): void {
-		if (pending.size <= PENDING_MAX) return;
-		for (const [h, e] of pending) {
-			if (pending.size <= PENDING_MAX) break;
-			const collectible = e.status === "done" && !e.delivered;
-			if (e.status !== "running" && !collectible) pending.delete(h);
+	const EVICTED_PENDING_MAX = 64;
+	const RESERVED_ASYNC_MAX = 256;
+	function rememberEvictedPending(entry: PendingTask): void {
+		if (entry.status === "running") return;
+		// Reinsert at the tail so a handle that was refreshed after an earlier
+		// eviction is not treated as the oldest tombstone on the next trim.
+		evictedPending.delete(entry.handle);
+		evictedPending.set(entry.handle, {
+			handle: entry.handle,
+			status: entry.status,
+			error: entry.error,
+			delivered: entry.delivered,
+		});
+		while (evictedPending.size > EVICTED_PENDING_MAX) {
+			const oldest = evictedPending.keys().next().value;
+			if (oldest === undefined) break;
+			evictedPending.delete(oldest);
 		}
 	}
+	function markEvictedDelivered(handle: string): void {
+		const evicted = evictedPending.get(handle);
+		if (evicted) evicted.delivered = true;
+	}
+	function pruneReservedHandles(): void {
+		if (reservedAsyncHandles.size <= RESERVED_ASYNC_MAX) return;
+		for (const handle of reservedAsyncHandles.keys()) {
+			if (reservedAsyncHandles.size <= RESERVED_ASYNC_MAX) break;
+			// Running, pending, and tombstoned handles still have an explicit lifecycle
+			// entry and must remain collision-protected until the caller acknowledges them.
+			if (pending.has(handle) || evictedPending.has(handle)) continue;
+			reservedAsyncHandles.delete(handle);
+		}
+	}
+	function prunePending(): void {
+		if (pending.size > PENDING_MAX) {
+			for (const [h, e] of pending) {
+				if (pending.size <= PENDING_MAX) break;
+				if (e.status !== "running") {
+					pending.delete(h);
+					rememberEvictedPending(e);
+				}
+			}
+		}
+		pruneReservedHandles();
+	}
+
+	type ResumeMetadata = Omit<ResumeState, "messages" | "savedAt">;
 
 	interface LiveAgentRecord {
 		agent: Agent;
 		recordId: string;
+		resumeMetadata?: ResumeMetadata;
 	}
 
 	// Live Agents whose run was cut short (ESC abort, or a network drop that ended
@@ -504,10 +586,20 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	// parent session. Distinct from `resumable` (interrupted/errored runs).
 	const continuable = new Map<string, LiveAgentRecord>();
 	const CONTINUABLE_MAX = 8;
+	const lifecycleInFlight = new Set<string>();
+	const resumeInFlight = new Map<string, Promise<TaskOpResult>>();
+	const resumeControllers = new Map<string, AbortController>();
 
 	/** Record a successfully-finished Agent as continuable, evicting the oldest past the cap. */
-	function rememberContinuable(handle: string, agent: Agent, recordId: string): void {
-		continuable.set(handle, { agent, recordId });
+	async function rememberContinuable(
+		handle: string,
+		agent: Agent,
+		recordId: string,
+		resumeMetadata?: ResumeMetadata,
+	): Promise<void> {
+		resumable.delete(handle);
+		continuable.set(handle, { agent, recordId, resumeMetadata });
+		await deleteResumeState(options.getCwd ? options.getCwd() : process.cwd(), handle);
 		if (continuable.size > CONTINUABLE_MAX) {
 			const oldest = continuable.keys().next().value;
 			if (oldest !== undefined) continuable.delete(oldest);
@@ -517,16 +609,17 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	function completeMetaFromUsage(
 		turns: number | undefined,
 		usage: SubagentUsage | undefined,
-	): { turns?: number; totalTokens?: number } {
+	): { turns?: number; totalTokens?: number; costUsd?: number } {
 		return {
 			turns,
 			totalTokens: usage?.totalTokens,
+			costUsd: usage?.costUsd,
 		};
 	}
 
 	function emitBlockingComplete(
 		handle: string,
-		status: "done" | "error",
+		status: "done" | "error" | "cancelled",
 		turns?: number,
 		usage?: SubagentUsage,
 	): void {
@@ -548,12 +641,44 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	const RESUMABLE_MAX = 8;
 
 	/** Record an interrupted Agent as resumable, evicting the oldest past the cap. */
-	function rememberResumable(handle: string, agent: Agent, recordId: string): void {
-		resumable.set(handle, { agent, recordId });
+	function rememberResumable(handle: string, agent: Agent, recordId: string, resumeMetadata?: ResumeMetadata): void {
+		continuable.delete(handle);
+		resumable.set(handle, { agent, recordId, resumeMetadata });
 		if (resumable.size > RESUMABLE_MAX) {
 			const oldest = resumable.keys().next().value;
 			if (oldest !== undefined && oldest !== handle) resumable.delete(oldest);
 		}
+	}
+
+	function metadataFromResumeState(state: ResumeState): ResumeMetadata {
+		return {
+			handle: state.handle,
+			modelId: state.modelId,
+			thinkingLevel: state.thinkingLevel,
+			systemPrompt: state.systemPrompt,
+			allowedTools: state.allowedTools,
+			agentScope: state.agentScope,
+			cwd: state.cwd,
+			depth: state.depth,
+		};
+	}
+
+	async function persistLiveResumeState(
+		rcwd: string,
+		key: string,
+		agent: Agent,
+		resumeMetadata?: ResumeMetadata,
+	): Promise<void> {
+		const persisted = await loadResumeState(rcwd, key);
+		const base = persisted ?? resumeMetadata;
+		if (!base) return;
+		await saveResumeState(rcwd, {
+			...base,
+			...(resumeMetadata ?? {}),
+			handle: resumeMetadata?.handle ?? persisted?.handle ?? key,
+			messages: agent.state.messages,
+			savedAt: Date.now(),
+		});
 	}
 
 	// Reusable agent types from .pit/agents/*.md, loaded once. Spawn via task({type}).
@@ -635,7 +760,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	 * the parent, yet its head AND tail both survive (a head-only re-cut would drop
 	 * the tail the model recovered it for).
 	 */
-	function readOutput(handle: string | undefined): TaskOpResult {
+	async function readOutput(handle: string | undefined): Promise<TaskOpResult> {
 		const key = handle?.trim();
 		if (!key) {
 			return {
@@ -647,7 +772,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			};
 		}
 		const record = registry.list().find((r) => r.taskName === key);
-		const full = record?.output ?? outputStore.get(key);
+		const full = record?.output ?? (await outputStore.get(key));
 		if (full === undefined) {
 			return {
 				content: [
@@ -667,13 +792,13 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		};
 	}
 
-	function spawnBudgetBlock(): TaskOpResult | undefined {
+	function reserveSpawnBudget(estimatedTokens = 4096): SubagentTokenReservation | TaskOpResult {
 		const governor = options.getTokenGovernor?.();
-		if (!governor) return undefined;
-		const gate = governor.evaluateSpawn();
-		if (gate.allowed) return undefined;
+		if (!governor) return { allowed: true, record: () => {}, release: () => {} };
+		const reservation = governor.reserveSubagent(estimatedTokens);
+		if (reservation.allowed) return reservation;
 		return {
-			content: [{ type: "text" as const, text: gate.reason ?? "Token budget blocks subagent spawn." }],
+			content: [{ type: "text" as const, text: reservation.reason ?? "Token budget blocks subagent spawn." }],
 			isError: true,
 			details: undefined,
 		};
@@ -698,6 +823,38 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			turnCount: record.turnCount,
 			usage: record.usage ? { ...record.usage } : undefined,
 		};
+	}
+
+	async function resumeHandle(
+		handle: string | undefined,
+		continuation: string | undefined,
+		_signal: AbortSignal | undefined,
+	): Promise<TaskOpResult> {
+		const key = handle?.trim();
+		if (!key) return await resumeHandleUnlocked(handle, continuation, undefined);
+		const existing = resumeInFlight.get(key);
+		if (existing) return await existing;
+		if (lifecycleInFlight.has(key)) {
+			return {
+				content: [
+					{ type: "text" as const, text: `task: subagent "${key}" already has a continue operation in progress.` },
+				],
+				isError: true,
+				details: { handle: key, inFlight: true },
+			};
+		}
+		lifecycleInFlight.add(key);
+		const controller = new AbortController();
+		resumeControllers.set(key, controller);
+		const promise = resumeHandleUnlocked(handle, continuation, controller.signal);
+		resumeInFlight.set(key, promise);
+		try {
+			return await promise;
+		} finally {
+			if (resumeInFlight.get(key) === promise) resumeInFlight.delete(key);
+			if (resumeControllers.get(key) === controller) resumeControllers.delete(key);
+			lifecycleInFlight.delete(key);
+		}
 	}
 
 	/**
@@ -755,8 +912,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	 * re-drive a live Agent (no registry record), so the disk copy is the ONLY way
 	 * their full output stays retrievable.
 	 */
-	function cappedBody(output: string, readHandle: string): string {
-		outputStore.put(readHandle, output);
+	async function cappedBody(output: string, readHandle: string): Promise<string> {
+		await outputStore.put(readHandle, output);
 		return digestWithPointer(output, readHandle);
 	}
 
@@ -852,11 +1009,17 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		const handleLines = [...pending.values()].map(
 			(e) => `- ${e.handle} [${e.status}]${e.error ? ` (${e.error})` : ""}`,
 		);
+		const evictedHandleLines = [...evictedPending.values()].map(
+			(e) => `- ${e.handle} [${e.status}; evicted â€” use op:"read" then op:"join"]`,
+		);
 		const sections: string[] = [];
 		sections.push(
 			records.length ? `Subagents (${records.length}):\n${recLines.join("\n")}` : "No subagents tracked.",
 		);
 		if (handleLines.length) sections.push(`Async handles (${handleLines.length}):\n${handleLines.join("\n")}`);
+		if (evictedHandleLines.length) {
+			sections.push(`Evicted async handles (${evictedHandleLines.length}):\n${evictedHandleLines.join("\n")}`);
+		}
 		// Disk stems carry a discriminator (resumeStateStem); the in-memory map is
 		// keyed by raw handle. Map the live keys through the same stem so a handle
 		// that is BOTH live and persisted is not listed twice. (H21)
@@ -886,6 +1049,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			details: {
 				subagents: records.length,
 				asyncHandles: pending.size,
+				evictedAsyncHandles: evictedPending.size,
+				reservedAsyncHandles: reservedAsyncHandles.size,
 				resumable: resumable.size + diskHandles.length,
 				continuable: continuable.size,
 				// active/queued are process-wide (slot budget shared across coordinator instances).
@@ -896,7 +1061,40 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		};
 	}
 
-	/** op:"poll" — non-blocking status of the given async handles. */
+	/** op:"cancel" — explicitly abort detached subagents by handle. */
+	function cancelHandles(rawHandles: string[]): TaskOpResult {
+		if (rawHandles.length === 0) {
+			return {
+				content: [{ type: "text" as const, text: "task: cancel needs `handles`." }],
+				isError: true,
+				details: undefined,
+			};
+		}
+		const handles = [...new Set(rawHandles)];
+		const lines = handles.map((handle) => {
+			const resumeController = resumeControllers.get(handle);
+			if (resumeController) {
+				resumeController.abort(new Error("aborted: cancelled by parent agent"));
+				return `${handle}: resume cancellation requested`;
+			}
+			const entry = pending.get(handle);
+			if (!entry) {
+				const evicted = evictedPending.get(handle);
+				return evicted
+					? `${handle}: evicted (${evicted.status}); use op:"read" to recover any stored output, then op:"join" to release the handle`
+					: `${handle}: unknown handle`;
+			}
+			if (entry.status !== "running") return `${handle}: already ${entry.status}`;
+			entry.controller.abort(new Error("aborted: cancelled by parent agent"));
+			return `${handle}: cancellation requested`;
+		});
+		return {
+			content: [{ type: "text" as const, text: lines.join("\n") }],
+			isError: false,
+			details: { cancelled: handles.filter((handle) => pending.get(handle)?.status === "running").length },
+		};
+	}
+
 	function pollHandles(rawHandles: string[]): TaskOpResult {
 		if (rawHandles.length === 0) {
 			return {
@@ -907,22 +1105,36 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		}
 		const handles = [...new Set(rawHandles)];
 		const lines = handles.map((h) => {
+			if (resumeInFlight.has(h)) return `${h}: running (resume)`;
 			const e = pending.get(h);
-			if (!e) return `${h}: unknown handle`;
+			if (!e) {
+				const evicted = evictedPending.get(h);
+				return evicted
+					? `${h}: evicted (${evicted.status}); use op:"read" to recover any stored output, then op:"join" to acknowledge it`
+					: reservedAsyncHandles.has(h)
+						? `${h}: settled (details evicted); use op:"read" to recover any stored output, then op:"join" to acknowledge it`
+						: `${h}: unknown handle`;
+			}
 			if (e.status === "running") return `${h}: running`;
+			if (e.status === "cancelled") return `${h}: cancelled${e.error ? ` — ${e.error}` : ""}`;
 			if (e.status === "error") return `${h}: error — ${e.error ?? "failed"}`;
 			if (e.delivered) return `${h}: done (already delivered to chat)`;
 			return `${h}: done (collect with op:"join")`;
 		});
-		const anyDone = handles.some((h) => pending.get(h)?.status === "done");
+		const statusForHandle = (handle: string) =>
+			resumeInFlight.has(handle)
+				? "running"
+				: (pending.get(handle)?.status ?? evictedPending.get(handle)?.status ?? reservedAsyncHandles.get(handle));
+		const anyDone = handles.some((h) => statusForHandle(h) === "done");
 		const allSettled = handles.every((h) => {
-			const s = pending.get(h)?.status;
-			return s === "done" || s === "error";
+			const s = statusForHandle(h);
+			return s === "done" || s === "error" || s === "cancelled";
 		});
+		const evicted = handles.filter((h) => evictedPending.has(h)).length;
 		return {
 			content: [{ type: "text" as const, text: lines.join("\n") }],
 			isError: false,
-			details: { anyDone, allSettled },
+			details: { anyDone, allSettled, evicted },
 		};
 	}
 
@@ -937,6 +1149,15 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		}
 		const handles = [...new Set(rawHandles)];
 		const entries = handles.map((h) => pending.get(h)).filter((e): e is PendingTask => e !== undefined);
+		const resumeSnapshot = new Map(
+			handles.flatMap((h) => (resumeInFlight.has(h) ? [[h, resumeInFlight.get(h)!]] : [])),
+		);
+		const evictedSnapshot = new Map(
+			handles
+				.map((h) => evictedPending.get(h))
+				.filter((e): e is EvictedPendingTask => e !== undefined)
+				.map((e) => [e.handle, e]),
+		);
 		// Snapshot the resolved entries (keyed by handle) BEFORE awaiting. A concurrent
 		// op:spawn can call prunePending() while we're suspended on the await, which evicts
 		// the oldest SETTLED entries — including a just-joined one — from `pending`. Reading
@@ -945,11 +1166,42 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		// entry objects, whose status/result/error mutate in place, so it reflects the final
 		// settled state once the await resolves.
 		const snapshot = new Map(entries.map((e) => [e.handle, e]));
-		await yieldRunSlotWhile(signal, () => Promise.allSettled(entries.map((e) => e.promise)));
+		try {
+			await yieldRunSlotWhile(signal, () =>
+				Promise.allSettled([...entries.map((e) => e.promise), ...resumeSnapshot.values()]),
+			);
+		} catch (err) {
+			if (signal?.aborted) {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: "task: join cancelled; detached subagents continue in the background.",
+						},
+					],
+					isError: true,
+					details: { joined: 0, cancelled: true },
+				};
+			}
+			throw err;
+		}
+		const resumeResults = new Map<string, TaskOpResult>();
+		for (const [handle, promise] of resumeSnapshot) resumeResults.set(handle, await promise);
 		const parts = handles.map((h) => {
+			const resumed = resumeResults.get(h);
+			if (resumed) return `### ${h}\n${resumed.content.map((block) => block.text).join("\n")}`;
 			const e = snapshot.get(h) ?? pending.get(h);
-			if (!e) return `### ${h}\n(unknown handle)`;
+			if (!e) {
+				const evicted = evictedSnapshot.get(h) ?? evictedPending.get(h);
+				if (!evicted && reservedAsyncHandles.has(h)) {
+					return `### ${h}\n[settled details were evicted from the detached-result cache. Use task({op:"${SUBAGENT_READ_OP}", name:"${h}"}) to recover any stored integral output.]`;
+				}
+				if (!evicted) return `### ${h}\n(unknown handle)`;
+				const state = evicted.delivered ? "already delivered to chat" : `${evicted.status} result`;
+				return `### ${h}\n[${state} was evicted from the detached-result cache. Use task({op:"${SUBAGENT_READ_OP}", name:"${h}"}) to recover any stored integral output.]`;
+			}
 			if (e.status === "error") return `### ${h}\n[failed: ${e.error ?? "error"}]`;
+			if (e.status === "cancelled") return formatCancelledPending(h, e);
 			if (e.delivered)
 				return `### ${h}\n(already delivered to the chat automatically when it finished — not repeated)`;
 			return `### ${h}\n${e.result ?? "(no output)"}`;
@@ -957,11 +1209,14 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		for (const h of handles) {
 			const e = pending.get(h);
 			if (e && e.status !== "running") pending.delete(h);
+			evictedPending.delete(h);
+			if (e?.status !== "running") reservedAsyncHandles.delete(h);
+			else if (!e) reservedAsyncHandles.delete(h);
 		}
 		return {
 			content: [{ type: "text" as const, text: parts.join("\n\n") }],
 			isError: false,
-			details: { joined: entries.length },
+			details: { joined: entries.length + resumeSnapshot.size, evicted: evictedSnapshot.size },
 		};
 	}
 
@@ -972,7 +1227,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	 * (caller-supplied or a default) is issued. On success the handle is freed; if
 	 * it errors again it stays resumable for another attempt.
 	 */
-	async function resumeHandle(
+	async function resumeHandleUnlocked(
 		handle: string | undefined,
 		continuation: string | undefined,
 		signal: AbortSignal | undefined,
@@ -991,6 +1246,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			return await resumeFromDisk(key, continuation, signal);
 		}
 		const { agent, recordId } = live;
+		safeCallback(() => options.onSubagentStart?.(key), undefined);
 		// The interrupted run may still be settling (an aborted stream resolves
 		// async). Stop it and wait for idle before re-driving the same Agent.
 		agent.abort();
@@ -1017,6 +1273,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		// issued from inside a nested subagent's turn can't deadlock the budget.
 		let promptFailed = false;
 		let promptError: unknown;
+		let settlementStatus: SubagentStatus = "running";
 		try {
 			await withRunSlot(signal, () => agent.prompt(text));
 		} catch (err) {
@@ -1024,16 +1281,36 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			promptError = err;
 		} finally {
 			cleanupAbort();
+			settlementStatus = directSettlementStatus(agent, promptFailed, signal);
 			accountDirectAgentSettlement(
 				agent,
 				messageBoundary,
 				recordBaseline,
-				directSettlementStatus(agent, promptFailed, signal),
+				settlementStatus,
 				directSettlementError(agent, promptError),
+			);
+			safeCallback(
+				() =>
+					options.onSubagentProgress?.(key, {
+						turn: agent.state.messages.filter((m) => m.role === "assistant").length,
+					}),
+				undefined,
+			);
+			safeCallback(
+				() =>
+					options.onSubagentComplete?.(
+						key,
+						settlementStatus === "completed" ? "done" : settlementStatus === "cancelled" ? "cancelled" : "error",
+						completeMetaFromUsage(undefined, undefined),
+					),
+				undefined,
 			);
 		}
 		if (promptFailed) {
 			const message = promptError instanceof Error ? promptError.message : String(promptError);
+			// A thrown prompt can still have appended partial messages. Keep the
+			// durable Tier-2 transcript in sync before exposing the retry path.
+			await persistLiveResumeState(rcwd, key, agent, live.resumeMetadata);
 			return {
 				content: [{ type: "text" as const, text: `Subagent resume failed: ${message}` }],
 				isError: true,
@@ -1041,6 +1318,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			};
 		}
 		if (agentEndedWithError(agent)) {
+			await persistLiveResumeState(rcwd, key, agent, live.resumeMetadata);
 			// Still unfinished — keep it resumable for another attempt.
 			return {
 				content: [
@@ -1054,8 +1332,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			};
 		}
 		resumable.delete(key);
-		await deleteResumeState(rcwd, key);
-		const body = cappedBody(extractAssistantText(agent.state.messages), key);
+		await rememberContinuable(key, agent, recordId, live.resumeMetadata);
+		const body = await cappedBody(extractAssistantText(agent.state.messages), key);
 		return {
 			content: [{ type: "text" as const, text: body }],
 			isError: false,
@@ -1069,7 +1347,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	 * resume (interrupted/errored runs), the Agent stays continuable afterwards so
 	 * multiple follow-ups are possible. `prompt` is required.
 	 */
-	async function continueHandle(
+	async function continueHandleUnlocked(
 		handle: string | undefined,
 		continuation: string | undefined,
 		signal: AbortSignal | undefined,
@@ -1105,12 +1383,14 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		}
 		const { agent, recordId } = live;
 		const messageBoundary = agent.state.messages.length;
+		safeCallback(() => options.onSubagentStart?.(key), undefined);
 		const recordBaseline = directAgentRecordBaseline(recordId);
 		// A fresh ESC during the follow-up aborts this Agent; it stays continuable.
 		const cleanupAbort = wireAbort(agent, signal);
 		// Respect the concurrency budget: a follow-up is a live run like any spawn.
 		let promptFailed = false;
 		let promptError: unknown;
+		let settlementStatus: SubagentStatus = "running";
 		try {
 			await withRunSlot(signal, () => agent.prompt(text));
 		} catch (err) {
@@ -1118,28 +1398,86 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			promptError = err;
 		} finally {
 			cleanupAbort();
+			settlementStatus = directSettlementStatus(agent, promptFailed, signal);
 			accountDirectAgentSettlement(
 				agent,
 				messageBoundary,
 				recordBaseline,
-				directSettlementStatus(agent, promptFailed, signal),
+				settlementStatus,
 				directSettlementError(agent, promptError),
+			);
+			safeCallback(
+				() =>
+					options.onSubagentProgress?.(key, {
+						turn: agent.state.messages.filter((m) => m.role === "assistant").length,
+					}),
+				undefined,
+			);
+			safeCallback(
+				() =>
+					options.onSubagentComplete?.(
+						key,
+						settlementStatus === "completed" ? "done" : settlementStatus === "cancelled" ? "cancelled" : "error",
+						completeMetaFromUsage(undefined, undefined),
+					),
+				undefined,
 			);
 		}
 		if (promptFailed) {
 			const message = promptError instanceof Error ? promptError.message : String(promptError);
+			const rcwd = options.getCwd ? options.getCwd() : process.cwd();
+			continuable.delete(key);
+			rememberResumable(key, agent, recordId, live.resumeMetadata);
+			await persistLiveResumeState(rcwd, key, agent, live.resumeMetadata);
 			return {
-				content: [{ type: "text" as const, text: `Subagent continue failed: ${message}` }],
+				content: [{ type: "text" as const, text: `Subagent continue failed: ${message}. It remains resumable.` }],
 				isError: true,
-				details: { handle: key, continued: true },
+				details: { handle: key, continued: true, stillResumable: true },
 			};
 		}
-		const body = cappedBody(extractAssistantText(agent.state.messages), key);
+		if (agentEndedWithError(agent)) {
+			const rcwd = options.getCwd ? options.getCwd() : process.cwd();
+			continuable.delete(key);
+			rememberResumable(key, agent, recordId, live.resumeMetadata);
+			await persistLiveResumeState(rcwd, key, agent, live.resumeMetadata);
+			return {
+				content: [{ type: "text" as const, text: `Continue of "${key}" did not complete; it remains resumable.` }],
+				isError: true,
+				details: { handle: key, continued: true, stillResumable: true },
+			};
+		}
+		const body = await cappedBody(extractAssistantText(agent.state.messages), key);
 		return {
 			content: [{ type: "text" as const, text: body }],
 			isError: false,
 			details: { handle: key, continued: true },
 		};
+	}
+
+	async function continueHandle(
+		handle: string | undefined,
+		continuation: string | undefined,
+		signal: AbortSignal | undefined,
+	): Promise<TaskOpResult> {
+		const key = handle?.trim();
+		if (key && lifecycleInFlight.has(key)) {
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: `task: subagent "${key}" already has a resume/continue operation in progress.`,
+					},
+				],
+				isError: true,
+				details: { handle: key, inFlight: true },
+			};
+		}
+		if (key) lifecycleInFlight.add(key);
+		try {
+			return await continueHandleUnlocked(handle, continuation, signal);
+		} finally {
+			if (key) lifecycleInFlight.delete(key);
+		}
 	}
 
 	/**
@@ -1178,9 +1516,10 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 
 				if (op === "list") return listSubagents();
 				if (op === "agents") return listAgentTypes();
-				if (op === SUBAGENT_READ_OP) return readOutput(p.name ?? p.handles?.[0]);
+				if (op === SUBAGENT_READ_OP) return await readOutput(p.name ?? p.handles?.[0]);
 				if (op === "poll") return pollHandles(p.handles ?? []);
 				if (op === "join") return await joinHandles(p.handles ?? [], signal);
+				if (op === "cancel") return cancelHandles(p.handles ?? (p.name ? [p.name] : []));
 				if (op === "resume") return await resumeHandle(p.name ?? p.handles?.[0], p.prompt, signal);
 				if (op === "continue") return await continueHandle(p.name ?? p.handles?.[0], p.prompt, signal);
 
@@ -1193,9 +1532,9 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					max_turns,
 					result_schema,
 					worktree,
-					timeout_ms,
 					inherit_skills,
 					acceptance,
+					policy,
 				} = p;
 				if (!prompt || !prompt.trim()) {
 					return {
@@ -1212,8 +1551,6 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						details: undefined,
 					};
 				}
-				const budgetBlocked = spawnBudgetBlock();
-				if (budgetBlocked) return budgetBlocked;
 				const agentType = resolveAgentType(agentTypeMap, p.type);
 				if (p.type?.trim() && !agentType) {
 					return {
@@ -1253,18 +1590,21 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				// (Tier 1) AND persist its transcript to disk so it survives a Pit
 				// restart (Tier 2). Callers await the disk write so an interrupted run is
 				// durably persisted before its result returns; saveResumeState never throws.
+				const resumeMetadata = (handle: string): ResumeMetadata => ({
+					handle,
+					modelId: subModel?.id ?? model.id,
+					thinkingLevel: subThinking,
+					systemPrompt: effSystemPrompt,
+					allowedTools: effAllowedToolsScoped,
+					agentScope: hindsightScope,
+					cwd: effectiveChildCwd,
+					depth: childDepth,
+				});
 				const markResumable = (handle: string, agent: Agent, recordId: string): Promise<void> => {
-					rememberResumable(handle, agent, recordId);
+					rememberResumable(handle, agent, recordId, resumeMetadata(handle));
 					return saveResumeState(cwd, {
-						handle,
+						...resumeMetadata(handle),
 						messages: agent.state.messages,
-						modelId: subModel?.id ?? model.id,
-						thinkingLevel: subThinking,
-						systemPrompt: effSystemPrompt,
-						allowedTools: effAllowedToolsScoped,
-						agentScope: hindsightScope,
-						cwd: effectiveChildCwd,
-						depth: childDepth,
 						savedAt: Date.now(),
 					});
 				};
@@ -1310,8 +1650,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							details: { handle, async: true },
 						};
 					}
-					// Mirror prunePending's collectible() predicate: a prior spawn with the
-					// SAME `name` that finished (status==="done") but was never joined/polled
+					// A prior spawn with the SAME `name` that finished (status==="done") but was never joined/polled
 					// (delivered===false — the DEFAULT, since async re-injection is off) still
 					// holds an unreachable result. Overwriting its `pending` entry would drop
 					// that output silently; reject so the caller collects it first.
@@ -1327,6 +1666,37 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							details: { handle, async: true },
 						};
 					}
+					const evicted = evictedPending.get(handle);
+					if (evicted?.delivered) {
+						evictedPending.delete(handle);
+						reservedAsyncHandles.delete(handle);
+					}
+					if (evicted && !evicted.delivered) {
+						return {
+							content: [
+								{
+									type: "text" as const,
+									text: `task: a settled subagent named "${handle}" was evicted from the detached-result cache. Recover any stored output with task({op:"${SUBAGENT_READ_OP}", name:"${handle}"}), then task({op:"join", handles:["${handle}"]}) to release the handle before re-spawning.`,
+								},
+							],
+							isError: true,
+							details: { handle, async: true, evicted: true },
+						};
+					}
+					if (reservedAsyncHandles.has(handle)) {
+						return {
+							content: [
+								{
+									type: "text" as const,
+									text: `task: a settled subagent named "${handle}" is still reserved although its details were evicted. Recover any stored output with task({op:"${SUBAGENT_READ_OP}", name:"${handle}"}), then task({op:"join", handles:["${handle}"]}) before re-spawning.`,
+								},
+							],
+							isError: true,
+							details: { handle, async: true, retained: true },
+						};
+					}
+					const budgetReservation = reserveSpawnBudget(acceptance ? 8192 : 4096);
+					if ("content" in budgetReservation) return budgetReservation;
 					const controller = new AbortController();
 					const entry: PendingTask = {
 						handle,
@@ -1361,10 +1731,11 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					// itself is acquired inside spawnSubagent (single chokepoint); a queue-
 					// full / abort rejection is caught below (status="error" +
 					// onAsyncComplete) instead of escaping as an unhandledRejection.
+					const hasGate = !!(acceptance?.criteria || acceptance?.check);
 					entry.promise = withoutLease(async () => {
 						try {
 							safeCallback(() => options.onSubagentStart?.(handle), undefined);
-							const result = await spawnSubagent(makeSpawnDeps(spawnChildTools, model), {
+							const spawnOpts = {
 								prompt,
 								model: subModel,
 								thinkingLevel: subThinking,
@@ -1376,85 +1747,136 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 								maxTurns: max_turns,
 								signal: controller.signal,
 								resultSchema,
+								mutationPolicy: policy,
 								worktree: worktree as boolean | { branch?: string; cleanup?: "auto" | "keep" } | undefined,
-								timeoutMs: timeout_ms,
 								taskName: handle,
 								cwd,
 								depth: childDepth,
 								inheritSkills: inherit_skills,
 								systemPromptSuffix: spawnSystemPromptSuffix,
-								onWorktreeReady: (path) => {
+								onWorktreeReady: (path: string) => {
 									effectiveChildCwd = path;
 								},
-								onSubagentEvent: (info) => options.onSubagentProgress?.(handle, info),
-								onAgentReady: (agent, record) => {
+								onSubagentEvent: hasGate
+									? undefined
+									: (info: { turn: number; lastTool?: string; totalTokens?: number }) =>
+											options.onSubagentProgress?.(handle, info),
+								onAgentReady: (agent: Agent, record: { id: string }) => {
 									capturedAgent = agent;
 									capturedRecordId = record.id;
 									spawnMessagingReady?.(agent);
 								},
-							});
-							recordSubagentSpend(result.usage);
-							const meta = completeMetaFromUsage(result.record.turnCount, result.usage);
+							};
+							const gated = await runWithAcceptance(
+								{
+									...makeSpawnDeps(spawnChildTools, model),
+									acceptanceLifecycle: {
+										handlePrefix: handle,
+										onStart: (phaseHandle) => options.onSubagentStart?.(phaseHandle),
+										onProgress: (phaseHandle, info) => options.onSubagentProgress?.(phaseHandle, info),
+										onComplete: (phaseHandle, status, phaseMeta) =>
+											options.onSubagentComplete?.(phaseHandle, status, phaseMeta),
+									},
+								},
+								spawnOpts,
+								acceptance,
+							);
+							const result = gated.result;
+							const effectiveUsage = gated.usage ?? result.usage;
+							budgetReservation.record(effectiveUsage);
+							const meta = completeMetaFromUsage(result.record.turnCount, effectiveUsage);
 							entry.turns = meta.turns;
 							entry.totalTokens = meta.totalTokens;
+							entry.costUsd = meta.costUsd;
 							// A drop that ended the turn on an error (without throwing) still
 							// leaves a resumable transcript — surface it as such, not "done".
-							if (capturedAgent && capturedRecordId && agentEndedWithError(capturedAgent) && !usedAutoWorktree) {
-								await markResumable(handle, capturedAgent, capturedRecordId);
-								entry.status = "error";
-								entry.error = "interrupted (resumable)";
-								const note = `Subagent '${handle}' was interrupted before finishing — resume with task({op:"resume", name:"${handle}"}).`;
-								if (
-									safeCallback(() => options.onAsyncComplete?.(handle, note, "error", meta) ?? false, false)
-								) {
-									entry.delivered = true;
+							const interrupted = !!capturedAgent && agentEndedWithError(capturedAgent);
+							let completionStatus: "done" | "error" | "cancelled" = gated.isError ? "error" : "done";
+							if (interrupted) {
+								if (capturedAgent && capturedRecordId && !usedAutoWorktree) {
+									await markResumable(handle, capturedAgent, capturedRecordId);
+								} else {
+									await deleteResumeState(cwd, handle);
+								}
+								completionStatus = controller.signal.aborted ? "cancelled" : "error";
+								entry.error = usedAutoWorktree ? "interrupted (worktree cleanup)" : "interrupted (resumable)";
+							} else if (!gated.isError) {
+								await deleteResumeState(cwd, handle);
+								if (capturedAgent && capturedRecordId && !usedAutoWorktree) {
+									await rememberContinuable(handle, capturedAgent, capturedRecordId, resumeMetadata(handle));
 								}
 							} else {
-								if (capturedAgent && capturedRecordId && !usedAutoWorktree) {
-									rememberContinuable(handle, capturedAgent, capturedRecordId);
-								}
-								// Persist the integral output for op:"read" recovery, then keep only a digest inline.
-								outputStore.put(handle, result.output);
-								const resultText = formatSpawnResult(result, resultSchema, handle);
-								entry.result = resultText;
-								entry.status = "done";
-								if (
-									safeCallback(
-										() => options.onAsyncComplete?.(handle, resultText, "done", meta) ?? false,
-										false,
-									)
-								) {
-									entry.delivered = true;
-								}
+								await deleteResumeState(cwd, handle);
+								entry.error = `acceptance gate failed after ${gated.gate?.attempts ?? 1} attempt(s)`;
 							}
-						} catch (err) {
-							const failedUsage = getSubagentErrorUsage(err);
-							recordSubagentSpend(failedUsage);
-							entry.totalTokens = failedUsage?.totalTokens ?? entry.totalTokens;
-							entry.error = err instanceof Error ? err.message : String(err);
-							entry.status = "error";
-							if (capturedAgent && capturedRecordId && !usedAutoWorktree) {
-								await markResumable(handle, capturedAgent, capturedRecordId);
-							}
-							const suffix =
-								capturedAgent && !usedAutoWorktree ? ` Resume with task({op:"resume", name:"${handle}"}).` : "";
+							// Persist the integral output for op:"read" recovery, then keep only a digest inline.
+							await outputStore.put(handle, result.output);
+							const resultText = gated.gate
+								? digestWithPointer(gated.text, handle)
+								: formatSpawnResult(result, resultSchema, handle);
+							entry.result = resultText;
+							entry.status = completionStatus;
+							reservedAsyncHandles.set(handle, completionStatus);
+							const completionText =
+								completionStatus === "done" ? resultText : `${entry.error ?? "subagent failed"}\n${resultText}`;
+							prunePending();
 							if (
 								safeCallback(
-									() =>
-										options.onAsyncComplete?.(handle, `${entry.error}${suffix}`, "error", {
-											turns: entry.turns,
-											totalTokens: entry.totalTokens,
-										}) ?? false,
+									() => options.onAsyncComplete?.(handle, completionText, completionStatus, meta) ?? false,
 									false,
 								)
 							) {
 								entry.delivered = true;
+								markEvictedDelivered(handle);
+							}
+						} catch (err) {
+							const failedUsage = getSubagentErrorUsage(err);
+							budgetReservation.record(failedUsage);
+							entry.totalTokens = failedUsage?.totalTokens ?? entry.totalTokens;
+							entry.costUsd = failedUsage?.costUsd ?? entry.costUsd;
+							entry.error = err instanceof Error ? err.message : String(err);
+							entry.status = controller.signal.aborted ? "cancelled" : "error";
+							reservedAsyncHandles.set(handle, entry.status);
+							const partialRecord = capturedRecordId ? registry.get(capturedRecordId) : undefined;
+							if (partialRecord?.output) await outputStore.put(handle, partialRecord.output);
+							entry.result = partialRecord?.output ? digestWithPointer(partialRecord.output, handle) : undefined;
+							const workerInterrupted = !!capturedAgent && agentEndedWithError(capturedAgent);
+							if (capturedAgent && capturedRecordId && !usedAutoWorktree && (!hasGate || workerInterrupted)) {
+								await markResumable(handle, capturedAgent, capturedRecordId);
+							}
+							const suffix =
+								capturedAgent && !usedAutoWorktree && (!hasGate || workerInterrupted)
+									? ` Resume with task({op:"resume", name:"${handle}"}).`
+									: "";
+							prunePending();
+							if (
+								safeCallback(
+									() =>
+										options.onAsyncComplete?.(
+											handle,
+											`${entry.error}${suffix}${entry.result ? `\n\n${entry.result}` : ""}`,
+											entry.status === "cancelled" ? "cancelled" : "error",
+											{
+												turns: entry.turns,
+												totalTokens: entry.totalTokens,
+												costUsd: entry.costUsd,
+											},
+										) ?? false,
+									false,
+								)
+							) {
+								entry.delivered = true;
+								markEvictedDelivered(handle);
 							}
 						} finally {
 							if (spawnMessagingId) agentMessageBus.unregister(spawnMessagingId);
+							if (entry.delivered) reservedAsyncHandles.delete(handle);
+							budgetReservation.release();
+							prunePending();
 						}
 					});
 					pending.set(handle, entry);
+					reservedAsyncHandles.set(handle, "running");
 					prunePending();
 					const worktreeNote = usedAutoWorktree
 						? " Note: worktree cleanup:auto — this spawn is not resumable/continuable after settle."
@@ -1499,10 +1921,16 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					};
 				}
 
-				// The run slot is acquired inside spawnSubagent (single chokepoint);
-				// queue time is not counted against the task timeout. A queue-full /
-				// ESC rejection falls into the catch below (returns isError) instead
+				const budgetReservation = reserveSpawnBudget(acceptance ? 8192 : 4096);
+				if ("content" in budgetReservation) {
+					if (messagingId) agentMessageBus.unregister(messagingId);
+					return budgetReservation;
+				}
+
+				// The run slot is acquired inside spawnSubagent (single chokepoint).
+				// A queue-full / ESC rejection falls into the catch below (returns isError) instead
 				// of escaping execute() and crashing the batch.
+				const hasGate = !!(acceptance?.criteria || acceptance?.check);
 				try {
 					safeCallback(() => options.onSubagentStart?.(runHandle), undefined);
 					const spawnOpts = {
@@ -1517,8 +1945,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						maxTurns: max_turns,
 						signal,
 						resultSchema,
+						mutationPolicy: policy,
 						worktree: worktree as boolean | { branch?: string; cleanup?: "auto" | "keep" } | undefined,
-						timeoutMs: timeout_ms,
 						taskName: name ?? undefined,
 						cwd,
 						depth: childDepth,
@@ -1527,34 +1955,56 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						onWorktreeReady: (path: string) => {
 							effectiveChildCwd = path;
 						},
-						onSubagentEvent: (info: { turn: number; lastTool?: string; totalTokens?: number }) =>
-							options.onSubagentProgress?.(runHandle, info),
+						// A gate owns attempt-specific rows. Forwarding worker events to the
+						// parent handle too would reset its displayed turn on retry.
+						onSubagentEvent: hasGate
+							? undefined
+							: (info: { turn: number; lastTool?: string; totalTokens?: number }) =>
+									options.onSubagentProgress?.(runHandle, info),
 						onAgentReady: (agent: Agent, record: { id: string }) => {
 							capturedAgent = agent;
 							capturedRecordId = record.id;
 							messagingReady?.(agent);
 						},
 					};
-					const hasGate = !!(acceptance?.criteria || acceptance?.check);
 					const gated = hasGate
-						? await runWithAcceptance(makeSpawnDeps(childTools, model), spawnOpts, acceptance)
+						? await runWithAcceptance(
+								{
+									...makeSpawnDeps(childTools, model),
+									acceptanceLifecycle: {
+										handlePrefix: runHandle,
+										onStart: (handle) => options.onSubagentStart?.(handle),
+										onProgress: (handle, info) => options.onSubagentProgress?.(handle, info),
+										onComplete: (handle, status, meta) => options.onSubagentComplete?.(handle, status, meta),
+									},
+								},
+								spawnOpts,
+								acceptance,
+							)
 						: undefined;
 					const result = gated?.result ?? (await spawnSubagent(makeSpawnDeps(childTools, model), spawnOpts));
 					const effectiveUsage = gated?.usage ?? result.usage;
-					recordSubagentSpend(effectiveUsage);
+					budgetReservation.record(effectiveUsage);
 					const interrupted = !!capturedAgent && agentEndedWithError(capturedAgent);
 					if (interrupted && capturedAgent && capturedRecordId && !usedAutoWorktree) {
 						await markResumable(runHandle, capturedAgent, capturedRecordId);
-					} else {
+					} else if (interrupted) {
+						await deleteResumeState(cwd, runHandle);
+					} else if (!gated?.isError) {
+						await deleteResumeState(cwd, runHandle);
 						resumable.delete(runHandle);
 						if (!interrupted && capturedAgent && capturedRecordId && !usedAutoWorktree) {
-							rememberContinuable(runHandle, capturedAgent, capturedRecordId);
+							await rememberContinuable(runHandle, capturedAgent, capturedRecordId, resumeMetadata(runHandle));
 						}
+					} else {
+						await deleteResumeState(cwd, runHandle);
+						resumable.delete(runHandle);
+						continuable.delete(runHandle);
 					}
 					// op:"read" recovers by the canonical (collision-resolved) taskName the
 					// result details surface, so persist and cite that same key.
 					const readHandle = result.record.taskName;
-					outputStore.put(readHandle, result.output);
+					await outputStore.put(readHandle, result.output);
 					// Both branches go through the digest. The gated one carries the judge's
 					// accepted text, which is the FULL subagent output — skipping the cap
 					// here dumped it whole into the parent's context, and only on the tasks
@@ -1569,10 +2019,11 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					if (usedAutoWorktree) {
 						text = `${text}\n\n[not resumable/continuable — worktree cleanup:auto]`;
 					}
-					emitBlockingComplete(runHandle, interrupted ? "error" : "done", result.record.turnCount, effectiveUsage);
+					const isError = !!gated?.isError || interrupted;
+					emitBlockingComplete(runHandle, isError ? "error" : "done", result.record.turnCount, effectiveUsage);
 					return {
 						content: [{ type: "text" as const, text }],
-						isError: interrupted,
+						isError,
 						details: {
 							subagentId: result.record.id,
 							taskName: result.record.taskName,
@@ -1582,21 +2033,32 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							hasStructuredValue: result.value !== undefined,
 							deniedToolCalls: result.record.deniedToolCalls,
 							usedAutoWorktree,
+							costUsd: effectiveUsage?.costUsd,
 							...(gateDetails ? { gate: gateDetails } : {}),
 						},
 					};
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
 					const failedUsage = getSubagentErrorUsage(err);
-					recordSubagentSpend(failedUsage);
-					if (capturedAgent && capturedRecordId && !usedAutoWorktree) {
+					budgetReservation.record(failedUsage);
+					const workerInterrupted = !!capturedAgent && agentEndedWithError(capturedAgent);
+					const partialRecord = capturedRecordId ? registry.get(capturedRecordId) : undefined;
+					if (partialRecord?.output) await outputStore.put(runHandle, partialRecord.output);
+					if (capturedAgent && capturedRecordId && !usedAutoWorktree && (!hasGate || workerInterrupted)) {
 						await markResumable(runHandle, capturedAgent, capturedRecordId);
 					}
 					const hint =
-						capturedAgent && !usedAutoWorktree ? ` Resume with task({op:"resume", name:"${runHandle}"}).` : "";
-					emitBlockingComplete(runHandle, "error", undefined, failedUsage);
+						capturedAgent && !usedAutoWorktree && (!hasGate || workerInterrupted)
+							? ` Resume with task({op:"resume", name:"${runHandle}"}).`
+							: "";
+					emitBlockingComplete(runHandle, signal?.aborted ? "cancelled" : "error", undefined, failedUsage);
 					return {
-						content: [{ type: "text" as const, text: `Subagent failed: ${message}${hint}` }],
+						content: [
+							{
+								type: "text" as const,
+								text: `Subagent failed: ${message}${hint}${partialRecord?.output ? `\n\n${partialRecord.output}` : ""}`,
+							},
+						],
 						isError: true,
 						details: undefined,
 					};
@@ -1605,6 +2067,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					// spawnSubagent outcome (success, caught failure, or a throw before
 					// the agent's own teardown ran). delete is idempotent.
 					if (messagingId) agentMessageBus.unregister(messagingId);
+					budgetReservation.release();
 				}
 			},
 		});
@@ -1613,7 +2076,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	const acceptanceFieldSchema = Type.Object({
 		criteria: Type.Optional(Type.String()),
 		check: Type.Optional(Type.String()),
-		max_attempts: Type.Optional(Type.Number()),
+		max_attempts: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
+		check_timeout_ms: Type.Optional(Type.Integer({ minimum: 1000, maximum: 600000 })),
 	});
 
 	// Shared per-task/stage model guidance — same cost heuristic as `task`'s
@@ -1648,7 +2112,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	});
 
 	const parallelSchema = Type.Object({
-		tasks: Type.Array(parallelTaskSchema),
+		tasks: Type.Array(parallelTaskSchema, { maxItems: 32 }),
 		concurrency: Type.Optional(Type.Number()),
 	});
 
@@ -1681,16 +2145,15 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	 * Formats one settled parallel/fanout child for the parent's context: the
 	 * integral output is persisted for op:"read" recovery and only a head+tail
 	 * digest (plus the recovery pointer) is inlined — the same context economy
-	 * the single `task` op applies (N7). Also records the child's spend.
+	 * the single `task` op applies (N7). Its reservation already recorded the spend.
 	 */
-	function formatChildResult(r: ParallelTaskResult): string {
-		recordSubagentSpend(r.usage);
+	async function formatChildResult(r: ParallelTaskResult): Promise<string> {
 		const status = r.ok ? "ok" : "FAILED";
 		const gateNote = r.gate ? ` (gate ${r.gate.passed ? "passed" : "failed"}, attempts=${r.gate.attempts})` : "";
 		let body: string;
 		if (r.ok) {
 			const raw = r.value !== undefined ? JSON.stringify(r.value, null, 2) : (r.output ?? "");
-			outputStore.put(r.taskName, raw);
+			await outputStore.put(r.taskName, raw);
 			body = digestWithPointer(raw, r.taskName);
 		} else {
 			body = `[failed: ${r.error ?? "error"}]`;
@@ -1705,6 +2168,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			ok: r.ok,
 			...(r.turns !== undefined ? { turns: r.turns } : {}),
 			...(r.usage ? { totalTokens: r.usage.totalTokens } : {}),
+			...(r.usage ? { costUsd: r.usage.costUsd } : {}),
 			...(r.error ? { error: r.error } : {}),
 			...(r.gate ? { gate: r.gate } : {}),
 		}));
@@ -1739,8 +2203,6 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						details: undefined,
 					};
 				}
-				const budgetBlocked = spawnBudgetBlock();
-				if (budgetBlocked) return budgetBlocked;
 				const childDepth = depth + 1;
 				const cwd = options.getCwd ? options.getCwd() : process.cwd();
 				const childTools = buildSubagentToolCatalog(
@@ -1793,13 +2255,20 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						onTaskStart: (h) => options.onSubagentStart?.(h),
 						onTaskEvent: (h, info) => options.onSubagentProgress?.(h, info),
 						onTaskComplete: (h, status, meta) => options.onSubagentComplete?.(h, status, meta),
+						onTaskReserve: () => {
+							const reservation = reserveSpawnBudget();
+							return "content" in reservation
+								? { allowed: false, reason: reservation.content[0]?.text, release: () => {} }
+								: reservation;
+						},
 					});
-					const sections = results.map((r) => formatChildResult(r));
+					const sections = await Promise.all(results.map((r) => formatChildResult(r)));
 					const totalTokens = results.reduce((sum, r) => sum + (r.usage?.totalTokens ?? 0), 0);
+					const costUsd = results.reduce((sum, r) => sum + (r.usage?.costUsd ?? 0), 0);
 					return {
 						content: [{ type: "text" as const, text: sections.join("\n\n") }],
 						isError: false,
-						details: { results: summarizeChildResults(results), depth: childDepth, totalTokens },
+						details: { results: summarizeChildResults(results), depth: childDepth, totalTokens, costUsd },
 					};
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
@@ -1835,8 +2304,6 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						details: undefined,
 					};
 				}
-				const budgetBlocked = spawnBudgetBlock();
-				if (budgetBlocked) return budgetBlocked;
 				const childDepth = depth + 1;
 				const cwd = options.getCwd ? options.getCwd() : process.cwd();
 				const childTools = buildSubagentToolCatalog(
@@ -1916,22 +2383,29 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							onStageStart: (h) => options.onSubagentStart?.(h),
 							onStageEvent: (h, info) => options.onSubagentProgress?.(h, info),
 							onStageComplete: (h, status, meta) => options.onSubagentComplete?.(h, status, meta),
+							onStageReserve: (handle) => {
+								const reservation = reserveSpawnBudget(handle === "fanout-worker" ? 8192 : 4096);
+								return "content" in reservation
+									? { allowed: false, reason: reservation.content[0]?.text, release: () => {} }
+									: reservation;
+							},
 						},
 					);
-					// Record the WHOLE pipeline's spend: scout + every reviewer + worker
-					// (reviewers are recorded inside formatChildResult below).
-					recordSubagentSpend(fanoutResult.scout_usage);
-					recordSubagentSpend(fanoutResult.worker_output.usage);
+					// Every pipeline stage records spend through its own reservation.
 					// Same context economy as `task` (N7): persist integral scout,
 					// reviewer, and worker outputs for op:"read"; inline only digests +
 					// recovery pointers. Even a huge scout target list cannot flood the
 					// parent context now.
 					const scoutHandle = fanoutResult.scout_task_name ?? "fanout-scout";
 					const scoutOutput = fanoutResult.scout_output ?? JSON.stringify(fanoutResult.targets);
-					outputStore.put(scoutHandle, scoutOutput);
+					await outputStore.put(scoutHandle, scoutOutput);
 					const workerHandle = fanoutResult.worker_task_name ?? "fanout-worker";
-					outputStore.put(workerHandle, fanoutResult.worker_output.text);
-					const reviewSections = fanoutResult.reviews.map((r) => formatChildResult(r));
+					await outputStore.put(workerHandle, fanoutResult.worker_output.text);
+					const reviewSections = await Promise.all(fanoutResult.reviews.map((r) => formatChildResult(r)));
+					const costUsd =
+						(fanoutResult.scout_usage?.costUsd ?? 0) +
+						(fanoutResult.worker_output.usage?.costUsd ?? 0) +
+						fanoutResult.reviews.reduce((sum, review) => sum + (review.usage?.costUsd ?? 0), 0);
 					const text = [
 						`## Scout targets (${fanoutResult.targets.length}) [${scoutHandle}]\n${digestWithPointer(scoutOutput, scoutHandle)}`,
 						`## Reviews\n${reviewSections.join("\n\n") || "(no reviewers ran)"}`,
@@ -1947,11 +2421,11 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							workerTaskName: workerHandle,
 							gate: fanoutResult.gate,
 							depth: childDepth,
+							costUsd,
 						},
 					};
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
-					recordSubagentSpend(getSubagentErrorUsage(err));
 					return {
 						content: [{ type: "text" as const, text: `fanout failed: ${message}` }],
 						isError: true,
@@ -2028,10 +2502,9 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			state.cwd !== cwd
 				? (options.retargetToolsForCwd ?? retargetToolsForWorktree)(childTools, state.cwd)
 				: childTools;
-		const scopedChildTools =
-			process.env.PIT_NO_SCOPED_HINDSIGHT === "1"
-				? cwdBoundChildTools
-				: withAgentScope(cwdBoundChildTools, state.agentScope, state.cwd, false);
+		const scopedChildTools = isTruthyEnvFlag(process.env.PIT_NO_SCOPED_HINDSIGHT)
+			? cwdBoundChildTools
+			: withAgentScope(cwdBoundChildTools, state.agentScope, state.cwd, false);
 		const text =
 			continuation?.trim() ||
 			"You were interrupted before finishing. Continue from where you left off using the conversation above, then give your final answer.";
@@ -2042,9 +2515,10 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		// we delete the only persisted transcript. Mirrors the agentEndedWithError
 		// guard the in-memory (resumeHandle) and synchronous spawn paths already have.
 		let capturedAgent: Agent | undefined;
+		const budgetReservation = reserveSpawnBudget();
+		if ("content" in budgetReservation) return budgetReservation;
 		try {
-			const budgetBlocked = spawnBudgetBlock();
-			if (budgetBlocked) return budgetBlocked;
+			safeCallback(() => options.onSubagentStart?.(key), undefined);
 			const result = await spawnSubagent(makeSpawnDeps(scopedChildTools, model), {
 				prompt: text,
 				initialMessages: seed,
@@ -2059,8 +2533,9 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				onAgentReady: (agent) => {
 					capturedAgent = agent;
 				},
+				onSubagentEvent: (info) => options.onSubagentProgress?.(key, info),
 			});
-			recordSubagentSpend(result.usage);
+			budgetReservation.record(result.usage);
 			if (capturedAgent && agentEndedWithError(capturedAgent)) {
 				// Still unfinished — keep the on-disk transcript (do NOT delete) so a
 				// later attempt can resume again, and persist the latest progress so the
@@ -2091,22 +2566,60 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					details: { handle: key, resumed: true, fromDisk: true, stillResumable: true },
 				};
 			}
-			await deleteResumeState(cwd, key);
-			outputStore.put(key, result.output);
+			if (capturedAgent)
+				await rememberContinuable(key, capturedAgent, result.record.id, metadataFromResumeState(state));
+			await outputStore.put(key, result.output);
 			const out = formatSpawnResult(result, undefined, key);
+			safeCallback(
+				() =>
+					options.onSubagentComplete?.(key, "done", completeMetaFromUsage(result.record.turnCount, result.usage)),
+				undefined,
+			);
 			return {
 				content: [{ type: "text" as const, text: out }],
 				isError: false,
-				details: { handle: key, resumed: true, fromDisk: true },
+				details: { handle: key, resumed: true, fromDisk: true, costUsd: result.usage?.costUsd },
 			};
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
-			recordSubagentSpend(getSubagentErrorUsage(err));
+			budgetReservation.record(getSubagentErrorUsage(err));
+			// spawnSubagent promotes a terminal error/abort turn to a rejected
+			// promise.  Tier-2 resume must keep the newest transcript in that case;
+			// otherwise the next process restart replays the stale seed and loses
+			// the partial progress from this attempt.
+			if (capturedAgent) {
+				await saveResumeState(cwd, {
+					handle: state.handle,
+					messages: capturedAgent.state.messages,
+					modelId: state.modelId,
+					thinkingLevel: state.thinkingLevel,
+					systemPrompt: state.systemPrompt,
+					allowedTools: state.allowedTools,
+					agentScope: state.agentScope,
+					cwd: state.cwd,
+					depth: state.depth,
+					savedAt: Date.now(),
+				});
+				safeCallback(() => options.onSubagentComplete?.(key, signal?.aborted ? "cancelled" : "error"), undefined);
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Resume of "${key}" did not complete (${signal?.aborted ? "it was cancelled" : "it erred again"}). It remains resumable.`,
+						},
+					],
+					isError: true,
+					details: { handle: key, resumed: true, fromDisk: true, stillResumable: true },
+				};
+			}
+			safeCallback(() => options.onSubagentComplete?.(key, signal?.aborted ? "cancelled" : "error"), undefined);
 			return {
 				content: [{ type: "text" as const, text: `Subagent resume failed: ${message}` }],
 				isError: true,
 				details: { handle: key, resumed: true },
 			};
+		} finally {
+			budgetReservation.release();
 		}
 	}
 
@@ -2173,7 +2686,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			}
 			// N7: remove the on-disk integral-output store (session temp dir). Best-effort;
 			// once the parent session is gone, op:"read" recovery is moot.
-			outputStore.dispose();
+			await outputStore.dispose();
 		});
 	};
 }

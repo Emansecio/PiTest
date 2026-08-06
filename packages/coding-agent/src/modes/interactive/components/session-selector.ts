@@ -21,6 +21,7 @@ import type { SessionInfo, SessionListProgress } from "../../../core/session-man
 import { canonicalizePath as _canonicalizePath } from "../../../utils/paths.ts";
 import { formatDisplayPath } from "../display-utils.ts";
 import { theme } from "../theme/theme.ts";
+import { resolveTreeConnectors } from "./glyph-resolver.ts";
 import { HINT_SEPARATOR, keyHint, keyText, selectionCursor, themedScrollPositionHint } from "./keybinding-hints.ts";
 import { paintSelectedRow } from "./selectable-row.ts";
 import { beginSelectorSurface } from "./selector-surface.ts";
@@ -636,8 +637,9 @@ class SessionList implements Component, Focusable, MouseTarget {
 			return "";
 		}
 
-		const parts = node.ancestorContinues.map((continues) => (continues ? "│  " : "   "));
-		const branch = node.isLast ? "└─ " : "├─ ";
+		const tree = resolveTreeConnectors();
+		const parts = node.ancestorContinues.map((continues) => (continues ? tree.pipePad : "   "));
+		const branch = node.isLast ? tree.lastPad : tree.branchPad;
 		return parts.join("") + branch;
 	}
 

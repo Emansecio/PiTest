@@ -30,6 +30,11 @@ export class ComposerChrome implements Component, MouseHitContainer {
 	// so a sixel image line survives — the pet decides sixel vs. half-block cells.
 	private perch: Component | undefined;
 	private perchVisible: ((width: number) => boolean) | undefined;
+	// Fired when perchActive flips between frames (width/welcome/overlay). Used
+	// by InteractiveMode to subscribe/unsubscribe the pet animation ticker so a
+	// hidden pet does not keep the 16ms loop alive.
+	private onPerchVisibilityChange: ((visible: boolean) => void) | undefined;
+	private lastPerchActive: boolean | undefined;
 
 	constructor(content: Component, footer: Component, lowerContent?: Component) {
 		this.content = content;
@@ -48,10 +53,18 @@ export class ComposerChrome implements Component, MouseHitContainer {
 	 * own rows directly above the input. `visible` gates it per-frame on the
 	 * current width (so the pet hides on narrow terminals / while a modal is up).
 	 * The editor keeps its full width — the perch never narrows the content.
+	 * `onVisibilityChange` is called when the effective visibility flips so the
+	 * owner can start/stop animation without polling.
 	 */
-	setPerch(component: Component | undefined, visible?: (width: number) => boolean): void {
+	setPerch(
+		component: Component | undefined,
+		visible?: (width: number) => boolean,
+		onVisibilityChange?: (visible: boolean) => void,
+	): void {
 		this.perch = component;
 		this.perchVisible = visible;
+		this.onPerchVisibilityChange = onVisibilityChange;
+		this.lastPerchActive = undefined;
 		this.cache = undefined;
 	}
 
@@ -70,6 +83,10 @@ export class ComposerChrome implements Component, MouseHitContainer {
 		const footerWidth = Math.max(1, width);
 		const footerLines = this.footer.render(footerWidth);
 		const perchActive = !!this.perch && (this.perchVisible?.(width) ?? true);
+		if (this.lastPerchActive !== perchActive) {
+			this.lastPerchActive = perchActive;
+			this.onPerchVisibilityChange?.(perchActive);
+		}
 		const perchLines = perchActive ? this.perch!.render(width) : [];
 		const cache = this.cache;
 		if (

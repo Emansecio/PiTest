@@ -8,9 +8,9 @@
  * ten one-line edits are ten interruptions, one edit is one — and that there is
  * still no plan ritual: it should just do the work and let the prompt be the gate.
  *
- * Injected by the permissions extension from `before_agent_start` (pre-model band),
- * appended AFTER the system prompt's dynamic marker so it never invalidates the
- * cacheable prefix.
+ * Rendered into the system prompt's CACHEABLE PREFIX by the host
+ * (`BuildSystemPromptOptions.permissionModeSection`), which rebuilds only when the
+ * permission mode changes.
  */
 
 /**

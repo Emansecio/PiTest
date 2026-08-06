@@ -499,13 +499,8 @@ export function createRenderMermaidToolDefinition(
 		name: "render_mermaid",
 		label: "render_mermaid",
 		description:
-			"Render simple Mermaid flowcharts (graph TD/LR, flowchart TD/LR) as terminal ASCII art. Complex or unsupported diagrams (sequence/state/class/etc.) report a short unsupported-type message instead of rendering.",
+			"Render simple Mermaid flowcharts (graph TD/LR, flowchart TD/LR, node shapes [..] (..) {..}, --> / --- edges) as terminal ASCII art. Complex or unsupported diagrams (sequence/state/class/etc.) report a short unsupported-type message instead of rendering.",
 		promptSnippet: "Render simple Mermaid flowcharts as ASCII.",
-		promptGuidelines: [
-			"Supports graph/flowchart TD or LR with node shapes [..], (..), {..} and --> / --- edges.",
-			"Anything beyond simple flowcharts reports a short unsupported message — it does not echo the source back.",
-			"Keep diagrams small; very wide graphs are split across lines.",
-		],
 		parameters: renderMermaidSchema,
 		async execute(_toolCallId, input: RenderMermaidToolInput) {
 			const maxWidth = input.max_width ?? 80;

@@ -4,13 +4,14 @@
  */
 
 import { spawn } from "node:child_process";
-import { killProcessTree } from "../../utils/shell.ts";
+import { killProcessTreeAndWait } from "../../utils/shell.ts";
 import {
 	createRegexTestDeadline,
 	isRegexBudgetExpired,
 	testRegexWithinBudget,
 	validateSafeRegex,
 } from "../regex-budget.ts";
+import { parseSimpleArgv } from "../simple-argv.ts";
 import type { HookCommand, HookExecutionResult, HookPayload, HookResult } from "./types.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -81,7 +82,13 @@ export async function runHook(
 		let proc: ReturnType<typeof spawn>;
 		try {
 			proc = shell
-				? spawn(hook.command, { cwd, env, shell: true, stdio: ["pipe", "pipe", "pipe"] })
+				? spawn(hook.command, {
+						cwd,
+						env,
+						shell: true,
+						stdio: ["pipe", "pipe", "pipe"],
+						detached: process.platform !== "win32",
+					})
 				: spawnDirect(hook.command, cwd, env);
 		} catch (err) {
 			resolve({
@@ -99,10 +106,10 @@ export async function runHook(
 		const stderrChunks: Buffer[] = [];
 		let stdout = "";
 		let stderr = "";
-		let killed = false;
-		let exited = false;
 		let resolved = false;
-		let killTimer: ReturnType<typeof setTimeout> | null = null;
+		let cleanup: Promise<boolean> | undefined;
+		let termination: { exitCode: number; timedOut: boolean; rawError?: string } | undefined;
+		let timer: ReturnType<typeof setTimeout> | undefined;
 
 		const finish = (exitCode: number, timedOut: boolean, rawError?: string) => {
 			if (resolved) return;
@@ -114,11 +121,6 @@ export async function runHook(
 			stdout = Buffer.concat(stdoutChunks).toString("utf8") + stdout;
 			stderr = Buffer.concat(stderrChunks).toString("utf8") + stderr;
 			if (timer) clearTimeout(timer);
-			// Do NOT clear killTimer here: on the timeout/abort paths kill() arms the
-			// SIGKILL escalation and finish() runs immediately after — clearing it would
-			// cancel the escalation the instant it is armed, orphaning a SIGTERM-ignoring
-			// child. The timer is unref()'d (won't keep the loop alive) and its callback
-			// no-ops once proc.killed. Only the genuine-exit path ('close') clears it.
 			if (options.signal) {
 				options.signal.removeEventListener("abort", abort);
 			}
@@ -133,52 +135,41 @@ export async function runHook(
 			});
 		};
 
-		const kill = () => {
-			if (killed) return;
-			killed = true;
-			try {
-				proc.kill("SIGTERM");
-				killTimer = setTimeout(() => {
-					if (!exited) {
+		const kill = (): Promise<boolean> => {
+			if (cleanup) return cleanup;
+			cleanup = proc.pid
+				? killProcessTreeAndWait(proc.pid).catch(() => false)
+				: Promise.resolve().then(() => {
 						try {
-							// Reap the whole tree, not just the shell wrapper. With shell:true,
-							// `proc` is cmd.exe / sh -c, so a hook like `npm run typecheck`
-							// (shell -> node -> tsc) leaves node/tsc orphaned: proc.kill hits
-							// only the direct child (on Windows the signal does not propagate).
-							// killProcessTree (taskkill /F /T on Win, process-group kill on Unix)
-							// is the pattern every other subprocess in the codebase already uses.
-							if (proc.pid) killProcessTree(proc.pid);
-							else proc.kill("SIGKILL");
+							return proc.kill("SIGKILL");
 						} catch {
-							/* ignore */
+							return false;
 						}
-					}
-				}, 2000);
-				// Don't let the SIGKILL escalation timer keep the event loop alive after
-				// the process already exited; the 'close' handler clears it on real exit.
-				killTimer.unref();
-			} catch {
-				/* ignore */
-			}
+					});
+			return cleanup;
 		};
 
-		const abort = () => {
-			kill();
-			finish(-1, false);
+		const terminate = (exitCode: number, timedOut: boolean, rawError?: string) => {
+			if (termination) return;
+			termination = { exitCode, timedOut, rawError };
+			void kill().then((cleaned) => {
+				const cleanupError = cleaned ? undefined : "process tree cleanup did not complete";
+				finish(exitCode, timedOut, rawError ?? cleanupError);
+			});
 		};
+
+		const abort = () => terminate(-1, false);
 
 		if (options.signal) {
 			if (options.signal.aborted) {
-				kill();
-				resolve({ hook, stdout: "", stderr: "", exitCode: -1, timedOut: false, rawError: "aborted" });
+				terminate(-1, false, "aborted");
 				return;
 			}
 			options.signal.addEventListener("abort", abort, { once: true });
 		}
 
-		const timer = setTimeout(() => {
-			kill();
-			finish(-1, true);
+		timer = setTimeout(() => {
+			terminate(-1, true);
 		}, timeoutMs);
 
 		// A hook runs inline (awaited in beforeToolCall), so unbounded stdout/stderr
@@ -195,7 +186,7 @@ export async function runHook(
 			else stderrChunks.push(chunk);
 			if (outputBytes > MAX_HOOK_OUTPUT_BYTES) {
 				outputCapped = true;
-				kill();
+				terminate(-1, false);
 			}
 		};
 		proc.stdout?.on("data", (data) => {
@@ -214,11 +205,7 @@ export async function runHook(
 		});
 
 		proc.on("close", (code) => {
-			exited = true;
-			// Genuine process exit — the SIGKILL escalation is no longer needed. This is
-			// the only place killTimer is cleared; finish() deliberately leaves it armed
-			// so a SIGTERM-ignoring child still gets force-killed on the timeout/abort path.
-			if (killTimer) clearTimeout(killTimer);
+			if (termination) return;
 			finish(code ?? 0, false);
 		});
 
@@ -239,12 +226,21 @@ export async function runHook(
 }
 
 function spawnDirect(commandLine: string, cwd: string, env: NodeJS.ProcessEnv) {
-	const parts = commandLine.split(/\s+/).filter((p) => p.length > 0);
+	const parts = parseSimpleArgv(commandLine);
+	if (!parts) {
+		throw new Error("Direct hook command must contain one executable with quoted arguments and no shell operators");
+	}
 	const [cmd, ...args] = parts;
 	if (!cmd) {
 		throw new Error("Hook command is empty");
 	}
-	return spawn(cmd, args, { cwd, env, shell: false, stdio: ["pipe", "pipe", "pipe"] });
+	return spawn(cmd, args, {
+		cwd,
+		env,
+		shell: false,
+		stdio: ["pipe", "pipe", "pipe"],
+		detached: process.platform !== "win32",
+	});
 }
 
 /**

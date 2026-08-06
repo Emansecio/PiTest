@@ -60,6 +60,30 @@ describe("runWithAcceptance", () => {
 		expect(result.gate).toBeUndefined();
 	});
 
+	it.each([0, -1, 1.5, Number.NaN])("rejects invalid max_attempts %s before spawning", async (maxAttempts) => {
+		const { deps } = rig();
+		await expect(
+			runWithAcceptance(
+				deps,
+				{ prompt: "p", taskName: "invalid-attempts" },
+				{ criteria: "must pass", max_attempts: maxAttempts },
+			),
+		).rejects.toThrow(/max_attempts must be an integer >= 1/);
+		expect(deps.registry.list()).toHaveLength(0);
+	});
+
+	it.each([999, 600001, 1.5, Number.NaN])("rejects invalid check_timeout_ms %s before spawning", async (timeoutMs) => {
+		const { deps } = rig();
+		await expect(
+			runWithAcceptance(
+				deps,
+				{ prompt: "p", taskName: "invalid-timeout" },
+				{ check: "echo ok", check_timeout_ms: timeoutMs },
+			),
+		).rejects.toThrow(/check_timeout_ms must be an integer .*1000.*600000/);
+		expect(deps.registry.list()).toHaveLength(0);
+	});
+
 	it("gate pass on first attempt (criteria)", async () => {
 		const { faux, deps } = rig();
 		faux.setResponses([
@@ -99,7 +123,54 @@ describe("runWithAcceptance", () => {
 		expect(result.usage?.totalTokens).toBe(recordedTotal);
 	});
 
-	it("exhaustion returns last output flagged, isError:false", async () => {
+	it("emits distinct lifecycle rows for every worker, judge, and check phase", async () => {
+		const { faux, deps } = rig();
+		faux.setResponses([
+			fauxAssistantMessage("first worker"),
+			fauxAssistantMessage(`\`\`\`json\n${JSON.stringify({ pass: false, reasons: "retry" })}\n\`\`\``),
+			fauxAssistantMessage("second worker"),
+			fauxAssistantMessage(`\`\`\`json\n${JSON.stringify({ pass: true, reasons: "pass" })}\n\`\`\``),
+		]);
+		const started: string[] = [];
+		const progressed: Array<{ handle: string; turn: number; lastTool?: string }> = [];
+		const completed: Array<{ handle: string; status: string }> = [];
+		const command = process.platform === "win32" ? "exit 0" : "true";
+		const result = await runWithAcceptance(
+			{
+				...deps,
+				acceptanceLifecycle: {
+					handlePrefix: "gate-live",
+					onStart: (handle) => started.push(handle),
+					onProgress: (handle, info) => progressed.push({ handle, turn: info.turn, lastTool: info.lastTool }),
+					onComplete: (handle, status) => completed.push({ handle, status }),
+				},
+			},
+			{ prompt: "do work", taskName: "gate-live", depth: 0 },
+			{ criteria: "must pass", check: command, max_attempts: 2 },
+		);
+
+		expect(result.isError).toBe(false);
+		expect(started).toEqual([
+			"gate-live [attempt 1 worker]",
+			"gate-live [attempt 1 judge]",
+			"gate-live [attempt 1 check]",
+			"gate-live [attempt 2 worker]",
+			"gate-live [attempt 2 judge]",
+			"gate-live [attempt 2 check]",
+		]);
+		expect(completed).toEqual([
+			{ handle: "gate-live [attempt 1 worker]", status: "done" },
+			{ handle: "gate-live [attempt 1 judge]", status: "error" },
+			{ handle: "gate-live [attempt 1 check]", status: "done" },
+			{ handle: "gate-live [attempt 2 worker]", status: "done" },
+			{ handle: "gate-live [attempt 2 judge]", status: "done" },
+			{ handle: "gate-live [attempt 2 check]", status: "done" },
+		]);
+		expect(progressed).toContainEqual({ handle: "gate-live [attempt 1 check]", turn: 1, lastTool: "bash" });
+		expect(progressed).toContainEqual({ handle: "gate-live [attempt 2 check]", turn: 1, lastTool: "bash" });
+	});
+
+	it("exhaustion returns last output flagged as an error", async () => {
 		const { faux, deps } = rig();
 		faux.setResponses([
 			fauxAssistantMessage("attempt one"),
@@ -112,7 +183,7 @@ describe("runWithAcceptance", () => {
 			{ prompt: "do work", taskName: "exhaust", depth: 0 },
 			{ criteria: "high bar", max_attempts: 2 },
 		);
-		expect(result.isError).toBe(false);
+		expect(result.isError).toBe(true);
 		expect(result.text).toContain("⚠ Acceptance gate not satisfied after 2 attempts");
 		expect(result.text).toContain("attempt two");
 		expect(result.gate?.passed).toBe(false);
@@ -142,7 +213,7 @@ describe("runWithAcceptance", () => {
 			{ prompt: "p", taskName: "check-fail", depth: 0, cwd: process.cwd() },
 			{ check: cmd, max_attempts: 1 },
 		);
-		expect(result.isError).toBe(false);
+		expect(result.isError).toBe(true);
 		expect(result.gate?.passed).toBe(false);
 		expect(result.gate?.exhausted).toBe(true);
 	});
@@ -161,7 +232,7 @@ describe("runWithAcceptance", () => {
 			{ prompt: "p", taskName: "perm-deny", depth: 0 },
 			{ check: "echo hi", max_attempts: 1 },
 		);
-		expect(result.isError).toBe(false);
+		expect(result.isError).toBe(true);
 		expect(result.gate?.passed).toBe(false);
 		expect(result.gate?.exhausted).toBe(true);
 	});

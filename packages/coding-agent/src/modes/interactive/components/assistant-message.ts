@@ -20,6 +20,7 @@ import { sliceSafe } from "../../../utils/surrogate.ts";
 import { interpolateFg } from "../theme/color-interpolation.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { ColorEase } from "./color-ease.ts";
+import { keyDisplayText } from "./keybinding-hints.ts";
 import { MessageShell, SHELL_GUTTER_CHAR } from "./message-shell.ts";
 
 // Period of the "Thinking…" breathing oscillation (dim ⇄ normal) while the model
@@ -110,6 +111,8 @@ interface BlockComponentCacheEntry {
 	markdown: Markdown;
 	/** The Markdown itself for text; MessageShell(Markdown) for visible thinking. */
 	component: Component;
+	/** Present for thinking blocks so the host can toggle a settled fold. */
+	thinkingFold?: FoldedThinkingText;
 }
 
 // Grapheme-aware splitter for the reveal-edge fade, so the gradient is applied
@@ -170,21 +173,20 @@ const SETTLED_THINKING_TAIL_LINES = 6;
  * trailer. Sits INSIDE the MessageShell so every emitted row — trailer
  * included — still gets the thinking gutter.
  *
- * The trailer replicates the `… +N earlier lines` counter of
- * moreLinesTrailer (tool-activity.ts) WITHOUT its `(<key> to expand)` clause:
- * no keybinding unfolds a settled thinking trace, and promising one would lie
- * (same rationale as capDiffPreview). Only folds when it actually saves rows
- * (hidden ≥ 2), since a 1-line saving spent on a trailer is a wash.
+ * The trailer includes the configured tools-expand key and the fold is
+ * reversible. Only folds when it actually saves rows (hidden ≥ 2), since a
+ * 1-line saving spent on a trailer is a wash.
  *
  * Honors the Component memoization contract: returns the cached array while
  * the Markdown's own returned reference, the width, and the fold decision are
  * all unchanged; any change produces a new array.
  */
-class FoldedThinkingText implements Component {
+export class FoldedThinkingText implements Component {
 	private cachedSource: string[] | null = null;
 	private cachedWidth = -1;
 	private cachedFolded = false;
 	private cachedOut: string[] | null = null;
+	private expanded = false;
 
 	private readonly markdown: Markdown;
 	private readonly shouldFold: () => boolean;
@@ -192,6 +194,16 @@ class FoldedThinkingText implements Component {
 	constructor(markdown: Markdown, shouldFold: () => boolean) {
 		this.markdown = markdown;
 		this.shouldFold = shouldFold;
+	}
+
+	setExpanded(expanded: boolean): void {
+		if (this.expanded === expanded) return;
+		this.expanded = expanded;
+		this.cachedOut = null;
+	}
+
+	hasHiddenContent(): boolean {
+		return this.cachedFolded && !this.expanded;
 	}
 
 	invalidate(): void {
@@ -202,7 +214,7 @@ class FoldedThinkingText implements Component {
 
 	render(width: number): string[] {
 		const source = this.markdown.render(width);
-		const folded = source.length > SETTLED_THINKING_TAIL_LINES + 1 && this.shouldFold();
+		const folded = !this.expanded && source.length > SETTLED_THINKING_TAIL_LINES + 1 && this.shouldFold();
 		if (
 			this.cachedOut !== null &&
 			source === this.cachedSource &&
@@ -217,8 +229,11 @@ class FoldedThinkingText implements Component {
 		} else {
 			const kept = source.slice(-SETTLED_THINKING_TAIL_LINES);
 			const hidden = source.length - kept.length;
-			// Leading space matches the thinking Markdown's paddingX=1 text column.
-			const trailer = truncateToWidth(theme.fg("muted", ` … +${hidden} earlier lines`), Math.max(1, width));
+			const expandKey = keyDisplayText("app.tools.expand") || "expand key";
+			const trailer = truncateToWidth(
+				theme.fg("muted", ` … +${hidden} earlier lines (${expandKey} to expand)`),
+				Math.max(1, width),
+			);
 			out = [trailer, ...kept];
 		}
 		this.cachedSource = source;
@@ -464,6 +479,20 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	/** Expand/collapse settled thinking traces without rebuilding the transcript. */
+	setThinkingExpanded(expanded: boolean): void {
+		for (const entry of this.blockComponents) {
+			if (entry?.kind === "thinking") {
+				entry.thinkingFold?.setExpanded(expanded);
+				this.contentContainer.markChildStale(entry.component);
+			}
+		}
+	}
+
+	hasCollapsedThinking(): boolean {
+		return this.blockComponents.some((entry) => entry?.kind === "thinking" && entry.thinkingFold?.hasHiddenContent());
+	}
+
 	/** Toggle whether this live stream is mounted in the chat. Grouped tool-activity
 	 * mode defers attach until the message has visible prose; while detached the
 	 * reveal cursor stays at zero so text does not catch up off-screen. */
@@ -618,20 +647,23 @@ export class AssistantMessageComponent extends Container {
 			`nar:${this.isNarration ? 1 : 0}`,
 			`sr:${message.stopReason ?? ""}`,
 		];
-		const hasToolCalls = message.content.some((c) => c.type === "toolCall");
-		parts.push(`tc:${hasToolCalls ? 1 : 0}`);
-
+		// One pass for hasToolCalls + lastVisibleIndex (was .some + full scan).
+		let hasToolCalls = false;
 		let lastVisibleIndex = -1;
-		for (let i = 0; i < message.content.length; i++) {
-			const c = message.content[i];
-			if ((c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim())) {
+		const content = message.content;
+		for (let i = 0; i < content.length; i++) {
+			const c = content[i];
+			if (c.type === "toolCall") {
+				hasToolCalls = true;
+			} else if ((c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim())) {
 				lastVisibleIndex = i;
 			}
 		}
+		parts.push(`tc:${hasToolCalls ? 1 : 0}`);
 		parts.push(`hv:${lastVisibleIndex >= 0 ? 1 : 0}`);
 
-		for (let i = 0; i < message.content.length; i++) {
-			const c = message.content[i];
+		for (let i = 0; i < content.length; i++) {
+			const c = content[i];
 			if (c.type === "text" && c.text.trim()) {
 				parts.push(`${i}:text`);
 			} else if (c.type === "thinking" && c.thinking.trim()) {
@@ -817,11 +849,13 @@ export class AssistantMessageComponent extends Container {
 						// entry.markdown stays the raw Markdown, so setText/freeze paths
 						// above and in patchContentIfPossible are untouched.
 						const blockIndex = i;
-						shell.addChild(new FoldedThinkingText(markdown, () => this.isThinkingBlockSettled(blockIndex)));
+						const thinkingFold = new FoldedThinkingText(markdown, () => this.isThinkingBlockSettled(blockIndex));
+						shell.addChild(thinkingFold);
 						entry = {
 							kind: "thinking",
 							markdown,
 							component: shell,
+							thinkingFold,
 						};
 						this.blockComponents[i] = entry;
 					}

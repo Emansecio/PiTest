@@ -75,7 +75,20 @@ export interface SpawnAllOptions {
 	/** Per-turn progress for a running task — same shape the single `task` op emits. */
 	onTaskEvent?: (handle: string, info: SubagentProgressInfo) => void;
 	/** Fired when a task settles, with turns/tokens for the TUI. */
-	onTaskComplete?: (handle: string, status: "done" | "error", meta?: { turns?: number; totalTokens?: number }) => void;
+	onTaskComplete?: (
+		handle: string,
+		status: "done" | "error" | "cancelled",
+		meta?: { turns?: number; totalTokens?: number },
+	) => void;
+	/** Optional per-child token-budget hold. The hold is released in `finally`. */
+	onTaskReserve?: (handle: string) => TaskReservation;
+}
+
+export interface TaskReservation {
+	allowed: boolean;
+	reason?: string;
+	record?(usage: SubagentUsage | undefined): void;
+	release(): void;
 }
 
 /**
@@ -96,11 +109,18 @@ export async function spawnAll(
 		Math.min(options.concurrency ?? Number.POSITIVE_INFINITY, resolveMaxSubagentConcurrency()),
 	);
 	const base = options.base;
+	const seenHandles = new Map<string, number>();
+	const handles = tasks.map((task, index) => {
+		const requested = task.name?.trim() || `parallel-${index + 1}`;
+		const count = (seenHandles.get(requested) ?? 0) + 1;
+		seenHandles.set(requested, count);
+		return count === 1 ? requested : `${requested}#${count}`;
+	});
 
 	return mapWithConcurrency(tasks, concurrency, async (task, index) => {
 		// Stable pre-spawn handle for progress events and the error path; the
 		// registry still collision-resolves the final taskName on the result.
-		const handle = task.name?.trim() || `parallel-${index + 1}`;
+		const handle = handles[index];
 		const spawnOpts: SpawnSubagentOptions = {
 			...base,
 			prompt: task.prompt,
@@ -119,14 +139,29 @@ export async function spawnAll(
 		// recall/retain/reflect to that agent type). Keep the shared dependencies
 		// immutable and override only this child's catalog.
 		const taskDeps = task.tools ? { ...deps, availableTools: task.tools } : deps;
+		const reservation = options.onTaskReserve?.(handle);
+		if (reservation && !reservation.allowed) {
+			safeNotify(() => options.onTaskComplete?.(handle, "error"));
+			return {
+				taskName: task.name ?? handle,
+				ok: false,
+				error: reservation.reason ?? "Token budget blocks subagent spawn.",
+			};
+		}
+		let settledUsage: SubagentUsage | undefined;
 		try {
 			if (task.acceptance?.criteria || task.acceptance?.check) {
 				const gated = await runWithAcceptance(taskDeps, spawnOpts, task.acceptance);
+				settledUsage = gated.usage;
 				safeNotify(() =>
-					options.onTaskComplete?.(handle, gated.isError ? "error" : "done", {
-						turns: gated.result.record.turnCount,
-						totalTokens: gated.usage?.totalTokens,
-					}),
+					options.onTaskComplete?.(
+						handle,
+						gated.isError ? (base.signal?.aborted ? "cancelled" : "error") : "done",
+						{
+							turns: gated.result.record.turnCount,
+							totalTokens: gated.usage?.totalTokens,
+						},
+					),
 				);
 				return {
 					taskName: gated.result.record.taskName,
@@ -139,6 +174,7 @@ export async function spawnAll(
 				};
 			}
 			const result = await spawnSubagent(taskDeps, spawnOpts);
+			settledUsage = result.usage;
 			safeNotify(() =>
 				options.onTaskComplete?.(handle, "done", {
 					turns: result.record.turnCount,
@@ -155,13 +191,17 @@ export async function spawnAll(
 			};
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
-			safeNotify(() => options.onTaskComplete?.(handle, "error"));
+			settledUsage = getSubagentErrorUsage(err);
+			safeNotify(() => options.onTaskComplete?.(handle, base.signal?.aborted ? "cancelled" : "error"));
 			return {
 				taskName: task.name ?? handle,
 				ok: false,
 				error: message,
-				usage: getSubagentErrorUsage(err),
+				usage: settledUsage,
 			};
+		} finally {
+			reservation?.record?.(settledUsage);
+			reservation?.release();
 		}
 	});
 }

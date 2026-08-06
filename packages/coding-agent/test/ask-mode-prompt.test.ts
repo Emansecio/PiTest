@@ -1,6 +1,6 @@
 /**
- * Tests for the ask-mode system-prompt section and its injection via the
- * permissions extension's `before_agent_start` handler.
+ * Tests for the ask-mode system-prompt section (rendered into the cacheable
+ * prefix by the host — see plan-mode-prompt.test.ts for the placement invariant).
  *
  * Ask shares plan's enforcement, so what matters here is the DIFFERENCE: the
  * read-only warning survives, the plan ritual does not.
@@ -11,6 +11,7 @@ import { createPermissionsExtension } from "../src/core/built-ins/permissions-ex
 import type { ExtensionAPI } from "../src/core/extensions/types.ts";
 import { buildAskModeSection } from "../src/core/permissions/ask-mode-prompt.ts";
 import { PermissionChecker } from "../src/core/permissions/checker.ts";
+import { buildPermissionModeSection } from "../src/core/permissions/mode-prompt.ts";
 import { planBlockedToolNames } from "../src/core/permissions/plan-mode-prompt.ts";
 
 const cwd = process.platform === "win32" ? "C:/proj" : "/proj";
@@ -71,6 +72,16 @@ describe("buildAskModeSection", () => {
 		expect(s).not.toContain("present it for user approval");
 	});
 
+	it("narrows the blocked list to the session's tool surface", () => {
+		const surface = ["read", "grep", "bash", "write", "memory_append"];
+		const s = buildAskModeSection(surface);
+		expect(s).toContain("bash, memory_append, write, and MCP tools");
+		for (const absent of ["ast_edit", "edit_v2", "recipe", "resolve", "goal_complete"]) {
+			expect(s, `expected "${absent}" to be omitted from an ask session that lacks it`).not.toContain(absent);
+		}
+		expect(planBlockedToolNames(surface)).toEqual(["bash", "memory_append", "write"]);
+	});
+
 	it("tells the model to answer directly with read-only research", () => {
 		const s = buildAskModeSection();
 		expect(s).toContain("ANSWER");
@@ -79,27 +90,22 @@ describe("buildAskModeSection", () => {
 	});
 });
 
-describe("permissions extension — ask-mode injection", () => {
-	it("appends the ask_mode section (and not plan_mode) in ask mode", () => {
-		const checker = new PermissionChecker({ cwd, mode: "ask", settings: {} });
-		const { api, fire } = makeFakePi();
-		createPermissionsExtension({ cwd, checker })(api);
-		const res = fire("before_agent_start", { systemPrompt: "BASE" });
-		expect(res).toBeDefined();
-		expect(res.systemPrompt.startsWith("BASE")).toBe(true);
-		expect(res.systemPrompt).toContain("<ask_mode>");
-		expect(res.systemPrompt).not.toContain("<plan_mode>");
+describe("ask-mode section selection", () => {
+	it("selects ask_mode (and not plan_mode) for ask mode", () => {
+		const section = buildPermissionModeSection("ask");
+		expect(section).toContain("<ask_mode>");
+		expect(section).not.toContain("<plan_mode>");
 	});
 
 	it("follows the live checker mode when it flips mid-session", () => {
+		// The host reads `checker.mode` on the rebuild that a mode switch triggers,
+		// so the resolution has to track the live checker rather than a boot value.
 		const checker = new PermissionChecker({ cwd, mode: "plan", settings: {} });
-		const { api, fire } = makeFakePi();
-		createPermissionsExtension({ cwd, checker })(api);
-		expect(fire("before_agent_start", { systemPrompt: "BASE" }).systemPrompt).toContain("<plan_mode>");
+		expect(buildPermissionModeSection(checker.mode)).toContain("<plan_mode>");
 		checker.updateMode("ask");
-		expect(fire("before_agent_start", { systemPrompt: "BASE" }).systemPrompt).toContain("<ask_mode>");
+		expect(buildPermissionModeSection(checker.mode)).toContain("<ask_mode>");
 		checker.updateMode("auto");
-		expect(fire("before_agent_start", { systemPrompt: "BASE" })).toBeUndefined();
+		expect(buildPermissionModeSection(checker.mode)).toBeUndefined();
 	});
 });
 

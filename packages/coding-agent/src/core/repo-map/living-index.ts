@@ -9,9 +9,10 @@
  * commit (via `git diff --name-status`). Unchanged files keep their cached
  * symbols at zero parse cost — a strict reduction vs the always-rebuild digest.
  *
- * Anchoring uses `lastIndexedCommit` + per-file mtime (NOT blob-hash): mtime is
- * a single `stat` per touched file vs hashing whole bodies, and it also catches
- * UNCOMMITTED working-tree edits that a commit-only anchor would miss.
+ * Anchoring uses `lastIndexedCommit` (NOT blob-hash). The default git adapter
+ * compares that anchor with the full working tree, including untracked files;
+ * injected/alternate adapters retain the per-file mtime fallback when their
+ * diff contract is narrower.
  *
  * Fail-safe by construction:
  *  - Not a git repo / git unavailable / git times out  → full `scanSourceFiles`
@@ -96,7 +97,7 @@ export interface RepoMapDecl {
 export interface RepoMapEntry {
 	/** cwd-relative, forward-slash-normalized path (stable across OSes). */
 	path: string;
-	/** Symbol names (capped), in declaration order. */
+	/** Symbol names (capped), in declaration order; empty for edge-only nodes. */
 	symbols: string[];
 	/**
 	 * Enriched projection (kind+line) of the same top-level declarations as
@@ -124,6 +125,12 @@ export interface LivingRepoMap {
 	version: typeof CACHE_VERSION;
 	/** Commit the cache is anchored to ("" when built from a non-git scan). */
 	lastIndexedCommit: string;
+	/**
+	 * True when symbols were refreshed while PIT_NO_REPO_GRAPH was active, so
+	 * cached import edges may no longer match them. The next graph-enabled call
+	 * rebuilds fully and clears this marker.
+	 */
+	graphEdgesStale?: boolean;
 	/** Indexed entries, keyed by `path` (kept as an array for JSONL streaming). */
 	entries: RepoMapEntry[];
 }
@@ -153,8 +160,12 @@ interface DiffEntry {
 export interface LivingRepoMapDeps {
 	/** Resolve HEAD commit sha, or null if not a git repo / git failed. */
 	resolveHead: (cwd: string) => Promise<string | null>;
-	/** `git diff --name-status <base>..HEAD`, or null on failure / non-git. */
-	gitDiff: (cwd: string, base: string) => Promise<DiffEntry[] | null>;
+	/**
+	 * Working-tree delta against `base`, or null on failure / non-git. The
+	 * optional cached-path set lets the default adapter evict deleted files that
+	 * were previously untracked without re-statting every cached entry.
+	 */
+	gitDiff: (cwd: string, base: string, cachedPaths?: ReadonlySet<string>) => Promise<DiffEntry[] | null>;
 	/** Read a file's text, or null if unreadable / over cap. */
 	readFile: (absPath: string) => string | null;
 	/** Stat mtime in epoch ms, or 0 if the file is gone / unreadable. */
@@ -265,17 +276,41 @@ function parseDiffLine(line: string): DiffEntry | null {
 	return null;
 }
 
-async function defaultGitDiff(cwd: string, base: string): Promise<DiffEntry[] | null> {
-	// `<base>..HEAD` is the committed delta; uncommitted edits are caught
-	// separately by the mtime check, so we don't need --diff-filter here.
-	const out = await runGit(cwd, ["diff", "--name-status", `${base}..HEAD`], GIT_TIMEOUT_MS);
-	if (out === null) return null;
-	const entries: DiffEntry[] = [];
-	for (const line of out.split("\n")) {
+async function defaultGitDiff(
+	cwd: string,
+	base: string,
+	cachedPaths?: ReadonlySet<string>,
+): Promise<DiffEntry[] | null> {
+	// Comparing the commit directly with the working tree catches both committed
+	// and tracked working-tree changes. `git diff` never reports untracked files,
+	// so combine it with the current tracked/untracked listings below. The
+	// listings also let us evict a cached path that was untracked and then
+	// deleted, without an O(N) stat pass over the whole map.
+	const [tracked, untracked, trackedFiles] = await Promise.all([
+		runGit(cwd, ["diff", "--name-status", base], GIT_TIMEOUT_MS),
+		runGit(cwd, ["ls-files", "--others", "--exclude-standard", "-z"], GIT_TIMEOUT_MS),
+		runGit(cwd, ["ls-files", "--cached", "-z"], GIT_TIMEOUT_MS),
+	]);
+	if (tracked === null || untracked === null || trackedFiles === null) return null;
+
+	const byTarget = new Map<string, DiffEntry>();
+	const currentUntracked = new Set(untracked.split("\0").filter((path) => path.length > 0));
+	const currentTracked = new Set(trackedFiles.split("\0").filter((path) => path.length > 0));
+	for (const line of tracked.split("\n")) {
 		const parsed = parseDiffLine(line);
-		if (parsed) entries.push(parsed);
+		if (parsed) byTarget.set(parsed.renameTo ?? parsed.path, parsed);
 	}
-	return entries;
+	for (const path of currentUntracked) {
+		byTarget.set(path, { status: "A", path });
+	}
+	if (cachedPaths) {
+		for (const path of cachedPaths) {
+			if (!currentTracked.has(path) && !currentUntracked.has(path)) {
+				byTarget.set(path, { status: "D", path });
+			}
+		}
+	}
+	return Array.from(byTarget.values());
 }
 
 function defaultReadFile(absPath: string): string | null {
@@ -444,7 +479,7 @@ export function makeBareSpecifierResolver(cwd: string): (specifier: string, from
 
 /**
  * Best-effort cache read. JSONL: line 0 is the header
- * `{version,lastIndexedCommit}`, each subsequent non-empty line is one
+ * `{version,lastIndexedCommit,graphEdgesStale?}`, each subsequent non-empty line is one
  * RepoMapEntry. A malformed line is skipped (advisory data, never load-bearing).
  */
 /**
@@ -495,7 +530,7 @@ export function loadRepoMapCache(cachePath: string): LivingRepoMap | undefined {
 		return undefined;
 	}
 	if (!header || typeof header !== "object") return undefined;
-	const h = header as { version?: unknown; lastIndexedCommit?: unknown };
+	const h = header as { version?: unknown; lastIndexedCommit?: unknown; graphEdgesStale?: unknown };
 	if (h.version !== CACHE_VERSION) return undefined;
 	const lastIndexedCommit = typeof h.lastIndexedCommit === "string" ? h.lastIndexedCommit : "";
 	const entries: RepoMapEntry[] = [];
@@ -516,7 +551,12 @@ export function loadRepoMapCache(cachePath: string): LivingRepoMap | undefined {
 			// Skip the corrupt line; partial caches still accelerate the rest.
 		}
 	}
-	return { version: CACHE_VERSION, lastIndexedCommit, entries };
+	return {
+		version: CACHE_VERSION,
+		lastIndexedCommit,
+		...(h.graphEdgesStale === true ? { graphEdgesStale: true } : {}),
+		entries,
+	};
 }
 
 /**
@@ -526,7 +566,11 @@ export function loadRepoMapCache(cachePath: string): LivingRepoMap | undefined {
  */
 export function saveRepoMapCache(cachePath: string, map: LivingRepoMap): void {
 	mkdirSync(dirname(cachePath), { recursive: true });
-	const header = JSON.stringify({ version: CACHE_VERSION, lastIndexedCommit: map.lastIndexedCommit });
+	const header = JSON.stringify({
+		version: CACHE_VERSION,
+		lastIndexedCommit: map.lastIndexedCommit,
+		...(map.graphEdgesStale ? { graphEdgesStale: true } : {}),
+	});
 	const body = map.entries.map((e) => JSON.stringify(e)).join("\n");
 	const payload = body.length > 0 ? `${header}\n${body}\n` : `${header}\n`;
 	const tmpPath = `${cachePath}.tmp`;
@@ -591,7 +635,7 @@ function makeFileExistsChecker(
 	};
 }
 
-/** Index one file (abs path) into an entry, or null if it has no symbols/unreadable. */
+/** Index one file (abs path) into an entry, or null if it has no symbols or edges/unreadable. */
 function indexFile(
 	cwd: string,
 	relPath: string,
@@ -608,12 +652,20 @@ function indexFile(
 	const content = deps.readFile(abs);
 	if (content === null) return null;
 	const symbols = deps.extractSymbols(content, abs);
-	if (symbols.length === 0) return null;
 	const repoRelPath = toRelKey(cwd, relPath);
+	let fileDeps: string[] = [];
+	if (extractDepsEnabled && deps.extractDeps) {
+		try {
+			fileDeps = deps.extractDeps(content, repoRelPath, fileExists, resolveBare);
+		} catch {
+			// no-deps fallback
+		}
+	}
+	if (symbols.length === 0 && fileDeps.length === 0) return null;
 	const entry: RepoMapEntry = { path: repoRelPath, symbols, mtimeMs };
 	// Enriched projection (kind+line) when the dep is wired. Best-effort: any
 	// throw degrades to the name-only entry (never breaks indexing).
-	if (deps.extractDeclarations) {
+	if (symbols.length > 0 && deps.extractDeclarations) {
 		try {
 			const decls = deps.extractDeclarations(content, abs);
 			if (decls.length > 0) entry.decls = decls;
@@ -621,18 +673,41 @@ function indexFile(
 			// name-only fallback
 		}
 	}
-	// Edge extraction: skipped entirely under PIT_NO_REPO_GRAPH (extractDepsEnabled
-	// false) — the entry simply has no `deps`, same as a v2-only harness. Best-effort:
-	// any throw degrades to the deps-less entry (never breaks indexing).
-	if (extractDepsEnabled && deps.extractDeps) {
+	if (fileDeps.length > 0) entry.deps = fileDeps;
+	return entry;
+}
+
+/** Refresh only an existing entry's import edges after resolver configuration changes. */
+function refreshEntryDeps(
+	cwd: string,
+	entry: RepoMapEntry,
+	deps: LivingRepoMapDeps,
+	fileExists: (repoRelPath: string) => boolean,
+	resolveBare: ((specifier: string, fromRepoRelPath: string) => string | null) | undefined,
+): RepoMapEntry | null {
+	const abs = join(cwd, entry.path);
+	const content = deps.readFile(abs);
+	if (content === null) return null;
+	const next: RepoMapEntry = { ...entry, mtimeMs: deps.statMtime(abs) };
+	delete next.deps;
+	if (deps.extractDeps) {
 		try {
-			const fileDeps = deps.extractDeps(content, repoRelPath, fileExists, resolveBare);
-			if (fileDeps.length > 0) entry.deps = fileDeps;
+			const fileDeps = deps.extractDeps(content, entry.path, fileExists, resolveBare);
+			if (fileDeps.length > 0) next.deps = fileDeps;
 		} catch {
-			// no-deps fallback
+			// Keep the entry without edges on extractor failure; graph data is advisory.
 		}
 	}
-	return entry;
+	return next;
+}
+
+/** Resolver manifests can change edges without changing importing source files. */
+function isEdgeResolverConfig(path: string): boolean {
+	const normalized = path.split("\\").join("/");
+	const base = normalized.slice(normalized.lastIndexOf("/") + 1).toLowerCase();
+	return (
+		base === "package.json" || base === "tsconfig.json" || (base.startsWith("tsconfig.") && base.endsWith(".json"))
+	);
 }
 
 /** Build a fresh map from a full source-file walk (non-git / cold-start path). */
@@ -654,7 +729,12 @@ async function fullScan(
 	// are built lazily and shared across every file indexed below.
 	const resolveBare = extractDepsEnabled ? makeBareSpecifierResolver(cwd) : undefined;
 	const entries: RepoMapEntry[] = [];
-	for (const file of files) {
+	for (let i = 0; i < files.length; i++) {
+		// Indexing performs synchronous stat/read/parse work. Yield between small
+		// batches so a cold map cannot monopolize the TUI/event loop for the whole
+		// repository. The result and ordering remain identical.
+		if (i > 0 && i % 32 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+		const file = files[i]!;
 		const entry = indexFile(cwd, file, deps, fileExists, extractDepsEnabled, resolveBare);
 		if (entry) entries.push(entry);
 	}
@@ -665,9 +745,76 @@ async function fullScan(
 	};
 }
 
+function markGraphEdgesStale(map: LivingRepoMap): LivingRepoMap {
+	return { ...map, graphEdgesStale: true };
+}
+
+/**
+ * Merge an OFF-mode symbol refresh into the full graph cache. Changed files
+ * lose their old deps (which may be stale); unchanged entries, including
+ * import-only nodes, retain their graph data until the enabled-mode rebuild.
+ */
+function mergeGraphDisabledCache(
+	cache: LivingRepoMap,
+	entries: Map<string, RepoMapEntry>,
+	changedKeys: ReadonlySet<string>,
+	head: string,
+): LivingRepoMap {
+	const persisted = new Map<string, RepoMapEntry>();
+	for (const entry of cache.entries) persisted.set(entry.path, entry);
+	for (const path of changedKeys) {
+		const fresh = entries.get(path);
+		if (fresh) {
+			const next: RepoMapEntry = { path: fresh.path, symbols: fresh.symbols, mtimeMs: fresh.mtimeMs };
+			if (fresh.decls) next.decls = fresh.decls;
+			persisted.set(path, next);
+		} else {
+			persisted.delete(path);
+		}
+	}
+	return {
+		version: CACHE_VERSION,
+		lastIndexedCommit: head,
+		graphEdgesStale: true,
+		entries: Array.from(persisted.values()),
+	};
+}
+
+function arraysEqual<T>(left: readonly T[] | undefined, right: readonly T[] | undefined): boolean {
+	if (left === right) return true;
+	if (!left || !right || left.length !== right.length) return false;
+	return left.every((value, index) => value === right[index]);
+}
+
+function repoMapEntriesEqual(left: RepoMapEntry, right: RepoMapEntry): boolean {
+	return (
+		left.path === right.path &&
+		left.mtimeMs === right.mtimeMs &&
+		arraysEqual(left.symbols, right.symbols) &&
+		arraysEqual(left.deps, right.deps) &&
+		arraysEqual(left.decls, right.decls)
+	);
+}
+
+function hasAnchoredCacheChange(cache: LivingRepoMap, next: LivingRepoMap, reindexed: number): boolean {
+	if (
+		reindexed > 0 ||
+		cache.lastIndexedCommit !== next.lastIndexedCommit ||
+		cache.graphEdgesStale !== next.graphEdgesStale ||
+		cache.entries.length !== next.entries.length
+	) {
+		return true;
+	}
+	const cachedByPath = new Map(cache.entries.map((entry) => [entry.path, entry]));
+	return next.entries.some((entry) => {
+		const cached = cachedByPath.get(entry.path);
+		return !cached || !repoMapEntriesEqual(cached, entry);
+	});
+}
+
 /**
  * Short-TTL process-level memo for `getLivingRepoMap`, keyed by `(cwd,
- * resolvedHead)`. Several independent callers (agent-session, grounding-guard,
+ * resolvedHead, graph mode)`. Several independent callers (agent-session, grounding-guard,
  * impact, intent-gate extensions) each request the map within the same burst
  * of tool calls; without this, each one re-runs `resolveHead` + `loadCache` +
  * `gitDiff` + the re-stat loop from scratch. The TTL is short enough that it
@@ -679,6 +826,8 @@ async function fullScan(
  * — so any non-default `deps` bypasses the memo entirely.
  */
 const LIVING_REPO_MAP_MEMO_TTL_MS = 1000;
+const LIVING_REPO_MAP_HEAD_TTL_MS = 1000;
+const LIVING_REPO_MAP_MEMO_MAX_ENTRIES = 64;
 
 interface LivingRepoMapMemoEntry {
 	result: LivingRepoMapResult;
@@ -686,17 +835,104 @@ interface LivingRepoMapMemoEntry {
 }
 
 const livingRepoMapMemo = new Map<string, LivingRepoMapMemoEntry>();
+const livingRepoMapHeadMemo = new Map<string, { head: string | null; expiresAt: number }>();
+const livingRepoMapHeadInFlight = new Map<string, Promise<string | null>>();
+const livingRepoMapInFlight = new Map<string, Promise<LivingRepoMapResult>>();
 
-function livingRepoMapMemoKey(cwd: string, head: string | null): string {
+function livingRepoMapMemoKey(cwd: string, head: string | null, extractDepsEnabled: boolean): string {
 	// "::" can't appear in a git sha (plain hex), so it's a safe delimiter; the
 	// non-git case gets its own "::null" tail so it can never collide with a
 	// (never actually possible) empty-string sha.
-	return `${cwd}::${head === null ? "::null" : head}`;
+	return `${cwd}::${head === null ? "::null" : head}::deps=${extractDepsEnabled ? "on" : "off"}`;
+}
+
+function livingRepoMapRequestKey(cwd: string, extractDepsEnabled: boolean): string {
+	return `${cwd}::deps=${extractDepsEnabled ? "on" : "off"}`;
+}
+
+function pruneLivingRepoMapHeadMemo(now: number): void {
+	for (const [cwd, entry] of livingRepoMapHeadMemo) {
+		if (entry.expiresAt <= now) livingRepoMapHeadMemo.delete(cwd);
+	}
+	while (livingRepoMapHeadMemo.size >= LIVING_REPO_MAP_MEMO_MAX_ENTRIES) {
+		let oldestCwd: string | undefined;
+		let oldestExpiry = Number.POSITIVE_INFINITY;
+		for (const [cwd, entry] of livingRepoMapHeadMemo) {
+			if (entry.expiresAt < oldestExpiry) {
+				oldestCwd = cwd;
+				oldestExpiry = entry.expiresAt;
+			}
+		}
+		if (oldestCwd === undefined) break;
+		livingRepoMapHeadMemo.delete(oldestCwd);
+	}
+}
+
+async function resolveHeadForDefaultDeps(cwd: string): Promise<string | null> {
+	const now = Date.now();
+	pruneLivingRepoMapHeadMemo(now);
+	const cached = livingRepoMapHeadMemo.get(cwd);
+	if (cached) {
+		if (cached.expiresAt > now) return cached.head;
+		livingRepoMapHeadMemo.delete(cwd);
+	}
+	const running = livingRepoMapHeadInFlight.get(cwd);
+	if (running) return running;
+	const promise = defaultLivingRepoMapDeps
+		.resolveHead(cwd)
+		.then((head) => {
+			pruneLivingRepoMapHeadMemo(Date.now());
+			livingRepoMapHeadMemo.set(cwd, { head, expiresAt: Date.now() + LIVING_REPO_MAP_HEAD_TTL_MS });
+			return head;
+		})
+		.finally(() => {
+			if (livingRepoMapHeadInFlight.get(cwd) === promise) livingRepoMapHeadInFlight.delete(cwd);
+		});
+	livingRepoMapHeadInFlight.set(cwd, promise);
+	return promise;
+}
+
+function pruneLivingRepoMapMemo(now: number): void {
+	for (const [key, entry] of livingRepoMapMemo) {
+		if (entry.expiresAt <= now) livingRepoMapMemo.delete(key);
+	}
+	while (livingRepoMapMemo.size >= LIVING_REPO_MAP_MEMO_MAX_ENTRIES) {
+		let oldestKey: string | undefined;
+		let oldestExpiry = Number.POSITIVE_INFINITY;
+		for (const [key, entry] of livingRepoMapMemo) {
+			if (entry.expiresAt < oldestExpiry) {
+				oldestKey = key;
+				oldestExpiry = entry.expiresAt;
+			}
+		}
+		if (oldestKey === undefined) break;
+		livingRepoMapMemo.delete(oldestKey);
+	}
 }
 
 /** Test-only: clear the memo between cases so a stale entry can't leak across tests. */
 export function clearLivingRepoMapMemoForTest(): void {
 	livingRepoMapMemo.clear();
+	livingRepoMapHeadMemo.clear();
+}
+
+/** Share one default-deps refresh across the burst of graph consumers. */
+export function getLivingRepoMap(
+	cwd: string,
+	deps: LivingRepoMapDeps = defaultLivingRepoMapDeps,
+): Promise<LivingRepoMapResult> {
+	const extractDepsEnabled = !isTruthyEnvFlag(process.env.PIT_NO_REPO_GRAPH);
+	if (deps !== defaultLivingRepoMapDeps || isTruthyEnvFlag(process.env.PIT_NO_LIVING_REPO_MAP)) {
+		return getLivingRepoMapInternal(cwd, deps);
+	}
+	const requestKey = livingRepoMapRequestKey(cwd, extractDepsEnabled);
+	const running = livingRepoMapInFlight.get(requestKey);
+	if (running) return running;
+	const promise = getLivingRepoMapInternal(cwd, deps).finally(() => {
+		if (livingRepoMapInFlight.get(requestKey) === promise) livingRepoMapInFlight.delete(requestKey);
+	});
+	livingRepoMapInFlight.set(requestKey, promise);
+	return promise;
 }
 
 /**
@@ -706,15 +942,15 @@ export function clearLivingRepoMapMemoForTest(): void {
  *
  * Never throws: any I/O failure degrades to a coarser-but-correct path.
  */
-export async function getLivingRepoMap(
+async function getLivingRepoMapInternal(
 	cwd: string,
 	deps: LivingRepoMapDeps = defaultLivingRepoMapDeps,
 ): Promise<LivingRepoMapResult> {
 	const cachePath = deps.cachePath(cwd);
 	// Repo graph kill-switch: with the flag, deps are neither extracted nor
-	// persisted (entries fall back to symbols/decls-only, exactly like a v2-only
-	// harness) and `graph.ts` naturally sees an all-nodes-no-edges map. Read
-	// ONCE per call — every fullScan/indexFile call site below shares this value.
+	// exposed in the result. Symbols/decls still refresh in the persistent cache,
+	// which is marked so the next graph-enabled call safely recomposes edges.
+	// Read ONCE per call — every fullScan/indexFile call site below shares this value.
 	const extractDepsEnabled = !isTruthyEnvFlag(process.env.PIT_NO_REPO_GRAPH);
 
 	// Escape hatch: one-shot full scan, no persistence. Feature is ON by default;
@@ -723,21 +959,24 @@ export async function getLivingRepoMap(
 		return fullScan(cwd, "", deps, extractDepsEnabled);
 	}
 
-	const head = await deps.resolveHead(cwd);
+	const head = deps === defaultLivingRepoMapDeps ? await resolveHeadForDefaultDeps(cwd) : await deps.resolveHead(cwd);
 
 	// Short-TTL memo: only for the default deps (see `livingRepoMapMemoKey` doc
 	// comment) — non-default deps bypass it entirely so injectable-deps tests
 	// keep driving exact scenarios. `memoize` below stores every result this
 	// call produces; a hit here skips loadCache/gitDiff/the re-stat loop below.
-	const memoKey = deps === defaultLivingRepoMapDeps ? livingRepoMapMemoKey(cwd, head) : null;
+	const memoKey = deps === defaultLivingRepoMapDeps ? livingRepoMapMemoKey(cwd, head, extractDepsEnabled) : null;
 	if (memoKey) {
 		const cached = livingRepoMapMemo.get(memoKey);
-		if (cached && cached.expiresAt > Date.now()) {
-			return cached.result;
+		if (cached) {
+			if (cached.expiresAt > Date.now()) return cached.result;
+			livingRepoMapMemo.delete(memoKey);
 		}
 	}
 	const memoize = (result: LivingRepoMapResult): LivingRepoMapResult => {
 		if (memoKey) {
+			if (!extractDepsEnabled) livingRepoMapMemo.delete(livingRepoMapMemoKey(cwd, head, true));
+			pruneLivingRepoMapMemo(Date.now());
 			livingRepoMapMemo.set(memoKey, { result, expiresAt: Date.now() + LIVING_REPO_MAP_MEMO_TTL_MS });
 		}
 		return result;
@@ -748,7 +987,7 @@ export async function getLivingRepoMap(
 	// from real data instead of cold.
 	if (head === null) {
 		const result = await fullScan(cwd, "", deps, extractDepsEnabled);
-		trySave(deps, cachePath, result.map);
+		trySave(deps, cachePath, extractDepsEnabled ? result.map : markGraphEdgesStale(result.map));
 		return memoize(result);
 	}
 
@@ -759,23 +998,39 @@ export async function getLivingRepoMap(
 	// (no commit anchor at all) do a full scan once to seed the cache.
 	if (!cache || cache.lastIndexedCommit.length === 0) {
 		const result = await fullScan(cwd, head, deps, extractDepsEnabled);
+		trySave(deps, cachePath, extractDepsEnabled ? result.map : markGraphEdgesStale(result.map));
+		return memoize(result);
+	}
+
+	// An OFF-mode refresh deliberately kept the old graph while updating symbols.
+	// Rebuild once edges are requested again so no stale edge can escape.
+	if (extractDepsEnabled && cache.graphEdgesStale) {
+		const result = await fullScan(cwd, head, deps, true);
 		trySave(deps, cachePath, result.map);
 		return memoize(result);
 	}
 
 	// Anchored cache present. Ask git for the committed delta since that commit.
-	const diff = await deps.gitDiff(cwd, cache.lastIndexedCommit);
+	const diff = await deps.gitDiff(cwd, cache.lastIndexedCommit, new Set(cache.entries.map((entry) => entry.path)));
 
 	// git diff failed (e.g. the cached commit was rebased away): rebuild fully.
 	if (diff === null) {
 		const result = await fullScan(cwd, head, deps, extractDepsEnabled);
-		trySave(deps, cachePath, result.map);
+		trySave(deps, cachePath, extractDepsEnabled ? result.map : markGraphEdgesStale(result.map));
 		return memoize(result);
 	}
 
-	// Start from the cached entries, keyed for O(1) patch.
+	// Project cached entries onto the requested graph mode. This prevents the
+	// graph kill-switch from leaking persisted edges through an anchored cache
+	// hit, while retaining edge-only nodes when graph extraction is enabled.
 	const byPath = new Map<string, RepoMapEntry>();
-	for (const e of cache.entries) byPath.set(e.path, e);
+	for (const cached of cache.entries) {
+		const entry: RepoMapEntry = { path: cached.path, symbols: cached.symbols, mtimeMs: cached.mtimeMs };
+		if (cached.decls) entry.decls = cached.decls;
+		if (extractDepsEnabled && cached.deps) entry.deps = cached.deps;
+		if (entry.symbols.length === 0 && entry.deps === undefined) continue;
+		byPath.set(entry.path, entry);
+	}
 
 	// Seeded from the PRE-mutation cache keys — a cheap perf hint for edge
 	// resolution (see makeFileExistsChecker); correctness for files added/renamed
@@ -788,16 +1043,24 @@ export async function getLivingRepoMap(
 
 	let reindexed = 0;
 	const changedKeys = new Set<string>();
+	let resolverConfigChanged = false;
 
 	for (const entry of diff) {
+		if (isEdgeResolverConfig(entry.renameTo ?? entry.path)) resolverConfigChanged = true;
 		// Deleted: drop from the map. (Rename source is also dropped below.)
 		if (entry.status === "D") {
-			byPath.delete(toRelKey(cwd, entry.path));
+			const key = toRelKey(cwd, entry.path);
+			changedKeys.add(key);
+			byPath.delete(key);
 			continue;
 		}
 		// Rename/copy: remove the old key, index the destination.
 		const target = entry.renameTo ?? entry.path;
-		if (entry.status === "R") byPath.delete(toRelKey(cwd, entry.path));
+		if (entry.status === "R") {
+			const sourceKey = toRelKey(cwd, entry.path);
+			changedKeys.add(sourceKey);
+			byPath.delete(sourceKey);
+		}
 		const key = toRelKey(cwd, target);
 		changedKeys.add(key);
 		const fresh = indexFile(cwd, target, deps, fileExists, extractDepsEnabled, resolveBare);
@@ -810,33 +1073,56 @@ export async function getLivingRepoMap(
 		reindexed++;
 	}
 
-	// Working-tree drift: a file changed since the cached commit but with NO new
-	// commit (uncommitted edit) won't appear in `<base>..HEAD`. Catch it by mtime
-	// so the map reflects the live tree, not just the committed state. We only
-	// re-stat cached entries (bounded) and skip ones already reindexed above.
-	for (const e of cache.entries) {
-		if (changedKeys.has(e.path)) continue;
-		const abs = join(cwd, e.path);
-		const mtime = deps.statMtime(abs);
-		// mtime 0 = gone; a mismatch = edited in place. Either way, re-resolve.
-		if (mtime === 0) {
-			byPath.delete(e.path);
-			continue;
-		}
-		if (mtime !== e.mtimeMs) {
-			const fresh = indexFile(cwd, e.path, deps, fileExists, extractDepsEnabled, resolveBare);
-			if (fresh) byPath.set(e.path, fresh);
-			else byPath.delete(e.path);
+	// A changed tsconfig paths map or workspace manifest can alter the resolved
+	// destination of imports in otherwise untouched files. Refresh only the edge
+	// projection (not symbols/declarations) of cached entries; this keeps the
+	// invalidation correct without paying a declaration parse for every file.
+	if (extractDepsEnabled && resolverConfigChanged && deps.extractDeps) {
+		for (const [path, cachedEntry] of byPath) {
+			if (changedKeys.has(path)) continue;
+			const refreshed = refreshEntryDeps(cwd, cachedEntry, deps, fileExists, resolveBare);
+			changedKeys.add(path);
 			reindexed++;
+			if (refreshed) byPath.set(path, refreshed);
+			else byPath.delete(path);
+		}
+	}
+
+	// The default git diff already compares the anchor with the complete working
+	// tree, including staged/unstaged edits and untracked files. Avoid an O(N)
+	// synchronous stat pass for the normal runtime path. Injectable deps retain
+	// the mtime fallback because tests and alternate hosts may provide a narrower
+	// delta contract.
+	if (deps !== defaultLivingRepoMapDeps) {
+		for (const e of cache.entries) {
+			if (changedKeys.has(e.path)) continue;
+			const abs = join(cwd, e.path);
+			const mtime = deps.statMtime(abs);
+			if (mtime === 0) {
+				changedKeys.add(e.path);
+				byPath.delete(e.path);
+				continue;
+			}
+			if (mtime !== e.mtimeMs) {
+				changedKeys.add(e.path);
+				const fresh = indexFile(cwd, e.path, deps, fileExists, extractDepsEnabled, resolveBare);
+				if (fresh) byPath.set(e.path, fresh);
+				else byPath.delete(e.path);
+				reindexed++;
+			}
 		}
 	}
 
 	const result: LivingRepoMapResult = {
 		map: { version: CACHE_VERSION, lastIndexedCommit: head, entries: Array.from(byPath.values()) },
-		mode: reindexed > 0 ? "incremental" : "cache-hit",
+		mode: reindexed > 0 || changedKeys.size > 0 ? "incremental" : "cache-hit",
 		reindexedCount: reindexed,
 	};
-	trySave(deps, cachePath, result.map);
+	if (extractDepsEnabled && hasAnchoredCacheChange(cache, result.map, reindexed)) {
+		trySave(deps, cachePath, result.map);
+	} else if (changedKeys.size > 0) {
+		trySave(deps, cachePath, mergeGraphDisabledCache(cache, byPath, changedKeys, head));
+	}
 	return memoize(result);
 }
 

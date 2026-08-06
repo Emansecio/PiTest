@@ -64,6 +64,41 @@ export function cachedArgsLength(args: unknown): number {
 const TOOLCALL_ARG_VALUE_MARK_THRESHOLD = 200;
 
 /**
+ * P0: the exact prefix of the elision marker produced by {@link pruneToolCallArguments}.
+ * A mutating tool MUST NEVER execute arguments that contain this text — it means the
+ * historical copy was pruned and the "content" is a placeholder, not a payload.
+ * Detected by `containsElisionMarker`; rejected by the dispatcher (agent-loop.ts).
+ */
+const ELISION_MARKER_PREFIX = "chars elided";
+
+/**
+ * P0 — true when any string value inside `args` carries the internal elision
+ * marker produced by {@link pruneToolCallArguments} (`[N chars elided — …]`).
+ *
+ * This is the dispatcher's fail-safe: a mutating tool call whose arguments were
+ * pruned for HISTORY must never be executed as if the marker were the real
+ * payload. Detection is deliberately marker-prefix based (`chars elided`), so a
+ * legitimate user string containing that phrase would be a false positive — an
+ * acceptable cost for a fail-safe guard on mutation tools, which carry file
+ * bodies/edits, not prose.
+ */
+export function containsElisionMarker(args: unknown): boolean {
+	if (typeof args === "string") return args.includes(ELISION_MARKER_PREFIX);
+	if (Array.isArray(args)) {
+		for (const item of args) {
+			if (containsElisionMarker(item)) return true;
+		}
+		return false;
+	}
+	if (typeof args === "object" && args !== null) {
+		for (const value of Object.values(args as Record<string, unknown>)) {
+			if (containsElisionMarker(value)) return true;
+		}
+	}
+	return false;
+}
+
+/**
  * Returns a deep copy of a mutation tool-call's arguments with long string
  * values (file bodies, edit oldText/newText) replaced by a short marker, plus
  * the number of chars elided. Short values (paths, flags) pass through. Returns

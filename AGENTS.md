@@ -4,9 +4,9 @@ Canonical source of truth for project-specific rules, for both human contributor
 and coding agents working in this repository. Pit loads this file automatically at
 startup when run from the repo root (disable with `--no-context-files`).
 
-> Terminology: see [CONTEXT.md](CONTEXT.md) for the authoritative glossary
-> (Mode, Permission, Orchestration, Fusion, Todo, Plan, Channel, Role). Do not
-> redefine those terms here.
+> Terminology: see [CONTEXT.md](CONTEXT.md) for the authoritative domain language
+> (Mode, Permission, Orchestration, Fusion, Todo, Plan, Channel, Role), including
+> the Todo/Plan selection boundary. Do not redefine those terms here.
 
 ## Contribution rules
 
@@ -47,8 +47,9 @@ Monorepo (npm workspaces). Four packages:
 - `@pit/tui` (`packages/tui`) — terminal UI library with differential rendering.
 
 Turn flow: user input → `agent-session.ts` → `agent-loop.ts` → tool dispatch/execution
-→ compaction check → provider call. Behavioral features live in built-in extensions,
-not inline in `agent-session.ts`.
+→ compaction check → provider call. `agent-session.ts` owns lifecycle orchestration,
+prompt/session state, compaction, verification and self-review seams. New separable
+behaviors should normally live in built-in extensions.
 
 ## Documentation layout
 

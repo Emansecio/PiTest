@@ -71,7 +71,7 @@ export interface ExternalEditSentinelOptions {
 	/**
 	 * Accessor for the session's `ReadDedupeStore`, resolved lazily (the session
 	 * is constructed after extensions are bundled). Undefined in contexts that
-	 * never have one (tests, `PIT_READ_DEDUPE=0`) — invalidation is then skipped,
+	 * never have one (tests, `PIT_NO_READ_DEDUPE`) — invalidation is then skipped,
 	 * never a hard failure.
 	 */
 	getReadDedupeStore?: () => ReadDedupeStore | undefined;

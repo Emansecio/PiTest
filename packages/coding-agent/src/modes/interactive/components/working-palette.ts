@@ -13,13 +13,14 @@ const BREATH_PHASES = 24;
  * Brand lime (`#c9ff29`) — the bright end of the PIT hero-logo gradient. The
  * breathing pulse blends its accent toward this at the raised-cosine peak so the
  * spinner "touches" the brand at its brightest instant. Brand-fixed (not a theme
- * key) on purpose, matching the wordmark.
+ * key) on purpose, matching the wordmark — **except** on light themes, where the
+ * kiss washes the dark accent toward a pale yellow and kills contrast on white.
  */
 const BRAND_LIME: Rgb = { r: 201, g: 255, b: 41 };
 /** Phases either side of the peak (i≈0) that receive any brand blend. Keeps the
  * kiss to the brightest ~2-3 of the 24 phases. */
 const BRAND_PEAK_SPAN = 3;
-/** Peak blend fraction toward {@link BRAND_LIME} at the exact brightest phase. */
+/** Peak blend fraction toward {@link BRAND_LIME} at the exact brightest phase (dark themes). */
 const BRAND_PEAK_BLEND = 0.25;
 
 /**
@@ -39,6 +40,10 @@ const BRAND_PEAK_BLEND = 0.25;
  * the right default and tracks theme switches at runtime.
  */
 export function workingPulsePalette(themeInstance: Theme = globalTheme): LoaderColorFn[] {
+	if (themeInstance.getColorMode() === "none") {
+		// NO_COLOR / FORCE_COLOR=0: no SGR at all (rgbFg would still paint).
+		return [(s) => s];
+	}
 	if (isReducedMotion()) {
 		// Reduced-motion: steady accent on a frozen spinner frame (see spinner-ticker).
 		return [(s) => themeInstance.fg("accent", s)];
@@ -76,7 +81,7 @@ function grayPolesCollapse(themeInstance: Theme): boolean {
 /** Build the truecolor breathing gradient, or undefined when truecolor is
  * unavailable / the theme colors are not resolvable as RGB (256-color theme). */
 function breathingGradient(themeInstance: Theme): LoaderColorFn[] | undefined {
-	if (!getCapabilities().trueColor) return undefined;
+	if (themeInstance.getColorMode() !== "truecolor" || !getCapabilities().trueColor) return undefined;
 	const accent = parseTrueColorFg(themeInstance.getFgAnsi("accent"));
 	const dim = parseTrueColorFg(themeInstance.getFgAnsi("dim"));
 	if (!accent || !dim) return undefined;
@@ -90,10 +95,13 @@ function breathingGradient(themeInstance: Theme): LoaderColorFn[] | undefined {
 		// At the brightest (accent) pole \u2014 i\u22480, wrapping so late phases near i=24
 		// count too \u2014 kiss the accent toward the brand lime with a raised-cosine
 		// window, so the pulse just touches the brand at its peak and eases back.
+		// Neutralize the lime kiss on light themes: blending a dark green accent
+		// toward #c9ff29 on a white terminal *reduces* contrast at the peak.
+		const brandBlend = themeInstance.name === "light" ? 0 : BRAND_PEAK_BLEND;
 		const peakDist = Math.min(i, BREATH_PHASES - i);
-		if (peakDist < BRAND_PEAK_SPAN) {
+		if (brandBlend > 0 && peakDist < BRAND_PEAK_SPAN) {
 			const peak = (1 + Math.cos((peakDist / BRAND_PEAK_SPAN) * Math.PI)) / 2;
-			color = lerpRgb(color, BRAND_LIME, peak * BRAND_PEAK_BLEND);
+			color = lerpRgb(color, BRAND_LIME, peak * brandBlend);
 		}
 		palette.push(rgbFg(color));
 	}

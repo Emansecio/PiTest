@@ -12,7 +12,7 @@ import * as fs from "node:fs/promises";
 import { recordDiagnostic } from "@pit/ai";
 import { waitForChildProcess } from "../../utils/child-process.ts";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
-import { killProcessTree } from "../../utils/shell.ts";
+import { killProcessTree, killProcessTreeAndWait } from "../../utils/shell.ts";
 import { truncateWithEllipsis } from "../../utils/surrogate.ts";
 import { LruMap } from "../lru-map.ts";
 import { beginDiagnosticsBatch, endDiagnosticsBatch, notifyDiagnosticsPublished } from "./diagnostics-events.ts";
@@ -544,6 +544,7 @@ export async function getOrCreateClient(
 			cwd,
 			stdio: ["pipe", "pipe", "pipe"],
 			env: process.env,
+			detached: process.platform !== "win32",
 			windowsHide: true,
 			shell: useShell,
 		}) as ChildProcessWithoutNullStreams;
@@ -992,12 +993,45 @@ async function shutdownClientInstance(client: LspClient): Promise<void> {
 		() => true,
 		() => false,
 	);
-	if (shutdownCompleted) {
+	// Keep the Windows root alive as taskkill's tree anchor. On POSIX the
+	// dedicated process group remains addressable after a compliant server exits,
+	// so sending `exit` is safe there too; the process-tree wait below, rather
+	// than a fixed grace period, provides the lifecycle barrier.
+	if (shutdownCompleted && process.platform !== "win32") {
 		await sendNotification(client, "exit", undefined).catch(() => {});
-		if (await waitForExit(client, EXIT_TIMEOUT_MS)) return;
 	}
+	if (await killClientProcessAndWait(client)) return;
 	killClientProcess(client);
 	await waitForExit(client, EXIT_TIMEOUT_MS);
+}
+
+async function killClientProcessAndWait(client: LspClient): Promise<boolean> {
+	// Subscribe before killing so a fast Windows process cannot emit `exit`
+	// between taskkill completing and the wait being installed. Besides proving
+	// termination, this drains/destroys stdio before callers remove the cwd.
+	const exit = waitForExit(client, EXIT_TIMEOUT_MS);
+	try {
+		if (client.proc.pid) {
+			recordDiagnostic({
+				category: "process.kill",
+				level: "info",
+				source: "lsp.dispose",
+				context: { pid: client.proc.pid },
+			});
+			const treeGone = await killProcessTreeAndWait(client.proc.pid, EXIT_TIMEOUT_MS);
+			await exit;
+			return treeGone;
+		}
+		client.proc.kill();
+	} catch {
+		try {
+			client.proc.kill();
+		} catch {
+			await exit;
+			return true;
+		}
+	}
+	return exit;
 }
 
 function killClientProcess(client: LspClient): void {

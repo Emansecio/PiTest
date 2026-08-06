@@ -187,7 +187,7 @@ describe("ask picker", () => {
 		expect(out).toContain("Context");
 		expect(out).toMatch(/└─/);
 		expect(out).toContain("☐ Alpha");
-		expect(out).toContain("type a custom answer");
+		expect(out).toContain("✎ Other…");
 		expect(out).toContain("space toggle");
 		expect(out).toContain("↑↓ navigate");
 		expect(out).toContain("close");
@@ -239,18 +239,36 @@ describe("ask picker", () => {
 				],
 			}),
 		).render(80);
-		// The recommended row is focused by default → its description is shown in
-		// full under the connector.
-		expect(out).toContain("readaptação");
+		// The recommended row is focused by default → its description is shown
+		// under the connector (capped at 2 lines — may end with …).
 		expect(out).toMatch(/└─ protege/);
 		// The unfocused row stays a clean label: no description leaks onto it.
 		expect(out).toContain("Bulk");
 		expect(out).not.toContain("não focada");
 	});
 
-	it("renders the recommended badge as a quiet suffix", () => {
+	it("caps a focused option description at two lines with a trailing ellipsis", () => {
+		// Force >2 wrapped lines at a narrow card width.
+		const desc = Array.from({ length: 12 }, (_, i) => `palavra${i}`).join(" ");
+		const out = drive(
+			makeReq({
+				options: [{ label: "Alpha", description: desc, recommended: true }],
+			}),
+		).render(50);
+		const bodyLines = out.split("\n").map(stripAnsi);
+		const descLineCount = bodyLines.filter(
+			(l) => l.includes("└─") || (l.includes("palavra") && !l.includes("Alpha")),
+		).length;
+		expect(descLineCount).toBeLessThanOrEqual(2);
+		expect(out).toMatch(/…/);
+		// Far tail of the blurb must not all spill onto the card.
+		expect(out).not.toContain("palavra11");
+	});
+
+	it("renders the recommended badge as a quiet star suffix", () => {
 		const out = drive(makeReq({ options: [{ label: "Alpha", recommended: true }, { label: "Beta" }] })).render();
-		expect(out).toContain("(recommended)");
+		expect(out).toContain("★");
+		expect(out).not.toContain("(recommended)");
 	});
 
 	it("shows a live auto-select countdown in the hint when the request has a timeout", () => {
@@ -383,7 +401,7 @@ describe("ask picker mouse", () => {
 
 	it("clicking the freeform row opens the text field", () => {
 		const { target, result } = driveMouse(makeReq({ options: [{ label: "Alpha" }], allowFreeform: true }));
-		expect(target.onMouse(leftPress(), rowOf(target, "custom answer"), 4)).toBe(true);
+		expect(target.onMouse(leftPress(), rowOf(target, "Other…"), 4)).toBe(true);
 		for (const ch of "typed") target.handleInput?.(ch);
 		target.handleInput?.(ENTER);
 		expect(result()).toEqual({ picked: [], freeformText: "typed", cancelled: false });
@@ -461,14 +479,15 @@ describe("ask picker numeric quick-select", () => {
 
 	it("shows a dim `N·` ordinal prefix on numerable rows", () => {
 		const out = drive(makeReq({})).render();
-		expect(out).toContain("1·Alpha");
-		expect(out).toContain("2·Beta");
-		expect(out).toContain("3·Gamma");
+		// Trailing space after the middot keeps the digit from welding to the label.
+		expect(out).toContain("1· Alpha");
+		expect(out).toContain("2· Beta");
+		expect(out).toContain("3· Gamma");
 	});
 
 	it("keeps the ordinal before the checkbox in multi-select rows", () => {
 		const out = drive(makeReq({ allowMultiple: true })).render();
-		expect(out).toContain("1·☐ Alpha");
+		expect(out).toContain("1· ☐ Alpha");
 	});
 
 	it("routes digits to the text field while the freeform input has focus", () => {

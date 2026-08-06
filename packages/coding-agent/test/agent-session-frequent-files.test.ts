@@ -53,27 +53,27 @@ describe("AgentSession frequent files API", () => {
 		}
 	});
 
-	it("exposes an empty top-files list on a fresh session", () => {
+	it("exposes an empty top-files list on a fresh session", async () => {
 		const { session, cwd } = createSession(SettingsManager.inMemory());
 		dirs.push(cwd);
 		try {
 			expect(session.getFrequentFiles({ minHits: 0 })).toEqual([]);
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 	});
 
-	it("omits the frequent_files section when disabled", () => {
+	it("omits the frequent_files section when disabled", async () => {
 		const { session, cwd } = createSession(SettingsManager.inMemory());
 		dirs.push(cwd);
 		try {
 			expect(session.systemPrompt).not.toContain("<frequent_files>");
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 	});
 
-	it("omits the frequent_files section when enabled but tracker is empty", () => {
+	it("omits the frequent_files section when enabled but tracker is empty", async () => {
 		const { session, cwd } = createSession(
 			SettingsManager.inMemory({ frequentFiles: { enabled: true, minHits: 0 } }),
 		);
@@ -82,7 +82,7 @@ describe("AgentSession frequent files API", () => {
 			// No tool events have fired; section should not appear because no entries exist.
 			expect(session.systemPrompt).not.toContain("<frequent_files>");
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 	});
 });

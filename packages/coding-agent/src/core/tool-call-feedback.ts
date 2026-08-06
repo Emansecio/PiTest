@@ -8,12 +8,53 @@
  * The wording forces the model to articulate (a) what was wrong, (b) why, and
  * (c) the corrected invocation, rather than blindly retrying with the same
  * arguments. Inspired by the prompt patterns used in tailcallhq/forgecode.
+ *
+ * ## Steer format (prunability)
+ *
+ * Every steer here is emitted as a single self-contained
+ * `<system-reminder>[kind] … </system-reminder>` block, exactly like the
+ * overthink / TTSR steers in `@pit/agent-core`. That shape is what the N8
+ * "consumed steering-reminder collapse" in `compaction/prune.ts` recognizes: it
+ * matches a CONFIRMED opening marker and requires the sole `</system-reminder>`
+ * terminator to close the block. A steer is course correction, so it stays FULL
+ * text while it sits inside the prune protection window; once it scrolls out it
+ * collapses to one line instead of riding every request forever.
+ *
+ * Two consequences for anyone editing these builders:
+ *  - the marker must be the FIRST thing in the string and `</system-reminder>`
+ *    the LAST — appending an escalation paragraph after the close tag silently
+ *    makes the steer unprunable (that is why the doom-loop tiers render their
+ *    extra line INSIDE the block, via `tier`);
+ *  - every marker must also be registered in `STEERING_REMINDER_MATCHERS`
+ *    (`compaction/prune.ts`), which imports these constants as the single
+ *    source of truth.
  */
 
 import { sliceSafe } from "../utils/surrogate.ts";
 
 const MAX_ARGS_PREVIEW_CHARS = 400;
 const MAX_ERROR_PREVIEW_CHARS = 600;
+
+/** Terminator every steer block ends with (see the module note above). */
+export const STEER_REMINDER_CLOSE = "</system-reminder>";
+
+/**
+ * Opening markers of the steers built here. Registered in `prune.ts`'s
+ * `STEERING_REMINDER_MATCHERS` so the N8 collapse recognizes them.
+ */
+export const DOOM_LOOP_STEER_MARKER = "<system-reminder>[doom-loop]";
+export const FAILURE_BUDGET_STEER_MARKER = "<system-reminder>[failure-budget]";
+export const TOOL_ERROR_REFLECTION_STEER_MARKER = "<system-reminder>[tool-error]";
+
+/**
+ * The one piece of advice the whole loop/flailing family shares — doom-loop,
+ * per-turn failure budget, repeated-error (cross-error) and stagnation all used
+ * to spell out their own three-bullet variant of it, ~1.8k chars of near
+ * duplicate text per bad turn. Each reminder now carries ONE specific line (which
+ * tool, which error, how many turns) plus this body.
+ */
+export const LOOP_STEER_ADVICE =
+	"You are repeating an approach that is not working. Stop, say in one line what is blocking you, then change strategy or ask the user.";
 
 export interface ToolErrorReflectionInput {
 	toolName: string;
@@ -28,12 +69,22 @@ export interface ToolErrorReflectionInput {
 	attemptsLeft?: number;
 }
 
+/**
+ * Doom-loop escalation tiers. The ladder itself (thresholds, latches, the
+ * Tier-3 abort) lives in `turn-steering-engine.ts` — this only picks which extra
+ * line the block carries, so each tier reads differently without re-explaining
+ * the whole situation.
+ */
+export type DoomLoopTier = "reminder" | "pause" | "recovery";
+
 export interface DoomLoopReminderInput {
 	toolName: string;
-	/** Args of the repeated call (will be serialized for the prompt). */
-	args?: unknown;
 	/** How many consecutive identical invocations have been observed. */
 	consecutiveCount: number;
+	/** Escalation tier; defaults to the Tier-1 soft `reminder`. */
+	tier?: DoomLoopTier;
+	/** Identical calls left before the Tier-3 abort. Rendered by the `pause` tier only. */
+	remaining?: number;
 }
 
 export interface FailureBudgetReminderInput {
@@ -56,8 +107,7 @@ export function buildToolErrorReflection(input: ToolErrorReflectionInput): strin
 	const errorPreview = previewError(input.errorMessage);
 	const lines: string[] = [];
 
-	lines.push("<tool-error-reflection>");
-	lines.push(`The previous call to \`${input.toolName}\` failed.`);
+	lines.push(`${TOOL_ERROR_REFLECTION_STEER_MARKER} The previous call to \`${input.toolName}\` failed.`);
 	if (argsPreview) {
 		lines.push("");
 		lines.push("Arguments:");
@@ -85,41 +135,39 @@ export function buildToolErrorReflection(input: ToolErrorReflectionInput): strin
 	);
 	lines.push("");
 	lines.push("If the same call would fail again, do not repeat it.");
-	lines.push("</tool-error-reflection>");
+	lines.push(STEER_REMINDER_CLOSE);
 
 	return lines.join("\n");
 }
 
 /**
  * Build a reminder that the model appears stuck in a repetitive tool-call loop.
- * Suggests reassessment, alternative strategies, or asking for clarification.
+ *
+ * P3.9: the repeated arguments are NOT echoed. A doom-loop is by definition the
+ * same args over and over, so the JSON block duplicated a payload that sits a few
+ * lines above in the transcript — the tool name is the only part the steer has to
+ * carry.
+ *
+ * The escalation lives in `tier`: `pause` adds the countdown to the abort,
+ * `recovery` adds the decompose-and-switch instruction. Both render INSIDE the
+ * `<system-reminder>` block so the steer stays collapsible (see the module note).
  */
 export function buildDoomLoopReminder(input: DoomLoopReminderInput): string {
-	const argsPreview = previewArgs(input.args);
 	const count = Math.max(0, Math.floor(input.consecutiveCount));
 	const lines: string[] = [];
 
-	lines.push("<doom-loop-reminder>");
-	lines.push(
-		`You have made ${count} consecutive identical calls to \`${input.toolName}\`. This indicates you are not making progress.`,
-	);
-	if (argsPreview) {
-		lines.push("");
-		lines.push("Repeated arguments:");
-		lines.push("```json");
-		lines.push(argsPreview);
-		lines.push("```");
+	lines.push(`${DOOM_LOOP_STEER_MARKER} You have made ${count} consecutive identical calls to \`${input.toolName}\`.`);
+	lines.push(LOOP_STEER_ADVICE);
+	if (input.tier === "pause") {
+		const remaining = Math.max(0, Math.floor(input.remaining ?? 0));
+		lines.push(`Do NOT repeat it — ${remaining} more identical call${remaining === 1 ? "" : "s"} aborts the turn.`);
+	} else if (input.tier === "recovery") {
+		lines.push(
+			"STOP. Restate the goal in one sentence, list the sub-steps, then run ONLY sub-step 1 with a " +
+				"different approach. Another repeat aborts the turn.",
+		);
 	}
-	lines.push("");
-	lines.push("Reassess before calling this tool again:");
-	lines.push("- Has the previous result changed? If not, repeating will not help.");
-	lines.push(
-		"- Is there a **different tool**, a **different argument**, or a **different file/path** that would move the task forward?",
-	);
-	lines.push("- Do you need to **ask the user** for missing information?");
-	lines.push("");
-	lines.push("Do not repeat the same call with the same arguments. Pick a different action.");
-	lines.push("</doom-loop-reminder>");
+	lines.push(STEER_REMINDER_CLOSE);
 
 	return lines.join("\n");
 }
@@ -136,21 +184,12 @@ export function buildFailureBudgetReminder(input: FailureBudgetReminderInput): s
 	const count = Math.max(0, Math.floor(input.failureCount));
 	const lines: string[] = [];
 
-	lines.push("<tool-failure-budget>");
 	lines.push(
-		`The \`${input.toolName}\` tool has failed ${count} time${count === 1 ? "" : "s"} in this turn — ` +
-			"its per-turn failure budget is exhausted.",
+		`${FAILURE_BUDGET_STEER_MARKER} \`${input.toolName}\` failed ${count} time${count === 1 ? "" : "s"} in ` +
+			"this turn — per-turn budget exhausted.",
 	);
-	lines.push("");
-	lines.push("Stop repeating this tool. Before anything else, decide one of:");
-	lines.push(
-		"- **Change approach**: a different tool, a different file/target, or fundamentally different arguments.",
-	);
-	lines.push("- **Fix the root cause**: state why it keeps failing, then address that — not the symptom.");
-	lines.push("- **Explain the blocker**: if you cannot proceed, say what is blocking you instead of retrying.");
-	lines.push("");
-	lines.push(`Do not call \`${input.toolName}\` again until you have changed something material.`);
-	lines.push("</tool-failure-budget>");
+	lines.push(LOOP_STEER_ADVICE);
+	lines.push(STEER_REMINDER_CLOSE);
 
 	return lines.join("\n");
 }

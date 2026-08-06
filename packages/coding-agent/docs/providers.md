@@ -112,6 +112,7 @@ Run `/login` → **Use an API key** and pick a ready-made provider — no config
 
 | Provider | `auth.json` key | Base URL | Models |
 |----------|------------------|----------|--------|
+| QwenCloud (Aliyun MaaS) | `qwencloud` | `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` | `qwen3.8-max`, `glm-5.2`, `deepseek-v4-pro`, `deepseek-v4-flash-0731` |
 | Z.ai GLM (Coding Plan) | `zai` | `https://api.z.ai/api/coding/paas/v4` | `glm-5.2`, `glm-4.7`, `glm-5-turbo` |
 | Verboo Code | `verboo` | `https://code.verboo.ai/v1` | `deepseek-v4-flash`, `qwen3.6-27b`, `@preset/glm4-7-flash` |
 

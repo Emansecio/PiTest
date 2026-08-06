@@ -59,11 +59,6 @@ export function createResolveToolDefinition(
 		description:
 			'Commit or discard a preview staged by edit, edit_v2, or write with { preview: true }. Pattern: stage -> review -> resolve. Pass the 8-char id returned by the staging tool, or "*" with action=accept to apply all staged previews in order.',
 		promptSnippet: "Commit or discard a staged preview",
-		promptGuidelines: [
-			"Call resolve only after a previous edit/edit_v2/write returned a preview id.",
-			"action=accept writes to disk; action=discard drops the staged change.",
-			'id="*" with action=accept applies every staged preview in insertion order.',
-		],
 		parameters: resolveSchema,
 		async execute(_toolCallId, input: ResolveToolInput) {
 			const queue = options?.queue ?? getCurrentPreviewQueue();

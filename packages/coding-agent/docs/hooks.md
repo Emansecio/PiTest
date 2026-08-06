@@ -88,6 +88,8 @@ The hook responds with **JSON on stdout**:
 
 Non-JSON output and empty stdout are treated as `{ decision: "allow" }`.
 
+The `additionalContext` of every UserPromptSubmit hook in the chain is concatenated into a single `<hook_context>` block appended to the prompt. That block is capped at **16 KB** in aggregate (head + tail, middle elided with a truncation marker) — it lands in the conversation itself, so an unbounded hook would re-bill its whole payload on every request of the turn.
+
 #### SessionStart payload fields
 
 `reason` is one of `"startup"` | `"reload"` | `"new"` | `"resume"` | `"fork"`.

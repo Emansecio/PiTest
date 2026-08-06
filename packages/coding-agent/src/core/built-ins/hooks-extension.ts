@@ -4,7 +4,8 @@
  * Reads `Settings.hooks` and binds spawned-shell hooks to:
  *   - tool_call (PreToolUse) — may block tool execution
  *   - tool_result (PostToolUse) — may transform tool output
- *   - input (UserPromptSubmit) — may block or augment the prompt
+ *   - input (UserPromptSubmit) — may block or augment the prompt (the injected
+ *     `<hook_context>` is capped, see HOOK_CONTEXT_CAP_BYTES)
  *   - agent_end (Stop) — fires when a turn finishes
  *   - session_start (SessionStart) — fires when a session starts/loads/reloads;
  *     informative only (no block). `additionalContext` is surfaced via the UI
@@ -22,6 +23,16 @@
 import { type ExtensionAPI, markHandlerSideEffect } from "../extensions/types.ts";
 import type { HookExecutionResult, HooksSettings } from "../hooks/index.ts";
 import { runHookChain, selectHooks } from "../hooks/index.ts";
+import { truncateHeadTail } from "../tools/truncate.ts";
+
+/**
+ * Ceiling for the AGGREGATE `additionalContext` a UserPromptSubmit hook chain
+ * injects into `<hook_context>`. Deliberately the same 16KB budget as
+ * ERROR_TEXT_CAP_BYTES: this text lands in the conversation (not in a capped,
+ * deferrable tool result), so an unbounded hook could silently spend the whole
+ * context window on every prompt.
+ */
+const HOOK_CONTEXT_CAP_BYTES = 16 * 1024;
 
 export interface HooksExtensionOptions {
 	settings: HooksSettings;
@@ -177,9 +188,16 @@ export function createHooksExtension(options: HooksExtensionOptions) {
 					.map((e) => e.parsed?.additionalContext?.trim())
 					.filter((s): s is string => !!s && s.length > 0);
 				if (extras.length === 0) return { action: "continue" } as const;
+				// The runner caps a hook's raw stdout at 4MB, but the PARSED
+				// additionalContext had no ceiling of its own — and unlike a tool
+				// result it is spliced into the user turn, so it is never deferred,
+				// never recallable, and it re-bills on every request of the turn. Cap
+				// the AGGREGATE (head+tail, so a long context keeps both its opening
+				// and its conclusion) at the same 16KB budget thrown tool errors get.
+				const context = truncateHeadTail(extras.join("\n\n"), { maxBytes: HOOK_CONTEXT_CAP_BYTES }).content;
 				return {
 					action: "transform",
-					text: `${event.text}\n\n<hook_context>\n${extras.join("\n\n")}\n</hook_context>`,
+					text: `${event.text}\n\n<hook_context>\n${context}\n</hook_context>`,
 					images: event.images,
 				} as const;
 			});

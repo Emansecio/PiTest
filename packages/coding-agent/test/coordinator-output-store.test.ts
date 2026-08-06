@@ -31,19 +31,19 @@ describe("createSubagentOutputStore (N7)", () => {
 		}
 	});
 
-	it("persists and retrieves the integral output by handle", () => {
+	it("persists and retrieves the integral output by handle", async () => {
 		const store = createSubagentOutputStore({ dir: freshDir() });
-		store.put("task-a", "the full integral output");
-		expect(store.get("task-a")).toBe("the full integral output");
-		expect(store.get("never-stored")).toBeUndefined();
-		store.dispose();
+		await store.put("task-a", "the full integral output");
+		expect(await store.get("task-a")).toBe("the full integral output");
+		expect(await store.get("never-stored")).toBeUndefined();
+		await store.dispose();
 	});
 
-	it("redacts secrets before they land on disk (repo invariant)", () => {
+	it("redacts secrets before they land on disk (repo invariant)", async () => {
 		const dir = freshDir();
 		const store = createSubagentOutputStore({ dir });
 		const secret = "sk-ant-0123456789abcdef0123456789abcdef";
-		store.put("leaky", `here is a key ${secret} in the output`);
+		await store.put("leaky", `here is a key ${secret} in the output`);
 
 		// Read the raw file straight off disk — it must be redacted, not verbatim.
 		const files = readdirSync(dir).filter((f) => f.endsWith(".txt"));
@@ -52,27 +52,38 @@ describe("createSubagentOutputStore (N7)", () => {
 		expect(onDisk).not.toContain(secret);
 		expect(onDisk).toContain("[REDACTED");
 		// get() reads from disk, so it returns the redacted form.
-		expect(store.get("leaky")).not.toContain(secret);
-		store.dispose();
+		expect(await store.get("leaky")).not.toContain(secret);
+		await store.dispose();
 	});
 
-	it("re-storing a handle overwrites the same file (latest output wins)", () => {
+	it("re-storing a handle overwrites the same file (latest output wins)", async () => {
 		const dir = freshDir();
 		const store = createSubagentOutputStore({ dir });
-		store.put("h", "first");
-		store.put("h", "second (after resume/continue)");
-		expect(store.get("h")).toBe("second (after resume/continue)");
+		await store.put("h", "first");
+		await store.put("h", "second (after resume/continue)");
+		expect(await store.get("h")).toBe("second (after resume/continue)");
 		expect(readdirSync(dir).filter((f) => f.endsWith(".txt")).length).toBe(1);
-		store.dispose();
+		await store.dispose();
 	});
 
-	it("dispose removes the temp dir and get returns undefined afterwards", () => {
+	it("bounds retained output bytes", async () => {
+		const dir = freshDir();
+		const store = createSubagentOutputStore({ dir, maxEntries: 2, maxBytes: 20 });
+		await store.put("a", "1234567890");
+		await store.put("b", "abcdefghij");
+		await store.put("c", "klmnopqrst");
+		expect(await store.get("a")).toBeUndefined();
+		expect(await store.get("c")).toBe("klmnopqrst");
+		await store.dispose();
+	});
+
+	it("dispose removes the temp dir and get returns undefined afterwards", async () => {
 		const dir = freshDir();
 		const store = createSubagentOutputStore({ dir });
-		store.put("h", "content");
+		await store.put("h", "content");
 		expect(existsSync(dir)).toBe(true);
-		store.dispose();
+		await store.dispose();
 		expect(existsSync(dir)).toBe(false);
-		expect(store.get("h")).toBeUndefined();
+		expect(await store.get("h")).toBeUndefined();
 	});
 });

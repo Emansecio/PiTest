@@ -17,7 +17,7 @@ const { session: defaultAuthSession } = await createAgentSession({
 	modelRegistry,
 });
 console.log("Session with default auth storage and model registry");
-defaultAuthSession.dispose();
+await defaultAuthSession.dispose();
 
 // Custom auth storage location
 const customAuthStorage = AuthStorage.create("/tmp/my-app/auth.json");
@@ -29,7 +29,7 @@ const { session: customAuthSession } = await createAgentSession({
 	modelRegistry: customModelRegistry,
 });
 console.log("Session with custom auth storage location");
-customAuthSession.dispose();
+await customAuthSession.dispose();
 
 // Runtime API key override (not persisted to disk)
 authStorage.setRuntimeApiKey("anthropic", "sk-my-temp-key");
@@ -39,7 +39,7 @@ const { session: runtimeKeySession } = await createAgentSession({
 	modelRegistry,
 });
 console.log("Session with runtime API key override");
-runtimeKeySession.dispose();
+await runtimeKeySession.dispose();
 
 // No models.json - only built-in models
 const simpleRegistry = ModelRegistry.inMemory(authStorage);
@@ -49,4 +49,4 @@ const { session: builtInModelsSession } = await createAgentSession({
 	modelRegistry: simpleRegistry,
 });
 console.log("Session with only built-in models");
-builtInModelsSession.dispose();
+await builtInModelsSession.dispose();

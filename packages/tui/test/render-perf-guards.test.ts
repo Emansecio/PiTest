@@ -227,6 +227,21 @@ describe("Container.render flatten memoization (D2)", () => {
 		assert.deepStrictEqual(second, ["a0", "b0"]);
 	});
 
+	it("re-flattens when a same-sized child is replaced", () => {
+		const container = new Container();
+		const sharedLines: string[] = ["old"];
+		const firstChild = new RefChild(sharedLines);
+		const replacement = new RefChild(sharedLines);
+		container.addChild(firstChild);
+		assert.deepStrictEqual(container.render(80), ["old"]);
+
+		// Both components intentionally return the same stable array. The child
+		// identity must still invalidate the flatten cache after direct replacement.
+		container.children[0] = replacement;
+		assert.deepStrictEqual(container.render(80), ["old"]);
+		assert.strictEqual(replacement.renders, 1);
+	});
+
 	it("does not let downstream line-reset mutation corrupt the flatten cache (TUI path)", () => {
 		// The TUI mutates the rendered frame (resets/markers). Container.render hands
 		// out its memoized array, so if that mutation hit the cache, the second frame

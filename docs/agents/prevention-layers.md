@@ -22,7 +22,7 @@ Applied before/while talking to the model, not per tool call.
 | compaction / pre-send overflow guard | before send | keeps context under the window; summarizes + prunes. The presend phase fires at `assembled > window * 0.95` (`PRESEND_OVERFLOW_RATIO`) and **re-estimates after awaiting any in-flight background compaction** so it never double-compacts; opt out `PIT_NO_PRESEND_OVERFLOW_GUARD=1` | `core/compaction/`, `agent-session-compaction.ts:44,483` |
 | thinking cap | before send (compaction serialize) | trims stale assistant thinking blocks beyond the protected recent turns to head+tail (~1.5k chars) so old reasoning stops paying rent; opt out `PIT_NO_THINKING_CAP=1` | `capThinkingForContext` in `core/compaction/utils.ts`, applied `core/compaction/compaction.ts:1351` |
 | overthink guard | during stream | **permanently disabled for all models** — no longer interrupts streams on long reasoning or self-reversal rumination. Tracker + display helpers remain for historical transcripts; product path always returns `enabled: false` | `packages/agent/src/overthink-guard.ts`, `core/overthink-policy.ts` |
-| system-prompt build | before send | lean + conditional; volatile data kept in the suffix after `SYSTEM_PROMPT_DYNAMIC_MARKER`, out of the cached prefix. A custom prompt that omits the marker (or puts it at offset 0) triggers a warn-once `quality.cache-marker` diagnostic (`_checkDynamicMarkerPresence`) | `core/system-prompt.ts`, `packages/ai/src/types.ts` |
+| system-prompt build | before send | lean + conditional; volatile data kept in the suffix after `SYSTEM_PROMPT_DYNAMIC_MARKER`, out of the cached prefix. A custom prompt that omits the marker (or puts it at offset 0) triggers a warn-once `quality.cache-marker` diagnostic (`_checkDynamicMarkerPresence`). Every rebuild whose prefix actually changes content (compared byte-for-byte against the previous one, so suffix-only churn is free) records a `quality.cache-prefix-rewrite` diagnostic with `reason`/`rebuildCount`/`historyTokens` — `warn`, except deliberate transitions (`permission-mode`, `goal-lifecycle`) which record at `info` with `deliberate: true`. Session totals: `getCachePrefixDiagnostics()`, shown in `/session`, `/cache-status` and `/debug` | `core/system-prompt.ts`, `packages/ai/src/types.ts`, `agent-session.ts` `_trackPrefixStability` |
 | plan-mode prompt | before send (`before_agent_start`) | while permission mode is `plan`, the permissions extension appends a `<plan_mode>` section telling the model it is read-only and must research → build a DAG → call `exit_plan`; never invalidates the cached prefix | `core/built-ins/permissions-extension.ts`, `core/permissions/plan-mode-prompt.ts` |
 | prompt cache breakpoints | on send | 4 Anthropic breakpoints + stable OpenAI `prompt_cache_key` | `packages/ai/src/providers/anthropic.ts` |
 | connect-guard | during connect | connect-phase timeout + instant abort (anti-wedge) | `packages/ai/src/utils/connect-guard.ts` |
@@ -53,8 +53,8 @@ Fixed order inside `prepareSingleToolCall` (`agent-loop.ts:1066+`). Each step ca
 2. **afterToolCall / `tool_result` hooks** (`:1262`) — can rewrite the result:
    - **patch-audit** — audits edit/write diffs.
    - **read-guard** — records file mtime post-read (feeds edit-precondition).
-3. **Verification** — governed by `verification.mode` (default **`in-turn`**, Claude Code-like): the model is instructed via a system-prompt guideline (built in `_rebuildSystemPrompt`, with the configured or auto-detected check command) to run the check and fix failures BEFORE its final reply. The harness still runs **no check of its own** in this mode, but it is no longer purely honour-based — `_runInTurnPostCycle` (`agent-session.ts`) closes the two gaps the prompt alone cannot:
-   - **in-turn check grounding** (`core/verification/in-turn-check.ts`): a cycle that armed the gate (edited files) and ran **no verification-class bash command** (`isVerificationJobCommand`, counted pass OR fail — a red check still RAN) records a `quality.in-turn-check` diagnostic and injects ONE corrective turn naming the check command. It never blocks `goal_complete` and never runs the check itself; bounded like the todo cadence — after `IN_TURN_CHECK_MAX_IGNORED` (2) unheeded corrections it records `in-turn-check-gave-up` and stops for the session. Skipped on read-only cycles, aborted/interrupted turns, and projects with no detectable check command. Opt out `PIT_NO_INTURN_CHECK_STEER=1`.
+3. **Verification** — governed by `verification.mode` (default **`in-turn`**, Claude Code-like): the model is instructed via a system-prompt guideline (built in `_rebuildSystemPrompt`, with the configured or auto-detected check command) to run the check and fix failures BEFORE its final reply. `_runInTurnPostCycle` (`agent-session.ts`) closes the two gaps the prompt alone cannot:
+   - **in-turn check grounding** (`core/verification/in-turn-check.ts`): a cycle that armed the gate (edited files) and ran **no verification-class bash command** (`isVerificationJobCommand`, counted pass OR fail — a red check still RAN) records a `quality.in-turn-check` diagnostic and injects a corrective turn naming the check command. After `IN_TURN_CHECK_MAX_IGNORED` (2) unheeded corrections, an ordinary task gets one bounded mechanical check: green/timeout ends without a fix loop; red injects one terminal honesty prompt. Active autonomous goals keep the stronger `goal_complete` verification veto instead of duplicating it here. Skipped on read-only cycles, aborted/interrupted turns, and projects with no detectable check command. Opt out `PIT_NO_INTURN_CHECK_STEER=1`.
    - **self-review (Band P / P4)** now runs here too, with the full fix budget. It was previously reachable only from `post-turn` — i.e. dead code under the default mode it shipped with. Its own HIGH-risk gate and `PIT_NO_SELF_REVIEW=1` keep it a no-op on ordinary cycles.
 
    The layers below only exist in `mode: "post-turn"` (legacy opt-in; explicit `enabled: true` also maps there):
@@ -91,8 +91,9 @@ behavior), Band P shapes what the model sees and intends BEFORE it generates:
   one signal, loosen after a 5-clean streak), loosening gated to task boundaries
   (`quality.rigor` per-prompt marker), per-session reset. No cross-session
   self-regulation, no model lists to maintain — only fixed prior: native
-  `anthropic`/`openai` start `leve`. **Nothing consumes the level yet**; transitions
-  are emitted as `quality.supervision` diagnostics. `core/supervision-thermostat.ts`
+  `anthropic`/`openai` start `leve`. P1 uses it for context budgets, P2 for
+  block-versus-nudge policy, P3 for exemplar enablement, and P4 for the MEDIUM-risk
+  review threshold. Transitions are emitted as `quality.supervision` diagnostics. `core/supervision-thermostat.ts`
   (instantiated by `SessionRecoveryController`); opt out
   `PIT_NO_SUPERVISION_THERMOSTAT=1`.
   Telemetry: every diagnostic is persisted timestamped to
@@ -121,7 +122,7 @@ behavior), Band P shapes what the model sees and intends BEFORE it generates:
 - **P4 — structured self-review** (`core/self-review.ts` + `core/turn-risk.ts`):
   runs in BOTH verification modes — from the check phase in `post-turn` (sharing its
   fix budget) and from `_runInTurnPostCycle` in the default `in-turn` mode (full
-  budget, no check phase ran). Per-cycle changed-line aggregate closes the many-small-edits gap; HIGH risk
+  budget; the grounding fallback consumes no fix attempt). Per-cycle changed-line aggregate closes the many-small-edits gap; HIGH risk
   (any level) or MEDIUM (at `assistido`) runs a read-only review subagent
   (schema-bound, fusion-verify pattern) after the check phase, sharing the
   verification fix budget; unresolved high findings re-inject fix prompts and block

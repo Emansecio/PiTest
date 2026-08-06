@@ -9,7 +9,8 @@
 import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { getRuntimeDiagnostics, resetRuntimeDiagnostics } from "@pit/ai";
+import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createReadTool } from "../src/core/tools/read.js";
 import { WarmFileCache } from "../src/core/tools/warm-file-cache.js";
 
@@ -22,6 +23,7 @@ function textOf(res: { content: Array<{ type: string; text?: string }> }): strin
 
 describe("read tool: warm-file-cache consumption (P6)", () => {
 	afterAll(() => rmSync(dir, { recursive: true, force: true }));
+	beforeEach(() => resetRuntimeDiagnostics());
 
 	it("serves the cached body on a stat-matching hit, skipping the disk read", async () => {
 		const filePath = join(dir, "hit.ts");
@@ -35,6 +37,7 @@ describe("read tool: warm-file-cache consumption (P6)", () => {
 
 		expect(textOf(result)).toContain("WARM CACHE MARKER");
 		expect(textOf(result)).not.toContain("real disk content");
+		expect(getRuntimeDiagnostics().counters["graph.prefetch.hit"]?.count).toBe(1);
 	});
 
 	it("falls through to disk on an mtime mismatch (file changed since warming)", async () => {
@@ -49,6 +52,8 @@ describe("read tool: warm-file-cache consumption (P6)", () => {
 
 		expect(textOf(result)).toContain("real disk content v2");
 		expect(textOf(result)).not.toContain("STALE MARKER");
+		expect(cache.has(filePath)).toBe(false);
+		expect(getRuntimeDiagnostics().counters["graph.prefetch.stale"]?.count).toBe(1);
 	});
 
 	it("falls through to disk on a size mismatch even when mtime matches", async () => {
@@ -63,6 +68,7 @@ describe("read tool: warm-file-cache consumption (P6)", () => {
 
 		expect(textOf(result)).toContain("real disk content v3");
 		expect(textOf(result)).not.toContain("SIZE MISMATCH MARKER");
+		expect(cache.has(filePath)).toBe(false);
 	});
 
 	it("is a silent miss (never throws) when the cache has no entry for the path at all", async () => {

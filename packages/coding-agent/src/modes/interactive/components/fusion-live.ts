@@ -1,8 +1,10 @@
 import { performance } from "node:perf_hooks";
-import { type Component, SPINNER_FRAMES, type TUI, truncateToWidth, visibleWidth } from "@pit/tui";
+import { type Component, type TUI, truncateToWidth, visibleWidth } from "@pit/tui";
 import { formatElapsed, formatTokens } from "../../../utils/format-display.ts";
 import { truncateWithEllipsis } from "../../../utils/surrogate.ts";
-import { theme } from "../theme/theme.ts";
+import { type ThemeColor, theme } from "../theme/theme.ts";
+import { ColorEase } from "./color-ease.ts";
+import { resolveSpinnerFrames } from "./glyph-resolver.ts";
 import { spinnerFrameIndexAt } from "./spinner-ticker.ts";
 
 /**
@@ -51,22 +53,29 @@ interface MemberEntry {
 	 * tally mutates (in recordActivity), NOT on every render frame. `null` = stale,
 	 * recompute lazily. */
 	toolSummaryCache: string | null;
+	/** Spinner frame frozen at settle so the crossfade eases OUT of it. */
+	settleGlyph?: string;
+	/** One-shot spinner→outcome color crossfade (AgentsLive parity). */
+	settleEase?: ColorEase;
 }
 
 type FusionStage = "brief" | "panel" | "judge" | "verify" | "writer";
 
-/** Pure: pick the glyph for a member's status. Kept branchy (no nested ternary)
- * so the gate (tsgo erasableSyntaxOnly + biome) stays happy and the mapping
- * reads as a table. */
-function glyphFor(status: FusionLiveMember["status"], spinner: string): string {
-	switch (status) {
-		case "done":
-			return theme.fg("success", "✓");
-		case "failed":
-			return theme.fg("error", "✗");
-		default:
-			return theme.fg("accent", spinner);
+/**
+ * Pick the glyph for a member's status. Live rows use the shared spinner;
+ * settled rows two-phase ease spinner→✓/✗ via {@link ColorEase} (same cadence
+ * as AgentsLive / activity lines). Snaps under reduced motion / no truecolor.
+ */
+function glyphFor(entry: MemberEntry, spinner: string): string {
+	const status = entry.member.status;
+	if (status === "running") return theme.fg("accent", spinner);
+	const steady: ThemeColor = status === "done" ? "success" : "error";
+	const outcome = status === "done" ? "✓" : "✗";
+	const ease = entry.settleEase;
+	if (ease?.active && ease.progress < 0.5) {
+		return ease.colorize(steady, entry.settleGlyph ?? outcome);
 	}
+	return ease ? ease.colorize(steady, outcome) : theme.fg(steady, outcome);
 }
 
 /** Compact elapsed (whole seconds) for a member, live for "running" and frozen
@@ -221,13 +230,23 @@ export class FusionLiveComponent implements Component {
 
 	/** Insert or update a member by panel slot. The start instant is captured on
 	 * first insert and preserved across updates so the "running" clock keeps rising
-	 * continuously instead of resetting on every upsert. */
+	 * continuously instead of resetting on every upsert. Transitioning running →
+	 * done/failed starts a spinner→outcome ColorEase (parity with AgentsLive). */
 	upsertMember(m: FusionLiveMember): void {
 		const existing = this.members.get(m.index);
 		if (existing) {
+			const wasRunning = existing.member.status === "running";
 			existing.member = m;
+			if (wasRunning && m.status !== "running") {
+				this.beginMemberSettle(existing, m.status);
+			} else if (m.status === "running") {
+				// Re-opened slot (unlikely): drop residual settle ease.
+				existing.settleEase?.stop();
+				existing.settleEase = undefined;
+				existing.settleGlyph = undefined;
+			}
 		} else {
-			this.members.set(m.index, {
+			const entry: MemberEntry = {
 				member: m,
 				startedAt: Date.now(),
 				lastActivityAt: Date.now(),
@@ -236,10 +255,30 @@ export class FusionLiveComponent implements Component {
 				toolCount: 0,
 				thought: "",
 				toolSummaryCache: null,
-			});
+			};
+			// Inserted already settled (late upsert): no ease — snap to outcome
+			// (leave settleEase unset so glyphFor uses the steady theme color).
+			this.members.set(m.index, entry);
 		}
 		this.renderVersion++;
 		this.ui.requestRender();
+	}
+
+	/** Start the two-phase spinner→✓/✗ ease for a member that just left "running". */
+	private beginMemberSettle(entry: MemberEntry, status: "done" | "failed"): void {
+		// Guard: only the running→settled edge should begin an ease (caller also
+		// checks wasRunning; this keeps re-entry safe if begin is reused).
+		if (entry.settleEase?.active) entry.settleEase.stop();
+		const frames = resolveSpinnerFrames();
+		const frame = spinnerFrameIndexAt(performance.now());
+		entry.settleGlyph = frames[frame % frames.length] ?? frames[0]!;
+		entry.settleEase ??= new ColorEase(this.ui, () => {
+			this.renderCache = null;
+			this.ui.requestRender();
+		});
+		// accent matches the live spinner tint; done→success, failed→error (Fusion
+		// keeps error-red for failures, unlike AgentsLive's softer warning).
+		entry.settleEase.begin("accent", status === "done" ? "success" : "error");
 	}
 
 	/** Fold a live activity event into the advisor's running row: bump the tool tally
@@ -303,6 +342,9 @@ export class FusionLiveComponent implements Component {
 		}
 		for (const entry of this.members.values()) {
 			if (entry.member.status === "running") return true;
+			// Settle ease owns its own animation callback; still count as "busy"
+			// so we don't tear down thinking the strip is fully idle mid-crossfade.
+			if (entry.settleEase?.active) return true;
 		}
 		return false;
 	}
@@ -391,7 +433,8 @@ export class FusionLiveComponent implements Component {
 			return this.renderCache.lines;
 		}
 
-		const spinner = SPINNER_FRAMES[frameIdx]!;
+		const frames = resolveSpinnerFrames();
+		const spinner = frames[frameIdx % frames.length]!;
 		const lines: string[] = [];
 
 		// Render rows in SLOT order (Map insertion can race with the same-cli stagger).
@@ -420,7 +463,7 @@ export class FusionLiveComponent implements Component {
 			lines.push(
 				`  ${theme.fg("accent", spinner)} ${theme.fg("muted", `synth ${this.synthId}·writing final answer`)}${theme.fg("dim", `·${ws}s`)}`,
 			);
-			const rendered = lines.map((line) => truncateToWidth(line, width, theme.fg("dim", "…")));
+			const rendered = lines.map((line) => truncateToWidth(line, width, theme.ellipsis("dim")));
 			this.renderCache = { version: this.renderVersion, width, frameIdx, elapsedKey, lines: rendered };
 			return rendered;
 		}
@@ -431,7 +474,7 @@ export class FusionLiveComponent implements Component {
 			lines.push(
 				`  ${theme.fg("accent", spinner)} ${theme.fg("muted", `synth ${this.synthId}·drafting the advisor brief`)}${theme.fg("dim", `·${bs}s`)}`,
 			);
-			const rendered = lines.map((line) => truncateToWidth(line, width, theme.fg("dim", "…")));
+			const rendered = lines.map((line) => truncateToWidth(line, width, theme.ellipsis("dim")));
 			this.renderCache = { version: this.renderVersion, width, frameIdx, elapsedKey, lines: rendered };
 			return rendered;
 		}
@@ -446,12 +489,12 @@ export class FusionLiveComponent implements Component {
 		for (const entry of entries) {
 			const m = entry.member;
 			const secs = secsFor(entry, now);
-			const glyph = glyphFor(m.status, spinner);
+			const glyph = glyphFor(entry, spinner);
 			const slot = theme.fg("dim", `${m.index + 1}`);
 			const name = this.padVisible(theme.fg("muted", `${m.cli}:${m.model}`), nameCol);
 			let tail = statusTail(entry, secs, now);
 			if (m.status === "running" && entry.thought) {
-				const thoughtSnippet = truncateToWidth(entry.thought, Math.max(12, width - 24), theme.fg("dim", "…"));
+				const thoughtSnippet = truncateToWidth(entry.thought, Math.max(12, width - 24), theme.ellipsis("dim"));
 				tail = `${tail}${theme.fg("dim", `·${thoughtSnippet}`)}`;
 			}
 			// Name is padded to the shared column, so the dense `·` before the tail
@@ -482,7 +525,7 @@ export class FusionLiveComponent implements Component {
 		// Every emitted line MUST be truncated to the viewport width with a dim
 		// ellipsis — the TUI render guard rejects any component line wider than
 		// `width`, and overflow would dangle an orphan ellipsis at the border.
-		const rendered = lines.map((line) => truncateToWidth(line, width, theme.fg("dim", "…")));
+		const rendered = lines.map((line) => truncateToWidth(line, width, theme.ellipsis("dim")));
 		this.renderCache = { version: this.renderVersion, width, frameIdx, elapsedKey, lines: rendered };
 		return rendered;
 	}
@@ -494,6 +537,7 @@ export class FusionLiveComponent implements Component {
 	/** Unsubscribe from the shared animation ticker. Idempotent: safe to call
 	 * more than once (the second call is a no-op). */
 	dispose(): void {
+		for (const entry of this.members.values()) entry.settleEase?.stop();
 		if (this.animationUnsub) {
 			this.animationUnsub();
 			this.animationUnsub = null;

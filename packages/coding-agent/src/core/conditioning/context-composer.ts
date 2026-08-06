@@ -52,11 +52,18 @@ import type { SupervisionLevel } from "../supervision-thermostat.ts";
 /**
  * Token ceiling per supervision level (§5 dosing table). The composer estimates
  * ~4 chars/token; the char budget is `cap * CHARS_PER_TOKEN`.
+ *
+ * Halved from the study's original 1200/800/400: the block sits in the dynamic
+ * suffix, which the provider relocates past the cache breakpoint, so its cost is
+ * `cap × (tool rounds in the turn)` at full price — a ceiling sized for a
+ * once-per-turn cost is several times too generous for a once-per-request one.
+ * The outline degrades gracefully (it drops the lowest-ranked predictions and
+ * the exemplar first), so a tighter cap loses tail guesses, not the top hits.
  */
 export const LEVEL_TOKEN_CAP: Record<SupervisionLevel, number> = {
-	assistido: 1200,
-	padrao: 800,
-	leve: 400,
+	assistido: 600,
+	padrao: 400,
+	leve: 250,
 };
 
 const CHARS_PER_TOKEN = 4;
@@ -219,15 +226,33 @@ const IDENT_RE = /[A-Za-z_$][\w$]*/g;
 // `src/core/foo.ts` or `foo.test.ts`. Kept deliberately narrow to avoid noise.
 const PATH_RE = /[\w./-]*\/[\w.-]+\.[A-Za-z0-9]+|[\w-]+\.[A-Za-z]{1,5}\b/g;
 
-/** Extract candidate identifier tokens from the prompt (deduped, length-filtered). */
-function promptIdentifiers(prompt: string): string[] {
-	const out = new Set<string>();
+interface PromptIdentifier {
+	value: string;
+	allowFuzzy: boolean;
+}
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isCodeShapedIdentifier(value: string): boolean {
+	return /[_$\d]/.test(value) || /[a-z][A-Z]/.test(value);
+}
+
+/** Extract candidate identifiers and whether their spelling may be fuzzy-matched. */
+function promptIdentifiers(prompt: string): PromptIdentifier[] {
+	const out = new Map<string, PromptIdentifier>();
 	for (const m of prompt.matchAll(IDENT_RE)) {
-		const t = m[0]!;
+		const value = m[0]!;
 		// Skip trivial words; a 3+ char identifier is the smallest worth grounding.
-		if (t.length >= 3) out.add(t);
+		if (value.length < 3) continue;
+		const escaped = escapeRegExp(value);
+		const allowFuzzy =
+			isCodeShapedIdentifier(value) || new RegExp(`(?:\`${escaped}\`|\\b${escaped}\\s*\\()`).test(prompt);
+		const previous = out.get(value);
+		out.set(value, { value, allowFuzzy: previous?.allowFuzzy || allowFuzzy });
 	}
-	return [...out];
+	return [...out.values()];
 }
 
 /** Extract path-ish mentions from the prompt (deduped, normalized). */
@@ -254,7 +279,8 @@ function extractImportSpecifiers(content: string): string[] {
 
 /**
  * Predict the files this turn is likely to touch, ranked. Layered heuristic
- * (no ML): prompt-mentioned paths/symbols (fuzzy-matched against the map) >
+ * (no ML): prompt-mentioned paths/symbols (exact, with fuzzy only for code-shaped
+ * symbol mentions) >
  * imports of the most-recently-read file > session hot files > (Fase 3) direct
  * import-graph neighbors of the strong (path/symbol/recent-read) seeds.
  */
@@ -312,9 +338,10 @@ export function predictRelevantFiles(input: ComposeContextInput): string[] {
 		}
 	}
 
-	// (b) prompt-mentioned symbols → the file(s) declaring them (exact, then fuzzy).
+	// (b) prompt-mentioned symbols → the file(s) declaring them (exact, then fuzzy
+	// only when prompt syntax makes the identifier code-shaped).
 	for (const ident of promptIdentifiers(input.prompt)) {
-		const exact = symbolToPaths.get(ident);
+		const exact = symbolToPaths.get(ident.value);
 		if (exact) {
 			for (const p of exact) {
 				add(p, SCORE_PROMPT_SYMBOL);
@@ -322,7 +349,8 @@ export function predictRelevantFiles(input: ComposeContextInput): string[] {
 			}
 			continue;
 		}
-		const close = suggestClosest(ident, allSymbols, { maxDistance: 2, prefixMinOverlap: 64 });
+		if (!ident.allowFuzzy) continue;
+		const close = suggestClosest(ident.value, allSymbols, { maxDistance: 2, prefixMinOverlap: 64 });
 		if (close) {
 			for (const p of symbolToPaths.get(close) ?? []) {
 				add(p, SCORE_PROMPT_SYMBOL);

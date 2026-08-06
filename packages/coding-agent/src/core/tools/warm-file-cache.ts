@@ -82,6 +82,15 @@ export class WarmFileCache {
 		return this.seen.has(canonicalPathKey(absolutePath));
 	}
 
+	/** Remove one resident path. Returns true when an entry was removed. */
+	delete(absolutePath: string): boolean {
+		const key = canonicalPathKey(absolutePath);
+		const entry = this.seen.get(key);
+		if (!entry) return false;
+		this.totalBytes -= entry.bytes;
+		return this.seen.delete(key);
+	}
+
 	/** Warm (or refresh) an entry. Re-inserting refreshes LRU recency. */
 	set(absolutePath: string, entry: WarmFileCacheEntry): void {
 		const key = canonicalPathKey(absolutePath);

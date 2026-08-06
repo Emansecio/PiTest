@@ -53,8 +53,8 @@ describe("doom-loop Tier-3 structured recovery (CR6)", () => {
 		// Recovery steer fired once, and the turn was NOT aborted.
 		const recovery = customMessages(harness, "pi.doom-loop-recovery");
 		expect(recovery.length).toBe(1);
-		expect(recovery[0]?.content).toContain("Rethink from scratch");
-		expect(recovery[0]?.content).toContain("STOP repeating this call");
+		expect(recovery[0]?.content).toContain("Restate the goal in one sentence");
+		expect(recovery[0]?.content).toContain("ONLY sub-step 1");
 		expect(didAbort(harness)).toBe(false);
 	});
 

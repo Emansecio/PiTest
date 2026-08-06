@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { extractFileDeps } from "../src/core/repo-map/edges.js";
 import {
@@ -25,6 +29,7 @@ function makeDeps(opts: {
 	cache?: LivingRepoMap;
 	files: Record<string, string>;
 	mtimes?: Record<string, number>;
+	extractSymbols?: (content: string, path: string) => string[];
 	/**
 	 * OPTIONAL edge extractor. Omitted by default (matches the pre-repo-graph
 	 * harness exactly: `deps.extractDeps` stays undefined, so `indexFile` never
@@ -68,6 +73,7 @@ function makeDeps(opts: {
 		extractSymbols: (content, path) => {
 			const key = rel(path);
 			parseCounts[key] = (parseCounts[key] ?? 0) + 1;
+			if (opts.extractSymbols) return opts.extractSymbols(content, path);
 			// Trivial "parser": each non-empty line is a symbol name.
 			return content
 				.split("\n")
@@ -92,6 +98,62 @@ function makeDeps(opts: {
 }
 
 describe("getLivingRepoMap — incremental git delta", () => {
+	it("indexes an untracked source file while excluding ignored cache files", async () => {
+		const repo = mkdtempSync(join(tmpdir(), "pit-living-repo-map-"));
+		try {
+			execFileSync("git", ["init"], { cwd: repo });
+			execFileSync("git", ["config", "user.email", "pit@example.test"], { cwd: repo });
+			execFileSync("git", ["config", "user.name", "Pit Test"], { cwd: repo });
+			writeFileSync(join(repo, "a.ts"), "export const a = 1;\n");
+			writeFileSync(join(repo, ".gitignore"), ".pit/\n");
+			execFileSync("git", ["add", "a.ts", ".gitignore"], { cwd: repo });
+			execFileSync("git", ["commit", "-m", "initial"], { cwd: repo });
+
+			const initial = await getLivingRepoMap(repo);
+			expect(initial.mode).toBe("full-scan");
+			expect(initial.map.lastIndexedCommit).not.toBe("");
+			writeFileSync(join(repo, "new.ts"), "export const fresh = 1;\n");
+			writeFileSync(join(repo, ".pit", "ignored.ts"), "export const ignored = 1;\n");
+			clearLivingRepoMapMemoForTest();
+
+			const result = await getLivingRepoMap(repo);
+			expect(result.mode).toBe("incremental");
+			expect(result.reindexedCount).toBe(1);
+			expect(result.map.entries.map((entry) => entry.path)).toContain("new.ts");
+			expect(result.map.entries.map((entry) => entry.path)).not.toContain(".pit/ignored.ts");
+		} finally {
+			rmSync(repo, { recursive: true, force: true });
+		}
+	});
+
+	it("evicts an untracked source file after it is deleted without a full stat scan", async () => {
+		const repo = mkdtempSync(join(tmpdir(), "pit-living-repo-map-delete-"));
+		try {
+			execFileSync("git", ["init"], { cwd: repo, stdio: "ignore" });
+			execFileSync("git", ["config", "user.email", "pit@example.test"], { cwd: repo });
+			execFileSync("git", ["config", "user.name", "Pit Test"], { cwd: repo });
+			writeFileSync(join(repo, "a.ts"), "export const a = 1;\n");
+			writeFileSync(join(repo, ".gitignore"), ".pit/\n");
+			execFileSync("git", ["add", "a.ts", ".gitignore"], { cwd: repo, stdio: "ignore" });
+			execFileSync("git", ["commit", "-m", "initial"], { cwd: repo, stdio: "ignore" });
+
+			await getLivingRepoMap(repo);
+			writeFileSync(join(repo, "transient.ts"), "export const transient = 1;\n");
+			clearLivingRepoMapMemoForTest();
+			const withTransient = await getLivingRepoMap(repo);
+			expect(withTransient.map.entries.map((entry) => entry.path)).toContain("transient.ts");
+
+			rmSync(join(repo, "transient.ts"));
+			clearLivingRepoMapMemoForTest();
+			const afterDelete = await getLivingRepoMap(repo);
+			expect(afterDelete.mode).toBe("incremental");
+			expect(afterDelete.map.entries.map((entry) => entry.path)).not.toContain("transient.ts");
+		} finally {
+			clearLivingRepoMapMemoForTest();
+			rmSync(repo, { recursive: true, force: true });
+		}
+	});
+
 	it("reindexes ONLY the modified file, keeps the rest, persists new HEAD", async () => {
 		const cache: LivingRepoMap = {
 			version: 4,
@@ -199,7 +261,7 @@ describe("getLivingRepoMap — incremental git delta", () => {
 			lastIndexedCommit: "head-sha",
 			entries: [{ path: "a.ts", symbols: ["a"], mtimeMs: 5 }],
 		};
-		const { deps, parseCounts } = makeDeps({
+		const { deps, parseCounts, saved } = makeDeps({
 			head: "head-sha",
 			diff: [],
 			cache,
@@ -210,6 +272,7 @@ describe("getLivingRepoMap — incremental git delta", () => {
 		expect(result.mode).toBe("cache-hit");
 		expect(result.reindexedCount).toBe(0);
 		expect(Object.keys(parseCounts)).toHaveLength(0); // nothing parsed at all
+		expect(saved.calls).toBe(0); // unchanged cache must not be rewritten
 	});
 });
 
@@ -296,6 +359,18 @@ describe("getLivingRepoMap — repo graph (deps) extraction", () => {
 			.filter((l) => l.startsWith("dep:"))
 			.map((l) => l.slice(4));
 
+	it("keeps an import-only file as a graph node even when it declares no symbols", async () => {
+		const { deps } = makeDeps({
+			head: null,
+			files: { "index.ts": 'export * from "./dep.js";', "dep.ts": "export const value = 1;" },
+			extractSymbols: (_content, path) => (path.endsWith("index.ts") ? [] : ["value"]),
+			extractDeps: (_content, path) => (path === "index.ts" ? ["dep.ts"] : []),
+		});
+		const result = await getLivingRepoMap(CWD, deps);
+		const indexEntry = result.map.entries.find((entry) => entry.path === "index.ts");
+		expect(indexEntry).toEqual({ path: "index.ts", symbols: [], mtimeMs: 1, deps: ["dep.ts"] });
+	});
+
 	it("extracts deps ONLY for the reindexed file, in the SAME pass as symbols", async () => {
 		const cache: LivingRepoMap = {
 			version: 4,
@@ -360,7 +435,7 @@ describe("getLivingRepoMap — repo graph (deps) extraction", () => {
 		expect(byPath["b.ts"]).toBeUndefined(); // b.ts declares no "dep:" lines
 	});
 
-	it("PIT_NO_REPO_GRAPH disables deps extraction AND persistence entirely", async () => {
+	it("PIT_NO_REPO_GRAPH persists a symbol refresh without deps", async () => {
 		const cache: LivingRepoMap = {
 			version: 4,
 			lastIndexedCommit: "old-sha",
@@ -381,7 +456,90 @@ describe("getLivingRepoMap — repo graph (deps) extraction", () => {
 			expect(depsExtractCounts["a.ts"]).toBeUndefined(); // extractor never invoked
 			const byPath = Object.fromEntries(result.map.entries.map((e) => [e.path, e.deps]));
 			expect(byPath["a.ts"]).toBeUndefined();
-			expect(saved.last?.entries.every((e) => e.deps === undefined)).toBe(true);
+			expect(saved.calls).toBe(1);
+			expect(saved.last?.entries.find((entry) => entry.path === "a.ts")).toMatchObject({
+				symbols: ["aNew", "dep:b.ts"],
+				mtimeMs: 1,
+			});
+			expect(saved.last?.entries.find((entry) => entry.path === "a.ts")?.deps).toBeUndefined();
+			expect(saved.last?.graphEdgesStale).toBe(true);
+		} finally {
+			if (prev === undefined) delete process.env.PIT_NO_REPO_GRAPH;
+			else process.env.PIT_NO_REPO_GRAPH = prev;
+		}
+	});
+
+	it("PIT_NO_REPO_GRAPH strips deps already present in an anchored cache", async () => {
+		const cache: LivingRepoMap = {
+			version: 4,
+			lastIndexedCommit: "head-sha",
+			entries: [
+				{ path: "a.ts", symbols: ["a"], deps: ["b.ts"], mtimeMs: 1 },
+				{ path: "b.ts", symbols: ["b"], mtimeMs: 1 },
+			],
+		};
+		const { deps, saved } = makeDeps({
+			head: "head-sha",
+			diff: [],
+			cache,
+			files: { "a.ts": "a", "b.ts": "b" },
+		});
+		const prev = process.env.PIT_NO_REPO_GRAPH;
+		process.env.PIT_NO_REPO_GRAPH = "1";
+		try {
+			const result = await getLivingRepoMap(CWD, deps);
+			expect(result.map.entries.find((entry) => entry.path === "a.ts")?.deps).toBeUndefined();
+			expect(saved.calls).toBe(0);
+		} finally {
+			if (prev === undefined) delete process.env.PIT_NO_REPO_GRAPH;
+			else process.env.PIT_NO_REPO_GRAPH = prev;
+		}
+	});
+
+	it("rebuilds graph edges after an OFF-mode symbol refresh", async () => {
+		const cache: LivingRepoMap = {
+			version: 4,
+			lastIndexedCommit: "head-sha",
+			entries: [
+				{ path: "a.ts", symbols: ["aOld"], deps: ["old.ts"], mtimeMs: 1 },
+				{ path: "index.ts", symbols: [], deps: ["b.ts"], mtimeMs: 1 },
+				{ path: "b.ts", symbols: ["b"], mtimeMs: 1 },
+			],
+		};
+		const off = makeDeps({
+			head: "head-sha",
+			diff: [{ status: "M", path: "a.ts" }],
+			cache,
+			files: { "a.ts": "aNew\ndep:b.ts", "index.ts": "dep:b.ts", "b.ts": "b" },
+			mtimes: { "a.ts": 1, "index.ts": 1, "b.ts": 1 },
+			extractSymbols: (content, path) => (path.endsWith("index.ts") ? [] : content.split("\n").filter(Boolean)),
+			extractDeps: (content) => extractDepLines(content),
+		});
+		const prev = process.env.PIT_NO_REPO_GRAPH;
+		process.env.PIT_NO_REPO_GRAPH = "1";
+		try {
+			const offResult = await getLivingRepoMap(CWD, off.deps);
+			expect(offResult.map.entries.find((entry) => entry.path === "a.ts")?.symbols).toEqual(["aNew", "dep:b.ts"]);
+			expect(off.saved.last?.graphEdgesStale).toBe(true);
+			expect(off.saved.last?.entries.find((entry) => entry.path === "a.ts")?.deps).toBeUndefined();
+			expect(off.saved.last?.entries.find((entry) => entry.path === "index.ts")?.deps).toEqual(["b.ts"]);
+			const cacheAfterOff = off.saved.last;
+			if (!cacheAfterOff) throw new Error("OFF-mode refresh should persist the updated symbol cache");
+
+			delete process.env.PIT_NO_REPO_GRAPH;
+			const on = makeDeps({
+				head: "head-sha",
+				diff: [],
+				cache: cacheAfterOff,
+				files: { "a.ts": "aNew\ndep:b.ts", "index.ts": "dep:b.ts", "b.ts": "b" },
+				extractSymbols: (content, path) => (path.endsWith("index.ts") ? [] : content.split("\n").filter(Boolean)),
+				extractDeps: (content) => extractDepLines(content),
+			});
+			const onResult = await getLivingRepoMap(CWD, on.deps);
+			expect(onResult.mode).toBe("full-scan");
+			expect(onResult.map.entries.find((entry) => entry.path === "a.ts")?.deps).toEqual(["b.ts"]);
+			expect(onResult.map.entries.find((entry) => entry.path === "index.ts")?.deps).toEqual(["b.ts"]);
+			expect(on.saved.last?.graphEdgesStale).toBeUndefined();
 		} finally {
 			if (prev === undefined) delete process.env.PIT_NO_REPO_GRAPH;
 			else process.env.PIT_NO_REPO_GRAPH = prev;
@@ -459,6 +617,7 @@ describe("cache round-trip + digest projection", () => {
 			const map: LivingRepoMap = {
 				version: 4,
 				lastIndexedCommit: "sha123",
+				graphEdgesStale: true,
 				entries: [
 					{ path: "a.ts", symbols: ["f", "C"], mtimeMs: 10 },
 					{ path: "b.ts", symbols: ["g"], mtimeMs: 20 },
@@ -467,6 +626,7 @@ describe("cache round-trip + digest projection", () => {
 			saveRepoMapCache(cachePath, map);
 			const loaded = loadRepoMapCache(cachePath);
 			expect(loaded?.lastIndexedCommit).toBe("sha123");
+			expect(loaded?.graphEdgesStale).toBe(true);
 			expect(loaded?.entries).toEqual(map.entries);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
@@ -597,6 +757,114 @@ describe("getLivingRepoMap — process memo (Fix 3)", () => {
 			scanSpy.mockRestore();
 			clearLivingRepoMapMemoForTest();
 			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("coalesces concurrent default-deps refreshes into one in-flight computation", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pit-repomap-single-flight-"));
+		clearLivingRepoMapMemoForTest();
+		const scanSpy = vi.spyOn(defaultLivingRepoMapDeps, "scan");
+		const headSpy = vi.spyOn(defaultLivingRepoMapDeps, "resolveHead");
+		try {
+			const results = await Promise.all(Array.from({ length: 7 }, () => getLivingRepoMap(dir)));
+			expect(scanSpy).toHaveBeenCalledTimes(1);
+			expect(headSpy).toHaveBeenCalledTimes(1);
+			expect(results.every((result) => result === results[0])).toBe(true);
+		} finally {
+			scanSpy.mockRestore();
+			headSpy.mockRestore();
+			clearLivingRepoMapMemoForTest();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not stat every cached file on a default-deps cache hit", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pit-repomap-no-stat-scan-"));
+		clearLivingRepoMapMemoForTest();
+		const statSpy = vi.spyOn(defaultLivingRepoMapDeps, "statMtime");
+		try {
+			writeFileSync(join(dir, "a.ts"), "export const a = 1;\n");
+			writeFileSync(join(dir, ".gitignore"), ".pit/\n");
+			execFileSync("git", ["init"], { cwd: dir, stdio: "ignore" });
+			execFileSync("git", ["config", "user.email", "pit@example.test"], { cwd: dir });
+			execFileSync("git", ["config", "user.name", "Pit Test"], { cwd: dir });
+			execFileSync("git", ["add", "a.ts", ".gitignore"], { cwd: dir });
+			execFileSync("git", ["commit", "-m", "seed"], { cwd: dir, stdio: "ignore" });
+			await getLivingRepoMap(dir);
+			clearLivingRepoMapMemoForTest();
+			statSpy.mockClear();
+			const result = await getLivingRepoMap(dir);
+			expect(result.mode).toBe("cache-hit");
+			expect(statSpy).not.toHaveBeenCalled();
+		} finally {
+			statSpy.mockRestore();
+			clearLivingRepoMapMemoForTest();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not reuse a graph-enabled memo after PIT_NO_REPO_GRAPH turns on", async () => {
+		const repo = mkdtempSync(join(tmpdir(), "pit-repomap-memo-graph-"));
+		const prev = process.env.PIT_NO_REPO_GRAPH;
+		clearLivingRepoMapMemoForTest();
+		delete process.env.PIT_NO_REPO_GRAPH;
+		try {
+			writeFileSync(join(repo, "a.ts"), 'import { b } from "./b.js";\nexport const a = b;\n');
+			writeFileSync(join(repo, "b.ts"), "export const b = 1;\n");
+			writeFileSync(join(repo, ".gitignore"), ".pit/\n");
+			execFileSync("git", ["init"], { cwd: repo });
+			execFileSync("git", ["config", "user.email", "pit@example.test"], { cwd: repo });
+			execFileSync("git", ["config", "user.name", "Pit Test"], { cwd: repo });
+			execFileSync("git", ["add", "a.ts", "b.ts", ".gitignore"], { cwd: repo });
+			execFileSync("git", ["commit", "-m", "initial"], { cwd: repo });
+
+			const graphOn = await getLivingRepoMap(repo);
+			expect(graphOn.map.entries.find((entry) => entry.path === "a.ts")?.deps).toEqual(["b.ts"]);
+
+			process.env.PIT_NO_REPO_GRAPH = "1";
+			const graphOff = await getLivingRepoMap(repo);
+			expect(graphOff).not.toBe(graphOn);
+			expect(graphOff.map.entries.find((entry) => entry.path === "a.ts")?.deps).toBeUndefined();
+		} finally {
+			if (prev === undefined) delete process.env.PIT_NO_REPO_GRAPH;
+			else process.env.PIT_NO_REPO_GRAPH = prev;
+			clearLivingRepoMapMemoForTest();
+			rmSync(repo, { recursive: true, force: true });
+		}
+	});
+
+	it("recovers an edge-only cached node after PIT_NO_REPO_GRAPH turns back off", async () => {
+		const repo = mkdtempSync(join(tmpdir(), "pit-repomap-memo-edge-only-"));
+		const prev = process.env.PIT_NO_REPO_GRAPH;
+		clearLivingRepoMapMemoForTest();
+		delete process.env.PIT_NO_REPO_GRAPH;
+		try {
+			writeFileSync(join(repo, "index.ts"), 'export * from "./dep.js";\n');
+			writeFileSync(join(repo, "dep.ts"), "export const dep = 1;\n");
+			writeFileSync(join(repo, ".gitignore"), ".pit/\n");
+			execFileSync("git", ["init"], { cwd: repo });
+			execFileSync("git", ["config", "user.email", "pit@example.test"], { cwd: repo });
+			execFileSync("git", ["config", "user.name", "Pit Test"], { cwd: repo });
+			execFileSync("git", ["add", "index.ts", "dep.ts", ".gitignore"], { cwd: repo });
+			execFileSync("git", ["commit", "-m", "initial"], { cwd: repo });
+
+			const graphOn = await getLivingRepoMap(repo);
+			expect(graphOn.map.entries.find((entry) => entry.path === "index.ts")?.deps).toEqual(["dep.ts"]);
+
+			process.env.PIT_NO_REPO_GRAPH = "1";
+			const graphOff = await getLivingRepoMap(repo);
+			expect(graphOff.map.entries.find((entry) => entry.path === "index.ts")).toBeUndefined();
+
+			clearLivingRepoMapMemoForTest(); // prove disk cache, not the graph-on memo, preserves the node
+			delete process.env.PIT_NO_REPO_GRAPH;
+			const graphReenabled = await getLivingRepoMap(repo);
+			expect(graphReenabled.mode).toBe("cache-hit");
+			expect(graphReenabled.map.entries.find((entry) => entry.path === "index.ts")?.deps).toEqual(["dep.ts"]);
+		} finally {
+			if (prev === undefined) delete process.env.PIT_NO_REPO_GRAPH;
+			else process.env.PIT_NO_REPO_GRAPH = prev;
+			clearLivingRepoMapMemoForTest();
+			rmSync(repo, { recursive: true, force: true });
 		}
 	});
 

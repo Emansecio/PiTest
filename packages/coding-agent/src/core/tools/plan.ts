@@ -33,9 +33,17 @@ const stepSchema = Type.Object(
 		produces: Type.Optional(Type.String({ description: "Artifact this step produces (file/symbol/output)." })),
 		verify: Type.Optional(
 			Type.String({
-				description:
-					"Command that proves this step is done. Runs automatically on step_done (60s timeout); a non-zero exit/timeout blocks completion and returns the failure output instead.",
+				description: "Legacy alias for verify_command; retained for persisted and existing plans.",
 			}),
+		),
+		verify_command: Type.Optional(
+			Type.String({
+				description:
+					"Executable command that proves this step is done. Runs automatically on step_done (60s timeout).",
+			}),
+		),
+		verify_description: Type.Optional(
+			Type.String({ description: "Human-readable explanation of what the verification proves; never executed." }),
 		),
 		mechanical: Type.Optional(
 			Type.Boolean({
@@ -168,7 +176,8 @@ function toStepInputs(steps: PlanStepArg[] | undefined): PlanStepInput[] {
 		intent: s.intent,
 		dependsOn: s.depends_on,
 		producesArtifact: s.produces,
-		verifyCmd: s.verify,
+		verifyCmd: s.verify_command?.trim() || s.verify?.trim(),
+		verifyDescription: s.verify_description,
 		mechanical: s.mechanical,
 	}));
 }
@@ -205,13 +214,8 @@ export function createPlanToolDefinition(
 		name: "plan",
 		label: "plan",
 		description:
-			"Maintain a structured plan as a DAG of steps. Ops: propose (needs steps; creates v1), revise (needs steps; appends a new version keeping history), step_done (needs step_id), show (print the current DAG in topological order). Each step has id, intent, optional depends_on (ids), produces (artifact), verify (check). Cyclic or dangling depends_on are rejected. The optional `brief` carries markdown context the executor needs and is shown by exit_plan.",
+			"Maintain a structured plan as a DAG of steps. Ops: propose (needs steps; creates v1), revise (needs steps; appends a new version keeping history), step_done (needs step_id), show (print the current DAG in topological order). Each step has id, intent, optional depends_on (ids), produces (artifact), verify_command (executable check), and verify_description (human explanation; never executed). Legacy verify is accepted as an alias for verify_command. Cyclic or dangling depends_on are rejected. The optional `brief` carries markdown context the executor needs (constraints, invariants, key files, decisions and why) and is shown by exit_plan.\n\nWHICH TOOL: use `plan` when steps have real dependencies/artifacts; `todo` (a flat list) stays the everyday tracker.",
 		promptSnippet: "Plan multi-step work as a versioned DAG of dependent steps",
-		promptGuidelines: [
-			"When a multi-step task has real dependencies/artifacts, prefer `plan` (a DAG) over `todo` (a flat list); mark steps done as you go and `revise` to re-shape. Todo remains the everyday tracker (ADR-0007).",
-			"Fill `brief` with the context the executor needs (constraints, invariants, key files read, decisions and why); every code-changing step should have `produces` and `verify`.",
-			"step_done runs the step's `verify` command (60s timeout) before marking it done; a failing/timed-out verify blocks completion and returns the capped output — fix and retry step_done, or `revise` if the verify command itself is wrong.",
-		],
 		parameters: planSchema,
 		prepareArguments: preparePlanArguments,
 		async execute(_toolCallId: string, input: PlanToolInput, signal?: AbortSignal) {

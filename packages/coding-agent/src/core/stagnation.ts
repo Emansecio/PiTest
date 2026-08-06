@@ -11,6 +11,14 @@
 
 import type { AgentMessage } from "@pit/agent-core";
 import type { AssistantMessage, ToolCall, ToolResultMessage } from "@pit/ai";
+import { LOOP_STEER_ADVICE, STEER_REMINDER_CLOSE } from "./tool-call-feedback.ts";
+
+/**
+ * Opening marker of the stagnation steer. Emitted as a self-contained
+ * `<system-reminder>` block so `compaction/prune.ts` (N8) can collapse it once it
+ * leaves the protection window — see the format note in `tool-call-feedback.ts`.
+ */
+export const STAGNATION_STEER_MARKER = "<system-reminder>[stagnation]";
 
 /**
  * Tool names that produce a file mutation. A turn that successfully calls any
@@ -178,28 +186,23 @@ export interface StagnationReminderInput {
 	paused: boolean;
 }
 
-/** Build the markdown reminder injected when stagnation is detected. */
+/**
+ * Build the reminder injected when stagnation is detected. One specific line (the
+ * streak) plus the shared loop advice; the hard tier adds a single pause line.
+ * See the steer-format note in `tool-call-feedback.ts`.
+ */
 export function buildStagnationReminder(input: StagnationReminderInput): string {
 	const count = Math.max(0, Math.floor(input.count));
 	const lines: string[] = [];
-	lines.push("<stagnation-reminder>");
 	lines.push(
-		`You have run ${count} consecutive turns that called tools but never edited a file ` +
-			"(no write/edit). Reading, searching, and running commands without producing a change " +
-			"burns context without progress.",
+		`${STAGNATION_STEER_MARKER} ${count} consecutive turns called tools but never edited a file (no write/edit).`,
 	);
-	lines.push("");
-	lines.push("Reassess before continuing:");
-	lines.push("- Do you already have enough information to make the change? If so, **make the edit now**.");
-	lines.push("- Are you re-reading or re-searching things you have already seen?");
-	lines.push("- If the task is genuinely blocked, **ask the user** instead of investigating further.");
+	lines.push(LOOP_STEER_ADVICE);
 	if (input.paused) {
-		lines.push("");
 		lines.push(
-			`**The harness has paused execution** after ${count} non-productive turns. ` +
-				'Explain what is blocking the edit, or the user can type "continue" to resume.',
+			`Harness paused execution after ${count} non-productive turns — explain the blocker or ask the user to continue.`,
 		);
 	}
-	lines.push("</stagnation-reminder>");
+	lines.push(STEER_REMINDER_CLOSE);
 	return lines.join("\n");
 }

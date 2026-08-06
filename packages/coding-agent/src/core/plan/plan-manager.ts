@@ -32,6 +32,7 @@ export interface PlanStep {
 	dependsOn: string[];
 	producesArtifact?: string;
 	verifyCmd?: string;
+	verifyDescription?: string;
 	/**
 	 * Set true by the (strong) planner when the step is routine, deterministic
 	 * mechanical work — the model gearbox (P8b) may downshift to the `smol` role
@@ -49,6 +50,7 @@ export interface PlanStepInput {
 	dependsOn?: string[];
 	producesArtifact?: string;
 	verifyCmd?: string;
+	verifyDescription?: string;
 	mechanical?: boolean;
 	status?: PlanStepStatus;
 }
@@ -126,6 +128,7 @@ function validateSteps(rawSteps: PlanStepInput[]): PlanStep[] {
 			dependsOn,
 			producesArtifact: raw.producesArtifact?.trim() ? clamp(raw.producesArtifact, ARTIFACT_MAX) : undefined,
 			verifyCmd: raw.verifyCmd?.trim() ? clamp(raw.verifyCmd, VERIFY_MAX) : undefined,
+			verifyDescription: raw.verifyDescription?.trim() ? clamp(raw.verifyDescription, VERIFY_MAX) : undefined,
 			// Normalize to a strict `true | undefined` so the flag never persists as
 			// `false`/other truthy junk and equality (sameStep) stays trivial.
 			mechanical: raw.mechanical === true ? true : undefined,
@@ -498,6 +501,7 @@ function renderStepLine(step: PlanStep, statusById?: Map<string, PlanStepStatus>
 	const deps = step.dependsOn.length > 0 ? ` [needs ${step.dependsOn.join(",")}]` : "";
 	const artifact = step.producesArtifact ? ` →${step.producesArtifact}` : "";
 	const verify = step.verifyCmd ? ` ⟨${step.verifyCmd}⟩` : "";
+	const verifyDescription = step.verifyDescription ? ` — ${step.verifyDescription}` : "";
 	// Dense marker echoing the planner's `mechanical` flag back so the executor (and
 	// a reviewer) can see which steps the gearbox is allowed to downshift.
 	const mech = step.mechanical ? " ⚙" : "";
@@ -505,7 +509,7 @@ function renderStepLine(step: PlanStep, statusById?: Map<string, PlanStepStatus>
 		statusById && step.status === "pending" && step.dependsOn.every((d) => statusById.get(d) === "done")
 			? " ← ready"
 			: "";
-	return `  ${STATUS_GLYPH[step.status]} ${step.id}  ${step.intent}${deps}${artifact}${verify}${mech}${ready}`;
+	return `  ${STATUS_GLYPH[step.status]} ${step.id}  ${step.intent}${deps}${artifact}${verify}${verifyDescription}${mech}${ready}`;
 }
 
 function cloneVersion(v: PlanVersion): PlanVersion {
@@ -539,6 +543,7 @@ function sameStep(a: PlanStep, b: PlanStep): boolean {
 		a.intent === b.intent &&
 		a.producesArtifact === b.producesArtifact &&
 		a.verifyCmd === b.verifyCmd &&
+		a.verifyDescription === b.verifyDescription &&
 		a.mechanical === b.mechanical &&
 		a.dependsOn.length === b.dependsOn.length &&
 		a.dependsOn.every((d, i) => d === b.dependsOn[i])

@@ -9,6 +9,7 @@ import { minimatch } from "minimatch";
 import { isValidThinkingLevel } from "../cli/args.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ModelRegistry } from "./model-registry.ts";
+import { normalizePresetModelId } from "./openai-compatible-presets.ts";
 import type { PermissionMode } from "./permissions/types.ts";
 import type { ModelRoleConfig, ModelRoleSettings } from "./settings-manager.ts";
 
@@ -97,7 +98,7 @@ export function findExactModelReferenceMatch(
 	const slashIndex = trimmedReference.indexOf("/");
 	if (slashIndex !== -1) {
 		const provider = trimmedReference.substring(0, slashIndex).trim();
-		const modelId = trimmedReference.substring(slashIndex + 1).trim();
+		const modelId = normalizePresetModelId(provider, trimmedReference.substring(slashIndex + 1).trim());
 		if (provider && modelId) {
 			const providerMatches = availableModels.filter(
 				(model) =>
@@ -310,26 +311,35 @@ function resolvePatternToEntry(
 
 /**
  * Model-id substrings that mark a cheap/fast tier (haiku, mini, nano, flash, lite).
- * Used for zero-config compact-role sibling routing — same provider only.
- * Kept local (not imported from coordinator) so model-resolver stays free of
- * coordinator coupling; keep in sync with SMALL_CLASS_MODEL_MARKERS there.
+ * Used for every zero-config "route this side-task to a cheap sibling" decision —
+ * same provider only. Kept local (not imported from coordinator) so model-resolver
+ * stays free of coordinator coupling; keep in sync with SMALL_CLASS_MODEL_MARKERS
+ * there.
  */
-const COMPACT_SIBLING_MARKERS: readonly string[] = ["haiku", "mini", "nano", "flash", "lite"];
+const SMALL_CLASS_SIBLING_MARKERS: readonly string[] = ["haiku", "mini", "nano", "flash", "lite"];
 
 /**
- * Pick a same-provider small-class sibling of the session model for compaction
- * summarization. Returns undefined when the session model is already small-class,
- * or no sibling exists on that provider. Auth is NOT checked here — callers must
- * fail-open when the sibling has no credentials.
+ * Pick a same-provider small-class sibling of the session model for an internal
+ * side-task (compaction summarization, self-review). Returns undefined when the
+ * session model is already small-class, or no sibling exists on that provider.
+ * Auth is NOT checked here — callers must fail-open when the sibling has no
+ * credentials.
+ *
+ * Single home for the sibling policy: every caller that wants "the cheap model
+ * next to the session model" resolves it through here, so the marker table and
+ * the cheapest-first tiebreak are never duplicated.
  */
-export function resolveCompactSibling(sessionModel: Model<Api>, availableModels: Model<Api>[]): Model<Api> | undefined {
+export function resolveSmallClassSibling(
+	sessionModel: Model<Api>,
+	availableModels: readonly Model<Api>[],
+): Model<Api> | undefined {
 	const sessionId = sessionModel.id.toLowerCase();
-	if (COMPACT_SIBLING_MARKERS.some((m) => sessionId.includes(m))) return undefined;
+	if (SMALL_CLASS_SIBLING_MARKERS.some((m) => sessionId.includes(m))) return undefined;
 	const siblings = availableModels.filter(
 		(m) =>
 			m.provider === sessionModel.provider &&
 			m.id !== sessionModel.id &&
-			COMPACT_SIBLING_MARKERS.some((marker) => m.id.toLowerCase().includes(marker)),
+			SMALL_CLASS_SIBLING_MARKERS.some((marker) => m.id.toLowerCase().includes(marker)),
 	);
 	if (siblings.length === 0) return undefined;
 	// Prefer the cheapest sibling when cost metadata is present; otherwise first match.
@@ -576,6 +586,7 @@ export function resolveCliModel(options: {
 			pattern = cliModel.substring(prefix.length);
 		}
 	}
+	if (provider) pattern = normalizePresetModelId(provider, pattern);
 
 	const candidates = provider ? availableModels.filter((m) => m.provider === provider) : availableModels;
 

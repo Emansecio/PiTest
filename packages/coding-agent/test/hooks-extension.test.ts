@@ -108,6 +108,65 @@ function makePreparation(over?: Record<string, unknown>) {
 	};
 }
 
+describe("UserPromptSubmit additionalContext is bounded", () => {
+	const CAP = 16 * 1024;
+
+	async function runInput(contexts: string[], text = "do the thing") {
+		const { handlers, api } = makeFakePi();
+		const settings: HooksSettings = {
+			UserPromptSubmit: contexts.map((c) => ({ command: nodeCmd({ additionalContext: c }) })),
+		};
+		createHooksExtension({ settings, cwd: process.cwd() })(api);
+		const handler = handlers.get("input")?.[0];
+		expect(handler).toBeDefined();
+		const { ctx } = makeCtx();
+		return (await handler?.({ text, images: undefined }, ctx)) as any;
+	}
+
+	function hookBlock(res: any): string {
+		const start = res.text.indexOf("<hook_context>");
+		expect(start).toBeGreaterThanOrEqual(0);
+		return res.text.slice(start);
+	}
+
+	it("passes a small context through verbatim", async () => {
+		const res = await runInput(["project uses pnpm"]);
+		expect(res.action).toBe("transform");
+		expect(res.text).toBe("do the thing\n\n<hook_context>\nproject uses pnpm\n</hook_context>");
+	});
+
+	it("caps a 100KB context at ~16KB with a head+tail truncation note", async () => {
+		const huge = Array.from({ length: 4000 }, (_, i) => `line ${i} ${"x".repeat(20)}`).join("\n");
+		expect(Buffer.byteLength(huge, "utf-8")).toBeGreaterThan(100 * 1024);
+		const res = await runInput([huge]);
+		expect(res.action).toBe("transform");
+		const block = hookBlock(res);
+		// Cap + the marker line + the two <hook_context> tags.
+		expect(Buffer.byteLength(block, "utf-8")).toBeLessThanOrEqual(CAP + 512);
+		expect(block).toContain("truncated from the middle");
+		// head+tail: both ends of the original survive.
+		expect(block).toContain("line 0 ");
+		expect(block).toContain("line 3999 ");
+	});
+
+	it("caps the AGGREGATE, not each hook individually", async () => {
+		const chunk = Array.from({ length: 1500 }, (_, i) => `a${i} ${"y".repeat(20)}`).join("\n");
+		const res = await runInput([chunk, chunk, chunk]);
+		const block = hookBlock(res);
+		expect(Buffer.byteLength(block, "utf-8")).toBeLessThanOrEqual(CAP + 512);
+		expect(block).toContain("truncated from the middle");
+	});
+
+	it("does not transform when no hook returns context", async () => {
+		const { handlers, api } = makeFakePi();
+		const settings: HooksSettings = { UserPromptSubmit: [{ command: nodeCmd({ decision: "allow" }) }] };
+		createHooksExtension({ settings, cwd: process.cwd() })(api);
+		const { ctx } = makeCtx();
+		const res = (await handlers.get("input")?.[0]({ text: "hi", images: undefined }, ctx)) as any;
+		expect(res.action).toBe("continue");
+	});
+});
+
 describe("hooks-extension lifecycle events", () => {
 	it("installs no session listeners when nothing is configured", () => {
 		const { handlers, api } = makeFakePi();

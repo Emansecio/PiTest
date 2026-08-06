@@ -21,7 +21,8 @@ import {
  *
  * Opt-in is structural: a definition object may carry an `outputCap` field without
  * the shared `ToolDefinition` interface declaring it, so a tool can raise the
- * ceiling (recall's 256KB) without every other tool needing to know about it.
+ * ceiling (recall's RECALL_OUTPUT_CAP_BYTES) without every other tool needing to
+ * know about it.
  */
 export interface OutputCapConfig {
 	maxBytes: number;
@@ -38,10 +39,17 @@ type WithOutputCap = { outputCap?: OutputCapConfig };
  * recover them instead of silently reverting to the default 64KB head+tail cap
  * or the default "action" activity grouping. Not part of the public AgentTool
  * contract — read defensively, never assumed present.
+ *
+ * `promptSnippet` rides along for a second reason (T01): it is the hand-written
+ * one-sentence summary of the tool, and `tool-wire-schema.ts` prefers it over a
+ * mechanically truncated first line when building the provider-facing tool
+ * description. Without this passthrough the wire only ever sees the AgentTool,
+ * which has no snippet field, and every tool ships as a cut-off phrase.
  */
 interface ToolPassthrough {
 	outputCap?: OutputCapConfig;
 	activity?: ToolDefinition["activity"];
+	promptSnippet?: string;
 }
 
 /**
@@ -93,7 +101,8 @@ function deferFullOutput(fullText: string): string {
  * {@link deferFullOutput}), so nothing the net elides is unrecoverable.
  *
  * A definition may carry an `outputCap` override (see {@link withOutputCap}) to
- * raise the ceiling (recall's 256KB) or opt back into head-only truncation.
+ * raise the ceiling (recall's RECALL_OUTPUT_CAP_BYTES) or opt back into
+ * head-only truncation.
  */
 function capToolOutputBytes<TDetails>(
 	result: AgentToolResult<TDetails>,
@@ -143,8 +152,8 @@ function capToolOutputBytes<TDetails>(
  *
  * Unlike the result cap, errors get a dedicated, deliberately tight budget
  * (ERROR_TEXT_CAP_BYTES, 16KB) regardless of any per-tool `outputCap`: a
- * raised result ceiling (e.g. recall's 256KB) signals valuable OUTPUT, not
- * license for a 256KB error. Applied head+tail because an error's decisive
+ * raised result ceiling (e.g. recall's RECALL_OUTPUT_CAP_BYTES, 96KB) signals
+ * valuable OUTPUT, not license for a 96KB error. Applied head+tail because an error's decisive
  * signal sits at both ends (the message's opening line, the final stack
  * frames). Only the agent loop's `err.message` read reaches the model, so the
  * message is capped IN PLACE on the original error — type (subclasses), extra
@@ -195,8 +204,11 @@ export function wrapToolDefinition<TDetails = unknown>(
 		parameters: definition.parameters,
 		prepareArguments: definition.prepareArguments,
 		executionMode: definition.executionMode,
+		abortResultGraceMs: definition.abortResultGraceMs,
 		speculationSafe: definition.speculationSafe,
 		onSpeculationDiscarded: definition.onSpeculationDiscarded,
+		// P0: forward the elision-args mutation guard to the runtime dispatcher.
+		mutationGuard: definition.mutationGuard === true ? true : undefined,
 		execute: async (toolCallId, params, signal, onUpdate) => {
 			try {
 				const ctx = ctxFactory?.() as ExtensionContext | undefined;
@@ -213,6 +225,7 @@ export function wrapToolDefinition<TDetails = unknown>(
 	const passthrough: ToolPassthrough = {};
 	if (outputCap) passthrough.outputCap = outputCap;
 	if (activity !== undefined) passthrough.activity = activity;
+	if (definition.promptSnippet) passthrough.promptSnippet = definition.promptSnippet;
 	return Object.assign(tool, passthrough);
 }
 
@@ -231,11 +244,12 @@ export function wrapToolDefinitions(
  * provides plain AgentTool overrides that do not include prompt metadata or renderers.
  */
 export function createToolDefinitionFromAgentTool(tool: AgentTool<any>): ToolDefinition<any, unknown> {
-	// `tool` may carry `outputCap`/`activity` passthrough fields attached by
-	// wrapToolDefinition (see ToolPassthrough) even though the formal AgentTool
-	// type does not declare them — recover them here so a base-tool override
-	// round-tripped through this function keeps its cap/activity instead of
-	// silently reverting to the 64KB head+tail / default-action behavior.
+	// `tool` may carry `outputCap`/`activity`/`promptSnippet` passthrough fields
+	// attached by wrapToolDefinition (see ToolPassthrough) even though the formal
+	// AgentTool type does not declare them — recover them here so a base-tool
+	// override round-tripped through this function keeps its cap/activity/snippet
+	// instead of silently reverting to the 64KB head+tail / default-action
+	// behavior (and, for the snippet, to a truncated wire description).
 	const passthrough = tool as AgentTool<any> & ToolPassthrough;
 	const definition: ToolDefinition<any, unknown> = {
 		name: tool.name,
@@ -244,7 +258,10 @@ export function createToolDefinitionFromAgentTool(tool: AgentTool<any>): ToolDef
 		parameters: tool.parameters,
 		prepareArguments: tool.prepareArguments,
 		executionMode: tool.executionMode,
+		abortResultGraceMs: tool.abortResultGraceMs,
+		mutationGuard: (tool as AgentTool<any>).mutationGuard === true ? true : undefined,
 		activity: passthrough.activity,
+		promptSnippet: passthrough.promptSnippet,
 		execute: async (toolCallId, params, signal, onUpdate) => tool.execute(toolCallId, params, signal, onUpdate),
 	};
 	return passthrough.outputCap ? withOutputCap(definition, passthrough.outputCap) : definition;

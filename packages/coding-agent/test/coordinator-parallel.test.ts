@@ -121,4 +121,33 @@ describe("spawnAll", () => {
 		);
 		expect(maxInFlight).toBeLessThanOrEqual(2);
 	});
+
+	it("settles the lifecycle row when a reservation blocks a child", async () => {
+		const { deps } = rig();
+		const events: string[] = [];
+		const results = await spawnAll(deps, [{ name: "blocked", prompt: "p" }], {
+			concurrency: 1,
+			base: { depth: 0 },
+			onTaskStart: (handle) => events.push(`start:${handle}`),
+			onTaskComplete: (handle, status) => events.push(`complete:${handle}:${status}`),
+			onTaskReserve: () => ({ allowed: false, reason: "budget exhausted", release: () => {} }),
+		});
+		expect(results).toEqual([{ taskName: "blocked", ok: false, error: "budget exhausted" }]);
+		expect(events).toEqual(["start:blocked", "complete:blocked:error"]);
+	});
+
+	it("reports cancellation separately when the shared signal is already aborted", async () => {
+		const { deps } = rig();
+		const controller = new AbortController();
+		controller.abort(new Error("cancelled before start"));
+		const events: string[] = [];
+		const results = await spawnAll(deps, [{ name: "cancelled", prompt: "p" }], {
+			concurrency: 1,
+			base: { depth: 0, signal: controller.signal },
+			onTaskStart: (handle) => events.push(`start:${handle}`),
+			onTaskComplete: (handle, status) => events.push(`complete:${handle}:${status}`),
+		});
+		expect(results[0]?.ok).toBe(false);
+		expect(events).toEqual(["start:cancelled", "complete:cancelled:cancelled"]);
+	});
 });

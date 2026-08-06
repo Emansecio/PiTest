@@ -23,6 +23,7 @@ import {
 } from "../src/core/permissions/confirm-gate.ts";
 import { buildConfirmModeSection } from "../src/core/permissions/confirm-mode-prompt.ts";
 import { formatPermissionBlockedContent, humanModeNotifyLabel } from "../src/core/permissions/mode-labels.ts";
+import { buildPermissionModeSection } from "../src/core/permissions/mode-prompt.ts";
 import type { PermissionSettings } from "../src/core/permissions/types.ts";
 import { createUserInputBus, setCurrentUserInputBus } from "../src/core/user-input-bus.ts";
 
@@ -439,12 +440,14 @@ describe("permissions-extension in confirm mode", () => {
 		expect(block.reason).toContain("requires an interactive session");
 	});
 
-	it("injects the <confirm_mode> section into the system prompt", async () => {
+	it("resolves the <confirm_mode> section from the mode, and no longer appends it per-turn", async () => {
 		const { api, fire } = makeFakePi();
 		createPermissionsExtension({ cwd, checker: confirm() })(api);
-		const result = await fire("before_agent_start", { systemPrompt: "BASE" });
-		expect(result.systemPrompt).toContain("<confirm_mode>");
-		expect(result.systemPrompt.startsWith("BASE")).toBe(true);
+		// The section is now a cacheable-prefix input the host renders
+		// (BuildSystemPromptOptions.permissionModeSection), not a per-turn append —
+		// re-billing it on every request of every turn is the cost this avoids.
+		expect(buildPermissionModeSection("confirm")).toContain("<confirm_mode>");
+		expect(await fire("before_agent_start", { systemPrompt: "BASE" })).toBeUndefined();
 	});
 
 	it("accepts `/permission-mode confirm`", async () => {

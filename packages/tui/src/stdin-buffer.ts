@@ -223,10 +223,16 @@ function extractCompleteSequences(buffer: string): { sequences: string[]; remain
 	let pos = 0;
 
 	while (pos < buffer.length) {
-		const remaining = buffer.slice(pos);
+		const code = buffer.charCodeAt(pos);
 
 		// Try to extract a sequence starting at this position
-		if (remaining.startsWith(ESC)) {
+		if (code === 0x1b) {
+			// The completion scan never looks past MAX_INCOMPLETE_ESC_BYTES, so slice
+			// only that window instead of the whole tail: a buffer holding many short
+			// sequences would otherwise pay an O(n²) full-tail copy per position and
+			// freeze the event loop on large piped input.
+			const remaining = buffer.slice(pos, pos + MAX_INCOMPLETE_ESC_BYTES + 1);
+
 			// Find the end of this escape sequence. Cap the scan so a pathological
 			// incomplete CSI cannot burn O(n²) on multi-KB digit runs.
 			const scanLimit = Math.min(remaining.length, MAX_INCOMPLETE_ESC_BYTES);
@@ -286,29 +292,34 @@ function extractCompleteSequences(buffer: string): { sequences: string[]; remain
 				return { sequences, remainder: remaining };
 			}
 		} else {
-			// Not an escape sequence - take a single character. Astral-plane
-			// characters (emoji, CJK extensions, math symbols) are encoded as a
-			// UTF-16 surrogate PAIR (two code units); emit the whole pair as one
-			// sequence so downstream key matching never sees a lone surrogate.
-			const code = remaining.charCodeAt(0);
-			if (code >= 0xd800 && code <= 0xdbff) {
-				if (remaining.length > 1) {
-					const low = remaining.charCodeAt(1);
-					if (low >= 0xdc00 && low <= 0xdfff) {
-						sequences.push(remaining.slice(0, 2));
-						pos += 2;
-						continue;
+			// Plain-text run until the next ESC (or EOF). indexOf finds the end in
+			// one scan so we never re-slice the tail per character (O(n) overall).
+			// Downstream still receives one sequence per code point — same contract
+			// as before — but surrogate pairs are only checked at each step, not via
+			// a full-tail copy.
+			const nextEsc = buffer.indexOf("\x1b", pos);
+			const runEnd = nextEsc === -1 ? buffer.length : nextEsc;
+			while (pos < runEnd) {
+				const ch = buffer.charCodeAt(pos);
+				// Astral-plane characters are UTF-16 surrogate pairs; emit the whole
+				// pair as one sequence so key matching never sees a lone surrogate.
+				if (ch >= 0xd800 && ch <= 0xdbff) {
+					if (pos + 1 < buffer.length) {
+						const low = buffer.charCodeAt(pos + 1);
+						if (low >= 0xdc00 && low <= 0xdfff) {
+							sequences.push(buffer.slice(pos, pos + 2));
+							pos += 2;
+							continue;
+						}
+					} else {
+						// Lone high surrogate at the buffer tail: hold as remainder so
+						// the pair is reassembled when the low surrogate arrives.
+						return { sequences, remainder: buffer.slice(pos) };
 					}
-				} else {
-					// Lone high surrogate at the buffer tail: its low surrogate may
-					// still be arriving in the next chunk. Hold it as the remainder so
-					// the pair is reassembled and emitted whole, instead of emitting a
-					// lone surrogate now and another lone surrogate next chunk.
-					return { sequences, remainder: remaining };
 				}
+				sequences.push(buffer[pos]!);
+				pos++;
 			}
-			sequences.push(remaining[0]!);
-			pos++;
 		}
 	}
 

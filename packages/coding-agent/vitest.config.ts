@@ -1,12 +1,15 @@
-import { cpus } from "node:os";
+import { cpus, totalmem } from "node:os";
 import { fileURLToPath } from "node:url";
+import chalk from "chalk";
 import { defineConfig } from "vitest/config";
 
-// Pin chalk to level 0 in the main vitest process (and thus every worker it
-// forks) so a shell-exported FORCE_COLOR cannot inject ANSI escapes into
-// rendered text. `new Chalk()` reads FORCE_COLOR at import time, before
-// `test.env` is applied, so setting it here is what actually takes effect.
-process.env.FORCE_COLOR = "0";
+// Main process: clear parent-shell NO_COLOR/FORCE_COLOR so theme module init
+// (and createTheme) is not forced into ColorMode "none". Worker forks get the
+// same treatment via setupFiles (setup-color-env.ts). chalk.level=0 silences
+// chalk styles without FORCE_COLOR=0 (which Theme would treat as mono).
+delete process.env.NO_COLOR;
+delete process.env.FORCE_COLOR;
+chalk.level = 0;
 
 const aiSrcIndex = fileURLToPath(new URL("../ai/src/index.ts", import.meta.url));
 const aiSrcOAuth = fileURLToPath(new URL("../ai/src/oauth.ts", import.meta.url));
@@ -14,15 +17,34 @@ const agentSrcIndex = fileURLToPath(new URL("../agent/src/index.ts", import.meta
 const tuiSrcIndex = fileURLToPath(new URL("../tui/src/index.ts", import.meta.url));
 const aiSrcModelsCompare = fileURLToPath(new URL("../ai/src/models-compare.ts", import.meta.url));
 const tuiSrcCore = fileURLToPath(new URL("../tui/src/core.ts", import.meta.url));
-// Speed/headroom trade-off on Windows: cpus-4 forks (28 -> 24). Keeps a few
-// cores free for spawned children (tsx boots, git, taskkill/AgentSession
-// dispose teardown) while cutting collect/test wall vs the old cpus/2 default.
-const maxVitestForks = process.env.CI ? 3 : Math.max(2, cpus().length - 4);
+// Keep worker creation bounded on large hosts: Vitest workers compete with git,
+// taskkill, LSP, eval kernels and E2E child processes. The explicit override is
+// useful for CI/benchmark hosts; the default considers CPU, platform and RAM.
+const GIB = 1024 ** 3;
+
+export function resolveMaxVitestForks(options: {
+	cpuCount?: number;
+	totalMemoryBytes?: number;
+	platform?: NodeJS.Platform;
+	env?: NodeJS.ProcessEnv;
+} = {}): number {
+	const env = options.env ?? process.env;
+	const override = Number.parseInt(env.PIT_VITEST_MAX_WORKERS ?? "", 10);
+	if (Number.isFinite(override) && override >= 1) return override;
+	const cpuBudget = Math.max(2, (options.cpuCount ?? cpus().length) - 4);
+	const platformCap = (options.platform ?? process.platform) === "win32" ? 12 : 16;
+	const ramBudget = Math.max(2, Math.floor((options.totalMemoryBytes ?? totalmem()) / (2 * GIB)));
+	const ciCap = env.CI ? 3 : Number.POSITIVE_INFINITY;
+	return Math.max(2, Math.min(cpuBudget, platformCap, ramBudget, ciCap));
+}
+
+const maxVitestForks = resolveMaxVitestForks();
 
 export default defineConfig({
 	test: {
 		globals: true,
 		environment: "node",
+		setupFiles: [fileURLToPath(new URL("./test/setup-color-env.ts", import.meta.url))],
 		// 60s (was 30s) gives headroom to the handful of inherently heavy tests
 		// (process-spawn E2E like dry-run-cli, full AgentSession boot) so a busy
 		// or thermally-throttled machine doesn't fail them spuriously. Fast tests
@@ -53,11 +75,8 @@ export default defineConfig({
 			// since discoverLegacyResources walks the real HOME. Keeps the suite
 			// hermetic regardless of which legacy skills the machine has.
 			PIT_NO_LEGACY_SKILLS: "1",
-			// Force chalk to level 0 so diff/inverse highlight does not inject ANSI
-			// escapes into rendered text. Tests assert on plain substrings (e.g.
-			// `toContain("line 50 changed")`); a shell-exported FORCE_COLOR would
-			// otherwise wrap tokens in \x1b[7m…\x1b[27m and break those asserts.
-			FORCE_COLOR: "0",
+			// Do NOT set FORCE_COLOR here — Theme treats FORCE_COLOR=0 as ColorMode
+			// "none". Chalk is pinned to level 0 at config load (see above).
 		},
 		server: {
 			deps: {

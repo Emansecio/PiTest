@@ -47,7 +47,7 @@ try {
 	await session.prompt("List files in the current directory.");
 	console.log();
 } finally {
-	session.dispose();
+	await session.dispose();
 }
 
 // Example extension file (./my-logging-extension.ts):

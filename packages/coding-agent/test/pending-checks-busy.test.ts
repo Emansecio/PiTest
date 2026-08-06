@@ -46,7 +46,12 @@ describe("pending-checks busy drain", () => {
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("All done.")]);
 
-		const job = bgJob({ id: "bg-busy", command: "npm run check", exited: false });
+		const job = bgJob({
+			id: "bg-busy",
+			ownerSessionId: harness.session.sessionId,
+			command: "npm run check",
+			exited: false,
+		});
 		_registerBashBackgroundJobForTest(job);
 		setTimeout(() => {
 			job.exited = true;

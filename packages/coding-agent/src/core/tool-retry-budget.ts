@@ -94,13 +94,15 @@ export interface RetryBudgetObservation {
 export class ToolRetryBudgetTracker {
 	private readonly failures = new Map<string, number>();
 	private readonly perCall = new Map<string, RetryBudgetObservation>();
+	private revision = 0;
 
 	/**
 	 * Fold one failing tool call into the budget. Idempotent per `callId`: a second
 	 * call with the same id (a re-applied hint pass) returns the first observation
 	 * without double-counting.
 	 */
-	observeFailure(callId: string, key: string, max: number): RetryBudgetObservation {
+	observeFailure(callId: string, key: string, max: number, revision = this.revision): RetryBudgetObservation {
+		this.advanceRevision(revision);
 		const memo = this.perCall.get(callId);
 		if (memo) return memo;
 		const count = (this.failures.get(key) ?? 0) + 1;
@@ -108,6 +110,14 @@ export class ToolRetryBudgetTracker {
 		const observation: RetryBudgetObservation = { count, max, exhausted: count >= max };
 		this.perCall.set(callId, observation);
 		return observation;
+	}
+
+	/** Clear stale counters when the harness observes a newer state revision. */
+	advanceRevision(revision: number): void {
+		if (!Number.isFinite(revision) || revision === this.revision) return;
+		this.revision = revision;
+		this.failures.clear();
+		this.perCall.clear();
 	}
 
 	/** A success for this (tool, target) key resets its consecutive-failure streak. */
@@ -158,6 +168,7 @@ export function buildRetryBudgetLine(toolName: string, observation: RetryBudgetO
 export function createRetryBudgetHintRule(
 	tracker: ToolRetryBudgetTracker,
 	env: NodeJS.ProcessEnv = process.env,
+	getRevision: () => number = () => 0,
 ): ToolErrorHintRule {
 	return {
 		id: "tool-retry-budget",
@@ -169,7 +180,7 @@ export function createRetryBudgetHintRule(
 			if (result.isError === false) return false;
 			const max = resolveToolRetryBudgetMax(env);
 			const key = retryBudgetTargetKey(call.name, call.arguments);
-			tracker.observeFailure(call.id, key, max);
+			tracker.observeFailure(call.id, key, max, getRevision());
 			return true;
 		},
 		hint: ({ call }) => {
@@ -177,7 +188,7 @@ export function createRetryBudgetHintRule(
 			// for this call id (idempotent), so matcher and hint never disagree.
 			const max = resolveToolRetryBudgetMax(env);
 			const key = retryBudgetTargetKey(call.name, call.arguments);
-			const observation = tracker.observeFailure(call.id, key, max);
+			const observation = tracker.observeFailure(call.id, key, max, getRevision());
 			return buildRetryBudgetLine(call.name, observation);
 		},
 	};

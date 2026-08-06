@@ -52,7 +52,7 @@ async function installGlobalDispatcher(): Promise<void> {
 const cliArgs = process.argv.slice(2);
 
 async function runCli(): Promise<void> {
-	if (cliArgs.includes("--version") || cliArgs.includes("-V")) {
+	if (cliArgs.includes("--version") || cliArgs.includes("-v") || cliArgs.includes("-V")) {
 		const { VERSION } = await import("./config.ts");
 		console.log(VERSION);
 		printTimings();

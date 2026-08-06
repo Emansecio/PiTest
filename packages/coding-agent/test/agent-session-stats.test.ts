@@ -95,7 +95,7 @@ function wirePercent(session: AgentSession): number {
 }
 
 describe("AgentSession.getSessionStats", () => {
-	it("exposes the current context usage alongside token totals", () => {
+	it("exposes the current context usage alongside token totals", async () => {
 		const { session, sessionManager } = createSession();
 
 		try {
@@ -112,11 +112,11 @@ describe("AgentSession.getSessionStats", () => {
 			expect(stats.contextUsage?.contextWindow).toBe(model.contextWindow);
 			expect(stats.contextUsage?.percent).toBe(wirePercent(session));
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 	});
 
-	it("keeps lifetime usage totals while reporting active-context counts after compaction", () => {
+	it("keeps lifetime usage totals while reporting active-context counts after compaction", async () => {
 		const { session, sessionManager } = createSession();
 
 		try {
@@ -153,11 +153,11 @@ describe("AgentSession.getSessionStats", () => {
 				(50_000 / model.contextWindow) * 100,
 			);
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 	});
 
-	it("memoizes context usage and invalidates it when messages change", () => {
+	it("memoizes context usage and invalidates it when messages change", async () => {
 		const { session, sessionManager } = createSession();
 
 		try {
@@ -182,11 +182,11 @@ describe("AgentSession.getSessionStats", () => {
 			expect(second?.wireTokens).toBe(350);
 			expect(second?.percent).toBe(wirePercent(session));
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 	});
 
-	it("uses post-compaction usage for current context instead of stale kept usage", () => {
+	it("uses post-compaction usage for current context instead of stale kept usage", async () => {
 		const { session, sessionManager } = createSession();
 
 		try {
@@ -209,34 +209,34 @@ describe("AgentSession.getSessionStats", () => {
 			expect(stats.contextUsage?.wireTokens).toBe(25_000);
 			expect(stats.contextUsage?.percent).toBe(wirePercent(session));
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 	});
 });
 
 describe("AgentSession.getFixedCostSurface", () => {
-	it("returns null before the first LLM request", () => {
+	it("returns null before the first LLM request", async () => {
 		const { session } = createSession();
 		try {
 			// No messages at all — pre-first-turn.
 			expect(session.getFixedCostSurface()).toBeNull();
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 	});
 
-	it("returns null when only user messages exist (no assistant turn yet)", () => {
+	it("returns null when only user messages exist (no assistant turn yet)", async () => {
 		const { session, sessionManager } = createSession();
 		try {
 			sessionManager.appendMessage(createUserMessage("hello", 1));
 			syncAgentMessages(session, sessionManager);
 			expect(session.getFixedCostSurface()).toBeNull();
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 	});
 
-	it("returns systemTokens and toolTokens after the first assistant turn", () => {
+	it("returns systemTokens and toolTokens after the first assistant turn", async () => {
 		const { session, sessionManager } = createSession();
 		try {
 			sessionManager.appendMessage(createUserMessage("hello", 1));
@@ -257,11 +257,11 @@ describe("AgentSession.getFixedCostSurface", () => {
 			expect(surface!.systemTokens).toBe(Math.ceil(prompt.length / 4));
 			expect(surface!.toolTokens).toBeGreaterThanOrEqual(0);
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 	});
 
-	it("splits system tokens into static and dynamic when the dynamic marker is present", () => {
+	it("splits system tokens into static and dynamic when the dynamic marker is present", async () => {
 		// Use the real SYSTEM_PROMPT_DYNAMIC_MARKER so splitSystemPromptOnDynamic fires.
 		const staticText = "Static prefix. ".repeat(50); // ~750 chars → staticSystemTokens > 0
 		const dynamicText = "Dynamic suffix. ".repeat(10); // ~150 chars → dynamicSystemTokens > 0
@@ -302,7 +302,7 @@ describe("AgentSession.getFixedCostSurface", () => {
 			// chars); just verify it's a non-zero positive integer.
 			expect(surface!.systemTokens).toBeGreaterThan(0);
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 	});
 });

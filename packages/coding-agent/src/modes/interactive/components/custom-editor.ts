@@ -12,6 +12,8 @@ export class CustomEditor extends Editor {
 	public onEscape?: () => void;
 	public onCtrlD?: () => void;
 	public onPasteImage?: () => void;
+	/** Move focus from an empty composer to running work. True consumes the Up key. */
+	public onNavigateToRunningWork?: () => boolean;
 	/** Handler for extension-registered shortcuts. Returns true if handled. */
 	public onExtensionShortcut?: (data: string) => boolean;
 
@@ -70,6 +72,18 @@ export class CustomEditor extends Editor {
 				return;
 			}
 			// Fall through to editor handling for delete-char-forward when not empty
+		}
+
+		// Empty-composer Up can enter the running-work surface. If the host has
+		// nothing actionable it returns false and ordinary prompt history remains
+		// byte-for-byte the parent Editor's responsibility.
+		if (
+			this.getText().length === 0 &&
+			!this.isShowingAutocomplete() &&
+			this.keybindings.matches(data, "tui.editor.cursorUp") &&
+			this.onNavigateToRunningWork?.()
+		) {
+			return;
 		}
 
 		// Check all other app actions

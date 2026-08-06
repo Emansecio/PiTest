@@ -46,6 +46,7 @@
 
 import { readFile as fsReadFile, stat as fsStat } from "node:fs/promises";
 import { relative } from "node:path";
+import { recordDiagnostic } from "@pit/ai";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { buildRepoGraph, dependenciesOf, dependentsOf, type RepoGraph, testsCovering } from "../repo-map/graph.ts";
@@ -222,6 +223,12 @@ export function createGraphPrefetchExtension(options: GraphPrefetchOptions) {
 					if (!snapshot) continue;
 					if (mutatingInFlight > 0) continue; // a mutation started mid-read; drop this one rather than warm possibly-stale content
 					cache.set(absPath, snapshot);
+					recordDiagnostic({
+						category: "graph.prefetch.warm",
+						level: "info",
+						source: "graph-prefetch",
+						context: { bytes: snapshot.size },
+					});
 				}
 			} catch {
 				// Best-effort warming; never surfaces to the model or the session.
@@ -246,7 +253,9 @@ export function createGraphPrefetchExtension(options: GraphPrefetchOptions) {
 					const rawPath = extractPathArg(event.input);
 					if (!rawPath) return undefined;
 					const absSeed = resolveToolPath(rawPath, options.cwd);
-					seeds = [toRepoRelPath(options.cwd, absSeed)];
+					const relSeed = toRepoRelPath(options.cwd, absSeed);
+					if (event.toolName === "read" && !cache.has(absSeed)) queuedThisTurn.delete(relSeed);
+					seeds = [relSeed];
 				}
 				if (seeds.length === 0) return undefined;
 

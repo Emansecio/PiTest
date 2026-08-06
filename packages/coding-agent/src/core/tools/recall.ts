@@ -92,9 +92,6 @@ export function createRecallToolDefinition(
 		description:
 			"Search the project's hindsight memory bank for relevant entries. Use this before doing redundant investigation — past sessions may have already established the answer.",
 		promptSnippet: "Search project hindsight memory",
-		promptGuidelines: [
-			"At the start of any non-trivial task, recall before grepping or reading widely — prior sessions have likely already established the relevant conventions, decisions, or gotchas.",
-		],
 		parameters: recallSchema,
 		async execute(_toolCallId: string, input: RecallToolInput) {
 			const bank = options?.bank ?? getCurrentHindsightBank();

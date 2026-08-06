@@ -20,6 +20,7 @@ import { Text } from "../src/components/text.js";
 import type { Terminal } from "../src/terminal.js";
 import { resetCapabilitiesCache, setCapabilities } from "../src/terminal-image.js";
 import { Container, TUI } from "../src/tui.js";
+import { VirtualizedContainer } from "../src/virtualized-container.js";
 
 class NullTerminal implements Terminal {
 	bytes = 0;
@@ -88,13 +89,41 @@ function measure(n: number): { ms: number; cache: number } {
 	return { ms: total / FRAMES, cache: tui.getResetCacheSizeForTest() };
 }
 
+/** Build the production transcript shape: settled bubbles stay cached while
+ * the mutable tail is explicitly marked stale for each streaming frame. */
+function buildVirtualized(n: number): { tui: TUI; chat: VirtualizedContainer; spinner: Text } {
+	const tui = new TUI(new NullTerminal());
+	const chat = new VirtualizedContainer();
+	for (let i = 0; i < n; i++) {
+		chat.addChild(new Text(`line ${i}: the quick brown fox jumps over the lazy dog ${i}`, 1, 0));
+	}
+	const spinner = new Text("â ‹ Workingâ€¦", 1, 0);
+	chat.addChild(spinner);
+	tui.addChild(chat);
+	return { tui, chat, spinner };
+}
+
+function measureVirtualized(n: number): number {
+	const { tui, chat, spinner } = buildVirtualized(n);
+	doRender(tui);
+	let total = 0;
+	for (let f = 0; f < FRAMES; f++) {
+		spinner.setText(`${SPINNER_FRAMES[f % SPINNER_FRAMES.length]} Workingâ€¦`);
+		chat.markChildStale(spinner);
+		const t0 = performance.now();
+		doRender(tui);
+		total += performance.now() - t0;
+	}
+	return total / FRAMES;
+}
+
 function fmt(ms: number): string {
 	return ms.toFixed(3).padStart(8);
 }
 
 console.log(`Render hot-path bench — ${FRAMES} spinner frames per size\n`);
-console.log("    N | gated ms/f |  scan ms/f |  cache |  ~max fps (gated)");
-console.log("------|------------|------------|--------|------------------");
+console.log("    N | gated ms/f |  scan ms/f | virtual ms/f |  cache | ~max fps");
+console.log("------|------------|------------|--------------|--------|---------");
 for (const n of SIZES) {
 	// #1 "after": non-Kitty caps → Kitty scan short-circuits.
 	setCapabilities({ images: null, trueColor: true, hyperlinks: false });
@@ -102,12 +131,14 @@ for (const n of SIZES) {
 	// #1 "before": Kitty caps → per-line scan runs over every line.
 	setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 	const scan = measure(n);
+	setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+	const virtualized = measureVirtualized(n);
 	resetCapabilitiesCache();
 	const fps = gated.ms > 0 ? Math.round(1000 / gated.ms) : 0;
 	console.log(
-		`${String(n).padStart(5)} | ${fmt(gated.ms)}   | ${fmt(scan.ms)}   | ${String(gated.cache).padStart(6)} | ${String(fps).padStart(6)}`,
+		`${String(n).padStart(5)} | ${fmt(gated.ms)}   | ${fmt(scan.ms)}   | ${fmt(virtualized).padStart(12)} | ${String(gated.cache).padStart(6)} | ${String(fps).padStart(7)}`,
 	);
 }
 console.log(
-	"\ngated = #1 active (Kitty scan skipped); scan = pre-#1 cost; cache = reset entries held (#2: ≈N, never capped at 4096).",
+	"\ngated/scan = regular Container baseline; virtual = production VirtualizedContainer with a stale streaming tail; cache = reset entries held.",
 );

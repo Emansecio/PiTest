@@ -48,7 +48,7 @@ describe("Fusion turn persists the user message", () => {
 	// turn). The writer callback now calls _emitFusionUserMessage(userPrompt) before streaming
 	// the synthesized answer; this exercises that helper + the assistant twin in the same order
 	// the writer path uses them.
-	it("lands a user message before the synthesized assistant reply, in order", () => {
+	it("lands a user message before the synthesized assistant reply, in order", async () => {
 		const session = createSession();
 		try {
 			emitFusionUserMessage(session, "explain the auth flow");
@@ -59,17 +59,17 @@ describe("Fusion turn persists the user message", () => {
 			expect(messageText(session.agent.state.messages[0])).toContain("explain the auth flow");
 			expect(messageText(session.agent.state.messages[1])).toContain("synthesized answer");
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 	});
 
-	it("does not start history with an assistant message (Anthropic alternation guard)", () => {
+	it("does not start history with an assistant message (Anthropic alternation guard)", async () => {
 		const session = createSession();
 		try {
 			emitFusionUserMessage(session, "first fusion prompt");
 			expect(session.agent.state.messages[0]?.role).toBe("user");
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 	});
 });

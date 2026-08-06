@@ -104,12 +104,12 @@ describe("per-turn per-tool failure budget", () => {
 		const budgetMsgs = customMessages(harness, "pi.tool-failure-budget");
 		// Exactly one steer for the tool, even though it kept failing.
 		expect(budgetMsgs.length).toBe(1);
-		expect(budgetMsgs[0]?.content).toContain("<tool-failure-budget>");
+		expect(budgetMsgs[0]?.content).toContain("<system-reminder>[failure-budget]");
 		expect(budgetMsgs[0]?.content).toContain("`flaky`");
 		expect(budgetMsgs[0]?.content).toContain("failed 3 times in this turn");
 	});
 
-	it("computes descending attemptsLeft (2,1,0) across three failures of one tool", () => {
+	it("computes descending attemptsLeft (2,1,0) across three failures of one tool", async () => {
 		// attemptsLeft is what the budget feeds into `buildToolErrorReflection`
 		// (whose attemptsLeft line is unit-tested separately). Assert the source
 		// progression directly — deterministic and independent of the opt-in
@@ -125,7 +125,7 @@ describe("per-turn per-tool failure budget", () => {
 			// A 4th failure stays clamped at 0 (never negative).
 			expect(internal._steering.recordTurnToolFailure("flaky").attemptsLeft).toBe(0);
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 	});
 
@@ -202,7 +202,7 @@ describe("per-turn per-tool failure budget", () => {
 		expect(customMessages(harness, "pi.tool-failure-budget").length).toBe(1);
 	});
 
-	it("carries failure counts into the next turn with half-life decay", () => {
+	it("carries failure counts into the next turn with half-life decay", async () => {
 		const session = makeBareSession({ enabled: true, maxPerTurn: 3, carryover: true });
 		try {
 			const internal = session as unknown as {
@@ -221,11 +221,11 @@ describe("per-turn per-tool failure budget", () => {
 			internal._steering.resetTurnFailureBudget();
 			expect(internal._steering._turnToolFailures.get("flaky")).toBeUndefined();
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 	});
 
-	it("clears carryover for a tool after it succeeds", () => {
+	it("clears carryover for a tool after it succeeds", async () => {
 		const session = makeBareSession({ enabled: true, maxPerTurn: 3, carryover: true });
 		try {
 			const internal = session as unknown as {
@@ -243,7 +243,7 @@ describe("per-turn per-tool failure budget", () => {
 			internal._steering.observeToolSuccess("flaky");
 			expect(internal._steering._turnToolFailures.get("flaky")).toBeUndefined();
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 	});
 

@@ -153,12 +153,8 @@ export function createEvalToolDefinition(
 		name: "eval",
 		label: "eval",
 		description:
-			"Run code in a persistent Python or JavaScript kernel. State (variables, imports, defined functions) survives across calls within the same session for the chosen lang. The javascript kernel process is shared with the `code` tool — aborting or timing out either one tears down that shared kernel and wipes both tools' persisted JS state.",
+			"Run code in a persistent Python or JavaScript kernel. State (variables, imports, defined functions) survives across calls within the same session for the chosen lang. Print what you need to stdout/stderr — nothing else comes back. JavaScript supports top-level await; Python preloads sys, os, and json. The javascript kernel process is shared with the `code` tool — aborting or timing out either one tears down that shared kernel and wipes both tools' persisted JS state.",
 		promptSnippet: "Execute code in a persistent Python or JS kernel; state persists across calls.",
-		promptGuidelines: [
-			"Use eval for stateful computations or prototyping; state persists per language and session. JavaScript supports top-level await; Python preloads sys, os, and json.",
-			"Print results to stdout/stderr. JavaScript shares a process with `code`; aborting or timing out either resets both tools' JS state.",
-		],
 		parameters: evalSchema,
 		async execute(_toolCallId, input: EvalToolInput, signal) {
 			const manager = getCurrentEvalKernelManager();

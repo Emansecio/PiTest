@@ -111,13 +111,8 @@ export function createWebFetchToolDefinition(
 		name: "web_fetch",
 		label: "web_fetch",
 		description:
-			"Fetch a URL and return its content as markdown. HTML is converted, text and JSON are returned raw; PDFs and binaries are not supported. Output is capped per call — page through long documents with start_index.",
+			"Fetch a URL you already have (use web_search to find one) and return its content as markdown. HTML is converted, text and JSON are returned raw; PDFs and binaries are not supported. Output is capped per call — when the result says it was truncated, call again with the reported start_index until you have the whole document.",
 		promptSnippet: "Fetch a URL and read it as markdown",
-		promptGuidelines: [
-			"Use when you already have a specific URL; use `web_search` when you still need to find one.",
-			"Read the whole document: when the result says it was truncated, call again with the reported `start_index`.",
-			"Non-public targets (localhost, LAN, link-local/cloud-metadata addresses) are refused by design — do not try to work around it.",
-		],
 		parameters: webFetchSchema,
 		sideEffect: "none",
 		async execute(_toolCallId, input: WebFetchToolInput, signal) {

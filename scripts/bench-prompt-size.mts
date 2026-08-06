@@ -20,7 +20,7 @@ import {
 } from "../packages/coding-agent/src/core/memory/index.ts";
 import { loadProjectContextFiles } from "../packages/coding-agent/src/core/resource-loader.ts";
 import { buildSystemPrompt } from "../packages/coding-agent/src/core/system-prompt.ts";
-import { compactWireToolSurface } from "../packages/coding-agent/src/core/tool-wire-schema.ts";
+import { agentToolToWireSurface, compactWireToolSurface } from "../packages/coding-agent/src/core/tool-wire-schema.ts";
 import {
 	createAllToolDefinitions,
 	createAllTools,
@@ -89,10 +89,11 @@ for (const definition of Object.values(toolDefinitions)) {
 	if (definition.promptSnippet) toolSnippets[definition.name] = definition.promptSnippet;
 }
 
-const guidelinesFromTools: string[] = [];
-for (const definition of Object.values(toolDefinitions)) {
-	if (definition.promptGuidelines) guidelinesFromTools.push(...definition.promptGuidelines);
-}
+// NOTE: built-in tool `promptGuidelines` are deliberately NOT collected here.
+// The runtime drops them (`AgentSession._getCustomToolPromptGuidelines` keeps only
+// extension/SDK guidance), so summing them would inflate the measured prompt above
+// what any real session sends. Only engineering-style / in-turn-verification
+// bullets reach `promptGuidelines` at runtime, and those are not modelled here.
 
 const contextFiles = loadContextFiles(benchRoot);
 const skills = loadSkills();
@@ -100,7 +101,6 @@ const systemPrompt = buildSystemPrompt({
 	cwd: benchRoot,
 	selectedTools: tools.map((t) => t.name),
 	toolSnippets,
-	promptGuidelines: guidelinesFromTools,
 	contextFiles,
 	skills,
 });
@@ -113,13 +113,11 @@ const skillsChars = visibleSkills.reduce(
 	0,
 );
 
-const wireTools = tools.map((t) =>
-	compactWireToolSurface({
-		name: t.name,
-		description: (t as { promptSnippet?: string }).promptSnippet ?? t.description.split("\n")[0],
-		parameters: t.parameters,
-	}),
-);
+// Exactly the runtime wire path (T01): agentToolToWireSurface carries the
+// `promptSnippet` passthrough, compactWireToolSurface prefers it over a
+// truncated first line. Rebuilding the surface by hand here would drift from
+// what the provider actually receives.
+const wireTools = tools.map((t) => compactWireToolSurface(agentToolToWireSurface(t)));
 const toolBreakdown = tools.map((t, i) => ({
 	name: t.name,
 	descChars: t.description.length,

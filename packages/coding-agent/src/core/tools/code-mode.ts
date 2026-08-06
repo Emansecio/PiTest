@@ -71,18 +71,6 @@ export interface CodeModeToolOptions {
 	maxToolResultBytes?: number;
 }
 
-/**
- * Build compact code-mode guidance. The system prompt already lists every
- * active tool, so repeating all names here wastes prefix tokens.
- */
-function buildGuidelines(): string[] {
-	return [
-		"For multi-tool workflows, use one code-mode program with `await tools.<name>(args)`; active tools listed above are available except `code` itself.",
-		"Tool results are strings: print the final result and catch failures. State does not persist between `code` calls.",
-		"The JavaScript process is shared with `eval`; aborting or timing out either resets both tools' JS state.",
-	];
-}
-
 export function createCodeModeToolDefinition(
 	_cwd: string,
 	options?: CodeModeToolOptions,
@@ -94,12 +82,9 @@ export function createCodeModeToolDefinition(
 		name: "code",
 		label: "code",
 		description:
-			"Run ONE JavaScript program that calls the agent's tools as `await tools.<name>(args)`. Use for multi-tool workflows (read/filter/compose over many results) to collapse N tool calls into a single turn — less latency and fewer tokens. Tool calls go through the same permission/safety pipeline as normal calls. Runs in the same persistent JavaScript kernel process as `eval` (lang=javascript) — aborting or timing out either tool tears down that shared kernel and wipes both tools' persisted JS state.",
+			"Run ONE JavaScript program that calls the agent's tools as `await tools.<name>(args)`. Use for multi-tool workflows (read/filter/compose over many results) to collapse N tool calls into a single turn — less latency and fewer tokens. Every tool in the system prompt's active tool list is callable except `code` itself; each returns a string — print the final result and catch failures. Tool calls go through the same permission/safety pipeline as normal calls. Runs in the same persistent JavaScript kernel process as `eval` (lang=javascript) — aborting or timing out either tool tears down that shared kernel and wipes both tools' persisted JS state.",
 		promptSnippet:
 			"Write one JS program calling tools via `await tools.<name>(args)`; collapses N tool calls into one turn.",
-		get promptGuidelines(): string[] {
-			return buildGuidelines();
-		},
 		parameters: codeModeSchema,
 		// Has observable effects (it runs tools); keep it on its own activity line.
 		activity: "action",

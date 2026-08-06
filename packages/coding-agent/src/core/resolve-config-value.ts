@@ -3,12 +3,8 @@
  * Used by auth-storage.ts and model-registry.ts.
  */
 
-import { promisify } from "node:util";
-import { exec, execFile, execSync, spawnSync } from "child_process";
-import { getShellConfig } from "../utils/shell.ts";
-
-const execFileAsync = promisify(execFile);
-const execAsync = promisify(exec);
+import { execSync, spawn, spawnSync } from "child_process";
+import { getShellConfig, killProcessTreeAndWait } from "../utils/shell.ts";
 
 // Short-lived TTL memo for `!command` resolvers. The per-request
 // auth path (model-registry.getApiKeyAndHeaders → apiKey + provider headers +
@@ -20,10 +16,12 @@ const execAsync = promisify(exec);
 // must not turn into a sticky auth outage).
 const ttlCommandCache = new Map<string, { value: string; expiresAt: number }>();
 const DEFAULT_CONFIG_COMMAND_TTL_MS = 30_000;
+// Keep parity with child_process.exec/execFile's default maxBuffer.
+const MAX_CONFIG_COMMAND_STDOUT_BYTES = 1024 * 1024;
 
 function throwIfAborted(signal?: AbortSignal): void {
 	if (!signal?.aborted) return;
-	throw signal.reason instanceof Error ? signal.reason : new Error("aborted");
+	throw signal.reason === undefined ? new Error("aborted") : signal.reason;
 }
 
 // Window for ttlCommandCache, overridable via PIT_CONFIG_COMMAND_TTL_MS
@@ -137,36 +135,104 @@ export function resolveConfigValueUncached(config: string): string | undefined {
 }
 
 /**
- * Async, non-blocking mirror of executeWithConfiguredShell. Used by the MCP
- * transport-resolution path so a slow `!cmd` (up to the 10s timeout) yields the
- * event loop instead of freezing it. Same params as the sync version 1:1
- * (configured shell, timeout 10000, stdio ignore/pipe/ignore, shell:false,
- * windowsHide, trim, undefined on failure/status!=0/empty).
+ * Run a shell command asynchronously. Abort, timeout, and excessive output make a
+ * bounded attempt to reap the process tree before settling; a failed cleanup does
+ * not replace an AbortSignal's reason.
  */
+async function executeShellCommandAsync(
+	file: string,
+	args: string[],
+	shell: boolean,
+	signal?: AbortSignal,
+): Promise<{ code: number | null; error?: NodeJS.ErrnoException; stdout: string }> {
+	throwIfAborted(signal);
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		let stopping = false;
+		const stdoutChunks: Buffer[] = [];
+		let stdoutBytes = 0;
+		const child = spawn(file, args, {
+			detached: process.platform !== "win32",
+			shell,
+			stdio: ["ignore", "pipe", "ignore"],
+			windowsHide: true,
+		});
+		const stdout = (): string => Buffer.concat(stdoutChunks).toString("utf-8");
+
+		const finish = (result: { code: number | null; error?: NodeJS.ErrnoException; stdout: string }): void => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeout);
+			signal?.removeEventListener("abort", onAbort);
+			resolve(result);
+		};
+		const failAbort = (): void => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeout);
+			signal?.removeEventListener("abort", onAbort);
+			try {
+				throwIfAborted(signal);
+			} catch (error) {
+				reject(error);
+			}
+		};
+		const stop = async (aborted: boolean): Promise<void> => {
+			if (stopping || settled) return;
+			stopping = true;
+			clearTimeout(timeout);
+			if (aborted) failAbort();
+			if (child.pid !== undefined) {
+				await killProcessTreeAndWait(child.pid).catch(() => false);
+			}
+			if (!aborted) finish({ code: null, stdout: stdout() });
+		};
+		const onAbort = (): void => {
+			void stop(true);
+		};
+		const timeout = setTimeout(() => {
+			void stop(false);
+		}, 10000);
+
+		child.stdout?.on("data", (chunk: Buffer | string) => {
+			const buffer = Buffer.from(chunk);
+			stdoutBytes += buffer.length;
+			if (stdoutBytes > MAX_CONFIG_COMMAND_STDOUT_BYTES) {
+				void stop(false);
+				return;
+			}
+			stdoutChunks.push(buffer);
+		});
+		child.on("error", (error: NodeJS.ErrnoException) => {
+			if (!stopping) finish({ code: null, error, stdout: stdout() });
+		});
+		child.on("close", (code) => {
+			if (!stopping) finish({ code, stdout: stdout() });
+		});
+		signal?.addEventListener("abort", onAbort, { once: true });
+		if (signal?.aborted) onAbort();
+	});
+}
+
 async function executeWithConfiguredShellAsync(
 	command: string,
 	signal?: AbortSignal,
 ): Promise<{ executed: boolean; value: string | undefined }> {
+	let shellConfig: ReturnType<typeof getShellConfig>;
 	try {
+		shellConfig = getShellConfig();
+	} catch {
 		throwIfAborted(signal);
-		const { shell, args } = getShellConfig();
-		const { stdout } = await execFileAsync(shell, [...args, command], {
-			encoding: "utf-8",
-			timeout: 10000,
-			windowsHide: true,
-			shell: false,
-			signal,
-		});
-		const value = (stdout ?? "").trim();
+		return { executed: false, value: undefined };
+	}
+	try {
+		const result = await executeShellCommandAsync(shellConfig.shell, [...shellConfig.args, command], false, signal);
+		if (result.error?.code === "ENOENT") return { executed: false, value: undefined };
+		if (result.error || result.code !== 0) return { executed: true, value: undefined };
+		const value = result.stdout.trim();
 		return { executed: true, value: value || undefined };
-	} catch (err) {
+	} catch {
 		throwIfAborted(signal);
-		const error = err as NodeJS.ErrnoException;
-		// ENOENT = shell binary not found -> not executed (caller falls back to default shell).
-		if (error?.code === "ENOENT") {
-			return { executed: false, value: undefined };
-		}
-		// Any other failure (non-zero exit, timeout) = executed but no usable value.
 		return { executed: true, value: undefined };
 	}
 }
@@ -174,13 +240,9 @@ async function executeWithConfiguredShellAsync(
 /** Async, non-blocking mirror of executeWithDefaultShell (execSync -> promisified exec). */
 async function executeWithDefaultShellAsync(command: string, signal?: AbortSignal): Promise<string | undefined> {
 	try {
-		throwIfAborted(signal);
-		const { stdout } = await execAsync(command, {
-			encoding: "utf-8",
-			timeout: 10000,
-			signal,
-		});
-		return stdout.trim() || undefined;
+		const result = await executeShellCommandAsync(command, [], true, signal);
+		if (result.error || result.code !== 0) return undefined;
+		return result.stdout.trim() || undefined;
 	} catch {
 		throwIfAborted(signal);
 		return undefined;

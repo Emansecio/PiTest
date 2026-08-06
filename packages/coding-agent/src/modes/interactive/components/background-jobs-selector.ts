@@ -13,7 +13,6 @@ import { Container, getKeybindings, Spacer, Text, type TUI } from "@pit/tui";
 import {
 	type BashBackgroundJob,
 	isBashBackgroundJobStalled,
-	killBashBackgroundJob,
 	listBashBackgroundJobs,
 	onBashBackgroundJobEvent,
 } from "../../../core/tools/bash.ts";
@@ -45,6 +44,7 @@ export function formatJobElapsed(ms: number): string {
 /** One-line state chip for a job row (glyph + label, themed). */
 function jobStateChip(job: BashBackgroundJob, now: number): string {
 	if (!job.exited) {
+		if (job.stopUnconfirmed) return theme.fg("warning", "stop unconfirmed");
 		if (isBashBackgroundJobStalled(job, now)) {
 			const quietMs = now - Math.max(job.lastOutputAt, job.promotedAt);
 			return theme.fg("warning", `▶ stalled ${formatJobElapsed(quietMs)}`);
@@ -64,6 +64,7 @@ export class BackgroundJobsSelectorComponent extends Container {
 	private onCancelCallback: () => void;
 	private onKilledCallback: (job: BashBackgroundJob) => void;
 	private tui: TUI | undefined;
+	private ownerSessionId: string | undefined;
 	private unsubscribeJobEvents: () => void;
 	private refreshTimer: NodeJS.Timeout | undefined;
 
@@ -72,12 +73,14 @@ export class BackgroundJobsSelectorComponent extends Container {
 		onKilled: (job: BashBackgroundJob) => void;
 		onCancel: () => void;
 		tui?: TUI;
+		ownerSessionId?: string;
 	}) {
 		super();
 		this.onViewCallback = options.onView;
 		this.onKilledCallback = options.onKilled;
 		this.onCancelCallback = options.onCancel;
 		this.tui = options.tui;
+		this.ownerSessionId = options.ownerSessionId;
 
 		const { surface: card, mount } = beginSelectorSurface(this, true);
 		card.addChild(new Spacer(1));
@@ -118,7 +121,7 @@ export class BackgroundJobsSelectorComponent extends Container {
 	}
 
 	private refresh(): void {
-		this.jobs = listBashBackgroundJobs();
+		this.jobs = listBashBackgroundJobs(this.ownerSessionId).filter((job) => !job.stopping);
 		if (this.selectedIndex >= this.jobs.length) {
 			this.selectedIndex = Math.max(0, this.jobs.length - 1);
 		}
@@ -195,9 +198,6 @@ export class BackgroundJobsSelectorComponent extends Container {
 		} else if (kb.matches(keyData, "app.jobs.kill")) {
 			const job = this.jobs[this.selectedIndex];
 			if (!job) return;
-			// "ui" source: the session's job-event subscriber tells the agent the
-			// user ended this job, so it never polls a ghost id.
-			killBashBackgroundJob(job.id, "ui");
 			this.onKilledCallback(job);
 			this.refresh();
 		} else if (kb.matches(keyData, "tui.select.confirm") || keyData === "\n") {

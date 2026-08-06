@@ -2,7 +2,28 @@
 // Content-Length framing and answers the handful of methods the lsp tool
 // exercises. Not a real language server — just enough to drive client.ts.
 
+import { spawn } from "node:child_process";
+
 let buf = Buffer.alloc(0);
+
+// Process-tree shutdown test hook. Spawn a persistent grandchild and publish
+// its PID before the LSP handshake starts, so the test can verify a graceful
+// LSP exit does not orphan descendants.
+const grandchildPidFileArg = process.argv.find((arg) => arg.startsWith("--spawn-grandchild="));
+if (grandchildPidFileArg) {
+	const pidFile = grandchildPidFileArg.slice("--spawn-grandchild=".length);
+	const grandchild = spawn(
+		process.execPath,
+		[
+			"-e",
+			'const { writeFileSync } = require("node:fs"); writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 1000);',
+			pidFile,
+		],
+		{ stdio: "ignore" },
+	);
+	grandchild.on("error", () => {});
+	grandchild.unref();
+}
 
 function send(msg) {
 	const content = Buffer.from(JSON.stringify(msg), "utf-8");

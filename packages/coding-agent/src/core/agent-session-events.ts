@@ -20,7 +20,14 @@ export type AgentSessionEvent =
 			steering: readonly string[];
 			followUp: readonly string[];
 	  }
-	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
+	| {
+			type: "compaction_start";
+			reason: "manual" | "threshold" | "overflow";
+			/** Correlates one start/end pair; a second pass gets a fresh id. */
+			operationId: string;
+			/** Selected summarizer model, once resolution has completed. */
+			modelId?: string;
+	  }
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	| { type: "orchestration_changed"; orchestration: Orchestration }
@@ -64,6 +71,10 @@ export type AgentSessionEvent =
 	| {
 			type: "compaction_end";
 			reason: "manual" | "threshold" | "overflow";
+			/** Correlates this terminal event with its compaction attempt. */
+			operationId: string;
+			/** Selected summarizer model; absent when failure preceded resolution. */
+			modelId?: string;
 			result: CompactionResult | undefined;
 			aborted: boolean;
 			willRetry: boolean;
@@ -115,7 +126,14 @@ export type AgentSessionEvent =
 	  }
 	| { type: "subagent_start"; handle: string }
 	| { type: "subagent_progress"; handle: string; turn: number; lastTool?: string; totalTokens?: number }
-	| { type: "subagent_complete"; handle: string; status: "done" | "error"; turns?: number; totalTokens?: number }
+	| {
+			type: "subagent_complete";
+			handle: string;
+			status: "done" | "error" | "cancelled";
+			turns?: number;
+			totalTokens?: number;
+			reason?: string;
+	  }
 	/** Fired when `prompt()` finishes post-turn gates (verification / pending checks / goal loop). */
 	| { type: "prompt_end" };
 

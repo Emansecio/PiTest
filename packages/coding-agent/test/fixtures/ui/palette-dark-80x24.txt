@@ -1,0 +1,12 @@
+pit · dark · <repo>
+────────────────────────────────────────────────────────────────────────────────
+  ESSENTIAL
+→ /help                           [built-in] Open command help
+  /resume                         [built-in] Resume a previous session
+  /new                            [built-in] Start a new session
+  PROJECT
+  /calendar                       [extension] Project command
+  /review                         [skill] Review changes
+  Tab/↵ apply · ↑↓ navigate · Esc close
+
+ctrl+c sair · /help ajuda

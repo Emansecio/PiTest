@@ -9,16 +9,27 @@
  * approval instead of fighting the permission layer.
  *
  * The blocked-tools list is DERIVED from the canonical side-effect
- * classification (`BUILTIN_TOOL_SIDE_EFFECTS` + `isPlanBlockingSideEffect`) so
- * the prompt can never drift from what `checkPlan` actually denies — the bug
- * this replaced was a hand-maintained string that had gone stale (it omitted the
- * spawn/memory tools). Injected by the permissions extension from the
- * `before_agent_start` handler (pre-model band), appended AFTER the system
- * prompt's dynamic marker so it never invalidates the cacheable prefix.
+ * classification (`BUILTIN_TOOL_SIDE_EFFECTS` + `EXTENSION_TOOL_SIDE_EFFECTS` +
+ * `isPlanBlockingSideEffect`) so the prompt can never drift from what `checkPlan`
+ * actually denies — the bug this replaced was a hand-maintained string that had
+ * gone stale (it omitted the spawn/memory tools). Both maps are read explicitly
+ * here instead of relying on `BUILTIN_TOOL_SIDE_EFFECTS` re-exporting the
+ * extension entries, so re-splitting the two maps can never silently drop
+ * `memory_append` & co. from the prompt again.
+ *
+ * The list is then INTERSECTED with the session's tool surface when the caller
+ * passes it: naming `ast_edit`/`recipe`/`goal_complete` to a model that was never
+ * given those tools is pure noise (7 of 19 derived names on a default surface).
+ * The surface comes from the SAME `selectedTools` array the prompt build already
+ * consumes, so the section can only change on a rebuild where the tool block of
+ * the prefix changed anyway — which is what keeps this block in the CACHEABLE
+ * PREFIX: the host renders it via `BuildSystemPromptOptions.permissionModeSection`
+ * and rebuilds the prompt only when the permission mode (or the tool surface)
+ * changes.
  */
 
 import { BUILTIN_TOOL_SIDE_EFFECTS } from "./checker.ts";
-import { isPlanBlockingSideEffect } from "./side-effect.ts";
+import { EXTENSION_TOOL_SIDE_EFFECTS, isPlanBlockingSideEffect, type ToolSideEffect } from "./side-effect.ts";
 
 /**
  * Optional, conditionally-registered integration families (browser automation,
@@ -34,16 +45,43 @@ function isIntegrationNamespaced(toolName: string): boolean {
 }
 
 /**
- * The tools plan mode blocks, derived from the canonical side-effect map so the
+ * The tools plan mode blocks, derived from the canonical side-effect maps so the
  * prompt and the gating (`checker.ts` / `side-effect.ts`) share one source of
  * truth. Sorted for a stable, cache-friendly string. Optional integration
  * namespaces are folded into the general read-only rule (see above).
+ *
+ * `sessionToolNames` narrows the result to tools the session actually exposes.
+ * Omit it (tests, callers without a surface) to get the full static derivation —
+ * the previous behaviour.
  */
-export function planBlockedToolNames(): string[] {
-	return Object.entries(BUILTIN_TOOL_SIDE_EFFECTS)
-		.filter(([name, effect]) => isPlanBlockingSideEffect(effect) && !isIntegrationNamespaced(name))
+export function planBlockedToolNames(sessionToolNames?: readonly string[]): string[] {
+	const surface = sessionToolNames ? new Set(sessionToolNames) : undefined;
+	const merged: Record<string, ToolSideEffect> = {
+		...BUILTIN_TOOL_SIDE_EFFECTS,
+		...EXTENSION_TOOL_SIDE_EFFECTS,
+	};
+	return Object.entries(merged)
+		.filter(([name, effect]) => {
+			if (!isPlanBlockingSideEffect(effect) || isIntegrationNamespaced(name)) return false;
+			return surface === undefined || surface.has(name);
+		})
 		.map(([name]) => name)
 		.sort();
+}
+
+/**
+ * The shared "these are BLOCKED" bullet for `<plan_mode>` / `<ask_mode>`. Kept in
+ * one place so the two stances cannot describe the same gate differently, and so
+ * an empty derived list (a session with no mutating tools at all) degrades to a
+ * sentence instead of an empty parenthesis.
+ */
+export function blockedToolsBullet(sessionToolNames?: readonly string[]): string {
+	const names = planBlockedToolNames(sessionToolNames);
+	const inner =
+		names.length > 0
+			? `${names.join(", ")}, and MCP tools`
+			: "MCP tools, and anything that writes, executes or spawns";
+	return `- Mutating tools (${inner}) are BLOCKED at the permission layer. Do not attempt them; do not promise edits.`;
 }
 
 /**
@@ -51,12 +89,11 @@ export function planBlockedToolNames(): string[] {
  * Keep these invariants in the text: blocked-tools warning, numbered workflow,
  * brief/produces/verify guidance, and the obligation to call `exit_plan`.
  */
-export function buildPlanModeSection(): string {
-	const blocked = planBlockedToolNames().join(", ");
+export function buildPlanModeSection(sessionToolNames?: readonly string[]): string {
 	return [
 		"<plan_mode>",
 		"Plan mode is ACTIVE: this session is READ-ONLY.",
-		`- Mutating tools (${blocked}, and MCP tools) are BLOCKED at the permission layer. Do not attempt them; do not promise edits.`,
+		blockedToolsBullet(sessionToolNames),
 		"- Subagents/spawn (`task`, `parallel`, `fanout`) are also blocked — there is no read-only carve-out; do your own research with the read-only tools directly.",
 		"Workflow you MUST follow:",
 		"1. Research with read-only tools (read, grep, find, ls, symbol, lsp navigation).",

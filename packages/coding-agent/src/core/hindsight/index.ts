@@ -38,32 +38,29 @@ export function getCurrentHindsightBank(): HindsightBank | undefined {
 	return currentBank;
 }
 
+const HINDSIGHT_HINT_BLOCK = [
+	"<hindsight_hint>",
+	"Summaries of prior sessions exist in the hindsight bank (not inlined). " +
+		'Before re-investigating prior work, recall({ query: "<topic>", kinds: ["session-summary"] }).',
+	"</hindsight_hint>",
+].join("\n");
+
 /**
- * Format the most recent N session-summary entries as a system-prompt prefix.
- * Returns undefined when there is no bank or no summaries to surface.
+ * On-demand hindsight prefix (E4): points at the bank; bodies come via recall().
+ *
+ * Static by construction. This block lands in the *cacheable* system-prompt
+ * prefix (appendSections → before SYSTEM_PROMPT_DYNAMIC_MARKER), so any byte
+ * tracking bank state — counts, dates, subjects — would rewrite the prefix on
+ * every rebuild and re-bill the whole history. The bank grows mid-session
+ * (every compaction adds a session-summary), so the text must not depend on it.
+ * Only presence is encoded: no bank or no summaries → undefined.
  */
-/**
- * On-demand hindsight prefix (E4): index of recent session summaries; bodies via recall().
- */
-export function formatHindsightHintForPrompt(limit = 5): string | undefined {
+export function formatHindsightHintForPrompt(): string | undefined {
 	const bank = currentBank;
 	if (!bank) return undefined;
-	const all = bank.all().filter((e) => e.kind === "session-summary");
-	if (all.length === 0) return undefined;
-	const recent = all.sort((a, b) => b.createdAt - a.createdAt).slice(0, limit);
-	const lines: string[] = ["<hindsight_hint>"];
-	lines.push(
-		`${all.length} session summar${all.length === 1 ? "y" : "ies"} in the hindsight bank (not inlined). ` +
-			'Use recall({ query: "<topic>", kinds: ["session-summary"] }) before re-investigating prior work.',
-	);
-	lines.push("Recent:");
-	for (const entry of recent) {
-		const subject = entry.subject ? ` "${entry.subject}"` : "";
-		const date = new Date(entry.createdAt).toISOString().slice(0, 10);
-		lines.push(`- ${date}${subject}`);
-	}
-	lines.push("</hindsight_hint>");
-	return lines.join("\n");
+	// Only the empty→non-empty transition can invalidate the prefix, once per session.
+	if (!bank.all().some((e) => e.kind === "session-summary")) return undefined;
+	return HINDSIGHT_HINT_BLOCK;
 }
 
 export function formatSessionSummariesForPrompt(limit = 5, perEntryChars = 400): string | undefined {

@@ -140,8 +140,15 @@ describe("AssistantMessageComponent", () => {
 		expect(plain).toMatch(/\+\d+ earlier lines/);
 		// Folded trace stays compact: trailer + tail lines (plus OSC decoration rows).
 		expect(lines.length).toBeLessThanOrEqual(9);
-		// The trailer must not promise an expand keybinding — none unfolds thinking.
-		expect(plain).not.toMatch(/to expand/);
+		// The trailer names the same configured key used by the host expansion cycle.
+		expect(plain).toMatch(/to expand/);
+
+		component.setThinkingExpanded(true);
+		const expanded = component.render(80).map(stripAnsi).join("\n");
+		expect(expanded).toContain("thought line 00");
+		expect(expanded).toContain("thought line 29");
+		component.setThinkingExpanded(false);
+		expect(component.render(80).map(stripAnsi).join("\n")).not.toContain("thought line 00");
 	});
 
 	test("a short settled thinking trace renders whole, without a fold trailer", () => {

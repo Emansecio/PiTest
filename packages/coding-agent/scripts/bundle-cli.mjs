@@ -36,6 +36,10 @@ const SHEBANG = "#!/usr/bin/env node";
 // via createRequire at runtime anyway. Extra entries are harmless: nothing here
 // is statically value-imported, so most are never pulled regardless.
 const EXTERNAL = [
+	// The PDF inspector is a lazy dynamic import whose entrypoint loads a
+	// platform-specific .node addon. Keep the whole package external so esbuild
+	// does not walk into the native binding during the CLI bundle.
+	"@firecrawl/pdf-inspector",
 	"@silvia-odwyer/photon-node",
 	"ffi-rs",
 	"@ast-grep/napi",

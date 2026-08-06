@@ -1,6 +1,6 @@
 import { splitSystemPromptOnDynamic } from "@pit/ai";
 import { afterEach, describe, expect, test } from "vitest";
-import { buildSystemPrompt, resolvePromptProfile } from "../src/core/system-prompt.js";
+import { buildSystemPrompt, OCCUPANCY_GATE_PERCENT, resolvePromptProfile } from "../src/core/system-prompt.js";
 
 describe("buildSystemPrompt", () => {
 	describe("empty tools", () => {
@@ -148,6 +148,8 @@ describe("buildSystemPrompt", () => {
 	});
 
 	describe("visual definition-of-done", () => {
+		const VISUAL = "After a change that affects rendered UI, inspect it with `preview` or Chrome DevTools";
+
 		test("included when an edit/write tool and a preview tool are available", () => {
 			const prompt = buildSystemPrompt({
 				selectedTools: ["read", "bash", "edit", "write", "preview"],
@@ -156,7 +158,7 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("Visual verification: after any change that may affect rendered UI");
+			expect(prompt).toContain(VISUAL);
 		});
 
 		test("included with a chrome_devtools tool as the visual surface", () => {
@@ -167,10 +169,10 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("Visual verification: after any change that may affect rendered UI");
+			expect(prompt).toContain(VISUAL);
 		});
 
-		test("included before preview/browser activation", () => {
+		test("omitted when no UI surface is on the tool set (backend/CLI session)", () => {
 			const prompt = buildSystemPrompt({
 				selectedTools: ["read", "bash", "edit", "write"],
 				contextFiles: [],
@@ -178,7 +180,9 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("Visual verification: after any change that may affect rendered UI");
+			expect(prompt).not.toContain(VISUAL);
+			// the rest of the edit/write contract is unaffected
+			expect(prompt).toContain("Use edit for surgical changes to an existing file");
 		});
 
 		test("omitted in a read-only session even when a preview tool is present", () => {
@@ -189,7 +193,7 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).not.toContain("Visual verification: after any change that may affect rendered UI");
+			expect(prompt).not.toContain(VISUAL);
 		});
 	});
 
@@ -247,63 +251,63 @@ describe("buildSystemPrompt", () => {
 			expect(withIndex).toBe(withoutIndex);
 		});
 
-		test("omits frequent_files when context occupancy is at or above 50%", () => {
+		test("omits frequent_files when context occupancy is at or above the gate", () => {
 			const prompt = buildSystemPrompt({
 				selectedTools: ["read"],
 				contextFiles: [],
 				skills: [],
 				cwd: process.cwd(),
 				frequentFiles: freqFiles,
-				contextOccupancyPercent: 60,
+				contextOccupancyPercent: OCCUPANCY_GATE_PERCENT + 10,
 			});
 			expect(prompt).not.toContain("<frequent_files>");
 		});
 
-		test("emits frequent_files when context occupancy is below 50%", () => {
+		test("emits frequent_files when context occupancy is below the gate", () => {
 			const prompt = buildSystemPrompt({
 				selectedTools: ["read"],
 				contextFiles: [],
 				skills: [],
 				cwd: process.cwd(),
 				frequentFiles: freqFiles,
-				contextOccupancyPercent: 40,
+				contextOccupancyPercent: OCCUPANCY_GATE_PERCENT - 10,
 			});
 			expect(prompt).toContain("<frequent_files>");
 			expect(prompt).toContain("src/a.ts");
 		});
 
-		test("omits hotFileOutlines when context occupancy is at or above 50%", () => {
+		test("omits hotFileOutlines when context occupancy is at or above the gate", () => {
 			const prompt = buildSystemPrompt({
 				selectedTools: ["read"],
 				contextFiles: [],
 				skills: [],
 				cwd: process.cwd(),
 				hotFileOutlines: [{ path: "src/a.ts", symbols: ["foo", "bar"] }],
-				contextOccupancyPercent: 50,
+				contextOccupancyPercent: OCCUPANCY_GATE_PERCENT,
 			});
 			expect(prompt).not.toContain("<frequent_files_outline>");
 		});
 
-		test("omits groundedContext when context occupancy is at or above 50%", () => {
+		test("omits groundedContext when context occupancy is at or above the gate", () => {
 			const prompt = buildSystemPrompt({
 				selectedTools: ["read"],
 				contextFiles: [],
 				skills: [],
 				cwd: process.cwd(),
 				groundedContext: "<grounded_context>\nsrc/a.ts: foo, bar\n</grounded_context>",
-				contextOccupancyPercent: 50,
+				contextOccupancyPercent: OCCUPANCY_GATE_PERCENT,
 			});
 			expect(prompt).not.toContain("<grounded_context>");
 		});
 
-		test("emits groundedContext when context occupancy is below 50% or undefined", () => {
+		test("emits groundedContext when context occupancy is below the gate or undefined", () => {
 			const promptBelow = buildSystemPrompt({
 				selectedTools: ["read"],
 				contextFiles: [],
 				skills: [],
 				cwd: process.cwd(),
 				groundedContext: "<grounded_context>\nsrc/a.ts: foo, bar\n</grounded_context>",
-				contextOccupancyPercent: 40,
+				contextOccupancyPercent: OCCUPANCY_GATE_PERCENT - 10,
 			});
 			expect(promptBelow).toContain("<grounded_context>");
 			expect(promptBelow).toContain("src/a.ts: foo, bar");
@@ -316,6 +320,59 @@ describe("buildSystemPrompt", () => {
 				groundedContext: "<grounded_context>\nsrc/a.ts: foo, bar\n</grounded_context>",
 			});
 			expect(promptUndefined).toContain("<grounded_context>");
+		});
+
+		test("the gate trips well below half-full (the block is re-billed per request)", () => {
+			// Guards the value itself: everything after the marker is relocated past
+			// the cache breakpoint, so it costs cap × (tool rounds), not cap × turns.
+			expect(OCCUPANCY_GATE_PERCENT).toBeLessThan(50);
+		});
+	});
+
+	describe("cacheable-prefix session state", () => {
+		const base = {
+			selectedTools: ["read", "todo"],
+			contextFiles: [],
+			skills: [],
+			cwd: process.cwd(),
+		};
+
+		test("goal persistence rules land in the prefix, never the suffix", () => {
+			const rules = "<goal_rules>\nKeep working until the goal is fully resolved\n</goal_rules>";
+			const { staticPart, dynamicPart } = splitSystemPromptOnDynamic(
+				buildSystemPrompt({ ...base, goalRulesSection: rules }),
+			);
+			expect(staticPart).toContain("<goal_rules>");
+			expect(dynamicPart).not.toContain("<goal_rules>");
+		});
+
+		test("prefix section order is fixed regardless of caller ordering", () => {
+			const built = buildSystemPrompt({
+				...base,
+				permissionModeSection: "<plan_mode>P</plan_mode>",
+				goalRulesSection: "<goal_rules>G</goal_rules>",
+			});
+			expect(built.indexOf("<plan_mode>")).toBeLessThan(built.indexOf("<goal_rules>"));
+			// Both sit between the guidelines/docs block and project context/skills.
+			expect(built.indexOf("consult pit documentation")).toBeLessThan(built.indexOf("<plan_mode>"));
+		});
+
+		test("todo usage instructions ride the prefix and do not depend on the list", () => {
+			// Unconditional on the tool being present: gating them on a non-empty list
+			// would invalidate the cached prefix the moment the first todo is created.
+			const { staticPart } = splitSystemPromptOnDynamic(buildSystemPrompt(base));
+			expect(staticPart).toContain('todo{action:"set"}');
+			expect(staticPart).toContain("in_progress");
+			expect(staticPart).toContain("activeForm");
+			// Without the tool, nothing about todos is emitted at all.
+			const noTodo = buildSystemPrompt({ ...base, selectedTools: ["read"] });
+			expect(noTodo).not.toContain('todo{action:"set"}');
+		});
+
+		test("the compact tier keeps the todo how-to (weak models need it most)", () => {
+			const compact = buildSystemPrompt({ ...base, profile: "compact" });
+			expect(compact).toContain('todo{action:"set"}');
+			expect(splitSystemPromptOnDynamic(compact).staticPart).toContain('todo{action:"set"}');
 		});
 	});
 
@@ -438,11 +495,10 @@ describe("buildSystemPrompt", () => {
 				"Todo-first: at the very start of your reasoning, decide whether this task needs more than one step",
 			);
 			expect(prompt).not.toContain(
-				"Treat the user as an experienced professional: deliver the requested work directly, avoid unnecessary disclaimers",
+				"Treat the user as an experienced professional: deliver the requested work directly",
 			);
 			expect(prompt).not.toContain("Prefer grep/find/ls over bash for file exploration");
 			expect(prompt).not.toContain("Use bash for file operations like ls, rg, find");
-			expect(prompt).not.toContain("git diff --numstat");
 			expect(prompt).not.toContain(
 				"Match each file's existing style and reuse project utilities; before using a library, confirm it is already a dependency.",
 			);
@@ -453,7 +509,7 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).not.toContain(
 				"Add code comments only for non-obvious *why*; never narrate the diff in comments.",
 			);
-			expect(prompt).not.toContain("If the user's premise is wrong (a false assumption");
+			expect(prompt).not.toContain("If the user's premise is wrong, say so directly and briefly");
 		});
 
 		test("condenses the dropped nuance into a handful of imperative lines", () => {
@@ -472,7 +528,9 @@ describe("buildSystemPrompt", () => {
 				selectedTools: [...base.selectedTools, "preview"],
 				profile: "compact",
 			});
-			expect(prompt).toContain("Visual verification: after any change that may affect rendered UI");
+			expect(prompt).toContain(
+				"After a change that affects rendered UI, inspect it with `preview` or Chrome DevTools",
+			);
 		});
 
 		test("respects PIT_NARRATION in the condensed narration line", () => {

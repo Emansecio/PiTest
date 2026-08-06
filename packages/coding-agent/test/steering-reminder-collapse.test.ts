@@ -17,12 +17,35 @@ import {
 	pruneOldToolOutputs,
 	wouldPruneOldToolOutputs,
 } from "../src/core/compaction/compaction.js";
+import { buildCrossErrorReminder } from "../src/core/cross-error.js";
 import { createDeferredOutputStore, setCurrentDeferredOutputStore } from "../src/core/deferred-output-store.js";
+import { buildStagnationReminder } from "../src/core/stagnation.js";
+import {
+	buildDoomLoopReminder,
+	buildFailureBudgetReminder,
+	buildToolErrorReflection,
+} from "../src/core/tool-call-feedback.js";
 
 const PRUNE_TOKEN_THRESHOLD = 20_000;
 
 function user(text: string): AgentMessage {
 	return { role: "user", content: [{ type: "text", text }], timestamp: 1 } as unknown as AgentMessage;
+}
+
+/**
+ * The turn-steering engine posts its steers as `role: "custom"` messages
+ * (`sendCustomMessage`), which only become user-role at the LLM boundary — after
+ * the prune runs. Shape mirrors `createCustomMessage`.
+ */
+function customSteer(customType: string, text: string): AgentMessage {
+	return {
+		role: "custom",
+		customType,
+		content: [{ type: "text", text }],
+		display: false,
+		details: undefined,
+		timestamp: 1,
+	} as unknown as AgentMessage;
 }
 
 /** Real overthink steer (uses the shipping generator — non-enumerable marker + text). */
@@ -161,5 +184,77 @@ describe("N8 — consumed steering-reminder collapse", () => {
 		expect(textAt(messages, 2)).toContain("recall_tool_output");
 		expect(textAt(messages, 2)).toContain("PASTE_HEAD");
 		store.dispose();
+	});
+});
+
+/**
+ * The session's OWN steers (doom-loop, per-turn failure budget, repeated-error,
+ * stagnation, tool-error reflection) are course corrections: they must stay FULL
+ * text while the model can still act on them, then become dead weight like any
+ * other consumed reminder. They ride as `role: "custom"` messages, so N8 has to
+ * reach that role too.
+ */
+describe("N8 — session steers (turn-steering engine)", () => {
+	const STEERS: Array<[string, string, string]> = [
+		["doom-loop", "pi.doom-loop-reminder", buildDoomLoopReminder({ toolName: "read", consecutiveCount: 4 })],
+		[
+			"doom-loop",
+			"pi.doom-loop-recovery",
+			buildDoomLoopReminder({ toolName: "read", consecutiveCount: 6, tier: "recovery" }),
+		],
+		[
+			"failure-budget",
+			"pi.tool-failure-budget",
+			buildFailureBudgetReminder({ toolName: "bash", failureCount: 3, maxPerTurn: 3 }),
+		],
+		[
+			"repeated-error",
+			"pi.cross-error-reminder",
+			buildCrossErrorReminder({ count: 3, distinctApproaches: 2, sampleError: "ENOENT: missing.txt" }),
+		],
+		["stagnation", "pi.stagnation-reminder", buildStagnationReminder({ count: 12, paused: false })],
+		[
+			"tool-error",
+			"pi.tool-error-reflection",
+			buildToolErrorReflection({ toolName: "edit", args: { path: "a.ts" }, errorMessage: "no match" }),
+		],
+	];
+
+	it.each(STEERS)("collapses a consumed %s steer once it leaves the window", (kind, customType, text) => {
+		const messages = [user("task"), customSteer(customType, text), user("a"), user("b")];
+
+		expect(wouldPruneOldToolOutputs(messages, PRUNE_TOKEN_THRESHOLD, 2)).toBe(true);
+		const reclaimed = pruneOldToolOutputs(messages, PRUNE_TOKEN_THRESHOLD, 2, false);
+
+		expect(reclaimed).toBeGreaterThan(0);
+		expect(textAt(messages, 1)).toBe(`[steering reminder (${kind}) consumed]`);
+	});
+
+	it.each(STEERS)("keeps a %s steer intact inside the protection window", (_kind, customType, text) => {
+		// Only ONE user message after the steer → still within protectTurns=2.
+		const messages = [user("task"), user("a"), customSteer(customType, text), user("b")];
+
+		expect(wouldPruneOldToolOutputs(messages, PRUNE_TOKEN_THRESHOLD, 2)).toBe(false);
+		expect(pruneOldToolOutputs(messages, PRUNE_TOKEN_THRESHOLD, 2, false)).toBe(0);
+		expect(textAt(messages, 2)).toBe(text);
+	});
+
+	it("prunes the CLONE only — the live custom message stays byte-identical", () => {
+		const text = buildStagnationReminder({ count: 12, paused: true });
+		const messages = [user("task"), customSteer("pi.stagnation-pause", text), user("a"), user("b")];
+
+		const copy = cloneToolResultMessagesForPrune(messages);
+		expect(pruneOldToolOutputs(copy, PRUNE_TOKEN_THRESHOLD, 2, false)).toBeGreaterThan(0);
+
+		expect(textAt(copy, 1)).toBe("[steering reminder (stagnation) consumed]");
+		expect(textAt(messages, 1)).toBe(text);
+	});
+
+	it("leaves an unrelated custom message intact", () => {
+		const note = "Fusion produced 3 candidate patches; the writer merged them.";
+		const messages = [user("task"), customSteer("pi.fusion-summary", note), user("a"), user("b")];
+
+		expect(pruneOldToolOutputs(messages, PRUNE_TOKEN_THRESHOLD, 2, false)).toBe(0);
+		expect(textAt(messages, 1)).toBe(note);
 	});
 });

@@ -196,6 +196,14 @@ export interface WireToolSurface {
 	name: string;
 	description: string;
 	parameters: unknown;
+	/**
+	 * Hand-written one-sentence summary of the tool, when it has one. Carried
+	 * alongside `description` only so `compactWireToolSurface` can prefer it over
+	 * a mechanically truncated first line (T01); it is folded INTO `description`
+	 * on the compacted surface and never counted twice by
+	 * {@link estimateToolSurfaceTokens}.
+	 */
+	promptSnippet?: string;
 }
 
 export interface WireEstimateInput {

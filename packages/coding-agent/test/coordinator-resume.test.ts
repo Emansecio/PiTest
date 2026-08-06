@@ -76,7 +76,7 @@ describe("coordinator op:resume", () => {
 
 		// Consumed: no longer offered as resumable; usage remains on the original run.
 		const list2 = await exec(task, { op: "list" });
-		expect(textOf(list2)).not.toMatch(/[Rr]esumable[\s\S]*probe/);
+		expect(textOf(list2).split("\n\nContinuable")[0].split("\n\nResumable")[1] ?? "").not.toContain("- probe");
 		expect(textOf(list2)).toContain(`probe [completed] turns=2 (${afterResume} tok)`);
 		expect((list2 as { details?: { totalTokens?: number } }).details?.totalTokens).toBe(afterResume);
 	});
@@ -106,15 +106,35 @@ describe("coordinator op:resume", () => {
 		expect(textOf(list)).toMatch(/[Rr]esumable[\s\S]*retry/);
 	});
 
+	it("deduplicates concurrent resumes onto one active lifecycle", async () => {
+		const task = buildTask([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "drop" }),
+			fauxAssistantMessage("resumed once"),
+		]);
+		await exec(task, { op: "run", name: "same", prompt: "start" });
+		const first = exec(task, { op: "resume", name: "same" });
+		const second = exec(task, { op: "resume", name: "same" });
+		const [a, b] = await Promise.all([first, second]);
+		expect(isErr(a)).toBe(false);
+		expect(textOf(b)).toBe(textOf(a));
+	});
+
 	it("resume accepts a continuation prompt", async () => {
 		const task = buildTask([
 			fauxAssistantMessage("", { stopReason: "error", errorMessage: "drop" }),
 			fauxAssistantMessage("CONTINUED with new instruction"),
+			fauxAssistantMessage("FOLLOW-UP AFTER RESUME"),
 		]);
 		await exec(task, { op: "run", name: "p2", prompt: "start" });
 		const resumed = await exec(task, { op: "resume", name: "p2", prompt: "now wrap it up" });
 		expect(isErr(resumed)).toBe(false);
 		expect(textOf(resumed)).toContain("CONTINUED with new instruction");
+		const list = await exec(task, { op: "list" });
+		expect(textOf(list).split("\n\nContinuable")[0].split("\n\nResumable")[1] ?? "").not.toContain("- p2");
+		expect(textOf(list)).toMatch(/Continuable[\s\S]*p2/);
+		const followedUp = await exec(task, { op: "continue", name: "p2", prompt: "one more thing" });
+		expect(isErr(followedUp)).toBe(false);
+		expect(textOf(followedUp)).toContain("FOLLOW-UP AFTER RESUME");
 	});
 
 	it("returns a clear error when resuming an unknown handle", async () => {

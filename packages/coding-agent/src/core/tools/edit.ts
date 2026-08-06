@@ -300,13 +300,12 @@ export function createEditToolDefinition(
 	return {
 		name: "edit",
 		label: "edit",
+		// P0: refuse to execute args pruned by the history elision marker.
+		mutationGuard: true,
 		description:
-			'Edit one file by exact text replacement. Pass edits[] of {oldText,newText}; each oldText must match exactly one region in the ORIGINAL file. Multiple disjoint changes in same file → one call with multiple edits[]. If the file changed on disk since your last read this session, the edit still applies to the current content, but the result carries a NOTE that content you were not shown may have moved — re-read if that happens (some embedders additionally enforce reading a file before editing it).\n\nWRONG: { "edits": [{ "oldText": "foo", "newText": "foo" }] }   // no-op, refused\nWRONG: { "edits": [{ "oldText": "x", "newText": "y" }] }       // ambiguous if multiple "x"\nRIGHT: { "edits": [{ "oldText": "function foo()", "newText": "function foo(x)" }] }   // unique anchor\n\nWHICH TOOL: Default tool for text edits. For very large files where output tokens matter, prefer `edit_v2` (content-hash anchors). For structural rewrites across multiple files, use `ast_edit`. To create a new file or fully replace one, use `write`.',
+			'Edit one file by exact text replacement. Pass edits[] of {oldText,newText}; each oldText must match exactly one region in the ORIGINAL file and stay as small as it can be while unique (do not pad with unchanged lines). Multiple disjoint changes in same file → one call with multiple edits[]. If the file changed on disk since your last read this session, the edit still applies to the current content, but the result carries a NOTE that content you were not shown may have moved — re-read if that happens (some embedders additionally enforce reading a file before editing it).\n\nWRONG: { "edits": [{ "oldText": "foo", "newText": "foo" }] }   // no-op, refused\nWRONG: { "edits": [{ "oldText": "x", "newText": "y" }] }       // ambiguous if multiple "x"\nRIGHT: { "edits": [{ "oldText": "function foo()", "newText": "function foo(x)" }] }   // unique anchor\n\nWHICH TOOL: Default tool for text edits. For very large files where output tokens matter, prefer `edit_v2` (content-hash anchors). For structural rewrites across multiple files, use `ast_edit`. To create a new file or fully replace one, use `write`.',
 		promptSnippet:
 			"Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
-		promptGuidelines: [
-			"Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.",
-		],
 		parameters: editSchema,
 		renderShell: "self",
 		prepareArguments: prepareEditArguments,

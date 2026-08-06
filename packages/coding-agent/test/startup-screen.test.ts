@@ -59,7 +59,7 @@ describe("StartupScreen", () => {
 	// thinking/mode at all (the pristine footer on the same screen shows them),
 	// so the type system now enforces what that test asserted.
 
-	test("renders up to three resumable recent sessions with ↳", () => {
+	test("renders up to three recent sessions with an explicit resume affordance", () => {
 		const data = makeData({
 			recentSessions: [
 				{ title: "fix terminal freeze", age: "2h" },
@@ -69,9 +69,10 @@ describe("StartupScreen", () => {
 			],
 		});
 		const text = plain(new StartupScreen(data).render(80));
-		expect(text).toContain("↳ fix terminal freeze (2h)");
-		expect(text).toContain("↳ repo graph phase 4b (1d)");
-		expect(text).toContain("↳ third (3d)");
+		expect(text).toContain("Recent sessions · /resume");
+		expect(text).toContain("• fix terminal freeze (2h)");
+		expect(text).toContain("• repo graph phase 4b (1d)");
+		expect(text).toContain("• third (3d)");
 		expect(text).not.toContain("fourth");
 	});
 
@@ -108,7 +109,7 @@ describe("StartupScreen", () => {
 		const screen = new StartupScreen(makeData({ reducedMotion: true, recentSessions: [{ title: "s", age: "1h" }] }));
 		expect(screen.isSettled()).toBe(true);
 		expect(screen.tick(1000)).toBe(false);
-		expect(plain(screen.render(80))).toContain("↳ s (1h)");
+		expect(plain(screen.render(80))).toContain("• s (1h)");
 	});
 
 	test("staged reveal grows over time and then settles", () => {

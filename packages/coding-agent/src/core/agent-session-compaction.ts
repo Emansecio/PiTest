@@ -2,6 +2,7 @@
  * Compaction pipeline extracted from AgentSession (move-only).
  */
 
+import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import type { Agent, AgentMessage, ThinkingLevel } from "@pit/agent-core";
 import type { AssistantMessage, CacheRetention, Model } from "@pit/ai";
@@ -43,7 +44,7 @@ import {
 import type { ContextUsage, ExtensionRunner, SessionBeforeCompactResult } from "./extensions/index.js";
 import type { HindsightBank } from "./hindsight/index.js";
 import type { ModelRegistry } from "./model-registry.ts";
-import { resolveCompactSibling, resolveRole } from "./model-resolver.ts";
+import { resolveRole, resolveSmallClassSibling } from "./model-resolver.ts";
 import type { PinManager } from "./pins.ts";
 import type { CompactionEntry, SessionEntry, SessionManager } from "./session-manager.js";
 import { getLatestCompactionEntry } from "./session-manager.js";
@@ -533,7 +534,7 @@ export async function resolveCompactModel(
 				candidate = { model: resolved.model, thinkingLevel: resolved.thinkingLevel };
 			}
 		} else if (!isTruthyEnvFlag(process.env.PIT_NO_COMPACT_SIBLING_DEFAULT)) {
-			const sibling = resolveCompactSibling(sessionModel, availableModels);
+			const sibling = resolveSmallClassSibling(sessionModel, availableModels);
 			if (sibling) {
 				candidate = { model: sibling, thinkingLevel: "low" };
 			}
@@ -1149,10 +1150,12 @@ export async function compactSession(
 	ctx: CompactionController,
 	customInstructions?: string,
 ): Promise<CompactionResult> {
+	const operationId = randomUUID();
+	let modelId: string | undefined;
 	ctx.host.disconnectFromAgent();
 	await ctx.host.abort();
 	ctx.compactionAbortController = new AbortController();
-	ctx.host.emit({ type: "compaction_start", reason: "manual" });
+	ctx.host.emit({ type: "compaction_start", reason: "manual", operationId });
 
 	try {
 		if (!ctx.host.model) {
@@ -1194,6 +1197,7 @@ export async function compactSession(
 		// Route the summarization call to the `compact` role when configured;
 		// fail open to the session model otherwise. Thresholds stay on the session model.
 		const compactModel = await resolveCompactModel(ctx, ctx.host.model, { apiKey, headers }, ctx.host.thinkingLevel);
+		modelId = compactModel.model.id;
 		// apiKey/headers here are the SESSION model's auth (fetched above) — the
 		// cache-read route calls the session model, not the resolved sibling.
 		const cacheAware = buildCacheAwareGeneration(ctx, { model: ctx.host.model, apiKey, headers });
@@ -1240,6 +1244,8 @@ export async function compactSession(
 		ctx.host.emit({
 			type: "compaction_end",
 			reason: "manual",
+			operationId,
+			modelId,
 			result: compactionResult,
 			aborted: false,
 			willRetry: false,
@@ -1251,6 +1257,8 @@ export async function compactSession(
 		ctx.host.emit({
 			type: "compaction_end",
 			reason: "manual",
+			operationId,
+			modelId,
 			result: undefined,
 			aborted,
 			willRetry: false,
@@ -1391,6 +1399,8 @@ export async function checkCompaction(
 			ctx.host.emit({
 				type: "compaction_end",
 				reason: "overflow",
+				operationId: randomUUID(),
+				modelId: ctx.host.model.id,
 				result: undefined,
 				aborted: false,
 				willRetry: false,
@@ -1533,10 +1543,21 @@ export async function runAutoCompaction(
 	willRetry: boolean,
 ): Promise<boolean> {
 	const settings = ctx.host.settingsManager.getCompactionSettings();
+	const operationId = randomUUID();
+	let activeOperationId = operationId;
+	let modelId: string | undefined;
 	const emitSilentEnd = () =>
-		ctx.host.emit({ type: "compaction_end", reason, result: undefined, aborted: false, willRetry: false });
+		ctx.host.emit({
+			type: "compaction_end",
+			reason,
+			operationId,
+			modelId,
+			result: undefined,
+			aborted: false,
+			willRetry: false,
+		});
 
-	ctx.host.emit({ type: "compaction_start", reason });
+	ctx.host.emit({ type: "compaction_start", reason, operationId });
 	ctx.autoCompactionAbortController = new AbortController();
 
 	try {
@@ -1597,6 +1618,7 @@ export async function runAutoCompaction(
 		// fail open to the session model otherwise. Thresholds above stay on the
 		// session model (`ctx.host.model`).
 		const compactModel = await resolveCompactModel(ctx, ctx.host.model, { apiKey, headers }, ctx.host.thinkingLevel);
+		modelId = compactModel.model.id;
 		// Session model + auth for the cache-read route (undefined when cold or a
 		// precomputed summary already consumed the slot — cacheAware is unused then).
 		const cacheAware = buildCacheAwareGeneration(ctx, { model: ctx.host.model, apiKey, headers });
@@ -1613,7 +1635,7 @@ export async function runAutoCompaction(
 			cacheAware,
 		});
 
-		ctx.host.emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
+		ctx.host.emit({ type: "compaction_end", reason, operationId, modelId, result, aborted: false, willRetry });
 		ctx.lastCompactionDeficit = 0;
 
 		if (!willRetry && reason === "threshold") {
@@ -1643,7 +1665,14 @@ export async function runAutoCompaction(
 					((preparationAfter.messagesToSummarize?.length ?? 0) > 0 ||
 						(preparationAfter.turnPrefixMessages?.length ?? 0) > 0);
 				if (preparationAfter && hasSummarizableSpan) {
-					ctx.host.emit({ type: "compaction_start", reason });
+					const secondPassOperationId = randomUUID();
+					activeOperationId = secondPassOperationId;
+					ctx.host.emit({
+						type: "compaction_start",
+						reason,
+						operationId: secondPassOperationId,
+						modelId,
+					});
 					preparationAfter.cwd = ctx.host.cwd;
 					const resultAfter = await executeCompactionPipeline(ctx, {
 						preparation: preparationAfter,
@@ -1654,7 +1683,15 @@ export async function runAutoCompaction(
 						abortSignal: autoAbort.signal,
 						thinkingLevel: compactModel.thinkingLevel,
 					});
-					ctx.host.emit({ type: "compaction_end", reason, result: resultAfter, aborted: false, willRetry });
+					ctx.host.emit({
+						type: "compaction_end",
+						reason,
+						operationId: secondPassOperationId,
+						modelId,
+						result: resultAfter,
+						aborted: false,
+						willRetry,
+					});
 				}
 			}
 		}
@@ -1675,6 +1712,8 @@ export async function runAutoCompaction(
 		ctx.host.emit({
 			type: "compaction_end",
 			reason,
+			operationId: activeOperationId,
+			modelId,
 			result: undefined,
 			aborted,
 			willRetry: false,

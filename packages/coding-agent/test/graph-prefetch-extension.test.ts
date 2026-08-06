@@ -10,6 +10,10 @@
  * after firing the event — see `flush()`.
  */
 
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { getRuntimeDiagnostics, resetRuntimeDiagnostics } from "@pit/ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const getLivingRepoMap = vi.fn();
@@ -21,6 +25,7 @@ vi.mock("../src/core/repo-map/living-index.ts", () => ({
 import { createGraphPrefetchExtension, type FileReadSnapshot } from "../src/core/built-ins/graph-prefetch-extension.ts";
 import type { ExtensionAPI } from "../src/core/extensions/index.ts";
 import { resolveToolPath } from "../src/core/tools/argument-prep.ts";
+import { createReadTool } from "../src/core/tools/read.ts";
 import { WarmFileCache } from "../src/core/tools/warm-file-cache.ts";
 
 const CWD = process.cwd();
@@ -100,6 +105,7 @@ function makeSnapshotReader(bodies: Record<string, string>) {
 describe("createGraphPrefetchExtension", () => {
 	beforeEach(() => {
 		getLivingRepoMap.mockReset();
+		resetRuntimeDiagnostics();
 	});
 	afterEach(() => {
 		delete process.env.PIT_NO_GRAPH_PREFETCH;
@@ -133,6 +139,7 @@ describe("createGraphPrefetchExtension", () => {
 		await flush();
 
 		expect(cache.peek(abs("src/a.ts"))?.content).toBe("content a");
+		expect(getRuntimeDiagnostics().counters["graph.prefetch.warm"]?.count).toBe(1);
 	});
 
 	it("seeds from find_symbol's own 'path:line' hit lines, capped and deduped", async () => {
@@ -224,6 +231,54 @@ describe("createGraphPrefetchExtension", () => {
 
 		expect(reads).toEqual([]);
 		expect(cache.peek(abs("src/a.ts"))?.content).toBe("already warm");
+	});
+
+	it("can warm a path again after a stale consumer evicts it", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "pit-prefetch-rewarm-"));
+		try {
+			const dependentPath = join(cwd, "dependent.ts");
+			writeFileSync(dependentPath, "fresh disk\n");
+			const liveStat = statSync(dependentPath);
+			mockMap([entry("seed-a.ts"), entry("seed-b.ts"), entry("dependent.ts", ["seed-a.ts", "seed-b.ts"])]);
+			const cache = new WarmFileCache();
+			const reads: string[] = [];
+			let warmCount = 0;
+			const readFileSnapshot = async (absPath: string): Promise<FileReadSnapshot | undefined> => {
+				reads.push(absPath);
+				if (absPath !== dependentPath) return undefined;
+				warmCount++;
+				return warmCount === 1
+					? { content: "stale", mtimeMs: 1, size: 5 }
+					: { content: "fresh disk\n", mtimeMs: liveStat.mtimeMs, size: liveStat.size };
+			};
+			const { api, fire } = makeFakePi();
+			createGraphPrefetchExtension({ cwd, getWarmFileCache: () => cache, readFileSnapshot })(api);
+
+			fire("tool_result", toolResult("read", { path: "seed-a.ts" }));
+			await flush();
+			expect(cache.peek(dependentPath)?.content).toBe("stale");
+
+			const readTool = createReadTool(cwd, { embedHashlineAnchors: false, warmFileCache: cache });
+			const foregroundResult = await readTool.execute("foreground-read", { path: "dependent.ts" });
+			expect(cache.has(dependentPath)).toBe(false);
+			fire("tool_result", {
+				...toolResult("read", { path: "dependent.ts" }),
+				content: foregroundResult.content,
+			});
+			await flush();
+
+			fire("tool_result", toolResult("read", { path: "seed-b.ts" }));
+			await flush();
+
+			expect(reads.filter((path) => path === dependentPath)).toEqual([dependentPath, dependentPath]);
+			expect(cache.peek(dependentPath)).toEqual({
+				content: "fresh disk\n",
+				mtimeMs: liveStat.mtimeMs,
+				size: liveStat.size,
+			});
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
 	});
 
 	it("pauses warming while a mutating tool is in flight and resumes once it ends", async () => {

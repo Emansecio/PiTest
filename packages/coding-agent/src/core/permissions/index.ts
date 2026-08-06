@@ -26,6 +26,7 @@ export {
 	normalizeTargetPath,
 } from "./matcher.ts";
 export { formatPermissionBlockedContent, humanModeNotifyLabel } from "./mode-labels.ts";
+export { buildPermissionModeSection } from "./mode-prompt.ts";
 export {
 	DEFAULT_REGISTER_TOOL_SIDE_EFFECT,
 	EXTENSION_TOOL_SIDE_EFFECTS,

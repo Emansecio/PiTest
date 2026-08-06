@@ -33,8 +33,9 @@ explicit fan-out and the scout → N reviewers → worker pattern.
 | `spawn` | Non-blocking — launch detached and return a `handle`. Collect the result later with `join` (or check `poll`); see [async delegation](#async-delegation). |
 | `poll` | Non-blocking status of the given `handles`. |
 | `join` | Await the given `handles` and collect their outputs. |
+| `cancel` | Explicitly stop detached subagents or an in-flight `resume` by `handles`. |
 | `list` | List tracked subagents, live async handles, resumable (interrupted), and continuable (finished) ones. |
-| `resume` | Continue a subagent cut short by ESC or a network drop, by its `name`/handle, transcript intact. |
+| `resume` | Continue an interrupted subagent by handle; concurrent calls share one in-flight lifecycle. |
 | `continue` | Follow-up prompt on a **successfully finished** subagent (same live Agent / transcript). |
 | `read` | Recover the **integral** output for a handle when the inline digest was truncated. |
 | `agents` | List the reusable agent types loaded from `.pit/agents/`. |
@@ -52,16 +53,29 @@ task({
   system_prompt: "Optional override for the subagent's system prompt",
   result_schema: { type: "object", properties: { findings: { type: "array" } } }, // optional structured output
   acceptance:    { criteria: "List every unused import with file path", check: "npm test", max_attempts: 2 },
+  policy:        { allowedPaths: ["src"], forbidTestChanges: true }, // optional mutation policy
+  // Also: deniedPaths, forbidTimeoutIncrease, forbidAssertionRemoval
   worktree:      true,                        // optional; run in an isolated, auto-cleaned git worktree
-  inherit_skills:false,                       // optional; append the parent's skills to the subagent prompt
-  timeout_ms:    120000                       // optional wall-clock timeout
+  inherit_skills:false                        // optional; append the parent's skills to the subagent prompt
 })
 ```
+
+## Mutation policy
+
+`policy` is enforced before a tool marked `mutationGuard` executes. Paths are normalized before `allowedPaths`/`deniedPaths` checks; test-file, assertion-removal, and timeout-increase violations return an actionable tool error without applying the mutation. Custom tools must set `mutationGuard: true` and expose `path`, `file`, or `filePath` for path rules.
+
+Subagents have no wall-clock execution timeout. A detached run continues until it finishes, reaches `max_turns`, the session is aborted, or the parent explicitly calls `task({ op: "cancel", handles: ["name"] })`.
+
+## Harness state contracts
+
+- Todo reminders carry a monotonic revision and session owner; stale reminder snapshots are discarded.
+- The per-target retry budget rearms when the todo revision changes. Configure its limit with `PIT_TOOL_RETRY_BUDGET` (default `3`) or disable it with `PIT_NO_TOOL_RETRY_BUDGET=1`.
+- Plan steps accept `verify_command` for an executable check and `verify_description` for explanatory text. Only `verify_command` is executed. The legacy `verify` field remains an alias for `verify_command`.
 
 `run`/`resume`/`continue` return the subagent's final assistant message as text. Tool
 calls and intermediate output are not surfaced to the parent — only the final
 answer (as a **digest** when large; see caps below). When `result_schema` is set, the final message is parsed and validated
-against it and the structured value is returned.
+against it and the structured value is returned. Cancelled or failed runs retain `partial: true` registry metadata (files touched, commands, last error, and worktree path) and return a recoverable partial output.
 
 ## Caps (defaults — override via env)
 
@@ -80,7 +94,7 @@ against it and the structured value is returned.
 Every spawned subagent is recorded on an in-memory registry, including
 status (`pending`, `running`, `completed`, `failed`, `cancelled`), turn
 count, inclusive usage (`input + output + cacheRead + cacheWrite`), and any
-error. Resume/continue follow-ups merge only their newly appended turns into
+error. Execution manifests are updated after each tool call. Resume/continue follow-ups merge only their newly appended turns into
 the original collision-resolved record. Completed scout/reviewer work is also
 retained when a later fanout worker or acceptance judge fails, so Goal spend
 and `op:"list"` do not lose already-incurred tokens. Records are kept in memory
@@ -156,7 +170,7 @@ agent owns can ask instead of guessing.
 A subagent interrupted by ESC or ended by a network drop (its last turn stopped
 with `error`/`aborted`) is kept **resumable**, addressed by its `name`/handle.
 `task({ op: "resume", name: "<handle>" })` re-drives it with its transcript
-intact (pass `prompt` to steer the continuation). Two tiers back this:
+intact (pass `prompt` to steer the continuation). Concurrent resumes are idempotent and share one in-flight lifecycle; `poll`, `join`, and `cancel` resolve the active handle. Two tiers back this:
 Tier 1 keeps the live `Agent` in memory for the session; Tier 2 persists the
 partial transcript to `<cwd>/.pit/subagents/<handle>.json`, so a resume survives
 a Pit restart. Persisted transcripts pass through the same disk-egress secret
@@ -176,11 +190,13 @@ one automatic retry inside `spawnSubagent`; after that, use `resume`.
 ## Acceptance / parallel / fanout
 
 - **`acceptance`** on `task` (and parallel/fanout worker entries): optional
-  `criteria` (judge subagent) and/or `check` (shell, exit 0). Retries up to
-  `max_attempts` (default 2); on exhaustion returns the last output flagged
-  (`isError: false`, `details.gate.passed: false`). Spend includes every worker
-  attempt and semantic judge. For auto-cleanup worktrees, the checkout remains
-  alive through judge/check evaluation and is removed immediately afterwards.
+	`criteria` (judge subagent) and/or `check` (shell, exit 0). Retries up to
+	`max_attempts` (default 2); `check_timeout_ms` bounds each shell check
+	(default 120000, maximum 600000). On exhaustion the last output is returned
+	with `isError: true` and `details.gate.passed: false`, so it cannot be resumed
+	as if it had passed. Spend includes every worker attempt and semantic judge.
+	For auto-cleanup worktrees, the checkout remains alive through judge/check
+	evaluation and is removed immediately afterwards.
 - **`parallel({ tasks, concurrency? })`**: run an explicit list concurrently
   (`allSettled` semantics). Each task accepts `type`, `model`,
   `thinking_level`, `allowed_tools`, `result_schema`, and `acceptance`. Child

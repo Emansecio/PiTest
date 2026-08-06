@@ -73,7 +73,7 @@ class RewindList implements Component {
 			// `\x1b[0m` right before the ellipsis, so a bare "…" here would land
 			// outside the surrounding `muted` and print brighter than the path it
 			// abbreviates.
-			lines.push(theme.fg("muted", `  ${truncateToWidth(file, width - 2, theme.fg("muted", "…"), false)}`));
+			lines.push(theme.fg("muted", `  ${truncateToWidth(file, width - 2, theme.ellipsis("muted"), false)}`));
 		}
 		if (turn.files.length > 8) lines.push(theme.fg("muted", `  …and ${turn.files.length - 8} more`));
 		lines.push("");
@@ -98,7 +98,7 @@ class RewindList implements Component {
 			const isSelected = i === this.selectedIndex;
 			const cursor = selectionCursor(isSelected);
 			const label = turnLabel(this.turns[i]);
-			const truncated = truncateToWidth(label, width - 2, "…", isSelected);
+			const truncated = truncateToWidth(label, width - 2, theme.ellipsis(), isSelected);
 			let line = cursor + (isSelected ? theme.bold(truncated) : truncated);
 			if (isSelected) line = theme.bg("selectedBg", line);
 			lines.push(line);

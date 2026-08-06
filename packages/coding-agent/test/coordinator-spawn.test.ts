@@ -13,6 +13,9 @@
  * harness (`test/suite/harness.ts`) uses.
  */
 
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Agent, AgentMessage, AgentTool } from "@pit/agent-core";
 import {
 	type Context,
@@ -27,8 +30,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { SubagentRegistry } from "../src/core/coordinator/registry.js";
 import {
+	cleanupSubagentWorktree,
 	DEFAULT_MAX_TURNS,
 	deriveSubagentCacheKey,
+	evaluateSubagentMutationPolicy,
 	evaluateSubagentToolPermission,
 	isTransportRetryableError,
 	type SpawnSubagentDependencies,
@@ -69,7 +74,8 @@ function makeTool(name: string): AgentTool {
 		name,
 		label: name,
 		description: `${name} tool`,
-		parameters: Type.Object({ value: Type.String() }),
+		parameters: Type.Object({ value: Type.String(), path: Type.Optional(Type.String()) }),
+		mutationGuard: name === "mutate",
 		execute: async () => ({
 			content: [{ type: "text", text: `${name}:ok` }],
 			details: {},
@@ -119,6 +125,26 @@ describe("spawnSubagent (faux model)", () => {
 		rigs.push(rig);
 		return rig;
 	}
+
+	it("cleans a failed git worktree removal only inside the managed worktree root", async () => {
+		const parentCwd = await mkdtemp(join(tmpdir(), "pit-worktree-cleanup-"));
+		const managedPath = join(parentCwd, ".pit", "worktrees", "partial");
+		const unrelatedPath = join(parentCwd, "unrelated");
+		try {
+			await mkdir(managedPath, { recursive: true });
+			await mkdir(unrelatedPath, { recursive: true });
+			await writeFile(join(managedPath, "partial.txt"), "partial");
+			await writeFile(join(unrelatedPath, "keep.txt"), "keep");
+
+			await cleanupSubagentWorktree(parentCwd, managedPath);
+
+			await expect(access(managedPath)).rejects.toThrow();
+			await cleanupSubagentWorktree(parentCwd, unrelatedPath);
+			await expect(access(unrelatedPath)).resolves.toBeUndefined();
+		} finally {
+			await rm(parentCwd, { recursive: true, force: true });
+		}
+	});
 
 	it("happy path: captures final assistant text and marks the record completed", async () => {
 		const rig = newRig();
@@ -328,31 +354,6 @@ describe("spawnSubagent (faux model)", () => {
 		expect(record?.status).toBe("cancelled");
 	});
 
-	it("timeoutMs: a small timeout cancels a delayed subagent", async () => {
-		const rig = newRig();
-		// Factory schedules its result after the timeout fires; the timeout-driven
-		// abort should win the race.
-		rig.faux.setResponses([
-			async () => {
-				await new Promise((resolve) => setTimeout(resolve, 200));
-				return fauxAssistantMessage("too late");
-			},
-		]);
-
-		await expect(
-			spawnSubagent(rig.deps, {
-				prompt: "slow",
-				taskName: "timeout",
-				timeoutMs: 10,
-			}),
-			// The reason now names the trigger instead of a bare "aborted".
-		).rejects.toThrow(/aborted: timeout after 10ms/);
-
-		const record = rig.registry.list().find((r) => r.prompt === "slow");
-		expect(record?.status).toBe("cancelled");
-		expect(record?.error).toMatch(/timeout after 10ms/);
-	});
-
 	it("turn cap: keeps the answer when the capped turn is the one that finished", async () => {
 		// Regression: the cap fired on EVERY turn_end, including the terminal one
 		// that had already produced the answer — so the run was aborted, recorded
@@ -383,6 +384,20 @@ describe("spawnSubagent (faux model)", () => {
 		const record = rig.registry.list().find((r) => r.prompt === "loops forever");
 		expect(record?.status).toBe("cancelled");
 		expect(record?.error).toMatch(/turn cap \(2\) reached/);
+	});
+
+	it("turn cap retains a partial execution manifest", async () => {
+		const rig = newRig({ tools: [makeTool("mutate")] });
+		rig.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("mutate", { value: "x", path: "src/a.ts" })], { stopReason: "toolUse" }),
+		]);
+		await expect(spawnSubagent(rig.deps, { prompt: "mutate", taskName: "partial", maxTurns: 1 })).rejects.toThrow(
+			/turn cap/,
+		);
+		const record = rig.registry.list().find((item) => item.taskName === "partial");
+		expect(record?.partial).toBe(true);
+		expect(record?.manifest?.filesTouched).toEqual(["src/a.ts"]);
+		expect(record?.output).toContain("[partial: true]");
 	});
 
 	it("default turn cap is 50 (raised from 25 for long recon/mining tasks)", () => {
@@ -556,9 +571,29 @@ describe("spawnSubagent (faux model)", () => {
 		expect(result.record.turnCount).toBeGreaterThanOrEqual(2);
 	});
 
-	it("does not classify abort/timeout as transport-retryable", () => {
+	it("marks the run failed when a soft transport retry also ends on an error turn", async () => {
+		const rig = newRig();
+		rig.faux.setResponses([
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				errorMessage: "provider returned error: 503 service unavailable",
+			}),
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				errorMessage: "provider returned error: 503 service unavailable again",
+			}),
+		]);
+
+		await expect(spawnSubagent(rig.deps, { prompt: "p", taskName: "transport-double-fail" })).rejects.toThrow(
+			/service unavailable again/,
+		);
+		const record = rig.registry.list().find((entry) => entry.taskName === "transport-double-fail");
+		expect(record?.status).toBe("failed");
+		expect(record?.error).toContain("service unavailable again");
+	});
+
+	it("does not classify cancellation as transport-retryable", () => {
 		expect(isTransportRetryableError("aborted: parent signal")).toBe(false);
-		expect(isTransportRetryableError("aborted: timeout after 100ms")).toBe(false);
 		expect(isTransportRetryableError("aborted: turn cap (2) reached")).toBe(false);
 		expect(isTransportRetryableError("provider returned error: 502")).toBe(true);
 	});
@@ -655,6 +690,28 @@ describe("deriveSubagentCacheKey", () => {
 		const longParent = "x".repeat(200);
 		expect(deriveSubagentCacheKey(longParent, "aaa")).not.toBe(deriveSubagentCacheKey(longParent, "bbb"));
 	});
+});
+
+describe("evaluateSubagentMutationPolicy", () => {
+	it("enforces path allowlists", () => {
+		expect(evaluateSubagentMutationPolicy({ allowedPaths: ["src"] }, "test/a.ts")).toMatch(/does not allow/);
+	});
+	it("forbids assertion removal", () =>
+		expect(
+			evaluateSubagentMutationPolicy({ forbidAssertionRemoval: true }, "src/a.ts", {
+				oldText: "expect(x).toBe(1)",
+				newText: "x",
+			}),
+		).toMatch(/assertion removal/));
+	it("forbids timeout increases", () =>
+		expect(
+			evaluateSubagentMutationPolicy({ forbidTimeoutIncrease: true }, "src/a.ts", {
+				oldText: "timeout: 100",
+				newText: "timeout: 200",
+			}),
+		).toMatch(/timeout increases/));
+	it("forbids test changes", () =>
+		expect(evaluateSubagentMutationPolicy({ forbidTestChanges: true }, "src/a.test.ts")).toMatch(/forbids test/));
 });
 
 describe("evaluateSubagentToolPermission (subagent permission gate)", () => {

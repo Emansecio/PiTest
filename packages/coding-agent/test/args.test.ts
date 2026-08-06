@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { parseArgs } from "../src/cli/args.js";
+import { parseArgs, suggestCliOption } from "../src/cli/args.js";
 
 describe("parseArgs", () => {
 	describe("--version flag", () => {
@@ -149,6 +149,32 @@ describe("parseArgs", () => {
 		test("parses --mode rpc", () => {
 			const result = parseArgs(["--mode", "rpc"]);
 			expect(result.mode).toBe("rpc");
+		});
+
+		test("rejects invalid --mode values immediately", () => {
+			const result = parseArgs(["--mode", "bogus"]);
+			expect(result.mode).toBeUndefined();
+			expect(result.diagnostics).toEqual([
+				{ type: "error", message: 'Invalid mode "bogus". Valid values: text, json, rpc.' },
+			]);
+			expect(result.unknownFlags.size).toBe(0);
+		});
+
+		test.each(["--mode", "--model", "--provider", "--thinking", "--session", "--models"])(
+			"reports a missing value for %s",
+			(option) => {
+				const result = parseArgs([option]);
+				expect(result.diagnostics).toEqual([{ type: "error", message: `Option "${option}" requires a value.` }]);
+				expect(result.unknownFlags.size).toBe(0);
+			},
+		);
+
+		test("does not consume the next option as a missing value", () => {
+			const result = parseArgs(["--model", "--print", "hello"]);
+			expect(result.model).toBeUndefined();
+			expect(result.print).toBe(true);
+			expect(result.messages).toEqual(["hello"]);
+			expect(result.diagnostics[0]).toEqual({ type: "error", message: 'Option "--model" requires a value.' });
 		});
 
 		test("parses --session", () => {
@@ -406,6 +432,16 @@ describe("parseArgs", () => {
 	});
 
 	describe("messages and file args", () => {
+		test("reports unknown short options for the CLI diagnostic layer", () => {
+			const result = parseArgs(["-mdoe"]);
+			expect(result.diagnostics).toEqual([{ type: "error", message: "Unknown option: -mdoe" }]);
+		});
+
+		test("suggests only a close built-in option", () => {
+			expect(suggestCliOption("--proivder")).toBe("--provider");
+			expect(suggestCliOption("--definitely-not-an-option")).toBeUndefined();
+		});
+
 		test("parses plain text messages", () => {
 			const result = parseArgs(["hello", "world"]);
 			expect(result.messages).toEqual(["hello", "world"]);

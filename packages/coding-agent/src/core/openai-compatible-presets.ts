@@ -49,6 +49,25 @@ export interface OpenAICompatiblePreset {
 	models: OpenAICompatiblePresetModel[];
 }
 
+const LEGACY_PRESET_MODEL_IDS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+	qwencloud: {
+		"qwen3.8-max-preview": "qwen3.8-max",
+		"deepseek-v4-flash": "deepseek-v4-flash-0731",
+	},
+};
+
+/** Resolve renamed preset ids without re-exposing legacy entries in model pickers. */
+export function normalizePresetModelId(providerId: string, modelId: string): string {
+	const aliases = LEGACY_PRESET_MODEL_IDS[providerId.toLowerCase()];
+	if (!aliases) return modelId;
+	const lowerModelId = modelId.toLowerCase();
+	for (const [legacyId, canonicalId] of Object.entries(aliases)) {
+		if (lowerModelId === legacyId) return canonicalId;
+		if (lowerModelId.startsWith(`${legacyId}:`)) return `${canonicalId}${modelId.slice(legacyId.length)}`;
+	}
+	return modelId;
+}
+
 /**
  * Curated, ready-to-use OpenAI-compatible providers.
  *
@@ -77,12 +96,12 @@ export const OPENAI_COMPATIBLE_PRESETS: readonly OpenAICompatiblePreset[] = [
 		},
 		models: [
 			{
-				id: "qwen3.8-max-preview",
-				name: "Qwen3.8 Max (Preview)",
+				id: "qwen3.8-max",
+				name: "Qwen3.8 Max",
 				reasoning: true,
 				contextWindow: 262_000,
 				maxTokens: 65_536,
-				// qwen3.8-max-preview: thinking always on; depth via openai-style reasoning_effort (xhigh|high|low, default xhigh).
+				// Thinking always on; depth via openai-style reasoning_effort (xhigh|high|low).
 				thinkingLevelMap: { off: "low", minimal: "low", low: "low", medium: "high", high: "high", xhigh: "xhigh" },
 				compat: { supportsReasoningEffort: true } as PresetCompat,
 			},
@@ -97,6 +116,15 @@ export const OPENAI_COMPATIBLE_PRESETS: readonly OpenAICompatiblePreset[] = [
 			{
 				id: "deepseek-v4-pro",
 				name: "DeepSeek V4 Pro",
+				reasoning: true,
+				contextWindow: 1_000_000,
+				maxTokens: 65_536,
+				compat: { thinkingFormat: "deepseek" } as PresetCompat,
+			},
+			{
+				// Catalog id is dated; bare "deepseek-v4-flash" returns HTTP 403 on this plan.
+				id: "deepseek-v4-flash-0731",
+				name: "DeepSeek V4 Flash",
 				reasoning: true,
 				contextWindow: 1_000_000,
 				maxTokens: 65_536,

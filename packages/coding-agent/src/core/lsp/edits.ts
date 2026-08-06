@@ -275,6 +275,15 @@ async function fileExists(filePath: string): Promise<boolean> {
 	}
 }
 
+async function resourceExists(
+	uri: string,
+	filePath: string,
+	virtualContent: Map<string, string | null>,
+): Promise<boolean> {
+	if (virtualContent.has(uri)) return virtualContent.get(uri) !== null;
+	return fileExists(filePath);
+}
+
 async function readVirtualOrDisk(
 	uri: string,
 	filePath: string,
@@ -310,7 +319,13 @@ async function prepareCreateOperation(
 ): Promise<void> {
 	const filePath = await resolveSafeWorkspaceUri(createOp.uri, cwd, "create");
 	await ensureFileResourceIsNotDirectory(filePath);
-	if ((await fileExists(filePath)) && createOp.options?.overwrite !== true) return;
+	const exists = await resourceExists(createOp.uri, filePath, virtualContent);
+	if (exists) {
+		if (createOp.options?.ignoreIfExists === true) return;
+		if (createOp.options?.overwrite !== true) {
+			throw new Error(`LSP create failed: resource already exists: ${filePath}`);
+		}
+	}
 	snapshotPaths.add(filePath);
 	virtualContent.set(createOp.uri, "");
 }
@@ -325,17 +340,23 @@ async function prepareRenameOperation(
 	const newPath = await resolveSafeWorkspaceUri(renameOp.newUri, cwd, "rename destination");
 	await ensureFileResourceIsNotDirectory(oldPath);
 	await ensureFileResourceIsNotDirectory(newPath);
+	if (!(await resourceExists(renameOp.oldUri, oldPath, virtualContent))) {
+		throw new Error(`LSP rename failed: source does not exist: ${oldPath}`);
+	}
+	const destinationExists = await resourceExists(renameOp.newUri, newPath, virtualContent);
+	if (destinationExists) {
+		if (renameOp.options?.ignoreIfExists === true) return;
+		if (renameOp.options?.overwrite !== true) {
+			throw new Error(`LSP rename failed: destination already exists: ${newPath}`);
+		}
+	}
 	snapshotPaths.add(oldPath);
 	snapshotPaths.add(newPath);
-	try {
-		const content = virtualContent.has(renameOp.oldUri)
-			? virtualContent.get(renameOp.oldUri)
-			: await fs.readFile(oldPath, "utf-8");
-		if (content !== null && content !== undefined) virtualContent.set(renameOp.newUri, content);
-		virtualContent.set(renameOp.oldUri, null);
-	} catch (err) {
-		if (!isEnoent(err)) throw err;
-	}
+	const content = virtualContent.has(renameOp.oldUri)
+		? virtualContent.get(renameOp.oldUri)
+		: await fs.readFile(oldPath, "utf-8");
+	if (content !== null && content !== undefined) virtualContent.set(renameOp.newUri, content);
+	virtualContent.set(renameOp.oldUri, null);
 }
 
 async function prepareDeleteOperation(
@@ -346,6 +367,10 @@ async function prepareDeleteOperation(
 ): Promise<void> {
 	const filePath = await resolveSafeWorkspaceUri(deleteOp.uri, cwd, "delete");
 	await ensureFileResourceIsNotDirectory(filePath);
+	if (!(await resourceExists(deleteOp.uri, filePath, virtualContent))) {
+		if (deleteOp.options?.ignoreIfNotExists === true) return;
+		throw new Error(`LSP delete failed: resource does not exist: ${filePath}`);
+	}
 	snapshotPaths.add(filePath);
 	virtualContent.set(deleteOp.uri, null);
 }
@@ -459,13 +484,15 @@ async function applyCreateOperation(
 	await flushPendingTextEdits(createOp.uri, pending, cwd, applied);
 	const filePath = await resolveSafeWorkspaceUri(createOp.uri, cwd, "create");
 	await fs.mkdir(path.dirname(filePath), { recursive: true });
-	// Per LSP §3.16, `create` must not clobber an existing file unless
-	// `overwrite:true`. With the default options (overwrite unset) or
-	// `ignoreIfExists`, an already-present file is left untouched and the
-	// op is a no-op — only write when absent or explicitly overwriting.
-	if ((await fileExists(filePath)) && createOp.options?.overwrite !== true) {
-		applied.push(`Skipped create of existing ${formatPathRelativeToCwd(filePath, cwd)}`);
-		return;
+	const exists = await fileExists(filePath);
+	if (exists) {
+		if (createOp.options?.ignoreIfExists === true) {
+			applied.push(`Skipped create of existing ${formatPathRelativeToCwd(filePath, cwd)}`);
+			return;
+		}
+		if (createOp.options?.overwrite !== true) {
+			throw new Error(`LSP create failed: resource already exists: ${filePath}`);
+		}
 	}
 	await writeFileAtomic(filePath, "");
 	applied.push(`Created ${formatPathRelativeToCwd(filePath, cwd)}`);
@@ -481,20 +508,22 @@ async function applyRenameOperation(
 	await flushPendingSubtree(renameOp.newUri, pending, cwd, applied);
 	const oldPath = await resolveSafeWorkspaceUri(renameOp.oldUri, cwd, "rename source");
 	const newPath = await resolveSafeWorkspaceUri(renameOp.newUri, cwd, "rename destination");
-	try {
-		await fs.mkdir(path.dirname(newPath), { recursive: true });
-		await fs.rename(oldPath, newPath);
-		applied.push(`Renamed ${formatPathRelativeToCwd(oldPath, cwd)} -> ${formatPathRelativeToCwd(newPath, cwd)}`);
-	} catch (err) {
-		// A missing source (e.g. already renamed/removed by an earlier op in the
-		// same batch, or a stale edit after a concurrent fs change) must not abort
-		// the remaining documentChanges and the trailing flush loop.
-		if (isEnoent(err)) {
-			applied.push(`Skipped rename of missing ${formatPathRelativeToCwd(oldPath, cwd)}`);
+	if (!(await fileExists(oldPath))) {
+		throw new Error(`LSP rename failed: source does not exist: ${oldPath}`);
+	}
+	if (await fileExists(newPath)) {
+		if (renameOp.options?.ignoreIfExists === true) {
+			applied.push(`Skipped rename to existing ${formatPathRelativeToCwd(newPath, cwd)}`);
 			return;
 		}
-		throw err;
+		if (renameOp.options?.overwrite !== true) {
+			throw new Error(`LSP rename failed: destination already exists: ${newPath}`);
+		}
+		await fs.rm(newPath, { force: false, recursive: false });
 	}
+	await fs.mkdir(path.dirname(newPath), { recursive: true });
+	await fs.rename(oldPath, newPath);
+	applied.push(`Renamed ${formatPathRelativeToCwd(oldPath, cwd)} -> ${formatPathRelativeToCwd(newPath, cwd)}`);
 }
 
 async function applyDeleteOperation(
@@ -506,25 +535,16 @@ async function applyDeleteOperation(
 	await flushPendingSubtree(deleteOp.uri, pending, cwd, applied);
 	const filePath = await resolveSafeWorkspaceUri(deleteOp.uri, cwd, "delete");
 	const ignoreMissing = deleteOp.options?.ignoreIfNotExists === true;
-	try {
-		// Honor LSP §3.16 DeleteFileOptions: `recursive` (default true here to
-		// preserve prior behavior) and `ignoreIfNotExists` (force makes a missing
-		// path a no-op instead of an ENOENT rejection that aborts the whole batch).
-		await fs.rm(filePath, {
-			recursive: deleteOp.options?.recursive ?? true,
-			force: ignoreMissing,
-		});
-		applied.push(`Deleted ${formatPathRelativeToCwd(filePath, cwd)}`);
-	} catch (err) {
-		// A redundant delete of an already-gone path (e.g. removed by an earlier
-		// op / overlapping rename's flushSubtree, or a stale edit) is a no-op,
-		// never a batch-aborting crash that leaves a partially-applied workspace.
-		if (isEnoent(err)) {
-			applied.push(`Skipped delete of missing ${formatPathRelativeToCwd(filePath, cwd)}`);
-			return;
-		}
-		throw err;
+	if (!(await fileExists(filePath)) && !ignoreMissing) {
+		throw new Error(`LSP delete failed: resource does not exist: ${filePath}`);
 	}
+	// Honor LSP §3.16 DeleteFileOptions: a missing path is only a no-op when
+	// ignoreIfNotExists is explicitly requested.
+	await fs.rm(filePath, {
+		recursive: deleteOp.options?.recursive ?? true,
+		force: ignoreMissing,
+	});
+	applied.push(`Deleted ${formatPathRelativeToCwd(filePath, cwd)}`);
 }
 
 async function applyDocumentChange(
@@ -534,7 +554,12 @@ async function applyDocumentChange(
 	applied: string[],
 ): Promise<void> {
 	if ("textDocument" in change && change.textDocument && "edits" in change && change.edits) {
+		// Each TextDocumentEdit is an ordered documentChanges operation. Flush
+		// this entry independently so a repeated URI sees the previous result.
+		const uri = change.textDocument.uri;
+		await flushPendingTextEdits(uri, pending, cwd, applied);
 		queueTextDocumentEdits(change, pending);
+		await flushPendingTextEdits(uri, pending, cwd, applied);
 		return;
 	}
 	if (!("kind" in change) || !change.kind) return;

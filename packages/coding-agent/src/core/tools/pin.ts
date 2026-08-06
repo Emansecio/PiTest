@@ -66,9 +66,6 @@ export function createPinToolDefinition(
 		description:
 			"Pin a critical decision or file so it survives context compaction. RARE — reserve for load-bearing facts the user explicitly stated (a hard constraint, an irreversible decision, a must-not-touch file), not routine notes (use `todo` for everyday task tracking). Ops: add_fact (needs text; capped at 16 pins total), add_file (needs path — protects its reads/edits from pruning, does not substitute for re-reading), remove (needs id — a pin the user created can only be removed by the user, via /unpin), list.",
 		promptSnippet: "Pin a rare, load-bearing fact or file so it survives compaction",
-		promptGuidelines: [
-			"Use `pin` sparingly: only for something the user explicitly marked as critical and never to be forgotten or dropped (a hard constraint, a must-not-touch file). Everyday task tracking stays on `todo`.",
-		],
 		parameters: pinSchema,
 		async execute(_toolCallId: string, input: PinToolInput) {
 			const mgr = getCurrentPinManager();

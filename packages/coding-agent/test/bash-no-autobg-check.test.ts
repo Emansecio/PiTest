@@ -45,6 +45,31 @@ describe("verification commands and auto-background policy", () => {
 		expect(isVerificationJobCommand("npm run check")).toBe(true);
 	});
 
+	it("gives a verification command a bounded default timeout", async () => {
+		let capturedTimeout: number | undefined;
+		const def = createBashToolDefinition(process.cwd(), {
+			operations: {
+				exec: async (_command, _cwd, options) => {
+					capturedTimeout = options.timeout;
+					return { exitCode: 0 };
+				},
+			},
+		});
+		const ctx = {} as Parameters<typeof def.execute>[4];
+
+		await def.execute("call-check-default-timeout", { command: "npm run check" }, undefined, undefined, ctx);
+		expect(capturedTimeout).toBe(180);
+
+		await def.execute(
+			"call-check-explicit-timeout",
+			{ command: "npm run check", timeout: 7 },
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(capturedTimeout).toBe(7);
+	});
+
 	it.skipIf(!BASH_AVAILABLE)(
 		"agent bash path disables autoBackground for verification commands — no promotion before exit",
 		async () => {

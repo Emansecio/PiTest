@@ -1,15 +1,5 @@
 import { performance } from "node:perf_hooks";
-import {
-	type Component,
-	Container,
-	getCapabilities,
-	Image,
-	type MouseEvent,
-	SPINNER_FRAMES,
-	Spacer,
-	Text,
-	type TUI,
-} from "@pit/tui";
+import { type Component, Container, getCapabilities, Image, type MouseEvent, Spacer, Text, type TUI } from "@pit/tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
 import { allToolNames, createToolDefinition, type ToolName } from "../../../core/tools/index.ts";
 import { buildCappedToolOutput, getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
@@ -18,6 +8,7 @@ import { convertToPng } from "../../../utils/image-convert.ts";
 import { interpolateFg } from "../theme/color-interpolation.ts";
 import { type ThemeColor, theme } from "../theme/theme.ts";
 import { summarizeArgsOneLine } from "./arg-summary.ts";
+import { resolveSpinnerFrames } from "./glyph-resolver.ts";
 import { MessageShell } from "./message-shell.ts";
 import { spinnerFrameIndexAt } from "./spinner-ticker.ts";
 import { ICON_ERROR, isEditFamilyTool, type ToolActivity } from "./tool-activity.ts";
@@ -778,7 +769,7 @@ export class ToolExecutionComponent extends MessageShell {
 		const frame = spinnerFrameIndexAt(now);
 		if (frame === this.runningSpinnerFrame) return false;
 		this.runningSpinnerFrame = frame;
-		this.setGutterSpinner(SPINNER_FRAMES[frame]);
+		this.setGutterSpinner(resolveSpinnerFrames()[frame]!);
 		return true;
 	}
 

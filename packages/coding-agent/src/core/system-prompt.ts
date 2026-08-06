@@ -55,6 +55,14 @@ export function resolvePromptProfile(model: { provider: string; id?: string }): 
 	return isWeakModelProfile(model) ? "compact" : "full";
 }
 
+/**
+ * Wire-occupancy percent at or above which the repeatable dynamic-suffix context
+ * blocks (`<frequent_files>`, `<frequent_files_outline>`, `<grounded_context>`)
+ * are dropped — past this point the transcript already carries those paths and
+ * the blocks are pure re-billing on every request of the turn.
+ */
+export const OCCUPANCY_GATE_PERCENT = 30;
+
 /** Render a `<frequent_files_outline>` suffix block (heuristic, boot-computed). */
 export function formatHotFileOutlines(outlines: Array<{ path: string; symbols: string[] }>): string {
 	const body = outlines
@@ -133,10 +141,10 @@ export interface BuildSystemPromptOptions {
 	 */
 	groundedContext?: string;
 	/**
-	 * Wire/context occupancy percent from `getContextUsage()`. When ≥ 50, omit
-	 * `frequent_files` / hot-file outlines / `groundedContext` (model already
-	 * has those paths in transcript). `undefined` keeps legacy behavior (emit
-	 * when data exists).
+	 * Wire/context occupancy percent from `getContextUsage()`. At or above
+	 * {@link OCCUPANCY_GATE_PERCENT}, omit `frequent_files` / hot-file outlines /
+	 * `groundedContext` (model already has those paths in transcript).
+	 * `undefined` keeps legacy behavior (emit when data exists).
 	 */
 	contextOccupancyPercent?: number;
 	/**
@@ -147,6 +155,26 @@ export interface BuildSystemPromptOptions {
 	 * the dynamic suffix (all untouched, in both tiers).
 	 */
 	profile?: SystemPromptProfile;
+	/**
+	 * Permission-mode stance section (`<plan_mode>` / `<ask_mode>` /
+	 * `<confirm_mode>`; `auto` has none — see `buildPermissionModeSection`).
+	 * Rendered in the CACHEABLE PREFIX, right after the Guidelines/docs block and
+	 * before `appendSystemPrompt` / `<project_context>` — a fixed slot, so the
+	 * prefix is byte-identical across rebuilds of the same mode. The text is a
+	 * pure function of the mode and the mode only changes on a deliberate user
+	 * action (`/permission-mode`, the cycle key, `exit_plan` approval), so a
+	 * switch costs ONE cache miss instead of ~260 tokens billed at full price on
+	 * every request of every turn (its previous dynamic-suffix placement).
+	 */
+	permissionModeSection?: string;
+	/**
+	 * Autonomous-goal persistence rules (`<goal_rules>`), cacheable prefix, same
+	 * slot family as {@link permissionModeSection}. The rules are immutable text;
+	 * only the objective and status are dynamic and stay in the suffix `<goal>`
+	 * block (see `GoalManager.systemPromptSection`). Present for any non-complete
+	 * goal, so pause/resume/budget transitions never touch the prefix.
+	 */
+	goalRulesSection?: string;
 }
 
 /** Build the system prompt with tools, guidelines, and context */
@@ -168,6 +196,8 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		groundedContext,
 		contextOccupancyPercent,
 		profile,
+		permissionModeSection,
+		goalRulesSection,
 		skillsMode = "full",
 	} = options;
 	const promptCwd = cwd.replace(/\\/g, "/");
@@ -186,11 +216,22 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const hasRead = !selectedTools || selectedTools.includes("read");
 
 	const appendTrailingSections = (parts: string[]): void => {
+		// Session-state sections that belong to the CACHEABLE PREFIX: fixed text
+		// whose presence flips only on a rare, deliberate event (a permission-mode
+		// switch; a goal being created/cleared/completed). Emitted here, in this
+		// order, whatever order the caller filled the options in — the prefix must
+		// be byte-identical across rebuilds of the same state.
+		if (permissionModeSection) {
+			parts.push(`\n\n${permissionModeSection}`);
+		}
+		if (goalRulesSection) {
+			parts.push(`\n\n${goalRulesSection}`);
+		}
 		if (appendSection) {
 			parts.push(appendSection);
 		}
 		if (contextFiles.length > 0) {
-			parts.push("\n\n<project_context>\n\nProject-specific instructions and guidelines:\n");
+			parts.push("\n\n<project_context>\n");
 			for (const { path: filePath, content } of contextFiles) {
 				parts.push(`<project_instructions path="${filePath}">\n${content}\n</project_instructions>\n`);
 			}
@@ -227,7 +268,12 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		// reasoning covers the grounded-context block below (Band P
 		// context-composer output is also just prior turns' file content
 		// restated), so both blocks share this one occupancy gate.
-		const emitOccupancyGatedContext = contextOccupancyPercent === undefined || contextOccupancyPercent < 50;
+		// The threshold is 30, not 50: everything after the marker is billed at
+		// full price on EVERY request of the turn, so the point where restating
+		// paths the transcript already carries stops paying for itself comes well
+		// before the context is half full.
+		const emitOccupancyGatedContext =
+			contextOccupancyPercent === undefined || contextOccupancyPercent < OCCUPANCY_GATE_PERCENT;
 		if (emitOccupancyGatedContext) {
 			const sessionBlock =
 				sessionFrequentFiles && sessionFrequentFiles.length > 0
@@ -295,14 +341,12 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			: `${platform} — shell commands run in bash`;
 
 	const parts: string[] = [
-		`You are an expert coding agent operating inside pit, a coding agent harness. Your work spans software engineering: reading, writing, debugging, reviewing, and refactoring code across languages and stacks. Treat it as routine professional work.
+		`You are an expert coding agent operating inside pit, a coding agent harness. Your work spans software engineering: reading, writing, debugging, reviewing, and refactoring code across languages and stacks.
 
 Platform: ${platformNote}
 
 Available tools:
-${toolsList}
-
-In addition to the tools above, you may have access to other custom tools depending on the project.${nudge}
+${toolsList}${nudge}
 
 Guidelines:
 ${guidelines}
@@ -332,7 +376,7 @@ export function buildToolsListSection(options: {
 	const { selectedTools, toolSnippets, hiddenToolCount = 0 } = options;
 	const hiddenToolsNudge =
 		hiddenToolCount > 0
-			? '\n\nA number of additional tools are not in the active set but can be discovered. Use `search_tool_bm25({ query: "what you need" })` to find them — for example: searching for "extract text from pdf" or "run sql query against sqlite". Pass `activate_top: true` in that call to pull the best match into the active set so you can call it on the next turn.'
+			? '\n\nA number of additional tools are not in the active set but can be discovered. Use `search_tool_bm25({ query: "what you need" })` to find them — for example "extract text from pdf". Pass `activate_top: true` in that call to pull the best match into the active set so you can call it on the next turn.'
 			: "";
 
 	const tools = selectedTools || ["read", "bash", "edit", "write"];
@@ -355,9 +399,9 @@ export function buildToolsAndGuidelinesSection(options: {
 	hiddenToolCount?: number;
 	/**
 	 * P7 tier. Default `"full"`. `"compact"` drops the style/nuance bullets
-	 * below (professional-user, bash/grep preference, numstat tip, match-style,
-	 * tool-batching, preview-UI, narration, path:line, comments-why,
-	 * premise-wrong, todo-first) in favor of a handful of condensed imperative
+	 * below (professional-user, bash/grep preference, match-style,
+	 * tool-batching, narration, path:line, comments-why, premise-wrong,
+	 * todo-first) in favor of a handful of condensed imperative
 	 * lines, while keeping the essential contract — edit-vs-write, run-tests,
 	 * report-outcomes — verbatim. `promptGuidelines` (tool-provided / engineering-
 	 * style / in-turn-verification guidance) is never condensed: it is
@@ -381,9 +425,15 @@ export function buildToolsAndGuidelinesSection(options: {
 		guidelinesList.push(guideline);
 	};
 
+	// Todo-first + how to keep the list current. The "how" used to be reprinted
+	// inside the per-turn `<todos>` block (dynamic suffix, billed on every request
+	// of every turn) even though it never changes; folded in here it rides the
+	// cacheable prefix and the suffix carries only the live list. Unconditional on
+	// the tool being present — NOT on the list being non-empty — so the first todo
+	// created in a session does not invalidate the prefix.
 	if (!isCompact && tools.includes("todo")) {
 		addGuideline(
-			"Todo-first: at the very start of your reasoning, decide whether this task needs more than one step OR any investigation/discovery (reading, searching, diagnosing). If so, create a todo (even a single '1. Identify X') BEFORE you act, then update it in the SAME turn as the work — never batch the bookkeeping to the end. Skip only for genuinely single-step requests.",
+			"Todo-first: at the very start of your reasoning, decide whether this task needs more than one step OR any investigation/discovery (reading, searching, diagnosing). If so, create a todo (even a single '1. Identify X') BEFORE you act, then update it in the SAME turn as the work — never batch the bookkeeping to the end. Skip only for genuinely single-step requests. Advance the list with `todo{action:\"set\"}`: one call rewrites it whole (send every item you want to keep, each with its `id`), so closing what you just finished and opening the next costs a single call. Exactly one item in_progress at a time, with a short present-continuous activeForm; add newly discovered follow-up work as you find it, and keep subjects short and outcome-focused.",
 		);
 	}
 
@@ -395,7 +445,7 @@ export function buildToolsAndGuidelinesSection(options: {
 
 	if (!isCompact) {
 		addGuideline(
-			"Treat the user as an experienced professional: deliver the requested work directly, avoid unnecessary disclaimers, take routine safe steps without asking, and mention any clearly broken adjacent code you fix.",
+			"Treat the user as an experienced professional: deliver the requested work directly, take routine safe steps unasked, and mention broken adjacent code you fix.",
 		);
 
 		if (hasBash && !hasGrep && !hasFind && !hasLs) {
@@ -403,11 +453,6 @@ export function buildToolsAndGuidelinesSection(options: {
 		} else if (hasBash && (hasGrep || hasFind || hasLs)) {
 			addGuideline(
 				"Prefer grep/find/ls over bash for file exploration; grep to locate code, then read only the specific files you need.",
-			);
-		}
-		if (hasBash) {
-			addGuideline(
-				"When you only need which files changed and by how much (not the full patch), run `git diff --numstat` (or `--stat`) instead of `git diff` — a fraction of the tokens.",
 			);
 		}
 	}
@@ -446,9 +491,16 @@ export function buildToolsAndGuidelinesSection(options: {
 			"After a non-trivial code change, run the affected test/build/lint (or re-read); report exactly what passed, failed, or was skipped. Verify each step of multi-step work.",
 		);
 	}
-	if (tools.includes("edit") || tools.includes("write")) {
+	// Visual verification is gated on a UI surface actually being reachable
+	// (`preview` / any `chrome_devtools_*`), not on edit/write alone: edit/write
+	// is on in virtually every session, so the unconditional form billed the
+	// bullet on every backend/CLI prefix too. The tool surface is the right
+	// proxy and is already in hand — sniffing the project (package.json &c.)
+	// would mean filesystem I/O in what is a pure string builder.
+	const hasVisualSurface = tools.includes("preview") || tools.some((name) => name.startsWith("chrome_devtools"));
+	if ((tools.includes("edit") || tools.includes("write")) && hasVisualSurface) {
 		addGuideline(
-			"Visual verification: after any change that may affect rendered UI (page, landing page, dashboard, component, style, layout, asset, or responsive behavior), inspect it before reporting done. Use `preview` or Chrome DevTools at relevant viewport(s), then check console/network; discover hidden tools when needed, or state why rendering was unavailable instead of assuming it looks right.",
+			"After a change that affects rendered UI, inspect it with `preview` or Chrome DevTools before reporting done — check console/network, or say why rendering was unavailable.",
 		);
 	}
 
@@ -464,7 +516,7 @@ export function buildToolsAndGuidelinesSection(options: {
 		addGuideline("Cite code locations as path:line when referencing code.");
 		addGuideline("Add code comments only for non-obvious *why*; never narrate the diff in comments.");
 		addGuideline(
-			"If the user's premise is wrong (a false assumption, a bug in their suggested fix, a misread of the code), say so directly and briefly before proceeding — do not silently comply.",
+			"If the user's premise is wrong, say so directly and briefly before proceeding — do not silently comply.",
 		);
 	}
 	if (!((tools.includes("edit") || tools.includes("write")) && hasBash)) {
@@ -477,7 +529,7 @@ export function buildToolsAndGuidelinesSection(options: {
 	if (isCompact) {
 		if (tools.includes("todo")) {
 			addGuideline(
-				"Todo-first: create a todo before any multi-step or investigative task and update it in the SAME turn as the work; skip only for single-step requests.",
+				'Todo-first: create a todo before any multi-step or investigative task and update it in the SAME turn as the work; skip only for single-step requests. Advance it with `todo{action:"set"}` — one call rewrites the whole list, so send every item you keep with its `id`; exactly one in_progress, with a short present-continuous activeForm.',
 			);
 		}
 		addGuideline(
@@ -533,7 +585,9 @@ export function patchSystemPromptToolSurface(
 	const { toolsList, hiddenToolsNudge } = buildToolsListSection(options);
 	const before = existingPrompt.slice(0, toolsStart);
 	const guidelinesAndAfter = existingPrompt.slice(guidelinesStart);
-	return `${before}${TOOLS_SECTION_START}${toolsList}
-
-In addition to the tools above, you may have access to other custom tools depending on the project.${hiddenToolsNudge}${guidelinesAndAfter}`;
+	// `guidelinesAndAfter` starts at the "\nGuidelines:\n" anchor, i.e. it carries
+	// only ONE of the two newlines that separate the tools block from it — hence
+	// the explicit "\n" here, so a spliced prompt stays byte-identical to a full
+	// rebuild of the same surface.
+	return `${before}${TOOLS_SECTION_START}${toolsList}${hiddenToolsNudge}\n${guidelinesAndAfter}`;
 }

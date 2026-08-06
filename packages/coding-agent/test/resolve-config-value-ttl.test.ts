@@ -6,11 +6,12 @@
  * model-registry.getApiKeyAndHeaders.
  */
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearConfigValueCache, resolveConfigValueUncachedAsync } from "../src/core/resolve-config-value.js";
+import * as shellUtils from "../src/utils/shell.js";
 
 describe("resolveConfigValueUncachedAsync TTL memo", () => {
 	const prevTtl = process.env.PIT_CONFIG_COMMAND_TTL_MS;
@@ -22,6 +23,7 @@ describe("resolveConfigValueUncachedAsync TTL memo", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		if (prevTtl === undefined) delete process.env.PIT_CONFIG_COMMAND_TTL_MS;
 		else process.env.PIT_CONFIG_COMMAND_TTL_MS = prevTtl;
 		clearConfigValueCache();
@@ -41,6 +43,25 @@ describe("resolveConfigValueUncachedAsync TTL memo", () => {
 
 	function spawnCount(counterFile: string): number {
 		return Number.parseInt(readFileSync(counterFile, "utf-8").trim(), 10);
+	}
+
+	async function waitFor<T>(check: () => T | undefined, timeoutMs = 5000): Promise<T> {
+		const deadline = Date.now() + timeoutMs;
+		while (Date.now() < deadline) {
+			const value = check();
+			if (value !== undefined) return value;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		throw new Error("Timed out waiting for test child process");
+	}
+
+	function isPidAlive(pid: number): boolean {
+		try {
+			process.kill(pid, 0);
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	it("memoises a successful command within the TTL window (one spawn)", async () => {
@@ -95,5 +116,82 @@ describe("resolveConfigValueUncachedAsync TTL memo", () => {
 		expect(first).toBeUndefined();
 		expect(second).toBeUndefined();
 		expect(spawnCount(counterFile)).toBe(2); // failures re-run instead of caching
+	}, 20000);
+
+	it("falls back to the default shell when configured-shell resolution fails before spawning", async () => {
+		const getShellConfig = vi.spyOn(shellUtils, "getShellConfig").mockImplementation(() => {
+			throw new Error("configured shell is unavailable");
+		});
+
+		await expect(resolveConfigValueUncachedAsync("!node -e \"console.log('fallback-key')\"")).resolves.toBe(
+			"fallback-key",
+		);
+
+		getShellConfig.mockRestore();
+	});
+
+	it("stops and reaps a noisy command tree when stdout exceeds 1 MiB", async () => {
+		const childPidFile = join(tempDir, "noisy-child.pid");
+		const launcherFile = join(tempDir, "spawn-noisy-child.cjs");
+		writeFileSync(
+			launcherFile,
+			[
+				'const { spawn } = require("node:child_process");',
+				'const { writeFileSync } = require("node:fs");',
+				'const child = spawn(process.execPath, ["-e", \'process.stdout.write("x".repeat(1024 * 1024 + 1)); setInterval(() => {}, 1000)\'], { stdio: ["ignore", "inherit", "ignore"] });',
+				"writeFileSync(process.argv[2], String(child.pid));",
+				"setInterval(() => {}, 1000);",
+			].join("\n"),
+		);
+
+		const controller = new AbortController();
+		const command = `!${JSON.stringify(process.execPath)} ${JSON.stringify(launcherFile)} ${JSON.stringify(childPidFile)}`;
+		const resolving = resolveConfigValueUncachedAsync(command, controller.signal);
+		const noisyChildPid = await waitFor(() => {
+			if (!existsSync(childPidFile)) return undefined;
+			return Number.parseInt(readFileSync(childPidFile, "utf-8"), 10);
+		});
+		const deadline = Symbol("stdout limit deadline");
+		const result = await Promise.race([
+			resolving,
+			new Promise<typeof deadline>((resolve) => setTimeout(() => resolve(deadline), 5000)),
+		]);
+
+		if (result === deadline) {
+			controller.abort(new Error("test cleanup"));
+			await expect(resolving).rejects.toThrow("test cleanup");
+		}
+		expect(result).toBeUndefined();
+		expect(isPidAlive(noisyChildPid)).toBe(false);
+	}, 20000);
+
+	it("rejects abort promptly and reaps a persistent Node grandchild asynchronously", async () => {
+		const childPidFile = join(tempDir, "persistent-child.pid");
+		const launcherFile = join(tempDir, "spawn-persistent-child.cjs");
+		writeFileSync(
+			launcherFile,
+			[
+				'const { spawn } = require("node:child_process");',
+				'const { writeFileSync } = require("node:fs");',
+				'const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });',
+				"writeFileSync(process.argv[2], String(child.pid));",
+				"setInterval(() => {}, 1000);",
+			].join("\n"),
+		);
+
+		const controller = new AbortController();
+		const abortReason = "test abort";
+		const command = `!${JSON.stringify(process.execPath)} ${JSON.stringify(launcherFile)} ${JSON.stringify(childPidFile)}`;
+		const resolving = resolveConfigValueUncachedAsync(command, controller.signal);
+		const persistentChildPid = await waitFor(() => {
+			if (!existsSync(childPidFile)) return undefined;
+			return Number.parseInt(readFileSync(childPidFile, "utf-8"), 10);
+		});
+
+		const abortedAt = Date.now();
+		controller.abort(abortReason);
+		await expect(resolving).rejects.toBe(abortReason);
+		expect(Date.now() - abortedAt).toBeLessThan(800);
+		await waitFor(() => (isPidAlive(persistentChildPid) ? undefined : true));
 	}, 20000);
 });

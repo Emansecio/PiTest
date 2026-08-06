@@ -279,32 +279,54 @@ export class GoalManager {
 		return lines.join("\n");
 	}
 
-	/** The Codex-like persistence section injected into the system prompt. */
-	systemPromptSection(): string {
-		const g = this.state;
-		if (!g || g.status === "complete") return "";
-		// While paused or budget-limited the agent is NOT auto-driving the goal, so
-		// the full persistence boilerplate ("Keep working until…", goal_complete
-		// instructions) is dead weight billed every turn on the un-cached suffix.
-		// statusLine/summaryText already surface the paused goal to the user; keep
-		// only a one-line objective reminder here.
-		if (g.status !== "active") {
-			return `<goal>Goal (${g.status}): ${g.objective}</goal>`;
-		}
+	/**
+	 * True while a goal exists and has not completed — the presence condition of
+	 * {@link systemPromptPrefixSection}. Deliberately blind to active vs paused vs
+	 * budget_limited: those transitions are frequent (every interrupt pauses), and
+	 * flipping the cacheable prefix on each one would cost far more than the block
+	 * itself. Only creating the first goal, clearing it, and completing it move
+	 * this bit.
+	 */
+	hasPromptRules(): boolean {
+		return this.state !== undefined && this.state.status !== "complete";
+	}
+
+	/**
+	 * The Codex-like persistence rules — CACHEABLE PREFIX (see
+	 * `BuildSystemPromptOptions.goalRulesSection`). Immutable text: the objective
+	 * and the live status are emitted separately by
+	 * {@link systemPromptSection} in the dynamic suffix. Because this block is
+	 * paid once instead of per turn, it can afford to spell out the paused case
+	 * rather than being dropped while paused — the status in the `<goal>` line
+	 * below is what switches the behavior on and off.
+	 */
+	systemPromptPrefixSection(): string {
+		if (!this.hasPromptRules()) return "";
 		return [
-			"<goal>",
-			"You are operating in autonomous goal mode. Your overarching goal for this session is:",
-			"",
-			g.objective,
-			"",
-			"Persistence rules:",
+			"<goal_rules>",
+			"A `<goal>` line further down states this session's overarching objective and its status.",
+			"While that status is `active` you are operating in autonomous goal mode:",
 			"- Keep working until the goal is fully resolved end-to-end before yielding. Do not stop at a partial result or hand back a plan when you can execute it.",
 			"- Treat the current files, command output, and test results as the source of truth — verify, don't assume.",
 			"- Do not redefine or narrow the goal into a smaller task. Solve the whole thing.",
 			"- Only when every requirement is satisfied and verified requirement-by-requirement, call the `goal_complete` tool with a short summary. Never call it before the work is actually done and checked.",
 			"- If you are genuinely blocked and cannot proceed without the user, state exactly what you need and stop.",
-			"</goal>",
+			"While it is `paused` or `budget_limited` the goal is NOT driving the session: answer the user's current request and do not auto-continue toward the objective.",
+			"</goal_rules>",
 		].join("\n");
+	}
+
+	/**
+	 * Dynamic-suffix section: objective + live status, one line.
+	 *
+	 * The persistence rules moved to {@link systemPromptPrefixSection} (cacheable
+	 * prefix) — they never changed, yet were billed at full price on every request
+	 * of every turn. What is left here is exactly what mutates.
+	 */
+	systemPromptSection(): string {
+		const g = this.state;
+		if (!g || g.status === "complete") return "";
+		return `<goal>Goal (${g.status}): ${g.objective}</goal>`;
 	}
 
 	/** Prompt enqueued to drive the next autonomous turn. */

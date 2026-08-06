@@ -586,6 +586,13 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	 */
 	executionMode?: ToolExecutionMode;
 	/**
+	 * Optional grace period for an individual `cancelTool(id)` request. During
+	 * this window the loop waits for the tool to return/reject with its own
+	 * cancellation result (for example captured partial output). A run-level
+	 * abort remains immediate. Default: 0 (detach immediately).
+	 */
+	abortResultGraceMs?: number;
+	/**
 	 * Marks this tool as safe to execute SPECULATIVELY while the assistant
 	 * message is still streaming (P1): its `execute` must be free of
 	 * world-visible side effects AND idempotent, because a speculative run can
@@ -602,6 +609,13 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	 * legitimate identical read). Failures are swallowed by the loop.
 	 */
 	onSpeculationDiscarded?: (toolCallId: string, args: unknown) => void;
+	/**
+	 * P0 (harness): when true, the dispatcher refuses to execute this tool if
+	 * its arguments carry the history-pruner's elision marker. Set by mutation
+	 * tools (write/edit) whose args can be pruned for token economy; executing
+	 * the placeholder would corrupt the target file. Default: false.
+	 */
+	mutationGuard?: boolean;
 }
 
 /** Context snapshot passed into the low-level agent loop. */

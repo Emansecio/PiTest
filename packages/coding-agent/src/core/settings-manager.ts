@@ -1,5 +1,5 @@
 import { recordDiagnostic, suggestClosest, type Transport } from "@pit/ai";
-import { existsSync, mkdirSync, readFileSync } from "fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
@@ -95,9 +95,9 @@ export type VerificationMode = "in-turn" | "post-turn" | "off";
 export interface VerificationSettings {
 	/**
 	 * Where verification happens. `"in-turn"` (default): the model is instructed
-	 * via system prompt to run the project check BEFORE its final reply — nothing
-	 * runs after the turn (Claude Code-like; no post-reply commands, no injected
-	 * fix turns, no self-review pass, no pending-checks drain). `"post-turn"`:
+	 * via system prompt to run the project check BEFORE its final reply. After two
+	 * ignored corrections, ordinary tasks get one mechanical fallback check (no
+	 * fix loop or pending-check drain); risk-gated self-review also applies. `"post-turn"`:
 	 * legacy harness gate — after a code-modifying turn the harness runs the
 	 * check, injects fix turns on failure, and runs the P4 self-review.
 	 * `"off"`: neither. Back-compat: explicit `enabled: false` resolves to
@@ -207,8 +207,8 @@ export interface OverthinkGuardSettings {
 	/** When unset, weak/open providers watch text_delta; frontier providers do not. */
 	watchTextDelta?: boolean;
 	/**
-	 * Per-model overrides keyed by model id (e.g. "qwen3.8-max-preview") or
-	 * "provider/model" (e.g. "qwencloud/qwen3.8-max-preview"). The provider-qualified
+	 * Per-model overrides keyed by model id (e.g. "qwen3.8-max") or
+	 * "provider/model" (e.g. "qwencloud/qwen3.8-max"). The provider-qualified
 	 * key wins over the bare model id. Fields fall back to the global settings.
 	 */
 	modelOverrides?: Record<string, OverthinkGuardModelOverride>;
@@ -742,6 +742,7 @@ const KNOWN_NESTED_SETTINGS_KEYS: ReadonlyMap<string, ReadonlySet<string>> = new
 	[
 		"verification",
 		new Set([
+			"mode",
 			"enabled",
 			"command",
 			"maxAttempts",
@@ -897,29 +898,35 @@ export class FileSettingsStorage implements SettingsStorage {
 
 		let release: (() => void) | undefined;
 		try {
-			// Only create directory and lock if file exists or we need to write
-			const fileExists = existsSync(path);
-			if (fileExists) {
+			let next: string | undefined;
+			if (existsSync(path)) {
+				// Existing files are locked before reading, so concurrent writers always
+				// merge against the latest on-disk snapshot.
 				release = this.acquireLockSyncWithRetry(path);
+				const current = readFileSync(path, "utf-8");
+				next = fn(current.trim().length > 0 ? current : undefined);
+			} else {
+				// A missing file cannot be locked by proper-lockfile. Compute whether a
+				// write is needed, then create a placeholder and acquire the lock before
+				// invoke the callback again against the now-current contents. The second
+				// read closes the creation race where two managers both saw undefined.
+				next = fn(undefined);
+				if (next === undefined) return;
+				if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+				const fd = openSync(path, "a");
+				closeSync(fd);
+				release = this.acquireLockSyncWithRetry(path);
+				const current = readFileSync(path, "utf-8");
+				next = fn(current.trim().length > 0 ? current : undefined);
 			}
-			const current = fileExists ? readFileSync(path, "utf-8") : undefined;
-			const next = fn(current);
+
 			if (next !== undefined) {
-				// Only create directory when we actually need to write
-				if (!existsSync(dir)) {
-					mkdirSync(dir, { recursive: true });
-				}
-				if (!release) {
-					release = this.acquireLockSyncWithRetry(path);
-				}
 				// Atomic: a crash/kill during this write must not truncate settings.json
 				// (a torn file fails JSON.parse on next boot and silently resets ALL settings).
 				writeFileAtomicSync(path, next);
 			}
 		} finally {
-			if (release) {
-				release();
-			}
+			if (release) release();
 		}
 	}
 }
@@ -1822,7 +1829,7 @@ export class SettingsManager {
 		pollIntervalMs: number;
 	} {
 		const p = this.settings.pendingChecks;
-		const envOff = process.env.PIT_NO_PENDING_CHECKS === "1";
+		const envOff = isTruthyEnvFlag(process.env.PIT_NO_PENDING_CHECKS);
 		return {
 			enabled: envOff ? false : (p?.enabled ?? true),
 			// Floor is a small sanity bound (not the old 1000ms) so an explicitly

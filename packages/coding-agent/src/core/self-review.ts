@@ -24,11 +24,19 @@
  *
  * Fail-open everywhere: any runner error/timeout degrades to "no findings" (with a
  * diagnostic), never blocking the turn. Kill-switch: `PIT_NO_SELF_REVIEW=1`.
+ *
+ * Cost: the pass runs on the session model's same-provider small-class sibling by
+ * default (see `resolveSelfReviewModel`) — reading files and filling a fixed
+ * schema is small-class work, and up to 6 read/grep turns on an Opus-class model
+ * was the single most expensive thing a HIGH cycle did. `PIT_NO_SELF_REVIEW_SIBLING`
+ * pins it back to the session model.
  */
 
-import { recordDiagnostic } from "@pit/ai";
+import type { ThinkingLevel } from "@pit/agent-core";
+import { type Api, type Model, recordDiagnostic } from "@pit/ai";
 import { type Static, Type } from "typebox";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
+import { resolveSmallClassSibling } from "./model-resolver.ts";
 import { HIGH_RISK_CHECKLIST } from "./patch-audit.ts";
 import type { SupervisionLevel } from "./supervision-thermostat.ts";
 import type { TurnRiskTotals } from "./turn-risk.ts";
@@ -76,6 +84,41 @@ export function isSelfReviewDisabled(env: NodeJS.ProcessEnv = process.env): bool
 	return isTruthyEnvFlag(env.PIT_NO_SELF_REVIEW);
 }
 
+/** Reasoning level the review pass uses when it runs on the session model. */
+export const SELF_REVIEW_SESSION_THINKING: ThinkingLevel = "medium";
+/**
+ * Reasoning level for the small-class sibling. Mirrors compaction's sibling
+ * routing (and `resolveSubagentThinking`'s small-class bucket): a cheap model is
+ * given a mechanical, schema-shaped job, so it must not pay for medium reasoning.
+ */
+export const SELF_REVIEW_SIBLING_THINKING: ThinkingLevel = "low";
+
+/**
+ * Where the review subagent runs. The review reads a handful of files and emits
+ * findings against a fixed schema (`SELF_REVIEW_SCHEMA`) — small-class work — so
+ * by default it goes to the same-provider cheap sibling instead of burning the
+ * session model (Opus/Sonnet) on up to 6 read/grep turns per HIGH cycle.
+ *
+ * Same shape as compaction's `resolveCompactModel`: sibling by default, session
+ * model when there is no sibling on the provider (or the session model is already
+ * small-class). Auth is NOT checked here — the caller fails open to the session
+ * model when the sibling has no credentials.
+ *
+ * Kill-switch: `PIT_NO_SELF_REVIEW_SIBLING` (truthy) pins the review to the
+ * session model, the pre-existing behavior.
+ */
+export function resolveSelfReviewModel(
+	sessionModel: Model<Api>,
+	availableModels: readonly Model<Api>[],
+	env: NodeJS.ProcessEnv = process.env,
+): { model: Model<Api>; thinkingLevel: ThinkingLevel; usedSibling: boolean } {
+	const sessionChoice = { model: sessionModel, thinkingLevel: SELF_REVIEW_SESSION_THINKING, usedSibling: false };
+	if (isTruthyEnvFlag(env.PIT_NO_SELF_REVIEW_SIBLING)) return sessionChoice;
+	const sibling = resolveSmallClassSibling(sessionModel, availableModels);
+	if (!sibling) return sessionChoice;
+	return { model: sibling, thinkingLevel: SELF_REVIEW_SIBLING_THINKING, usedSibling: true };
+}
+
 /**
  * Hard timeout for one review subagent pass. Bounded well under a typical check
  * command so the review never dominates end-of-turn latency; a timeout is
@@ -120,7 +163,7 @@ export function highFindings(findings: readonly SelfReviewFinding[]): SelfReview
 export const SELF_REVIEW_SYSTEM_PROMPT = [
 	"You are a strict, read-only code reviewer. A turn just made a high-risk change and you must catch defects the author cannot see.",
 	"",
-	"Review ONLY the supplied diff summary and the touched files (open them with read/grep/find/ls as needed). Do NOT review anything outside the touched files.",
+	"Review ONLY the supplied diff summary, the touched files, and any explicitly listed impacted files (open them with read/grep/find/ls as needed). Do NOT review unrelated files.",
 	"",
 	"Judge the change against this rubric:",
 	...HIGH_RISK_CHECKLIST.map((item) => `- ${item}`),

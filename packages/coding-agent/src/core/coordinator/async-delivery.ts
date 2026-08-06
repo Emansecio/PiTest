@@ -4,7 +4,7 @@
  * may have moved on, so the block restates which handle finished and carries the
  * full result/error as the trailing payload (so nothing after it dilutes it).
  */
-export function buildAsyncDeliveryBody(handle: string, status: "done" | "error", text: string): string {
+export function buildAsyncDeliveryBody(handle: string, status: "done" | "error" | "cancelled", text: string): string {
 	const header =
 		status === "error"
 			? `[ASYNC DELEGATION FAILED] Subagent '${handle}' errored.`

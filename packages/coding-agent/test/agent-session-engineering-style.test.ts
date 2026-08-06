@@ -34,7 +34,7 @@ function createSession(settingsManager: SettingsManager) {
 }
 
 describe("AgentSession threads engineeringStyle through to the system prompt", () => {
-	it("includes the compact karpathy pointer by default", () => {
+	it("includes the compact karpathy pointer by default", async () => {
 		const session = createSession(SettingsManager.inMemory());
 		try {
 			for (const b of getEngineeringStylePromptGuidelines("karpathy")) {
@@ -44,28 +44,28 @@ describe("AgentSession threads engineeringStyle through to the system prompt", (
 				expect(session.systemPrompt).not.toContain(b);
 			}
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 	});
 
-	it('omits karpathy bullets when engineeringStyle is explicitly "default"', () => {
+	it('omits karpathy bullets when engineeringStyle is explicitly "default"', async () => {
 		const session = createSession(SettingsManager.inMemory({ engineeringStyle: "default" }));
 		try {
 			for (const b of getEngineeringStyleGuidelines("karpathy")) {
 				expect(session.systemPrompt).not.toContain(b);
 			}
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 	});
 
-	it("does not repeat tool-local guidance in the global system prompt", () => {
+	it("does not repeat tool-local guidance in the global system prompt", async () => {
 		const session = createSession(SettingsManager.inMemory());
 		try {
 			expect(session.systemPrompt).not.toContain("Use read to examine files instead of cat or sed.");
 			expect(session.systemPrompt).not.toContain("Call only when the active tool list lacks a needed capability");
 		} finally {
-			session.dispose();
+			await session.dispose();
 		}
 	});
 });

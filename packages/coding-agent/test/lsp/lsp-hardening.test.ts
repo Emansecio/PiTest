@@ -142,6 +142,143 @@ describe("lsp hardening", () => {
 		}
 	});
 
+	it("applies repeated documentChanges text edits sequentially", async () => {
+		const cwd = makeProject();
+		try {
+			const target = join(cwd, "sequential.txt");
+			writeFileSync(target, "abc\n");
+			await applyWorkspaceEdit(
+				{
+					documentChanges: [
+						{
+							textDocument: { uri: fileToUri(target) },
+							edits: [
+								{
+									range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+									newText: "long",
+								},
+							],
+						},
+						{
+							textDocument: { uri: fileToUri(target) },
+							edits: [
+								{
+									range: { start: { line: 0, character: 0 }, end: { line: 0, character: 4 } },
+									newText: "LONG",
+								},
+							],
+						},
+					],
+				},
+				cwd,
+			);
+			expect(readFileSync(target, "utf-8")).toBe("LONGbc\n");
+		} finally {
+			await shutdownAll().catch(() => {});
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("honors resource operation options and rolls back on protocol failures", async () => {
+		const cwd = makeProject();
+		try {
+			const existing = join(cwd, "existing.txt");
+			writeFileSync(existing, "existing\n");
+			await expect(
+				applyWorkspaceEdit({ documentChanges: [{ kind: "create", uri: fileToUri(existing) }] }, cwd),
+			).rejects.toThrow(/exist|create|workspace edit/i);
+			expect(readFileSync(existing, "utf-8")).toBe("existing\n");
+			await applyWorkspaceEdit(
+				{ documentChanges: [{ kind: "create", uri: fileToUri(existing), options: { ignoreIfExists: true } }] },
+				cwd,
+			);
+			expect(readFileSync(existing, "utf-8")).toBe("existing\n");
+			await applyWorkspaceEdit(
+				{ documentChanges: [{ kind: "create", uri: fileToUri(existing), options: { overwrite: true } }] },
+				cwd,
+			);
+			expect(readFileSync(existing, "utf-8")).toBe("");
+
+			const source = join(cwd, "source.txt");
+			const destination = join(cwd, "destination.txt");
+			writeFileSync(source, "source\n");
+			writeFileSync(destination, "destination\n");
+			await expect(
+				applyWorkspaceEdit(
+					{ documentChanges: [{ kind: "rename", oldUri: fileToUri(source), newUri: fileToUri(destination) }] },
+					cwd,
+				),
+			).rejects.toThrow(/exist|rename|workspace edit/i);
+			expect(readFileSync(source, "utf-8")).toBe("source\n");
+			expect(readFileSync(destination, "utf-8")).toBe("destination\n");
+			await applyWorkspaceEdit(
+				{
+					documentChanges: [
+						{
+							kind: "rename",
+							oldUri: fileToUri(source),
+							newUri: fileToUri(destination),
+							options: { ignoreIfExists: true },
+						},
+					],
+				},
+				cwd,
+			);
+			expect(readFileSync(source, "utf-8")).toBe("source\n");
+			await applyWorkspaceEdit(
+				{
+					documentChanges: [
+						{
+							kind: "rename",
+							oldUri: fileToUri(source),
+							newUri: fileToUri(destination),
+							options: { overwrite: true },
+						},
+					],
+				},
+				cwd,
+			);
+			expect(readFileSync(destination, "utf-8")).toBe("source\n");
+			await applyWorkspaceEdit({ documentChanges: [{ kind: "delete", uri: fileToUri(destination) }] }, cwd);
+			expect(() => readFileSync(destination, "utf-8")).toThrow();
+
+			const missing = join(cwd, "missing.txt");
+			await expect(
+				applyWorkspaceEdit({ documentChanges: [{ kind: "delete", uri: fileToUri(missing) }] }, cwd),
+			).rejects.toThrow(/not exist|missing|delete|workspace edit/i);
+			await applyWorkspaceEdit(
+				{ documentChanges: [{ kind: "delete", uri: fileToUri(missing), options: { ignoreIfNotExists: true } }] },
+				cwd,
+			);
+
+			const rollback = join(cwd, "rollback.txt");
+			writeFileSync(rollback, "before\n");
+			await expect(
+				applyWorkspaceEdit(
+					{
+						documentChanges: [
+							{
+								textDocument: { uri: fileToUri(rollback) },
+								edits: [
+									{
+										range: { start: { line: 0, character: 0 }, end: { line: 0, character: 6 } },
+										newText: "after",
+									},
+								],
+							},
+							{ kind: "delete", uri: fileToUri(missing) },
+						],
+					},
+					cwd,
+				),
+			).rejects.toThrow(/not exist|missing|delete|workspace edit/i);
+			expect(readFileSync(rollback, "utf-8")).toBe("before\n");
+		} finally {
+			await shutdownAll().catch(() => {});
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
 	it("rolls back earlier text edits when a later workspace edit fails", async () => {
 		const cwd = makeProject();
 		try {

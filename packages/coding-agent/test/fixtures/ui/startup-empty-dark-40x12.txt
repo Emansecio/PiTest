@@ -1,0 +1,5 @@
+pit · dark · <repo>
+────────────────────────────────────────
+pit v0.75.4 · your coding companion · /…
+
+ctrl+c sair · /help ajuda

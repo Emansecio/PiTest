@@ -70,6 +70,27 @@ describe("coordinator op:continue", () => {
 		expect(textOf(cont)).toContain("follow-up answer with prior context");
 	});
 
+	it.each(["error", "aborted"] as const)(
+		"reports isError when a follow-up resolves with stopReason %s",
+		async (stopReason) => {
+			const task = buildTask([
+				fauxAssistantMessage("first answer"),
+				fauxAssistantMessage("partial follow-up", {
+					stopReason,
+					errorMessage: stopReason === "error" ? "follow-up dropped" : undefined,
+				}),
+			]);
+			await exec(task, { op: "run", name: "follow-up-failure", prompt: "first task" });
+
+			const cont = await exec(task, { op: "continue", name: "follow-up-failure", prompt: "go further" });
+			expect(isErr(cont)).toBe(true);
+			expect(textOf(cont)).toMatch(/did not complete|remains resumable/i);
+			const list = await exec(task, { op: "list" });
+			expect(textOf(list)).toMatch(/Resumable[\s\S]*follow-up-failure/);
+			expect(textOf(list)).not.toMatch(/Continuable[\s\S]*follow-up-failure/);
+		},
+	);
+
 	it("charges each follow-up once and merges only its new usage into the original record", async () => {
 		const task = buildTask([
 			fauxAssistantMessage("answer 1"),

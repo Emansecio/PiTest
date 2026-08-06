@@ -16,6 +16,14 @@
  */
 
 import { sliceSafe } from "../utils/surrogate.ts";
+import { LOOP_STEER_ADVICE, STEER_REMINDER_CLOSE } from "./tool-call-feedback.ts";
+
+/**
+ * Opening marker of the repeated-error steer. Emitted as a self-contained
+ * `<system-reminder>` block so `compaction/prune.ts` (N8) can collapse it once it
+ * leaves the protection window — see the format note in `tool-call-feedback.ts`.
+ */
+export const REPEATED_ERROR_STEER_MARKER = "<system-reminder>[repeated-error]";
 
 /**
  * Counts the trailing run of tool errors sharing one normalised fingerprint, and
@@ -108,38 +116,41 @@ export interface CrossErrorReminderInput {
 	sampleError?: string;
 }
 
-const MAX_SAMPLE_CHARS = 400;
+/**
+ * Chars kept of the recurring error, as head + tail. The sample only has to make
+ * the blocker recognizable — the full error text is already in the tool results
+ * a few messages above — so this is deliberately small (it used to be a 400-char
+ * head, which was most of the reminder's weight).
+ */
+const SAMPLE_HEAD_CHARS = 96;
+const SAMPLE_TAIL_CHARS = 64;
 
-/** Build the markdown reminder injected when the agent keeps hitting one error. */
+/** One-line head+tail excerpt of the recurring error (whitespace collapsed). */
+function sampleExcerpt(raw: string): string | undefined {
+	const flat = raw.replace(/\s+/g, " ").trim();
+	if (!flat) return undefined;
+	if (flat.length <= SAMPLE_HEAD_CHARS + SAMPLE_TAIL_CHARS) return flat;
+	const head = sliceSafe(flat, 0, SAMPLE_HEAD_CHARS);
+	const tail = sliceSafe(flat, flat.length - SAMPLE_TAIL_CHARS, flat.length);
+	return `${head}…${tail}`;
+}
+
+/**
+ * Build the reminder injected when the agent keeps hitting one error across
+ * several approaches. One specific line (count / approaches / short sample) plus
+ * the shared loop advice — see {@link LOOP_STEER_ADVICE}.
+ */
 export function buildCrossErrorReminder(input: CrossErrorReminderInput): string {
 	const count = Math.max(0, Math.floor(input.count));
 	const approaches = Math.max(0, Math.floor(input.distinctApproaches));
 	const lines: string[] = [];
-	lines.push("<repeated-error-reminder>");
 	lines.push(
-		`The last ${count} tool calls failed with the SAME underlying error across ${approaches} different ` +
-			"approaches. Changing the tool or tweaking arguments is not addressing the root cause — the blocker " +
-			"is the same each time.",
+		`${REPEATED_ERROR_STEER_MARKER} The last ${count} tool calls failed with the SAME error across ` +
+			`${approaches} different approaches.`,
 	);
-	if (input.sampleError) {
-		const sample =
-			input.sampleError.length > MAX_SAMPLE_CHARS
-				? `${sliceSafe(input.sampleError, 0, MAX_SAMPLE_CHARS)}…`
-				: input.sampleError;
-		lines.push("");
-		lines.push("Recurring error:");
-		lines.push("```");
-		lines.push(sample);
-		lines.push("```");
-	}
-	lines.push("");
-	lines.push(
-		"Before anything else, re-read the actual error above word for word — the reason it keeps failing is usually already stated in it.",
-	);
-	lines.push("Stop varying the call and fix the cause:");
-	lines.push("- **Read the actual file/state** the error refers to instead of guessing at arguments.");
-	lines.push("- If a path, permission, or precondition is wrong, correct THAT — not the surface call.");
-	lines.push("- If you cannot resolve it, **ask the user** rather than trying more variations.");
-	lines.push("</repeated-error-reminder>");
+	const sample = input.sampleError ? sampleExcerpt(input.sampleError) : undefined;
+	if (sample) lines.push(`Recurring error: ${sample}`);
+	lines.push(LOOP_STEER_ADVICE);
+	lines.push(STEER_REMINDER_CLOSE);
 	return lines.join("\n");
 }

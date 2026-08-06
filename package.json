@@ -21,6 +21,7 @@
 		"check:generated": "node scripts/check-generated-models.mjs",
 		"check:dist-exports": "node scripts/check-dist-exports.mjs",
 		"check:token-bench": "node scripts/check-token-bench.mjs",
+		"bench:repo-graph": "tsx scripts/bench-repo-graph.mts",
 		"bench:fusion-tokens": "tsx scripts/bench-fusion-tokens.mts",
 		"profile:tui": "node scripts/profile-coding-agent-node.mjs --mode tui",
 		"profile:rpc": "node scripts/profile-coding-agent-node.mjs --mode rpc",
@@ -64,6 +65,10 @@
 		"rimraf": "6.1.2",
 		"gaxios": {
 			"rimraf": "6.1.2"
-		}
+		},
+		"brace-expansion": "5.0.9",
+		"fast-uri": "3.1.5",
+		"protobufjs": "7.6.5",
+		"postcss": "8.5.25"
 	}
 }

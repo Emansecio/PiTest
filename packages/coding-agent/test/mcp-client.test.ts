@@ -157,13 +157,13 @@ describe("McpHttpClient", () => {
 			headers: { Authorization: slowHeader },
 		});
 
-		const startedAt = Date.now();
 		const initialization = client.initialize();
 		await new Promise((resolve) => setTimeout(resolve, 50));
+		const disposeStartedAt = Date.now();
 		client.dispose();
 
 		await expect(initialization).rejects.toThrow();
-		expect(Date.now() - startedAt).toBeLessThan(800);
+		expect(Date.now() - disposeStartedAt).toBeLessThan(800);
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 

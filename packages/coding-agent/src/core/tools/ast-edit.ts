@@ -266,6 +266,8 @@ export function createAstEditToolDefinition(
 	return {
 		name: "ast_edit",
 		label: "ast_edit",
+		// P0: refuse to execute args pruned by the history elision marker.
+		mutationGuard: true,
 		description: `Structural code rewrite via ast-grep CLI. \`pattern\` captures with $METAVAR; \`rewrite\` references them. Modes: dry_run returns proposed changes only; preview stages a preview that the resolve tool commits; default applies in-place with --update-all. Requires the ast-grep CLI to be installed and on PATH — the tool errors with "${AST_GREP_INSTALL_HINT}" if it is absent. For single-file text edits use \`edit\`/\`edit_v2\` instead.`,
 		promptSnippet:
 			"Structural AST rewrite (ast-grep). pattern + rewrite use $METAVAR. Supports dry_run and preview modes.",

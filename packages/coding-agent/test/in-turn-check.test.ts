@@ -17,6 +17,7 @@ const state = (overrides: Partial<InTurnCheckState> = {}): InTurnCheckState => (
 	ranCheck: false,
 	checkCommand: "npm run check",
 	ignoredStreak: 0,
+	autonomousGoalActive: false,
 	aborted: false,
 	...overrides,
 });
@@ -46,12 +47,20 @@ describe("decideInTurnCheckSteer", () => {
 		expect(decideInTurnCheckSteer(state({ checkCommand: null })).action).toBe("none");
 	});
 
-	it("gives up after the bounded number of unheeded corrections", () => {
+	it("runs one mechanical fallback check after the bounded corrections are ignored", () => {
 		for (let streak = 0; streak < IN_TURN_CHECK_MAX_IGNORED; streak++) {
 			expect(decideInTurnCheckSteer(state({ ignoredStreak: streak })).action).toBe("steer");
 		}
-		expect(decideInTurnCheckSteer(state({ ignoredStreak: IN_TURN_CHECK_MAX_IGNORED })).action).toBe("give-up");
-		expect(decideInTurnCheckSteer(state({ ignoredStreak: IN_TURN_CHECK_MAX_IGNORED + 5 })).action).toBe("give-up");
+		expect(decideInTurnCheckSteer(state({ ignoredStreak: IN_TURN_CHECK_MAX_IGNORED }))).toEqual({
+			action: "run-check",
+			command: "npm run check",
+		});
+	});
+
+	it("leaves an active autonomous goal to goal_complete after the bounded corrections", () => {
+		expect(
+			decideInTurnCheckSteer(state({ ignoredStreak: IN_TURN_CHECK_MAX_IGNORED, autonomousGoalActive: true })),
+		).toEqual({ action: "give-up" });
 	});
 });
 

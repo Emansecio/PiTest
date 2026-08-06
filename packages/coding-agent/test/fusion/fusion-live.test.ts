@@ -95,20 +95,30 @@ describe("FusionLiveComponent", () => {
 	});
 
 	it("rolls the tool count into the done row", () => {
-		const c = new FusionLiveComponent(fakeUi());
-		c.setStage("panel");
-		c.upsertMember({ index: 0, cli: "claude", model: "opus", status: "running", elapsedMs: 0 });
-		c.recordActivity(0, "tool", "Grep");
-		c.recordActivity(0, "tool", "Read");
-		c.upsertMember({ index: 0, cli: "claude", model: "opus", status: "done", elapsedMs: 22000, chars: 3100 });
-		const row =
-			c
-				.render(120)
-				.map(stripAnsi)
-				.find((l) => l.includes("claude:opus")) ?? "";
-		expect(row).toContain("2 tools");
-		expect(row).toContain("3.1k chars");
-		c.dispose();
+		// Snap settle ease so the row shows ✓ immediately (ColorEase two-phase
+		// would otherwise hold a frozen spinner for ~90ms of COLOR_EASE_MS).
+		const prev = process.env.PIT_REDUCED_MOTION;
+		process.env.PIT_REDUCED_MOTION = "1";
+		try {
+			const c = new FusionLiveComponent(fakeUi());
+			c.setStage("panel");
+			c.upsertMember({ index: 0, cli: "claude", model: "opus", status: "running", elapsedMs: 0 });
+			c.recordActivity(0, "tool", "Grep");
+			c.recordActivity(0, "tool", "Read");
+			c.upsertMember({ index: 0, cli: "claude", model: "opus", status: "done", elapsedMs: 22000, chars: 3100 });
+			const row =
+				c
+					.render(120)
+					.map(stripAnsi)
+					.find((l) => l.includes("claude:opus")) ?? "";
+			expect(row).toContain("✓");
+			expect(row).toContain("2 tools");
+			expect(row).toContain("3.1k chars");
+			c.dispose();
+		} finally {
+			if (prev === undefined) delete process.env.PIT_REDUCED_MOTION;
+			else process.env.PIT_REDUCED_MOTION = prev;
+		}
 	});
 
 	it("inlines WHAT the advisor is thinking on the member row", () => {

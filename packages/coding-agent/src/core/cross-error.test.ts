@@ -4,7 +4,13 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { buildCrossErrorReminder, CrossErrorTracker, decideCrossErrorReminder } from "./cross-error.ts";
+import {
+	buildCrossErrorReminder,
+	CrossErrorTracker,
+	decideCrossErrorReminder,
+	REPEATED_ERROR_STEER_MARKER,
+} from "./cross-error.ts";
+import { LOOP_STEER_ADVICE } from "./tool-call-feedback.ts";
 
 describe("CrossErrorTracker", () => {
 	it("counts a run of the same error across different call shapes", () => {
@@ -70,14 +76,32 @@ describe("decideCrossErrorReminder", () => {
 });
 
 describe("buildCrossErrorReminder", () => {
-	it("reports the count, approaches, and a truncated sample", () => {
+	it("reports the count, approaches, and a short sample", () => {
 		const out = buildCrossErrorReminder({ count: 3, distinctApproaches: 2, sampleError: "ENOENT: no such file" });
-		expect(out).toContain("<repeated-error-reminder>");
+		// Collapsible <system-reminder> block (N8 in compaction/prune.ts).
+		expect(out.startsWith(REPEATED_ERROR_STEER_MARKER)).toBe(true);
 		expect(out).toContain("3 tool calls");
 		expect(out).toContain("2 different");
 		expect(out).toContain("ENOENT: no such file");
+		expect(out).toContain(LOOP_STEER_ADVICE);
 		expect(out).toContain("ask the user");
-		// Steers the model to re-read the recurring error before trying another variation.
-		expect(out).toContain("re-read the actual error above");
+		expect(out.endsWith("</system-reminder>")).toBe(true);
+	});
+
+	it("excerpts a long sample as head+tail instead of a 400-char head", () => {
+		const out = buildCrossErrorReminder({
+			count: 4,
+			distinctApproaches: 3,
+			sampleError: `HEAD_MARK ${"filler ".repeat(300)}TAIL_MARK`,
+		});
+		expect(out).toContain("HEAD_MARK");
+		expect(out).toContain("TAIL_MARK");
+		expect(out).toContain("…");
+		expect(out.length).toBeLessThan(470);
+	});
+
+	it("omits the sample line when the error text is blank", () => {
+		const out = buildCrossErrorReminder({ count: 3, distinctApproaches: 2, sampleError: "   \n\t " });
+		expect(out).not.toContain("Recurring error:");
 	});
 });

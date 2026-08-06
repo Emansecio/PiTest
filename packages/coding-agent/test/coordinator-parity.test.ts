@@ -11,7 +11,8 @@
 
 import type { AgentMessage } from "@pit/agent-core";
 import { type FauxProviderRegistration, fauxAssistantMessage, registerFauxProvider } from "@pit/ai";
-import { Type } from "typebox";
+import { type TSchema, Type } from "typebox";
+import { Value } from "typebox/value";
 import { afterEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { createCoordinatorExtension, SUBAGENT_READ_OP } from "../src/core/built-ins/coordinator-extension.js";
@@ -124,7 +125,11 @@ describe("parallel tool parity (extension level)", () => {
 	let faux: FauxProviderRegistration | undefined;
 	afterEach(() => faux?.unregister());
 
-	function buildTools(responses: Parameters<FauxProviderRegistration["setResponses"]>[0], throwLifecycle = false) {
+	function buildTools(
+		responses: Parameters<FauxProviderRegistration["setResponses"]>[0],
+		throwLifecycle = false,
+		onAsyncSettled?: (handle: string, text: string, status: "done" | "error" | "cancelled") => boolean,
+	) {
 		faux = registerFauxProvider();
 		faux.setResponses(responses);
 		const model = faux.getModel();
@@ -133,6 +138,7 @@ describe("parallel tool parity (extension level)", () => {
 		const modelRegistry = ModelRegistry.inMemory(authStorage);
 		const started: string[] = [];
 		const completed: string[] = [];
+		const completionStatuses: Array<{ handle: string; status: string }> = [];
 		const ext = createCoordinatorExtension({
 			modelRegistry,
 			getParentModel: () => model,
@@ -142,26 +148,211 @@ describe("parallel tool parity (extension level)", () => {
 				started.push(h);
 				if (throwLifecycle) throw new Error("broken direct start sink");
 			},
-			onSubagentComplete: (h) => {
+			onSubagentComplete: (h, status) => {
 				completed.push(h);
+				completionStatuses.push({ handle: h, status });
 				if (throwLifecycle) throw new Error("broken direct complete sink");
 			},
-			onAsyncComplete: () => {
+			onAsyncComplete: (handle, text, status) => {
 				if (throwLifecycle) throw new Error("broken async-complete sink");
-				return false;
+				return onAsyncSettled?.(handle, text, status) ?? false;
 			},
 		});
-		const defs = new Map<string, { execute: (...a: unknown[]) => Promise<unknown> }>();
+		const defs = new Map<string, { execute: (...a: unknown[]) => Promise<unknown>; parameters: TSchema }>();
 		ext({
 			registerTool: (def: { name: string }) => defs.set(def.name, def as never),
 		} as never);
-		return { defs, started, completed };
+		return { defs, started, completed, completionStatuses };
 	}
 
 	const exec = (tool: { execute: (...a: unknown[]) => Promise<unknown> }, params: Record<string, unknown>) =>
 		tool.execute("call", params, undefined, undefined, {});
 	const textOf = (r: unknown): string => (r as { content: { text: string }[] }).content[0].text;
 	const isErr = (r: unknown): boolean => (r as { isError: boolean }).isError;
+
+	it.each([
+		["task", { op: "run", prompt: "p", acceptance: { criteria: "x", max_attempts: 0 } }],
+		["parallel", { tasks: [{ prompt: "p", acceptance: { criteria: "x", max_attempts: -1 } }] }],
+		[
+			"fanout",
+			{
+				scout: { prompt: "s" },
+				reviewer: { prompt_template: "{{target}}" },
+				worker: { prompt: "w", acceptance: { criteria: "x", max_attempts: 1.5 } },
+			},
+		],
+	] as const)("%s schema rejects max_attempts values below the integer minimum", (toolName, params) => {
+		const { defs } = buildTools([]);
+		const tool = defs.get(toolName);
+		if (!tool) throw new Error(`${toolName} not registered`);
+		expect(Value.Check(tool.parameters, params)).toBe(false);
+	});
+
+	it("exposes and validates acceptance check timeout on task", () => {
+		const { defs } = buildTools([]);
+		const task = defs.get("task");
+		if (!task) throw new Error("task not registered");
+		expect(
+			Value.Check(task.parameters, {
+				op: "run",
+				prompt: "p",
+				acceptance: { check: "true", check_timeout_ms: 1000 },
+			}),
+		).toBe(true);
+		expect(
+			Value.Check(task.parameters, { op: "run", prompt: "p", acceptance: { check: "true", check_timeout_ms: 999 } }),
+		).toBe(false);
+	});
+
+	it("cancels a detached subagent explicitly by handle", async () => {
+		const { defs } = buildTools([
+			async () => {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				return fauxAssistantMessage("too late");
+			},
+		]);
+		const task = defs.get("task");
+		if (!task) throw new Error("task not registered");
+
+		const spawned = await exec(task, { op: "spawn", name: "slow", prompt: "p" });
+		expect(isErr(spawned)).toBe(false);
+		const cancelled = await exec(task, { op: "cancel", handles: ["slow"] });
+		expect(isErr(cancelled)).toBe(false);
+		expect(textOf(cancelled)).toContain("slow: cancellation requested");
+		const joined = await exec(task, { op: "join", handles: ["slow"] });
+		expect(isErr(joined)).toBe(false);
+		expect(textOf(joined)).toMatch(/slow[\s\S]*cancelled[\s\S]*cancelled by parent/);
+	});
+
+	it("bounds uncollected detached completions and exposes evictions without losing readable output", async () => {
+		const count = 130;
+		let resolveSettled!: () => void;
+		const settled = new Promise<void>((resolve) => {
+			resolveSettled = resolve;
+		});
+		let completed = 0;
+		const { defs } = buildTools(
+			Array.from({ length: count }, (_, i) => fauxAssistantMessage(`detached-result-${i}`)),
+			false,
+			() => {
+				completed += 1;
+				if (completed === count) resolveSettled();
+				return false;
+			},
+		);
+		const task = defs.get("task");
+		if (!task) throw new Error("task not registered");
+
+		for (let i = 0; i < count; i += 1) {
+			const spawned = await exec(task, { op: "spawn", name: `overflow-${i}`, prompt: "p" });
+			expect(isErr(spawned)).toBe(false);
+		}
+		await settled;
+		const listed = await exec(task, { op: "list" });
+		expect((listed as { details?: { asyncHandles?: number; evictedAsyncHandles?: number } }).details).toMatchObject({
+			asyncHandles: 64,
+			evictedAsyncHandles: 64,
+		});
+
+		// The oldest completion has moved out of both the 64-entry pending cache and
+		// the compact tombstone display cache. Its separate identity reservation keeps
+		// poll/join honest and blocks name reuse until acknowledged.
+		const poll = await exec(task, { op: "poll", handles: ["overflow-0"] });
+		const pollText = textOf(poll);
+		expect(pollText).toMatch(/(?:settled|done)/);
+		if (pollText.includes("settled")) expect(pollText).toContain('op:"read"');
+		expect((poll as { details?: { evicted?: number } }).details?.evicted).toBe(0);
+
+		const duplicate = await exec(task, { op: "spawn", name: "overflow-0", prompt: "new" });
+		expect(isErr(duplicate)).toBe(true);
+		expect(textOf(duplicate)).toMatch(/(?:still reserved|already finished)/);
+
+		const joined = await exec(task, { op: "join", handles: ["overflow-0"] });
+		const joinedText = textOf(joined);
+		expect(joinedText).toMatch(/(?:settled details were evicted|detached-result-0)/);
+		if (joinedText.includes("settled details were evicted")) expect(joinedText).toContain('op:"read"');
+		expect((joined as { details?: { evicted?: number } }).details?.evicted).toBe(0);
+
+		const read = await exec(task, { op: SUBAGENT_READ_OP, name: "overflow-0" });
+		expect(isErr(read)).toBe(false);
+		expect(textOf(read)).toContain("detached-result-0");
+	});
+
+	it("preserves an errored detached status after its tombstone details are evicted", async () => {
+		const successful = 129;
+		let resolveErrored!: () => void;
+		const errored = new Promise<void>((resolve) => {
+			resolveErrored = resolve;
+		});
+		let resolveSettled!: () => void;
+		const settled = new Promise<void>((resolve) => {
+			resolveSettled = resolve;
+		});
+		let completed = 0;
+		const transportError = fauxAssistantMessage("", {
+			stopReason: "error",
+			errorMessage: "provider returned error: 503 detached failure",
+		});
+		const { defs } = buildTools(
+			[
+				transportError,
+				transportError,
+				...Array.from({ length: successful }, (_, i) => fauxAssistantMessage(`ok-${i}`)),
+			],
+			false,
+			(handle) => {
+				completed += 1;
+				if (handle === "evicted-error") resolveErrored();
+				if (completed === successful + 1) resolveSettled();
+				return false;
+			},
+		);
+		const task = defs.get("task");
+		if (!task) throw new Error("task not registered");
+
+		expect(isErr(await exec(task, { op: "spawn", name: "evicted-error", prompt: "p" }))).toBe(false);
+		await errored;
+		for (let i = 0; i < successful; i += 1) {
+			expect(isErr(await exec(task, { op: "spawn", name: `after-error-${i}`, prompt: "p" }))).toBe(false);
+		}
+		await settled;
+
+		const poll = await exec(task, { op: "poll", handles: ["evicted-error"] });
+		expect(textOf(poll)).toContain("settled (details evicted)");
+		expect((poll as { details?: { anyDone?: boolean; allSettled?: boolean } }).details).toMatchObject({
+			anyDone: false,
+			allSettled: true,
+		});
+	});
+
+	it("bounds identity reservations after detached tombstones are evicted", async () => {
+		const count = 270;
+		let resolveSettled!: () => void;
+		const settled = new Promise<void>((resolve) => {
+			resolveSettled = resolve;
+		});
+		let completed = 0;
+		const { defs } = buildTools(
+			Array.from({ length: count }, (_, i) => fauxAssistantMessage(`reservation-result-${i}`)),
+			false,
+			() => {
+				completed += 1;
+				if (completed === count) resolveSettled();
+				return false;
+			},
+		);
+		const task = defs.get("task");
+		if (!task) throw new Error("task not registered");
+		for (let i = 0; i < count; i += 1) {
+			const spawned = await exec(task, { op: "spawn", name: `reservation-${i}`, prompt: "p" });
+			expect(isErr(spawned)).toBe(false);
+		}
+		await settled;
+		const listed = await exec(task, { op: "list" });
+		expect(
+			(listed as { details?: { reservedAsyncHandles?: number } }).details?.reservedAsyncHandles,
+		).toBeLessThanOrEqual(256);
+	});
 
 	it("inlines digests with read pointers and keeps the integral output recoverable", async () => {
 		const { defs, started, completed } = buildTools([fauxAssistantMessage(bigOutput())]);
@@ -206,6 +397,59 @@ describe("parallel tool parity (extension level)", () => {
 		expect(isErr(joined)).toBe(false);
 		expect(textOf(joined)).toContain("detached done");
 		expect(started).toEqual(expect.arrayContaining(["direct-safe", "detached-safe"]));
+	});
+
+	it("marks an exhausted acceptance gate as an errored root lifecycle", async () => {
+		const { defs, started, completed, completionStatuses } = buildTools([
+			fauxAssistantMessage("incomplete"),
+			fauxAssistantMessage(`\`\`\`json\n${JSON.stringify({ pass: false, reasons: "missing" })}\n\`\`\``),
+		]);
+		const task = defs.get("task");
+		if (!task) throw new Error("task not registered");
+
+		const result = await exec(task, {
+			op: "run",
+			name: "gate-failed",
+			prompt: "p",
+			acceptance: { criteria: "must pass", max_attempts: 1 },
+		});
+
+		expect(isErr(result)).toBe(true);
+		expect(textOf(result)).toContain("Acceptance gate not satisfied after 1 attempts");
+		expect(started).toEqual(
+			expect.arrayContaining(["gate-failed", "gate-failed [attempt 1 worker]", "gate-failed [attempt 1 judge]"]),
+		);
+		expect(completed).toContain("gate-failed");
+		expect(completionStatuses).toContainEqual({ handle: "gate-failed", status: "error" });
+
+		const continued = await exec(task, { op: "continue", name: "gate-failed", prompt: "try again" });
+		expect(isErr(continued)).toBe(true);
+		expect(textOf(continued)).toContain("no continuable");
+	});
+
+	it("applies acceptance gates to detached spawns and does not expose failed work as continuable", async () => {
+		const { defs } = buildTools([
+			fauxAssistantMessage("detached incomplete"),
+			fauxAssistantMessage(`\`\`\`json\n${JSON.stringify({ pass: false, reasons: "missing" })}\n\`\`\``),
+		]);
+		const task = defs.get("task");
+		if (!task) throw new Error("task not registered");
+
+		const spawned = await exec(task, {
+			op: "spawn",
+			name: "gate-detached",
+			prompt: "p",
+			acceptance: { criteria: "must pass", max_attempts: 1 },
+		});
+		expect(isErr(spawned)).toBe(false);
+
+		const joined = await exec(task, { op: "join", handles: ["gate-detached"] });
+		expect(isErr(joined)).toBe(false);
+		expect(textOf(joined)).toContain("acceptance gate failed after 1 attempt(s)");
+
+		const continued = await exec(task, { op: "continue", name: "gate-detached", prompt: "try again" });
+		expect(isErr(continued)).toBe(true);
+		expect(textOf(continued)).toContain("no continuable");
 	});
 
 	it("digests the scout output and makes its integral target list readable", async () => {

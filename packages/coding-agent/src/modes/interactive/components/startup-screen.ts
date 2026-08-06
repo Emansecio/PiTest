@@ -4,7 +4,7 @@
  * Redesign (2026-07): a centered column reproducing the approved mock — the pet
  * mascot on top (sixel when the terminal supports it, half-block cells
  * otherwise), then a dense identity line (`pit v… · tagline`) and up to three
- * resumable recent sessions (`↳ title (age)`). No horizontal rule, no "Welcome
+ * recent sessions (`• title (age)`) under an explicit `/resume` affordance. No horizontal rule, no "Welcome
  * to Pit", and no workspace context line: cwd/branch/model/thinking/mode are
  * already on the pristine footer of the SAME screen (footer.ts collapse), so
  * repeating them here was pure noise — the original welcome-box had cut exactly
@@ -58,6 +58,8 @@ export interface StartupScreenData {
 	helpHint?: string;
 	/** Up to three recent sessions to offer for resume. */
 	recentSessions: StartupRecentSession[];
+	/** Explicit affordance shown above recent sessions. */
+	recentSessionsHint?: string;
 	/** Resolved pet colors (stroke/eye/bg) from the theme. */
 	petColors: PetColors;
 	/** False when `PIT_NO_PET` disables the mascot entirely. */
@@ -138,7 +140,7 @@ export class StartupScreen implements Component {
 		const compact = data.rows < COMPACT_ROWS;
 		const showPet = data.petEnabled && !compact;
 		const resumes = Math.min(3, data.recentSessions.length);
-		const unitCount = (showPet ? 1 : 0) + 1 /* identity */ + resumes;
+		const unitCount = (showPet ? 1 : 0) + 1 /* identity */ + (resumes > 0 ? 1 : 0) + resumes;
 		return { showPet, unitCount };
 	}
 
@@ -235,6 +237,9 @@ export class StartupScreen implements Component {
 		const identityLine = this.buildIdentityLine(colWidth, width);
 		units.push(this.showPet ? ["", identityLine] : [identityLine]);
 		const resumes = d.recentSessions.slice(0, 3);
+		if (resumes.length > 0) {
+			units.push([this.buildRecentSessionsHint(colWidth, width)]);
+		}
 		resumes.forEach((s, i) => {
 			const line = this.buildResumeLine(s, colWidth, width);
 			units.push(i === 0 ? ["", line] : [line]);
@@ -271,12 +276,17 @@ export class StartupScreen implements Component {
 		return centerLine(truncateToWidth(line, colWidth, "…"), width);
 	}
 
-	/** A resumable recent-session line: `↳ title (age)`. */
+	/** A recent-session line: `• title (age)`. */
 	private buildResumeLine(session: StartupRecentSession, colWidth: number, width: number): string {
-		const arrow = theme.fg("accent", "↳");
-		const body = theme.fg("dim", `${session.title} (${session.age})`);
-		const line = `${arrow} ${body}`;
+		const marker = theme.fg("muted", "•");
+		const body = theme.fg("muted", `${session.title} (${session.age})`);
+		const line = `${marker} ${body}`;
 		return centerLine(truncateToWidth(line, colWidth, "…"), width);
+	}
+
+	private buildRecentSessionsHint(colWidth: number, width: number): string {
+		const hint = theme.fg("muted", this.data.recentSessionsHint ?? "Recent sessions · /resume");
+		return centerLine(truncateToWidth(hint, colWidth, "…"), width);
 	}
 
 	/**

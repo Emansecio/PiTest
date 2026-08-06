@@ -1,6 +1,7 @@
 import { petCoverage } from "@pit/tui";
 import { describe, expect, test } from "vitest";
 import {
+	CROSSFADE_MS,
 	PET_MOOD_TIMINGS,
 	PetMood,
 	type PetMoodState,
@@ -9,6 +10,8 @@ import {
 
 const OPEN = 1;
 const CLOSED = 0.08;
+/** Sample past the mood crossfade so assertions see pure target params. */
+const AFTER_CF = CROSSFADE_MS + 1;
 
 /** rng floor: blink scheduled at exactly `now + idleBlinkMinMs`, as a DOUBLE blink. */
 const rngZero = () => 0;
@@ -38,14 +41,15 @@ describe("PetMood transitions", () => {
 	test("thinking half-closes the eyes, sweeps, and leans the head into the sweep", () => {
 		const mood = new PetMood({ now: 1000, rng: rngZero });
 		mood.setState("thinking", 1000);
-		expect(mood.params(1000).blinkK).toBe(0.75);
+		// After the crossfade, base thinking lids (open-eye micro-blink factor = 1).
+		expect(mood.params(1000 + AFTER_CF).blinkK).toBeCloseTo(0.75, 5);
 		// A quarter of the 2s period in reaches the sweep's positive extreme.
 		const p = mood.params(1000 + 500);
 		expect(p.eyeShift ?? 0).toBeGreaterThan(0.06);
 		// The tilt follows the gaze — same sign, not an independent wobble.
 		expect(Math.sign(p.tilt ?? 0)).toBe(Math.sign(p.eyeShift ?? 0));
-		// Centered again at the sweep's start.
-		expect(mood.params(1000).eyeShift ?? 0).toBeCloseTo(0, 5);
+		// Still near the sweep origin just after enter (past crossfade).
+		expect(Math.abs(mood.params(1000 + AFTER_CF).eyeShift ?? 0)).toBeLessThan(0.03);
 	});
 
 	test("working sweeps faster than thinking and hops the body", () => {
@@ -58,7 +62,7 @@ describe("PetMood transitions", () => {
 		const t = Math.abs(think.params(200).eyeShift ?? 0);
 		const w = Math.abs(work.params(200).eyeShift ?? 0);
 		expect(w).toBeGreaterThan(t);
-		expect(work.params(0).blinkK).toBe(0.82);
+		expect(work.params(AFTER_CF).blinkK).toBe(0.82);
 		// Mid-hop the whole body is off the ground (negative = lifted).
 		expect(work.params(210).bobY ?? 0).toBeLessThan(-0.02);
 		// Grounded between hops, and squashed rather than stretched there.
@@ -69,9 +73,10 @@ describe("PetMood transitions", () => {
 	test("digesting circles the gaze (x and y a quarter-cycle apart)", () => {
 		const mood = new PetMood({ now: 0, rng: rngZero });
 		mood.setState("digesting", 0);
-		const start = mood.params(0);
+		// Pure digesting pose after the enter crossfade (still near circle start).
+		const start = mood.params(AFTER_CF);
 		expect(start.eyeShift ?? 0).toBeGreaterThan(0.05);
-		expect(start.eyeShiftY ?? 0).toBeCloseTo(0, 5);
+		expect(Math.abs(start.eyeShiftY ?? 0)).toBeLessThan(0.03);
 		const quarter = mood.params(450); // a quarter of the 1800ms circle
 		expect(quarter.eyeShift ?? 0).toBeCloseTo(0, 5);
 		expect(quarter.eyeShiftY ?? 0).toBeGreaterThan(0.04);
@@ -80,7 +85,7 @@ describe("PetMood transitions", () => {
 	test("waiting looks up with half-lidded eyes", () => {
 		const mood = new PetMood({ now: 0, rng: rngHigh });
 		mood.setState("waiting", 0);
-		const p = mood.params(0);
+		const p = mood.params(AFTER_CF);
 		expect(p.eyeShiftY ?? 0).toBeLessThan(0); // negative = looking up
 		expect(p.blinkK).toBeLessThan(0.6);
 	});
@@ -88,7 +93,7 @@ describe("PetMood transitions", () => {
 	test("alert widens the eyes and holds the body still", () => {
 		const mood = new PetMood({ now: 0, rng: rngHigh });
 		mood.setState("alert", 0);
-		const p = mood.params(0);
+		const p = mood.params(AFTER_CF);
 		expect(p.eyeScale ?? 1).toBeGreaterThan(1.1);
 		expect(p.tilt ?? 0).toBe(0);
 		expect(Math.abs(p.bobY ?? 0)).toBeLessThan(0.02);
@@ -97,7 +102,7 @@ describe("PetMood transitions", () => {
 	test("watching leans in and looks down at the composer", () => {
 		const mood = new PetMood({ now: 0, rng: rngHigh });
 		mood.setState("watching", 0);
-		const p = mood.params(0);
+		const p = mood.params(AFTER_CF);
 		expect(p.eyeShiftY ?? 0).toBeGreaterThan(0); // positive = looking down
 		expect(p.tilt ?? 0).toBeLessThan(0);
 	});
@@ -162,8 +167,8 @@ describe("PetMood idle life", () => {
 		expect(mood.current).toBe("idle");
 		expect(mood.tick(PET_MOOD_TIMINGS.sleepAfterMs)).toBe(true);
 		expect(mood.current).toBe("sleepy");
-		// Lids down…
-		expect(mood.params(PET_MOOD_TIMINGS.sleepAfterMs).blinkK).toBeLessThan(0.3);
+		// Lids down (after the idle→sleepy crossfade)…
+		expect(mood.params(PET_MOOD_TIMINGS.sleepAfterMs + AFTER_CF).blinkK).toBeLessThan(0.3);
 		// …and a bigger, slower breath than when awake.
 		const asleep = Math.abs(mood.params(PET_MOOD_TIMINGS.sleepAfterMs + 1400).bobY ?? 0);
 		const awake = new PetMood({ now: 0, rng: rngHigh });
@@ -240,16 +245,68 @@ describe("PetMood transient moods", () => {
 	test("startled jumps immediately, wobbles out, then auto-returns to idle", () => {
 		const mood = new PetMood({ now: 0, rng: rngZero });
 		mood.setState("startled", 0);
-		const first = mood.params(0);
-		// No wind-up: the jump is already at full height on the first frame.
-		expect(first.bobY ?? 0).toBeLessThan(-0.055);
-		expect(first.eyeScale ?? 1).toBeGreaterThan(1.25);
-		// Damped: the late wobble is far smaller than the initial jump.
+		// Pure startled after enter crossfade: still elevated eyes and a live wobble.
+		const first = mood.params(AFTER_CF);
+		expect(first.eyeScale ?? 1).toBeGreaterThan(1.15);
+		expect(Math.abs(first.bobY ?? 0)).toBeGreaterThan(0.02);
+		// Damped: the late wobble is far smaller than the early jump.
 		expect(Math.abs(mood.params(400).bobY ?? 0)).toBeLessThan(Math.abs(first.bobY ?? 0) / 2);
 		expect(mood.tick(PET_MOOD_TIMINGS.startledMs - 1)).toBe(false);
 		expect(mood.current).toBe("startled");
 		expect(mood.tick(PET_MOOD_TIMINGS.startledMs)).toBe(true);
 		expect(mood.current).toBe("idle");
+	});
+});
+
+describe("PetMood crossfade", () => {
+	test("idle→thinking params shortly after setState sit between the two moods", () => {
+		const mood = new PetMood({ now: 0, rng: rngHigh });
+		const idleBlink = mood.params(0).blinkK;
+		mood.setState("thinking", 0);
+		// Mid-crossfade: lids are partway from idle open toward thinking half-lid.
+		const mid = mood.params(CROSSFADE_MS / 2);
+		expect(mid.blinkK).toBeGreaterThan(0.75);
+		expect(mid.blinkK).toBeLessThan(idleBlink);
+		// eyeShiftY eases from ~0 (idle) toward thinking's -0.02.
+		expect(mid.eyeShiftY ?? 0).toBeLessThan(0);
+		expect(mid.eyeShiftY ?? 0).toBeGreaterThan(-0.02);
+	});
+
+	test("after CROSSFADE_MS the pose matches pure thinking", () => {
+		const mood = new PetMood({ now: 0, rng: rngHigh });
+		mood.setState("thinking", 0);
+		const settled = mood.params(AFTER_CF);
+		// Open-eye micro-blink factor → pure THINKING_K.
+		expect(settled.blinkK).toBeCloseTo(0.75, 5);
+		expect(settled.eyeShiftY ?? 0).toBeCloseTo(-0.02, 5);
+		// Further samples stay on the thinking path (no residual blend).
+		const later = mood.params(500);
+		expect(later.blinkK).toBeCloseTo(0.75, 5);
+	});
+
+	test("reduced motion skips the crossfade (no intermediate pose)", () => {
+		const mood = new PetMood({ now: 0, reducedMotion: true, rng: rngHigh });
+		mood.setState("thinking", 0);
+		// Always the frozen open pose — never a blend into thinking lids.
+		expect(mood.params(0).blinkK).toBe(OPEN);
+		expect(mood.params(CROSSFADE_MS / 2).blinkK).toBe(OPEN);
+		expect(mood.params(AFTER_CF).blinkK).toBe(OPEN);
+		expect(mood.params(AFTER_CF).eyeShift ?? 0).toBe(0);
+	});
+
+	test("chained mood changes ease from the displayed blend, not pure previous", () => {
+		const mood = new PetMood({ now: 0, rng: rngHigh });
+		mood.setState("thinking", 0);
+		// Mid idle→thinking blend.
+		const midThink = mood.params(CROSSFADE_MS / 2);
+		// Interrupt into working before the first crossfade finishes.
+		mood.setState("working", CROSSFADE_MS / 2);
+		// Immediately after: still near the interrupted mid-thinking pose, not a
+		// pure-thinking or pure-working snap.
+		const justAfter = mood.params(CROSSFADE_MS / 2);
+		expect(justAfter.blinkK).toBeCloseTo(midThink.blinkK, 3);
+		// By the end of the second crossfade, settle on working lids.
+		expect(mood.params(CROSSFADE_MS / 2 + AFTER_CF).blinkK).toBeCloseTo(0.82, 5);
 	});
 });
 

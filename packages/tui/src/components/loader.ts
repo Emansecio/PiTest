@@ -66,6 +66,8 @@ export class Loader extends Text {
 	private renderIndicatorVerbatim = false;
 	private spinnerPalette: LoaderColorFn[];
 	private messageColorFn: LoaderColorFn;
+	/** Painter for the elapsed counter; defaults to {@link messageColorFn}. */
+	private elapsedColorFn: LoaderColorFn;
 	// Raw (uncolored) message text, kept so a time-aware color fn can repaint the
 	// label from scratch each frame (see setMessageColorAt / refreshMessageColor).
 	private message: string;
@@ -137,6 +139,7 @@ export class Loader extends Text {
 		const palette = Array.isArray(spinnerColor) ? spinnerColor.slice() : [spinnerColor];
 		this.spinnerPalette = palette.length > 0 ? palette : [(s) => s];
 		this.messageColorFn = messageColorFn;
+		this.elapsedColorFn = messageColorFn;
 
 		this.message = message;
 		this.coloredMessage = messageColorFn(message);
@@ -181,10 +184,11 @@ export class Loader extends Text {
 	/**
 	 * Opt into a time-aware label color: `fn(text, now)` is called every animation
 	 * frame to repaint the message label (e.g. a shimmer that sweeps across the
-	 * text). Distinct from the static `messageColorFn` passed to the constructor,
-	 * which still colors the elapsed counter and trailing suffix. Setting this
-	 * ensures the shared ticker is subscribed even for a single frozen indicator
-	 * frame, and invalidates the memoized label so the next frame repaints.
+	 * text). Distinct from the static `messageColorFn` (plain suffixes), from
+	 * {@link setElapsedColorFn} (clock), and from pre-colored trailing/detail
+	 * suffixes that keep their own ANSI. Setting this ensures the shared ticker
+	 * is subscribed even for a single frozen indicator frame, and invalidates
+	 * the memoized label so the next frame repaints.
 	 */
 	setMessageColorAt(fn: (text: string, now: number) => string): void {
 		this.messageColorAtFn = fn;
@@ -193,8 +197,19 @@ export class Loader extends Text {
 		this.updateDisplay();
 	}
 
+	/**
+	 * Paint already-styled segments as-is (they carry their own ANSI). Plain
+	 * text still goes through {@link messageColorFn}. Matches the documented
+	 * "pass an already-ANSI-colored string" contract used by chip hierarchy
+	 * and the thinking-preview monologue color.
+	 */
+	private paintSuffix(suffix: string): string {
+		if (suffix.length === 0) return "";
+		return suffix.includes("\x1b[") ? suffix : this.messageColorFn(suffix);
+	}
+
 	setTrailingSuffix(suffix: string): void {
-		const next = suffix.length > 0 ? this.messageColorFn(suffix) : "";
+		const next = this.paintSuffix(suffix);
 		if (next === this.coloredTrailingSuffix) return;
 		this.coloredTrailingSuffix = next;
 		this.updateDisplay();
@@ -203,14 +218,27 @@ export class Loader extends Text {
 	/**
 	 * Set an optional detail segment rendered between the message and the
 	 * elapsed counter — e.g. a live preview of what the underlying process is
-	 * doing right now. Same coloring convention as {@link setTrailingSuffix}
-	 * (pass an already-ANSI-colored string if a caller needs a color other than
-	 * `messageColorFn`); pass an empty string to hide it.
+	 * doing right now. Plain text is colored with {@link messageColorFn};
+	 * pass an already-ANSI-colored string to keep a custom tone (thinking
+	 * preview uses `thinkingText` + italic). Empty string hides it.
 	 */
 	setDetailSuffix(suffix: string): void {
-		const next = suffix.length > 0 ? this.messageColorFn(suffix) : "";
+		const next = this.paintSuffix(suffix);
 		if (next === this.coloredDetailSuffix) return;
 		this.coloredDetailSuffix = next;
+		this.updateDisplay();
+	}
+
+	/**
+	 * Override the elapsed-counter painter. Working loaders use a slightly
+	 * stronger tone than the muted phase label so the live clock stays the
+	 * most legible meta chip (`text` vs muted interrupt vs dim tokens).
+	 */
+	setElapsedColorFn(fn: LoaderColorFn): void {
+		this.elapsedColorFn = fn;
+		// Force the next tick to rebuild the colored elapsed string.
+		this.lastElapsedSec = -1;
+		this.coloredElapsed = "";
 		this.updateDisplay();
 	}
 
@@ -317,7 +345,7 @@ export class Loader extends Text {
 		if (sec === this.lastElapsedSec) return false;
 		this.lastElapsedSec = sec;
 		// Hide the first second so the counter doesn't flash "0s" at turn start.
-		this.coloredElapsed = sec > 0 ? this.messageColorFn(` ${Loader.formatElapsed(sec)}`) : "";
+		this.coloredElapsed = sec > 0 ? this.elapsedColorFn(` ${Loader.formatElapsed(sec)}`) : "";
 		return true;
 	}
 

@@ -384,13 +384,8 @@ export function createCalcToolDefinition(
 		activity: "navigation",
 		label: "calc",
 		description:
-			"Deterministic arithmetic evaluator. Supports + - * / % ^, parentheses, unary minus, the constants pi/e, and functions abs, sqrt, exp, log, log2, log10, sin, cos, tan, asin, acos, atan, floor, ceil, round, min, max, pow, mod. No variables, no statements.",
+			"Deterministic arithmetic evaluator. Supports + - * / % ^, parentheses, unary minus, the constants pi/e, and functions abs, sqrt, exp, log, log2, log10, sin, cos, tan, asin, acos, atan, floor, ceil, round, min, max, pow, mod. No variables, no statements.\n\nWHICH TOOL: use calc for math instead of bash $((...)) or python -c; for variables, control flow, or libraries use `eval` or bash.",
 		promptSnippet: "Compute an arithmetic expression deterministically.",
-		promptGuidelines: [
-			"Use calc for arithmetic — never bash echo $((...)) or python -c for math.",
-			"Supports constants pi, e and functions like sin, log, sqrt, pow, min, max.",
-			"For anything beyond arithmetic (variables, control flow, libraries) use a general-purpose evaluator (eval) or bash instead.",
-		],
 		parameters: calcSchema,
 		async execute(_toolCallId, input: CalcToolInput) {
 			const precision = input.precision ?? 6;

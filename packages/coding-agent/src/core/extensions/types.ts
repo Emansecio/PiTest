@@ -302,6 +302,10 @@ export interface ContextUsage {
 	subagentSpent?: number;
 	/** Portion of budgetSpent from Fusion stages (brief/panel/judge/verify/writer). */
 	fusionSpent?: number;
+	/** USD cost reported for the tracked budget channels. */
+	budgetCostUsd?: number;
+	/** Portion of budgetCostUsd reported by subagents. */
+	subagentCostUsd?: number;
 }
 
 export interface CompactOptions {
@@ -452,7 +456,13 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	description: string;
 	/** Optional one-line snippet for the Available tools section in the default system prompt. Custom tools are omitted from that section when this is not provided. */
 	promptSnippet?: string;
-	/** Optional guideline bullets appended to the default system prompt Guidelines section when this tool is active. */
+	/**
+	 * Optional guideline bullets appended to the default system prompt Guidelines
+	 * section when this tool is active. Extension/SDK tools only: built-in tools
+	 * are filtered out before the prompt is built (see
+	 * `_getCustomToolPromptGuidelines` in agent-session.ts), so their guidance
+	 * belongs in `description`/`promptSnippet` instead.
+	 */
 	promptGuidelines?: string[];
 	/** Parameter schema (TypeBox) */
 	parameters: TParams;
@@ -472,6 +482,12 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	executionMode?: ToolExecutionMode;
 
 	/**
+	 * Grace period for an individual tool cancellation to produce its own final
+	 * result. Run-level aborts are never delayed. Default: 0.
+	 */
+	abortResultGraceMs?: number;
+
+	/**
 	 * P1 speculative execution: marks this tool as safe to execute while the
 	 * assistant message is still streaming (side-effect-free on the world AND
 	 * idempotent — a speculative run may be discarded and later re-executed).
@@ -487,6 +503,14 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	 * Failures are swallowed by the loop.
 	 */
 	onSpeculationDiscarded?: (toolCallId: string, args: unknown) => void;
+
+	/**
+	 * P0: when true, the dispatcher refuses to execute this tool if its
+	 * arguments carry the history-pruner's elision marker. Set by mutation
+	 * tools (write/edit/…) whose args can be pruned for token economy;
+	 * executing the placeholder would corrupt the target file.
+	 */
+	mutationGuard?: boolean;
 
 	/**
 	 * Side-effect class for plan-mode gating (and docs).

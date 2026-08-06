@@ -29,28 +29,28 @@ describe("renderAskCallLines", () => {
 		expect(lines[0].length).toBeLessThanOrEqual(60);
 	});
 
-	it("opens with the label instead of a background chip", () => {
+	it("opens with the short label instead of a background chip", () => {
 		const lines = plain(renderAskCallLines({ question: LONG_QUESTION }, theme, 70));
-		expect(lines[0].startsWith("Question: ")).toBe(true);
+		expect(lines[0].startsWith("Ask ")).toBe(true);
 	});
 
 	it("prefixes the scope tight against the question, matching the UI separator", () => {
 		const lines = plain(renderAskCallLines({ question: "Seguir?", header: "autorização" }, theme, 80));
-		expect(lines[0]).toBe("Question: autorização·Seguir?");
+		expect(lines[0]).toBe("Ask autorização·Seguir?");
 	});
 
 	it("demotes an answered question but keeps the same layout", () => {
 		const pending = renderAskCallLines({ question: "Seguir?", header: "escopo" }, theme, 80, false);
 		const answered = renderAskCallLines({ question: "Seguir?", header: "escopo" }, theme, 80, true);
 		expect(plain(answered)).toEqual(plain(pending));
-		// Same text, quieter paint — the answer below it carries the block now.
+		// Same text, quieter paint (full breadcrumb dim) — the answer carries the block.
 		expect(answered[0]).not.toBe(pending[0]);
 	});
 
 	it("dims a trailing aside and drops it before touching the question", () => {
 		const q = "Qual é o link alvo? (client_id ou URL de signup)";
 		const wide = plain(renderAskCallLines({ question: q }, theme, 80));
-		expect(wide[0]).toBe("Question: Qual é o link alvo? (client_id ou URL de signup)");
+		expect(wide[0]).toBe("Ask Qual é o link alvo? (client_id ou URL de signup)");
 		// Too narrow for both: the aside goes, the question survives intact.
 		const tight = plain(renderAskCallLines({ question: q }, theme, 34));
 		expect(tight[0]).toContain("Qual é o link alvo?");

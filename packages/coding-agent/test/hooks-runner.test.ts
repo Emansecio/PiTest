@@ -12,6 +12,23 @@ import type { PreToolUsePayload } from "../src/core/hooks/types.js";
 
 const tempFiles: string[] = [];
 
+function pidExists(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function waitForFile(filePath: string, timeoutMs = 2_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!fs.existsSync(filePath) && Date.now() < deadline) {
+		await new Promise((resolve) => setTimeout(resolve, 20));
+	}
+	if (!fs.existsSync(filePath)) throw new Error(`Timed out waiting for ${filePath}`);
+}
+
 afterEach(() => {
 	while (tempFiles.length > 0) {
 		const p = tempFiles.pop();
@@ -100,5 +117,43 @@ describe("hooks/runHook (Node available)", () => {
 		});
 		expect(executions.length).toBe(1);
 		expect(blocked).toBeDefined();
+	});
+
+	it("reaps a shell hook's grandchild before returning from a timeout", async () => {
+		const pidPath = path.join(
+			os.tmpdir(),
+			`pi-hook-grandchild-${Date.now()}-${Math.random().toString(36).slice(2)}.pid`,
+		);
+		const wrapperPidPath = `${pidPath}.wrapper`;
+		const wrapperPath = path.join(
+			os.tmpdir(),
+			`pi-hook-wrapper-${Date.now()}-${Math.random().toString(36).slice(2)}.js`,
+		);
+		const grandchild = `require("node:fs").writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 1_000);`;
+		const wrapper = `const fs = require("node:fs"); const { spawn } = require("node:child_process"); fs.writeFileSync(${JSON.stringify(wrapperPidPath)}, String(process.pid)); spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}, ${JSON.stringify(pidPath)}], { stdio: "ignore" }); setInterval(() => {}, 1_000);`;
+		fs.writeFileSync(wrapperPath, wrapper, "utf-8");
+		tempFiles.push(wrapperPath, pidPath, wrapperPidPath);
+
+		let grandchildPid: number | undefined;
+		let wrapperPid: number | undefined;
+		try {
+			const result = await runHook({ command: `node ${JSON.stringify(wrapperPath)}`, timeoutMs: 500 }, payload, {
+				cwd: process.cwd(),
+			});
+			await waitForFile(pidPath);
+			grandchildPid = Number(fs.readFileSync(pidPath, "utf-8"));
+			if (fs.existsSync(wrapperPidPath)) wrapperPid = Number(fs.readFileSync(wrapperPidPath, "utf-8"));
+			expect(result.timedOut).toBe(true);
+			expect(pidExists(grandchildPid)).toBe(false);
+		} finally {
+			for (const pid of [wrapperPid, grandchildPid]) {
+				if (!pid || !pidExists(pid)) continue;
+				try {
+					process.kill(pid, "SIGKILL");
+				} catch {
+					/* already exited */
+				}
+			}
+		}
 	});
 });

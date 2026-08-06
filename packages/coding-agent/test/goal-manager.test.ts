@@ -166,49 +166,56 @@ describe("GoalManager lifecycle", () => {
 		expect(first).toBe("🎯 active 0s");
 	});
 
-	it("includes the objective in the system prompt section and continuation", () => {
+	it("splits the prompt: objective+status in the suffix, persistence rules in the prefix", () => {
 		const { mgr } = makeManager();
 		mgr.start("Make tests pass", {});
-		const section = mgr.systemPromptSection();
-		expect(section).toContain("Make tests pass");
-		expect(section).toContain("goal_complete");
-		expect(mgr.systemPromptSection()).toContain("autonomous");
+		// Dynamic suffix — billed on EVERY request of the turn, so it carries only
+		// what actually mutates.
+		expect(mgr.systemPromptSection()).toBe("<goal>Goal (active): Make tests pass</goal>");
+		// Cacheable prefix — the immutable rules, paid once per goal lifecycle.
+		const rules = mgr.systemPromptPrefixSection();
+		expect(rules).toContain("goal_complete");
+		expect(rules).toContain("autonomous");
+		expect(rules).toContain("Keep working until the goal is fully resolved");
+		expect(rules).not.toContain("Make tests pass");
 		expect(mgr.continuationPrompt()).toContain("goal_complete");
 	});
 
-	it("drops the persistence boilerplate when paused or budget_limited", () => {
+	it("keeps the prefix rules byte-identical across pause/resume and budget transitions", () => {
 		const { mgr } = makeManager();
-		mgr.start("Make tests pass", {});
-		// Active: full boilerplate present.
-		expect(mgr.systemPromptSection()).toContain("Keep working until the goal is fully resolved");
+		mgr.start("Make tests pass", { tokenBudget: 1000 });
+		const active = mgr.systemPromptPrefixSection();
+		expect(mgr.hasPromptRules()).toBe(true);
 
-		// Paused: only a one-line objective reminder, no boilerplate / goal_complete.
+		// Pausing/resuming is frequent (every interrupt pauses); if it moved the
+		// prefix it would re-bill the whole cached prompt each time. Only the
+		// one-line suffix reacts.
 		mgr.pause();
-		const paused = mgr.systemPromptSection();
-		expect(paused).toBe("<goal>Goal (paused): Make tests pass</goal>");
-		expect(paused).toContain("Make tests pass");
-		expect(paused).not.toContain("Keep working");
-		expect(paused).not.toContain("goal_complete");
-		expect(paused).not.toContain("autonomous");
+		expect(mgr.hasPromptRules()).toBe(true);
+		expect(mgr.systemPromptPrefixSection()).toBe(active);
+		expect(mgr.systemPromptSection()).toBe("<goal>Goal (paused): Make tests pass</goal>");
+		mgr.resume();
+		expect(mgr.systemPromptPrefixSection()).toBe(active);
 
-		// Budget-limited: same compact one-liner, no boilerplate.
-		mgr.clear();
-		mgr.start("Ship the feature", { tokenBudget: 1000 });
+		// Same for exhausting (and raising) the token budget.
 		mgr.recordTurn(1100);
 		expect(mgr.get()?.status).toBe("budget_limited");
-		const limited = mgr.systemPromptSection();
-		expect(limited).toBe("<goal>Goal (budget_limited): Ship the feature</goal>");
-		expect(limited).not.toContain("Keep working");
-		expect(limited).not.toContain("goal_complete");
-
-		// Raising the budget reactivates it and restores the full boilerplate
-		// (resume() alone can't lift an exhausted budget — see the resume test).
+		expect(mgr.systemPromptPrefixSection()).toBe(active);
+		expect(mgr.systemPromptSection()).toBe("<goal>Goal (budget_limited): Make tests pass</goal>");
 		mgr.setTokenBudget(2000);
-		expect(mgr.systemPromptSection()).toContain("Keep working until the goal is fully resolved");
+		expect(mgr.systemPromptPrefixSection()).toBe(active);
+		expect(mgr.systemPromptSection()).toBe("<goal>Goal (active): Make tests pass</goal>");
 
-		// Completed goal still emits nothing.
+		// Completion is the terminal event that DOES drop both blocks (one rebuild).
 		mgr.complete("done");
+		expect(mgr.hasPromptRules()).toBe(false);
+		expect(mgr.systemPromptPrefixSection()).toBe("");
 		expect(mgr.systemPromptSection()).toBe("");
+
+		// No goal at all: nothing either way.
+		mgr.clear();
+		expect(mgr.hasPromptRules()).toBe(false);
+		expect(mgr.systemPromptPrefixSection()).toBe("");
 	});
 
 	it("serializes and restores state", () => {

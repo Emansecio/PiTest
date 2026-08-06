@@ -1,9 +1,10 @@
 /**
  * Verification mode (Claude Code-like default): in `in-turn` mode the model is
  * instructed via system prompt to verify BEFORE its final reply, and the harness
- * runs NO CHECK of its own — no post-reply check command, no fix loop, no
- * pending-checks drain. It is not blind, though: a cycle that edited files and
- * ran no check at all gets ONE corrective turn (in-turn grounding). The legacy
+ * normally leaves the check in-turn — no automatic fix loop or pending-checks
+ * drain. It is not blind, though: a cycle that edited files and ran no check gets
+ * a corrective turn; after two ignored corrections, one bounded fallback check
+ * runs for ordinary tasks. The legacy
  * pipeline stays available behind `verification.mode: "post-turn"` (or explicit
  * `enabled: true`).
  */
@@ -62,7 +63,7 @@ describe("in-turn verification (default)", () => {
 		while (harnesses.length > 0) await harnesses.pop()?.cleanup();
 	});
 
-	it("never RUNS the configured check itself, but corrects the cycle that skipped it", async () => {
+	it("does not run the configured check on the first miss, but corrects the skipped cycle", async () => {
 		const harness = await createHarness({ settings: { verification: { command: NODE_FAIL, maxAttempts: 2 } } });
 		harnesses.push(harness);
 		const file = join(harness.tempDir, "out.txt");
@@ -84,6 +85,32 @@ describe("in-turn verification (default)", () => {
 		expect(texts[0]).toBe("create out.txt");
 		expect(texts[1]).toContain(NODE_FAIL);
 		expect(texts[1]).toContain("never ran the project's check");
+	});
+
+	it("runs one bounded check after two ignored corrections and reports a red result honestly", async () => {
+		const harness = await createHarness({ settings: { verification: { command: NODE_FAIL, maxAttempts: 2 } } });
+		harnesses.push(harness);
+		const file = join(harness.tempDir, "out.txt");
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("write", { path: file, content: "one" })], { stopReason: "toolUse" }),
+			fauxAssistantMessage("first done"),
+			fauxAssistantMessage("ignored first correction"),
+			fauxAssistantMessage([fauxToolCall("write", { path: file, content: "two" })], { stopReason: "toolUse" }),
+			fauxAssistantMessage("second done"),
+			fauxAssistantMessage("ignored second correction"),
+			fauxAssistantMessage("honest terminal report"),
+		]);
+
+		await harness.session.prompt("first edit");
+		await harness.session.prompt("second edit");
+
+		expect(harness.eventsOfType("verification")).toMatchObject([
+			{ phase: "running", command: NODE_FAIL, attempt: 1, maxAttempts: 1 },
+			{ phase: "failed", command: NODE_FAIL, attempt: 1, maxAttempts: 1, willRetry: false },
+		]);
+		const texts = getUserTexts(harness);
+		expect(texts.filter((text) => text.includes("never ran the project's check"))).toHaveLength(2);
+		expect(texts.at(-1)).toContain("STILL failing");
 	});
 
 	it("stays silent when the model DID run a check during the turn", async () => {

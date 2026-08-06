@@ -205,7 +205,34 @@ export type ThemeBg =
 	| "toolDiffRemovedBg"
 	| "cardBg";
 
-type ColorMode = "truecolor" | "256color";
+export type ColorMode = "truecolor" | "256color" | "none";
+
+/**
+ * Resolve the Theme color mode from env + terminal caps.
+ *
+ * Precedence (aligned with chalk / Node conventions):
+ * 1. `FORCE_COLOR=0|false` → none; `1|2` → 256; `3|true` → truecolor if capable else 256
+ * 2. `NO_COLOR` present (any value, including empty) → none
+ * 3. Else truecolor when {@link getCapabilities}.trueColor, else 256
+ *
+ * Theme has no 16-color path, so FORCE_COLOR=1 maps to 256.
+ */
+export function resolveColorMode(
+	env: NodeJS.ProcessEnv = process.env,
+	caps: { trueColor: boolean } = getCapabilities(),
+): ColorMode {
+	const force = env.FORCE_COLOR;
+	if (force !== undefined) {
+		const f = force.toLowerCase();
+		if (force === "0" || f === "false") return "none";
+		if (force === "3" || f === "true") return caps.trueColor ? "truecolor" : "256color";
+		// "1", "2", "" (force on), or other non-zero → 256 (no 16-color Theme path)
+		return "256color";
+	}
+	// no-color.org: presence of the variable disables color regardless of value.
+	if ("NO_COLOR" in env) return "none";
+	return caps.trueColor ? "truecolor" : "256color";
+}
 
 // ============================================================================
 // Color Utilities
@@ -290,7 +317,7 @@ function hexTo256(hex: string): number {
 	return rgbTo256(r, g, b);
 }
 
-function fgAnsi(color: string | number, mode: ColorMode): string {
+function fgAnsi(color: string | number, mode: Exclude<ColorMode, "none">): string {
 	if (color === "") return "\x1b[39m";
 	if (typeof color === "number") return `\x1b[38;5;${color}m`;
 	if (color.startsWith("#")) {
@@ -305,7 +332,7 @@ function fgAnsi(color: string | number, mode: ColorMode): string {
 	throw new Error(`Invalid color value: ${color}`);
 }
 
-function bgAnsi(color: string | number, mode: ColorMode): string {
+function bgAnsi(color: string | number, mode: Exclude<ColorMode, "none">): string {
 	if (color === "") return "\x1b[49m";
 	if (typeof color === "number") return `\x1b[48;5;${color}m`;
 	if (color.startsWith("#")) {
@@ -389,15 +416,17 @@ export class Theme {
 		this.sourcePath = options.sourcePath;
 		this.sourceInfo = options.sourceInfo;
 		this.mode = mode;
+		// ANSI maps need a real color depth; "none" only gates emission in fg/bg.
+		const mapMode: Exclude<ColorMode, "none"> = mode === "none" ? "256color" : mode;
 		this.fgColors = new Map();
 		this.fgSource = new Map();
 		for (const [key, value] of Object.entries(fgColors) as [ThemeColor, string | number][]) {
-			this.fgColors.set(key, fgAnsi(value, mode));
+			this.fgColors.set(key, fgAnsi(value, mapMode));
 			this.fgSource.set(key, value);
 		}
 		this.bgColors = new Map();
 		for (const [key, value] of Object.entries(bgColors) as [ThemeBg, string | number][]) {
-			this.bgColors.set(key, bgAnsi(value, mode));
+			this.bgColors.set(key, bgAnsi(value, mapMode));
 		}
 	}
 
@@ -425,44 +454,63 @@ export class Theme {
 	}
 
 	fg(color: ThemeColor, text: string): string {
+		if (this.mode === "none") return text;
 		const ansi = this.fgColors.get(color);
 		if (!ansi) throw new Error(`Unknown theme color: ${color}`);
 		return `${ansi}${text}\x1b[39m`; // Reset only foreground color
 	}
 
 	bg(color: ThemeBg, text: string): string {
+		if (this.mode === "none") return text;
 		const ansi = this.bgColors.get(color);
 		if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
 		return `${ansi}${text}\x1b[49m`; // Reset only background color
 	}
 
+	/**
+	 * Truncation ellipsis for UI chrome. Default `muted` matches the majority of
+	 * path/footer truncate sites; pass `plain` when the surrounding string is
+	 * already colored (or under NO_COLOR).
+	 */
+	ellipsis(tone: "muted" | "dim" | "plain" = "muted"): string {
+		if (tone === "plain" || this.mode === "none") return "…";
+		return this.fg(tone, "…");
+	}
+
 	bold(text: string): string {
+		if (this.mode === "none") return text;
 		return chalk.bold(text);
 	}
 
 	italic(text: string): string {
+		if (this.mode === "none") return text;
 		return chalk.italic(text);
 	}
 
 	underline(text: string): string {
+		if (this.mode === "none") return text;
 		return chalk.underline(text);
 	}
 
 	inverse(text: string): string {
+		if (this.mode === "none") return text;
 		return chalk.inverse(text);
 	}
 
 	strikethrough(text: string): string {
+		if (this.mode === "none") return text;
 		return chalk.strikethrough(text);
 	}
 
 	getFgAnsi(color: ThemeColor): string {
+		if (this.mode === "none") return "";
 		const ansi = this.fgColors.get(color);
 		if (!ansi) throw new Error(`Unknown theme color: ${color}`);
 		return ansi;
 	}
 
 	getBgAnsi(color: ThemeBg): string {
+		if (this.mode === "none") return "";
 		const ansi = this.bgColors.get(color);
 		if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
 		return ansi;
@@ -474,6 +522,7 @@ export class Theme {
 	 * this so custom themes written before the token existed keep working.
 	 */
 	tryGetBgAnsi(color: ThemeBg): string | undefined {
+		if (this.mode === "none") return undefined;
 		return this.bgColors.get(color);
 	}
 
@@ -504,8 +553,12 @@ export class Theme {
 	getContextUsageColor(percent: number): (str: string) => string {
 		// Emit the bold SGR directly (like `bg`) rather than via chalk, so the
 		// critical band is always distinct from plain `error` regardless of
-		// chalk's color level — `fg` already emits raw ANSI unconditionally.
-		if (percent > CONTEXT_USAGE_CRITICAL_PERCENT) return (str: string) => `\x1b[1m${this.fg("error", str)}\x1b[22m`;
+		// chalk's color level. Under ColorMode "none", fg/bg already pass
+		// through plain text and bold SGR is skipped.
+		if (percent > CONTEXT_USAGE_CRITICAL_PERCENT) {
+			if (this.mode === "none") return (str: string) => this.fg("error", str);
+			return (str: string) => `\x1b[1m${this.fg("error", str)}\x1b[22m`;
+		}
 		if (percent > CONTEXT_USAGE_ERROR_PERCENT) return (str: string) => this.fg("error", str);
 		if (percent > CONTEXT_USAGE_WARN_PERCENT) return (str: string) => this.fg("warning", str);
 		// Calm band is a real STATE color (cyan accent), not neutral gray — the
@@ -666,7 +719,7 @@ function loadThemeJson(name: string): ThemeJson {
 }
 
 function createTheme(themeJson: ThemeJson, mode?: ColorMode, sourcePath?: string): Theme {
-	const colorMode = mode ?? (getCapabilities().trueColor ? "truecolor" : "256color");
+	const colorMode = mode ?? resolveColorMode();
 	const resolvedColors = resolveThemeColors(themeJson.colors, themeJson.vars);
 	const fgColors: Record<ThemeColor, string | number> = {} as Record<ThemeColor, string | number>;
 	const bgColors: Record<ThemeBg, string | number> = {} as Record<ThemeBg, string | number>;
@@ -1526,7 +1579,7 @@ export function getEditorTheme(): EditorTheme {
 		// before the token existed fall back to `border` — the color this slot
 		// always borrowed.
 		commandColor: (text: string) => theme.fg(theme.hasColor("command") ? "command" : "border", text),
-		placeholderColor: (t) => theme.fg("dim", t),
+		placeholderColor: (t) => theme.fg("muted", t),
 	};
 }
 
@@ -1534,9 +1587,9 @@ export function getSettingsListTheme(): SettingsListTheme {
 	return {
 		label: (text: string, selected: boolean) => (selected ? theme.fg("accent", text) : text),
 		value: (text: string, selected: boolean) => (selected ? theme.fg("accent", text) : theme.fg("muted", text)),
-		description: (text: string) => theme.fg("dim", text),
+		description: (text: string) => theme.fg("muted", text),
 		cursor: theme.fg("accent", "→ "),
-		hint: (text: string) => theme.fg("dim", text),
+		hint: (text: string) => theme.fg("muted", text),
 		selectedBg: (text: string) => theme.bg("selectedBg", text),
 	};
 }

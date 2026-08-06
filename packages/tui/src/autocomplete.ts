@@ -243,6 +243,16 @@ export interface AutocompleteItem {
 	value: string;
 	label: string;
 	description?: string;
+	/** Optional visual grouping metadata for command palettes. */
+	section?: string;
+	/** Optional semantic group used by help/palette views. */
+	group?: string;
+	/** Compact source/origin badge rendered beside the command description. */
+	badge?: string;
+	/** Optional stable ordering hint; lower values appear first. */
+	priority?: number;
+	/** Text used for fuzzy matching when it differs from the value. */
+	filterText?: string;
 	/**
 	 * When true, confirming this item (Enter) only completes the text — exactly
 	 * like Tab — instead of completing AND submitting. Set for slash commands
@@ -261,6 +271,12 @@ export interface SlashCommand {
 	name: string;
 	description?: string;
 	argumentHint?: string;
+	section?: string;
+	group?: string;
+	hidden?: boolean;
+	badge?: string;
+	priority?: number;
+	filterText?: string;
 	/** Bare command is not submittable (argument required) — Enter on the
 	 * autocomplete suggestion completes like Tab instead of submitting. See
 	 * {@link AutocompleteItem.completeOnly}. */
@@ -359,6 +375,11 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 						name,
 						label: name,
 						description: fullDesc || undefined,
+						section: "section" in cmd ? cmd.section : undefined,
+						group: "group" in cmd ? cmd.group : undefined,
+						badge: "badge" in cmd ? cmd.badge : undefined,
+						priority: "priority" in cmd ? cmd.priority : undefined,
+						filterText: "filterText" in cmd ? cmd.filterText : undefined,
 						// Propagated verbatim (never inferred from the hint — see the
 						// field docs): the command source declares whether the bare
 						// command is submittable.
@@ -366,10 +387,34 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 					};
 				});
 
-				const filtered = fuzzyFilter(commandItems, prefix, (item) => item.name).map((item) => ({
+				const fuzzyItems = fuzzyFilter(commandItems, prefix, (item) => item.filterText ?? item.name);
+				// Empty-prefix browsing follows the explicit static priority supplied by
+				// the command registry. Once the user types, fuzzy quality remains the
+				// primary rank; exact and prefix matches get a small deterministic boost
+				// so typing `/help` never loses to a lower-priority fuzzy result.
+				const normalizedPrefix = prefix.toLowerCase();
+				const filteredItems = [...fuzzyItems].sort((a, b) => {
+					if (normalizedPrefix.length === 0) {
+						return (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER);
+					}
+					const nameA = a.name.toLowerCase();
+					const nameB = b.name.toLowerCase();
+					const exactA = nameA === normalizedPrefix ? 0 : 1;
+					const exactB = nameB === normalizedPrefix ? 0 : 1;
+					if (exactA !== exactB) return exactA - exactB;
+					const prefixA = nameA.startsWith(normalizedPrefix) ? 0 : 1;
+					const prefixB = nameB.startsWith(normalizedPrefix) ? 0 : 1;
+					return prefixA - prefixB;
+				});
+				const filtered = filteredItems.map((item) => ({
 					value: item.name,
 					label: item.label,
 					...(item.description && { description: item.description }),
+					...(item.section && { section: item.section }),
+					...(item.group && { group: item.group }),
+					...(item.badge && { badge: item.badge }),
+					...(item.priority !== undefined && { priority: item.priority }),
+					...(item.filterText && { filterText: item.filterText }),
 					...(item.completeOnly && { completeOnly: true }),
 				}));
 

@@ -159,8 +159,15 @@ export class TurnSteeringEngine {
 	private _fireReminder(
 		customType: string,
 		content: string,
-		opts: { deliverAs: "steer" | "followUp"; display: boolean; label: string; steerPriority?: boolean },
+		opts: {
+			deliverAs: "steer" | "followUp";
+			display: boolean;
+			label: string;
+			steerPriority?: boolean;
+			isCurrent?: () => boolean;
+		},
 	): void {
+		if (opts.isCurrent && !opts.isCurrent()) return;
 		const steerPriority =
 			opts.steerPriority ??
 			(customType === "pi.doom-loop-recovery" ||
@@ -228,8 +235,13 @@ export class TurnSteeringEngine {
 	 *
 	 * Throws to abort the turn at the Tier-3 relapse — same propagation as the old
 	 * start-time throw, now gated on "same call AND same result".
+	 *
+	 * `_args` is unused: the steer no longer echoes the repeated arguments (P3.9 —
+	 * a doom-loop IS the same args repeated, so the JSON block duplicated what sits
+	 * a few lines above in the transcript). The parameter stays for call-site
+	 * compatibility with `agent-session`'s tool_execution_end handler.
 	 */
-	maybeInjectDoomLoop(toolName: string, args: unknown, errorMessage: string | undefined): void {
+	maybeInjectDoomLoop(toolName: string, _args: unknown, errorMessage: string | undefined): void {
 		const cfg = this.deps.settingsManager.getToolFeedbackSettings().doomLoopReminder;
 		if (!cfg.enabled) return;
 		// Result-aware: only calls with identical name+args AND identical result count
@@ -283,15 +295,9 @@ export class TurnSteeringEngine {
 			if (this._doomLoopRecoveryAttempts < RECOVERY_LIMIT) {
 				this._doomLoopRecoveryAttempts++;
 				this._doomLoopFiredTier = 0;
-				const base = buildDoomLoopReminder({ toolName, args, consecutiveCount });
-				const recovery =
-					`${base}\n\n` +
-					`You have repeated ${consecutiveCount} calls to \`${toolName}\` with no progress. ` +
-					"STOP repeating this call. Rethink from scratch: " +
-					"(1) restate the goal of the current step in one sentence; " +
-					"(2) list the sub-steps; " +
-					"(3) execute ONLY sub-step 1, with a DIFFERENT approach (another tool or different " +
-					"arguments) — or ask the user. Repeating the same call again will abort the turn.";
+				// Tier-3 wording renders INSIDE the reminder block (see buildDoomLoopReminder):
+				// text appended after `</system-reminder>` would make the steer unprunable.
+				const recovery = buildDoomLoopReminder({ toolName, consecutiveCount, tier: "recovery" });
 				this._fireReminder("pi.doom-loop-recovery", recovery, {
 					deliverAs: "steer",
 					display: true,
@@ -322,13 +328,7 @@ export class TurnSteeringEngine {
 			if (this._doomLoopFiredTier >= 2) return;
 			this._doomLoopFiredTier = 2;
 			const remaining = TIER3_THRESHOLD - consecutiveCount;
-			const content = buildDoomLoopReminder({ toolName, args, consecutiveCount });
-			const escalation =
-				content +
-				`\n\nYou have made ${consecutiveCount} identical calls without progress. ` +
-				"Do NOT repeat this call again. State what you expected, what actually happened, " +
-				"and switch strategy: different tool, different arguments, or ask the user for guidance. " +
-				`${remaining} more identical call${remaining === 1 ? "" : "s"} will abort the turn.`;
+			const escalation = buildDoomLoopReminder({ toolName, consecutiveCount, tier: "pause", remaining });
 			this._fireReminder("pi.doom-loop-pause", escalation, {
 				deliverAs: "steer",
 				display: true,
@@ -343,7 +343,7 @@ export class TurnSteeringEngine {
 		// trying to break.
 		if (this._doomLoopFiredTier >= 1) return;
 		this._doomLoopFiredTier = 1;
-		const content = buildDoomLoopReminder({ toolName, args, consecutiveCount });
+		const content = buildDoomLoopReminder({ toolName, consecutiveCount });
 		this._fireReminder("pi.doom-loop-reminder", content, {
 			deliverAs: "steer",
 			display: false,
@@ -698,6 +698,7 @@ export class TurnSteeringEngine {
 		this._todoCadenceAwaitingSync = true;
 		const items = this.deps.todo.list();
 		const staleItem = items.find((t) => t.status === "in_progress");
+		const snapshot = { revision: this.deps.todo.getRevision(), sessionId: this.deps.todo.getSessionId() };
 		const content = buildTodoCadenceReminder({ items, staleItem, reason });
 		recordDiagnostic({
 			category: "quality.todo-cadence",
@@ -709,6 +710,7 @@ export class TurnSteeringEngine {
 			deliverAs: "steer",
 			display: false,
 			label: "todo cadence reminder",
+			isCurrent: () => this.deps.todo.isCurrentSnapshot(snapshot),
 		});
 	}
 
@@ -790,7 +792,9 @@ export class TurnSteeringEngine {
 	 */
 	retryBudgetHintRule(): ToolErrorHintRule {
 		if (!this._retryBudgetRule) {
-			this._retryBudgetRule = createRetryBudgetHintRule(this._retryBudget);
+			this._retryBudgetRule = createRetryBudgetHintRule(this._retryBudget, process.env, () =>
+				this.deps.todo.getRevision(),
+			);
 		}
 		return this._retryBudgetRule;
 	}

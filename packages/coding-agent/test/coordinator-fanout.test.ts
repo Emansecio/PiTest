@@ -152,4 +152,27 @@ describe("runFanout", () => {
 		expect(result.reviews.some((r) => r.ok)).toBe(true);
 		expect(result.worker_output.text).toBe("worker-ok");
 	});
+
+	it("settles the scout lifecycle row when its reservation blocks the pipeline", async () => {
+		const { deps } = rig();
+		const events: string[] = [];
+		await expect(
+			runFanout(
+				deps,
+				{
+					scout: { prompt: "scout" },
+					reviewer: { prompt_template: "rev {{target}}" },
+					worker: { prompt: "work" },
+				},
+				{
+					depth: 0,
+					cwd: process.cwd(),
+					onStageStart: (handle) => events.push(`start:${handle}`),
+					onStageComplete: (handle, status) => events.push(`complete:${handle}:${status}`),
+					onStageReserve: () => ({ allowed: false, reason: "budget exhausted", release: () => {} }),
+				},
+			),
+		).rejects.toThrow("budget exhausted");
+		expect(events).toEqual(["start:fanout-scout", "complete:fanout-scout:error"]);
+	});
 });

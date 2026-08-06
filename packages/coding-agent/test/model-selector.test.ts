@@ -247,6 +247,9 @@ describe("ModelSelectorComponent navigation & Esc", () => {
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		const registry = ModelRegistry.create(authStorage, modelsJsonPath);
 		registry.refresh();
+		// Keep ambient provider credentials from adding built-in groups to this fixture.
+		const availableModels = registry.getAvailable().filter((model) => model.provider === "alpha");
+		registry.getAvailable = () => availableModels;
 		const current = registry.find("alpha", "a1")!;
 		expect(current).toBeDefined();
 

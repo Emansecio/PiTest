@@ -38,6 +38,52 @@ describe("TokenBudgetGovernor", () => {
 		expect(governor.evaluateSpawn().allowed).toBe(true);
 	});
 
+	it("reserves the remaining budget atomically until the subagent settles", () => {
+		const governor = new TokenBudgetGovernor();
+		governor.setBudget(1_000);
+		governor.recordMain(400);
+
+		const first = governor.reserveSubagent(600);
+		expect(first.allowed).toBe(true);
+		expect(governor.snapshot()).toMatchObject({ reservedSubagentTokens: 600, remaining: 0 });
+		expect(governor.reserveSubagent().allowed).toBe(false);
+
+		first.record({ inputTokens: 100, outputTokens: 100, totalTokens: 200, costUsd: 0.12 });
+		expect(governor.snapshot()).toMatchObject({
+			subagentTokens: 200,
+			reservedSubagentTokens: 400,
+			costUsd: 0.12,
+			subagentCostUsd: 0.12,
+			remaining: 0,
+		});
+
+		first.release();
+		first.release();
+		expect(governor.snapshot()).toMatchObject({ reservedSubagentTokens: 0, remaining: 400 });
+	});
+
+	it("attributes out-of-order usage to the reservation that reported it", () => {
+		const governor = new TokenBudgetGovernor();
+		governor.setBudget(8_192);
+
+		const first = governor.reserveSubagent(4_096);
+		const second = governor.reserveSubagent(4_096);
+		expect(first.allowed).toBe(true);
+		expect(second.allowed).toBe(true);
+
+		second.record({ inputTokens: 2_048, outputTokens: 2_048, totalTokens: 4_096, costUsd: 0 });
+		second.release();
+
+		expect(governor.snapshot()).toMatchObject({
+			subagentTokens: 4_096,
+			reservedSubagentTokens: 4_096,
+			remaining: 0,
+		});
+		expect(governor.reserveSubagent(4_096).allowed).toBe(false);
+
+		first.release();
+	});
+
 	it("records fusion spend separately and includes it in totalSpent", () => {
 		const goal = new GoalManager();
 		const governor = new TokenBudgetGovernor();
@@ -49,6 +95,17 @@ describe("TokenBudgetGovernor", () => {
 		expect(governor.snapshot().fusionTokens).toBe(2500);
 		expect(governor.totalSpent()).toBe(3500);
 		expect(goal.get()?.tokensUsed).toBe(3500);
+	});
+
+	it("aggregates reported costs once across token channels", () => {
+		const governor = new TokenBudgetGovernor();
+		governor.recordMain(100, 0.1);
+		governor.recordSubagent({ inputTokens: 20, outputTokens: 30, totalTokens: 50, costUsd: 0.2 });
+		governor.recordFusion(40, 0.3);
+
+		const snap = governor.snapshot();
+		expect(snap.costUsd).toBeCloseTo(0.6);
+		expect(snap.subagentCostUsd).toBeCloseTo(0.2);
 	});
 
 	it("records gearbox spend as a subset of main — excluded from totalSpent and the persisted split (P8b)", () => {

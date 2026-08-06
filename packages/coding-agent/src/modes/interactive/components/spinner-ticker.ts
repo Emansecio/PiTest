@@ -1,5 +1,6 @@
-import { type LoaderIndicatorOptions, SPINNER_FRAME_MS, SPINNER_FRAMES, type TUI } from "@pit/tui";
+import { type LoaderIndicatorOptions, SPINNER_FRAME_MS, type TUI } from "@pit/tui";
 import { isReducedMotion } from "../../../utils/env-flags.ts";
+import { resolveSpinnerFrames } from "./glyph-resolver.ts";
 
 export interface SpinnerTicker {
 	/** Detach the animation callback. */
@@ -16,23 +17,27 @@ export interface SpinnerTicker {
 /** Spinner frame index at `clockMs` (P7 cadence); frozen to 0 under reduced motion. */
 export function spinnerFrameIndexAt(clockMs: number): number {
 	if (isReducedMotion()) return 0;
-	return Math.floor(clockMs / SPINNER_FRAME_MS) % SPINNER_FRAMES.length;
+	const frames = resolveSpinnerFrames();
+	return Math.floor(clockMs / SPINNER_FRAME_MS) % frames.length;
 }
 
-/** Shared braille glyph at `clockMs`; frozen to frame 0 under reduced motion. */
+/** Shared spinner glyph at `clockMs` (braille or ASCII under PIT_ASCII); frozen under reduced motion. */
 export function spinnerGlyphAt(clockMs: number): string {
-	return SPINNER_FRAMES[spinnerFrameIndexAt(clockMs)] ?? SPINNER_FRAMES[0];
+	const frames = resolveSpinnerFrames();
+	return frames[spinnerFrameIndexAt(clockMs)] ?? frames[0]!;
 }
 
 /** Collapse animated loader indicators to a single frame when motion is reduced. */
 export function reducedMotionLoaderIndicator(options?: LoaderIndicatorOptions): LoaderIndicatorOptions | undefined {
-	if (!isReducedMotion()) return options;
-	const frames = options?.frames;
-	if (frames !== undefined) {
-		if (frames.length <= 1) return options;
-		return { ...options, frames: [frames[0]!] };
+	const resolved = options?.frames ?? [...resolveSpinnerFrames()];
+	if (!isReducedMotion()) {
+		// Ensure Loader uses the ASCII set when PIT_ASCII is on even without reduced motion.
+		if (!options?.frames) return { ...options, frames: [...resolveSpinnerFrames()] };
+		return options;
 	}
-	return { frames: [SPINNER_FRAMES[0]] };
+	const frames = resolved;
+	if (frames.length <= 1) return { ...options, frames };
+	return { ...options, frames: [frames[0]!] };
 }
 
 export function createSpinnerTicker(
@@ -50,13 +55,14 @@ export function createSpinnerTicker(
 	// those clocks keep advancing (M0).
 	let lastElapsedSec = -1;
 	const unsub = ui.addAnimationCallback((now: number) => {
+		const frames = resolveSpinnerFrames();
 		if (shouldSpin()) {
 			cleared = false;
 			// Working-loader owns the animated zone: hold the current activity
 			// glyph (or frame 0) and only dirty once/s for elapsed suffixes.
 			if (isFrozen?.()) {
 				const sec = Math.floor(now / 1000);
-				const glyph = SPINNER_FRAMES[frame >= 0 ? frame : 0] ?? SPINNER_FRAMES[0]!;
+				const glyph = frames[frame >= 0 ? frame : 0] ?? frames[0]!;
 				if (frame < 0) {
 					frame = 0;
 					lastElapsedSec = sec;
@@ -72,7 +78,7 @@ export function createSpinnerTicker(
 			}
 			if (isReducedMotion()) {
 				const sec = Math.floor(now / 1000);
-				const glyph = SPINNER_FRAMES[0]!;
+				const glyph = frames[0]!;
 				if (frame !== 0) {
 					frame = 0;
 					lastElapsedSec = sec;
@@ -89,7 +95,7 @@ export function createSpinnerTicker(
 			const f = spinnerFrameIndexAt(now);
 			if (f === frame) return false;
 			frame = f;
-			onFrame(SPINNER_FRAMES[f]!);
+			onFrame(frames[f]!);
 			return true;
 		}
 		if (!cleared) {

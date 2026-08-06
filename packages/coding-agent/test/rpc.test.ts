@@ -201,6 +201,9 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 			) as any;
 
 			expect(assistantMessage).toBeDefined();
+			// Surface provider/auth failures to live(), rather than reporting the
+			// downstream symptom as a missing text block.
+			expect(assistantMessage.message.stopReason, assistantMessage.message.errorMessage).not.toBe("error");
 
 			const textContent = assistantMessage.message.content.find((c: any) => c.type === "text");
 			expect(textContent?.text).toContain(uniqueValue);
@@ -329,7 +332,14 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 			expect(text).toBeUndefined();
 
 			// Send prompt
-			await client.promptAndWait("Reply with just: test123");
+			const events = await client.promptAndWait("Reply with just: test123");
+			const assistantMessage = events.find(
+				(e) => e.type === "message_end" && e.message?.role === "assistant",
+			) as any;
+			expect(assistantMessage).toBeDefined();
+			// Keep authentication/provider failures actionable for live(), instead of
+			// turning them into an unrelated undefined-text assertion.
+			expect(assistantMessage.message.stopReason, assistantMessage.message.errorMessage).not.toBe("error");
 
 			// Should have text now
 			text = await client.getLastAssistantText();

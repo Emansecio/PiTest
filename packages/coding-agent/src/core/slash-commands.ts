@@ -11,10 +11,10 @@ export interface SlashCommandInfo {
 }
 
 /**
- * Coarse grouping used to organize `/help` (and, later, the "/" menu). The order
- * of this union is the order groups render in.
+ * Coarse grouping used to organize `/help` and the "/" menu. The order of this
+ * union is the order groups render in.
  */
-export type SlashCommandGroup = "Session" | "Model" | "Config" | "Info" | "Advanced";
+export type SlashCommandGroup = "Session" | "Model" | "Config" | "Info" | "Advanced" | "Project";
 
 /** Render order for grouped help. Keep in sync with {@link SlashCommandGroup}. */
 export const SLASH_COMMAND_GROUP_ORDER: readonly SlashCommandGroup[] = [
@@ -23,7 +23,19 @@ export const SLASH_COMMAND_GROUP_ORDER: readonly SlashCommandGroup[] = [
 	"Config",
 	"Info",
 	"Advanced",
+	"Project",
 ];
+
+/** Minimal shape consumed by the grouped help renderer. Keeping this separate
+ * from the TUI command type lets the runtime registry include extensions,
+ * prompts, and skills without coupling this core module to the TUI package. */
+export interface SlashCommandHelpEntry {
+	name: string;
+	description?: string;
+	group?: SlashCommandGroup | string;
+	hidden?: boolean;
+	badge?: string;
+}
 
 export interface BuiltinSlashCommand {
 	name: string;
@@ -169,16 +181,23 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 ];
 
 /**
- * Render visible builtin slash commands as grouped markdown tables — one table
+ * Render effective slash commands as grouped markdown tables — one table
  * per group in {@link SLASH_COMMAND_GROUP_ORDER}, each with a bold header.
  * Hidden commands are dropped; commands without a group fall into "Advanced" so
  * nothing silently vanishes. Pure (no UI deps) so it is unit-testable.
  */
-export function buildGroupedSlashHelp(commands: ReadonlyArray<BuiltinSlashCommand>): string {
+export function buildGroupedSlashHelp(commands: ReadonlyArray<SlashCommandHelpEntry>): string {
+	const escapeTableCell = (value: string): string =>
+		value
+			.replace(/\\/g, "\\\\")
+			.replace(/[\r\n]+/g, " ")
+			.replace(/\|/g, "\\|");
 	const visible = commands.filter((command) => !command.hidden);
-	const byGroup = new Map<SlashCommandGroup, BuiltinSlashCommand[]>();
+	const byGroup = new Map<SlashCommandGroup, SlashCommandHelpEntry[]>();
 	for (const command of visible) {
-		const group = command.group ?? "Advanced";
+		const group = SLASH_COMMAND_GROUP_ORDER.includes(command.group as SlashCommandGroup)
+			? (command.group as SlashCommandGroup)
+			: "Advanced";
 		const bucket = byGroup.get(group);
 		if (bucket) {
 			bucket.push(command);
@@ -190,7 +209,12 @@ export function buildGroupedSlashHelp(commands: ReadonlyArray<BuiltinSlashComman
 	for (const group of SLASH_COMMAND_GROUP_ORDER) {
 		const groupCommands = byGroup.get(group);
 		if (!groupCommands || groupCommands.length === 0) continue;
-		const rows = groupCommands.map((command) => `| \`/${command.name}\` | ${command.description} |`).join("\n");
+		const rows = groupCommands
+			.map((command) => {
+				const commandLabel = command.badge ? `/${command.name} [${command.badge}]` : `/${command.name}`;
+				return `| \`${escapeTableCell(commandLabel)}\` | ${escapeTableCell(command.description ?? "")} |`;
+			})
+			.join("\n");
 		sections.push(`**${group}**\n| Command | Description |\n|---------|-------------|\n${rows}`);
 	}
 	return sections.join("\n\n");

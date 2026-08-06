@@ -96,9 +96,12 @@ describe("code tool (code-mode)", () => {
 			dispatcher: async () => ({ content: [{ type: "text", text: "" }], isError: false }),
 			getActiveToolNames: () => ["read", "grep", "code"],
 		});
-		const joined = (def.promptGuidelines ?? []).join("\n");
-		expect(joined).toContain("active tools listed above");
-		expect(joined).not.toContain("tools.read");
-		expect(joined).not.toContain("tools.grep");
+		// Built-in tools carry no promptGuidelines (dead for builtins): the roster
+		// pointer lives in the description, which is what reaches the wire.
+		expect(def.promptGuidelines).toBeUndefined();
+		expect(def.description).toContain("system prompt's active tool list");
+		expect(def.description).toContain("except `code` itself");
+		expect(def.description).not.toContain("tools.read");
+		expect(def.description).not.toContain("tools.grep");
 	});
 });

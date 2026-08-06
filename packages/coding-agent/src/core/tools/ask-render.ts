@@ -12,12 +12,12 @@
  *    the second line of a long answer dangling under its glyph with no visual
  *    tie to it. Answers wrap under their own glyph instead.
  * 3. **Hierarchy.** The decision outranks the question in the scrollback. While
- *    the picker is open the question is the payload (`text`); once answered it
- *    demotes to context (`muted`) and the answer carries the row.
+ *    the picker is open the question is the payload (`text`); once answered the
+ *    whole breadcrumb demotes to `dim` and the `❯` answer carries the block.
  *
  * Layout (the `│` gutter comes from the MessageShell, not from here):
  *
- *     │ Question: scope·Which auth flow should the migration assume? (legacy)
+ *     │ Ask scope·Which auth flow should the migration assume? (legacy)
  *     │ ❯ Keep both paths alive behind a flag and drop the legacy one after
  *     │   the next release
  *     │   ↳ only if telemetry confirms nobody is on it
@@ -31,9 +31,10 @@ import { type Component, truncateToWidth, visibleWidth } from "@pit/tui";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { AskToolDetails } from "./ask.ts";
 
-/** Opening label. A word beats the old background chip: it survives themes
- * with no `selectedBg` contrast and costs the same columns as ` ASK  `. */
-const LABEL_TEXT = "Question:";
+/** Opening label. Short on purpose — frees columns for the question itself
+ * and matches the tool name. A word still beats a background chip: it
+ * survives themes with no `selectedBg` contrast. */
+const LABEL_TEXT = "Ask";
 /** Columns the label plus its trailing space consume on the call line. */
 const LABEL_COLS = LABEL_TEXT.length + 1;
 /** Below this many columns for the question itself, the scope label is dropped. */
@@ -143,6 +144,10 @@ function clampAll(lines: string[], width: number): string[] {
 /**
  * Call line: label, optional scope, and the question on a single row. Answered
  * asks demote the whole row to context so the `❯` below it carries the block.
+ *
+ * Pending: accent label + full-weight question (the decision is open).
+ * Answered: dim everything — the answer row is the payload now; this is only
+ * the breadcrumb that framed it.
  */
 export function renderAskCallLines(
 	args: { question?: unknown; header?: unknown } | undefined,
@@ -170,7 +175,9 @@ export function renderAskCallLines(
 	// default rather than to the outer color — every span after the aside would
 	// lose its tone.
 	const clipped = clipPlain(core, avail);
-	const body = answered ? theme.fg("muted", clipped) : theme.fg("text", clipped);
+	// Answered: whole breadcrumb is dim (label + scope + body + aside). Pending:
+	// label accent, body text, aside already-dim.
+	const body = answered ? theme.fg("dim", clipped) : theme.fg("text", clipped);
 	const left = avail - visibleWidth(clipped) - 1;
 	const aside = asideText && left >= MIN_ASIDE_COLS ? ` ${theme.fg("dim", clipPlain(asideText, left))}` : "";
 
@@ -182,6 +189,10 @@ export function renderAskCallLines(
  * Result line(s): the decision. Each picked option gets its own row (a
  * comma-joined blob hid where one label ended and the next began), an attached
  * comment nests under it, and freeform answers render as typed.
+ *
+ * The answer is the user's voice in the scrollback — same `❯` tick and
+ * `userMessageText` paint as a sent composer message, so an answered ask reads
+ * as "what I said" rather than another tool result.
  */
 export function renderAskResultLines(
 	details: AskToolDetails | undefined,
@@ -189,7 +200,7 @@ export function renderAskResultLines(
 	theme: Theme,
 	width: number,
 ): string[] {
-	const paintAnswer = (line: string): string => theme.fg("text", line);
+	const paintAnswer = (line: string): string => theme.fg("userMessageText", line);
 	const answerPrefix = `${theme.fg("gutterUser", ICON_ANSWER)} `;
 
 	if (details?.cancelled) {

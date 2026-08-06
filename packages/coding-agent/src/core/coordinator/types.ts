@@ -40,6 +40,13 @@ export interface SubagentProgressInfo {
 	totalTokens?: number;
 }
 
+export interface SubagentExecutionManifest {
+	filesTouched: string[];
+	commands: string[];
+	lastError?: string;
+	worktreePath?: string;
+}
+
 export interface SubagentRecord {
 	id: string;
 	/** Unique, collision-resolved task name (see SubagentRegistry.create). */
@@ -59,6 +66,17 @@ export interface SubagentRecord {
 	deniedToolCalls?: string[];
 	/** Aggregate token/cost usage, accumulated across the subagent's turns. */
 	usage?: SubagentUsage;
+	/** True when cancellation/failure preserved work produced before the final answer. */
+	partial?: boolean;
+	manifest?: SubagentExecutionManifest;
+}
+
+export interface SubagentMutationPolicy {
+	allowedPaths?: string[];
+	deniedPaths?: string[];
+	forbidTestChanges?: boolean;
+	forbidTimeoutIncrease?: boolean;
+	forbidAssertionRemoval?: boolean;
 }
 
 export interface SpawnSubagentOptions {
@@ -109,10 +127,10 @@ export interface SpawnSubagentOptions {
 	 *   in the result so the parent can inspect it.
 	 */
 	worktree?: boolean | WorktreeSpec;
-	/** Hard wall-clock timeout for the subagent. */
-	timeoutMs?: number;
 	/** Optional task name used for the worktree path. Collisions are auto-resolved to stay unique. */
 	taskName?: string;
+	/** Optional hard policy applied before mutating tool calls execute. */
+	mutationPolicy?: SubagentMutationPolicy;
 	/**
 	 * Stable type/role label used to derive the subagent's `prompt_cache_key`
 	 * (`${parentSessionId}:sub:${agentTypeLabel}`) for cache-shard affinity across

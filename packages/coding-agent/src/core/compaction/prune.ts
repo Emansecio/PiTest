@@ -11,9 +11,15 @@
 import { isAbsolute, resolve } from "node:path";
 import type { AgentMessage } from "@pit/agent-core";
 import { OVERTHINK_STEER_TEXT_MARKER, TTSR_STEER_TEXT_MARKER } from "@pit/agent-core";
+import { REPEATED_ERROR_STEER_MARKER } from "../cross-error.ts";
 import { type DeferredOutputStore, getCurrentDeferredOutputStore } from "../deferred-output-store.ts";
 import { lspSupersededResourceKey } from "../lsp/supersede.ts";
-import { MUTATING_TOOL_NAMES } from "../stagnation.ts";
+import { MUTATING_TOOL_NAMES, STAGNATION_STEER_MARKER } from "../stagnation.ts";
+import {
+	DOOM_LOOP_STEER_MARKER,
+	FAILURE_BUDGET_STEER_MARKER,
+	TOOL_ERROR_REFLECTION_STEER_MARKER,
+} from "../tool-call-feedback.ts";
 import { crushJson } from "../tools/json-crush.ts";
 import { canonicalPathKey, FS_CASE_INSENSITIVE } from "../tools/path-utils.ts";
 import { estimateTextTokens, pruneToolCallArguments } from "./message-tokens.ts";
@@ -799,6 +805,11 @@ export function wouldPruneOldToolOutputs(
 			if (wouldPruneUserPasteBlocks(msg, userPasteProfile(tokenThreshold))) return true;
 			continue;
 		}
+		// N8 parity for the session's `role: "custom"` steers (see the apply path).
+		if (msg.role === "custom") {
+			if (hasConsumedSteeringReminder(msg)) return true;
+			continue;
+		}
 		if (msg.role === "assistant" && Array.isArray(msg.content)) {
 			for (const block of msg.content) {
 				if (block.type !== "toolCall" || !MUTATING_TOOL_NAMES.has(block.name)) continue;
@@ -1002,22 +1013,34 @@ function wouldShrinkUserPaste(text: string, profile: UserPasteProfile): boolean 
 // ============================================================================
 
 /**
- * Steering reminders the anti-waste guards inject as synthetic user messages.
+ * Steering reminders the anti-waste guards inject as synthetic messages (user
+ * messages for the agent-core guards, `role: "custom"` messages for the session's
+ * turn-steering engine — both are user-role by the time the provider sees them).
  * Each entry is a CONFIRMED generator of a `<system-reminder>…</system-reminder>`
  * steering block that the guard re-emits on demand (overthink-guard.ts /
- * ttsr-steer.ts in @pit/agent-core — the markers are imported from there as the
- * single source of truth), so once the turn a reminder steered has scrolled out
- * of the protected window the full text is dead weight: re-derivable, ~zero
- * historical value.
+ * ttsr-steer.ts in @pit/agent-core, tool-call-feedback.ts / cross-error.ts /
+ * stagnation.ts here — the markers are imported from there as the single source
+ * of truth), so once the turn a reminder steered has scrolled out of the
+ * protected window the full text is dead weight: re-derivable, ~zero historical
+ * value.
  *
- * CONSERVATIVE by construction: only the two prefixes that OPEN a known steering
- * block are matched. A bare `<system-reminder>` a hook or the user injected —
- * which may carry load-bearing content — never matches, because every entry
- * requires a specific steering prefix, not the generic tag.
+ * The protection window is what keeps this safe for course-correction steers: a
+ * doom-loop / stagnation steer stays FULL text for the turns it is meant to
+ * influence and only collapses after `protectTurns` user turns have passed.
+ *
+ * CONSERVATIVE by construction: only prefixes that OPEN a known steering block
+ * are matched. A bare `<system-reminder>` a hook or the user injected — which may
+ * carry load-bearing content — never matches, because every entry requires a
+ * specific steering prefix, not the generic tag.
  */
 const STEERING_REMINDER_MATCHERS: ReadonlyArray<{ kind: string; prefix: string }> = [
 	{ kind: "overthink", prefix: OVERTHINK_STEER_TEXT_MARKER },
 	{ kind: "TTSR", prefix: TTSR_STEER_TEXT_MARKER },
+	{ kind: "doom-loop", prefix: DOOM_LOOP_STEER_MARKER },
+	{ kind: "failure-budget", prefix: FAILURE_BUDGET_STEER_MARKER },
+	{ kind: "repeated-error", prefix: REPEATED_ERROR_STEER_MARKER },
+	{ kind: "stagnation", prefix: STAGNATION_STEER_MARKER },
+	{ kind: "tool-error", prefix: TOOL_ERROR_REFLECTION_STEER_MARKER },
 ];
 
 const SYSTEM_REMINDER_CLOSE = "</system-reminder>";
@@ -1147,16 +1170,24 @@ export function pruneOldToolOutputs(
 				}
 				continue;
 			}
-			// N8: collapse consumed steering reminders (overthink/TTSR) to one line
-			// BEFORE the N5 paste prune. Reminders are far below the paste threshold
-			// (a few hundred chars), so N5 never reaches them — that is why N8 exists
-			// — and they need no store: the guard re-emits them, nothing to recover.
+			// N8: collapse consumed steering reminders to one line BEFORE the N5 paste
+			// prune. Reminders are far below the paste threshold (a few hundred chars),
+			// so N5 never reaches them — that is why N8 exists — and they need no
+			// store: the guard re-emits them, nothing to recover.
 			prunedTokens += collapseConsumedSteeringReminders(msg);
 			// N5: pasted logs/stacks are defer-mandatory (user input has no on-disk
 			// source of truth), so they only prune when a store is open.
 			if (store !== undefined) {
 				prunedTokens += pruneUserPasteBlocks(msg, userPasteProfile(tokenThreshold), store);
 			}
+			continue;
+		}
+		// N8 for the session's own steers: the turn-steering engine posts them as
+		// `role: "custom"` messages (converted to user role only at the LLM boundary,
+		// AFTER this prune), so they never reach the user branch above. Same matcher,
+		// same protection window, same no-store contract.
+		if (msg.role === "custom") {
+			prunedTokens += collapseConsumedSteeringReminders(msg);
 			continue;
 		}
 		// Assistant tool-call args for mutation tools (write/edit) carry the full
@@ -1345,46 +1376,76 @@ export function wouldApplyOldThinkingCap(messages: AgentMessage[], protectTurns 
 	return false;
 }
 
+/** Elide one already-located mutation call, retaining the shared estimate cache. */
+function elideMutatingToolCallBlock(block: { name: string; arguments: unknown }): number {
+	const argsRef = typeof block.arguments === "object" && block.arguments !== null ? block.arguments : undefined;
+	let before = argsRef ? beforeTokensCache.get(argsRef) : undefined;
+	if (before === undefined) {
+		before = estimateTextTokens(JSON.stringify(block.arguments), true);
+		if (argsRef) beforeTokensCache.set(argsRef, before);
+	}
+	const result = pruneToolCallArguments(block.arguments);
+	if (!result) return 0;
+	block.arguments = result.pruned;
+	const after = estimateTextTokens(JSON.stringify(result.pruned), true);
+	return Math.max(0, before - after);
+}
+
 export function elideMutatingToolCallArguments(messages: AgentMessage[], toolCallId: string): number {
+	// P0: only elide a mutation call whose result is ALREADY in the transcript.
+	// A call whose args are pruned BEFORE its tool-result lands would leave the
+	// dispatcher with the elision marker as the only payload — if the call is
+	// re-driven (continue/resume/re-dispatch of the same batch) it would execute
+	// the marker instead of the real content. The result being present proves
+	// execution already happened, so the historical copy is safe to prune.
+	let hasResult = false;
+	for (const msg of messages) {
+		if (msg.role === "toolResult" && msg.toolCallId === toolCallId) {
+			hasResult = true;
+			break;
+		}
+	}
+	if (!hasResult) return 0;
 	for (const msg of messages) {
 		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
 		for (let b = 0; b < msg.content.length; b++) {
 			const block = msg.content[b];
 			if (block.type !== "toolCall" || block.id !== toolCallId) continue;
 			if (!MUTATING_TOOL_NAMES.has(block.name)) return 0;
-			const argsRef = typeof block.arguments === "object" && block.arguments !== null ? block.arguments : undefined;
-			let before = argsRef ? beforeTokensCache.get(argsRef) : undefined;
-			if (before === undefined) {
-				before = estimateTextTokens(JSON.stringify(block.arguments), true);
-				if (argsRef) beforeTokensCache.set(argsRef, before);
-			}
-			const result = pruneToolCallArguments(block.arguments);
-			if (!result) return 0;
-			(block as { arguments: unknown }).arguments = result.pruned;
-			const after = estimateTextTokens(JSON.stringify(result.pruned), true);
-			return Math.max(0, before - after);
+			return elideMutatingToolCallBlock(block);
 		}
 	}
 	return 0;
 }
 
-/** Wire-path: elide long args on every mutating toolCall in the array (idempotent). */
+/**
+ * Wire-path: elide long args on every mutating toolCall in the array (idempotent).
+ * Each block is processed at its current location. The old implementation called
+ * the id-based helper for every block, causing a full history scan per call.
+ */
 export function elideAllMutatingToolCallArguments(messages: AgentMessage[]): number {
 	let total = 0;
+	// P0: only elide calls whose tool-result is present in the array (already
+	// executed). A result-less call may still be re-driven by the dispatcher.
+	const executed = new Set<string>();
+	for (const msg of messages) {
+		if (msg.role === "toolResult") executed.add(msg.toolCallId);
+	}
 	for (const msg of messages) {
 		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
 		for (const block of msg.content) {
 			if (block.type !== "toolCall" || !MUTATING_TOOL_NAMES.has(block.name)) continue;
-			total += elideMutatingToolCallArguments(messages, block.id);
+			if (!executed.has(block.id)) continue;
+			total += elideMutatingToolCallBlock(block);
 		}
 	}
 	return total;
 }
 
 /**
- * Return a new message array where every `toolResult`, assistant, and user
- * message — and the text-bearing content blocks inside it — is shallow-cloned,
- * while all other messages pass through by reference.
+ * Return a new message array where every `toolResult`, assistant, user and
+ * `custom` message — and the text-bearing content blocks inside it — is
+ * shallow-cloned, while all other messages pass through by reference.
  *
  * `pruneOldToolOutputs` rewrites `block.text` in place. For `type === "message"`
  * entries, `getMessageFromEntry` hands back `entry.message` BY REFERENCE, so the
@@ -1417,11 +1478,12 @@ export function cloneToolResultMessagesForPrune(messages: AgentMessage[]): Agent
 				),
 			};
 		}
-		// User messages: the N5 paste prune rewrites text blocks (or the whole
-		// string content) in place. Clone the text layer so the live session /
-		// branch entry.message stays byte-identical if the prune's consumer aborts.
-		// Fresh objects also sidestep the per-object charCountCache.
-		if (msg.role === "user") {
+		// User messages: the N5 paste prune / N8 reminder collapse rewrite text blocks
+		// (or the whole string content) in place. `custom` messages carry the session's
+		// own steers and take the same N8 path, so they need the same protection —
+		// without it the collapse would rewrite the LIVE transcript entry and the TUI
+		// would render the one-line marker instead of the steer.
+		if (msg.role === "user" || msg.role === "custom") {
 			const content = (msg as { content: unknown }).content;
 			if (Array.isArray(content)) {
 				return {

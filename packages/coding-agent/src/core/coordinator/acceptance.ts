@@ -18,12 +18,21 @@ import {
 	type SpawnSubagentDependencies,
 	spawnSubagent,
 } from "./spawn.ts";
-import type { SpawnSubagentOptions, SpawnSubagentResult, SubagentUsage, WorktreeSpec } from "./types.ts";
+import type {
+	SpawnSubagentOptions,
+	SpawnSubagentResult,
+	SubagentProgressInfo,
+	SubagentUsage,
+	WorktreeSpec,
+} from "./types.ts";
 import { retargetToolsForWorktree } from "./worktree-tools.ts";
 
 const execFileP = promisify(execFile);
 
 const JUDGE_READONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
+export const MAX_ACCEPTANCE_ATTEMPTS = 8;
+export const DEFAULT_ACCEPTANCE_CHECK_TIMEOUT_MS = 120_000;
+const MAX_ACCEPTANCE_CHECK_TIMEOUT_MS = 10 * 60_000;
 
 const JUDGE_RESULT_SCHEMA = Type.Object({
 	pass: Type.Boolean(),
@@ -35,6 +44,7 @@ export interface AcceptanceConfig {
 	criteria?: string;
 	check?: string;
 	max_attempts?: number;
+	check_timeout_ms?: number;
 }
 
 export interface GateDetails {
@@ -57,8 +67,22 @@ interface GateVerdict {
 	usage?: SubagentUsage;
 }
 
+export interface AcceptanceLifecycleCallbacks {
+	/** Stable parent-visible prefix for the gate's attempt/phase lifecycle rows. */
+	handlePrefix: string;
+	onStart?: (handle: string) => void;
+	onProgress?: (handle: string, info: SubagentProgressInfo) => void;
+	onComplete?: (
+		handle: string,
+		status: "done" | "error" | "cancelled",
+		meta?: { turns?: number; totalTokens?: number },
+	) => void;
+}
+
 export interface AcceptanceDependencies extends SpawnSubagentDependencies {
 	permissionChecker?: PermissionChecker;
+	/** Best-effort telemetry for individual gate attempts; never affects the verdict. */
+	acceptanceLifecycle?: AcceptanceLifecycleCallbacks;
 }
 
 export interface RunWithAcceptanceResult {
@@ -73,10 +97,41 @@ function judgeTools(catalog: readonly AgentTool[]): AgentTool[] {
 	return catalog.filter((t) => !isCoordinatorTool(t) && (JUDGE_READONLY_TOOLS as readonly string[]).includes(t.name));
 }
 
+function lifecycleHandle(
+	lifecycle: AcceptanceLifecycleCallbacks | undefined,
+	attempt: number,
+	phase: "worker" | "judge" | "check",
+): string | undefined {
+	return lifecycle ? `${lifecycle.handlePrefix} [attempt ${attempt} ${phase}]` : undefined;
+}
+
+function emitLifecycle(
+	lifecycle: AcceptanceLifecycleCallbacks | undefined,
+	kind: "onStart" | "onProgress" | "onComplete",
+	...args:
+		| [string, SubagentProgressInfo?]
+		| [string, "done" | "error" | "cancelled", { turns?: number; totalTokens?: number }?]
+): void {
+	try {
+		if (kind === "onStart") lifecycle?.onStart?.(args[0]);
+		else if (kind === "onProgress") lifecycle?.onProgress?.(args[0], args[1] as SubagentProgressInfo);
+		else
+			lifecycle?.onComplete?.(
+				args[0],
+				args[1] as "done" | "error" | "cancelled",
+				args[2] as { turns?: number; totalTokens?: number } | undefined,
+			);
+	} catch {
+		// Lifecycle is telemetry only; it must not change gate semantics.
+	}
+}
+
 async function runCheckCommand(
 	command: string,
 	cwd: string,
 	checker: PermissionChecker | undefined,
+	signal: AbortSignal | undefined,
+	timeoutMs: number,
 ): Promise<{ pass: boolean; outputTail: string }> {
 	if (checker) {
 		const decision = checker.check(describeToolAction("bash", { command }));
@@ -95,6 +150,8 @@ async function runCheckCommand(
 			cwd,
 			maxBuffer: 64 * 1024,
 			windowsHide: true,
+			timeout: timeoutMs,
+			signal,
 		});
 		const combined = `${stdout ?? ""}${stderr ?? ""}`.trim();
 		return {
@@ -116,6 +173,7 @@ async function evaluateCriteria(
 	criteria: string,
 	workerOutput: string,
 	spawnOpts: SpawnSubagentOptions,
+	attempt: number,
 ): Promise<{ pass: boolean; reasons: string; missing?: string[]; usage?: SubagentUsage }> {
 	const workerDepth = spawnOpts.depth ?? 0;
 	const judgePrompt =
@@ -123,22 +181,46 @@ async function evaluateCriteria(
 		"Use read-only tools to verify file/claim evidence when needed.\n\n" +
 		`## Criteria\n${criteria}\n\n## Worker output\n${workerOutput}`;
 
-	const judgeResult = await spawnSubagent(deps, {
-		prompt: judgePrompt,
-		allowedTools: JUDGE_READONLY_TOOLS.slice(),
-		resultSchema: JUDGE_RESULT_SCHEMA,
-		depth: workerDepth + 1,
-		cwd: spawnOpts.cwd,
-		model: spawnOpts.model,
-		thinkingLevel: spawnOpts.thinkingLevel,
-		signal: spawnOpts.signal,
-		systemPrompt:
-			"You are an acceptance judge. Verify claims with read-only tools when needed, then deliver a JSON verdict.",
-	});
+	const handle = lifecycleHandle(deps.acceptanceLifecycle, attempt, "judge");
+	emitLifecycle(deps.acceptanceLifecycle, "onStart", handle ?? "");
+	let judgeResult: SpawnSubagentResult;
+	try {
+		judgeResult = await spawnSubagent(deps, {
+			prompt: judgePrompt,
+			allowedTools: JUDGE_READONLY_TOOLS.slice(),
+			resultSchema: JUDGE_RESULT_SCHEMA,
+			depth: workerDepth + 1,
+			cwd: spawnOpts.cwd,
+			model: spawnOpts.model,
+			thinkingLevel: spawnOpts.thinkingLevel,
+			signal: spawnOpts.signal,
+			systemPrompt:
+				"You are an acceptance judge. Verify claims with read-only tools when needed, then deliver a JSON verdict.",
+			onSubagentEvent: handle
+				? (info) => emitLifecycle(deps.acceptanceLifecycle, "onProgress", handle, info)
+				: undefined,
+		});
+	} catch (error) {
+		emitLifecycle(
+			deps.acceptanceLifecycle,
+			"onComplete",
+			handle ?? "",
+			spawnOpts.signal?.aborted ? "cancelled" : "error",
+		);
+		throw error;
+	}
 	const value = judgeResult.value as { pass: boolean; reasons: string; missing?: string[] } | undefined;
 	if (!value) {
+		emitLifecycle(deps.acceptanceLifecycle, "onComplete", handle ?? "", "error", {
+			turns: judgeResult.record.turnCount,
+			totalTokens: judgeResult.usage?.totalTokens,
+		});
 		return { pass: false, reasons: "judge produced no valid verdict", usage: judgeResult.usage };
 	}
+	emitLifecycle(deps.acceptanceLifecycle, "onComplete", handle ?? "", value.pass ? "done" : "error", {
+		turns: judgeResult.record.turnCount,
+		totalTokens: judgeResult.usage?.totalTokens,
+	});
 	return { ...value, usage: judgeResult.usage };
 }
 
@@ -147,6 +229,7 @@ async function evaluateGate(
 	spawnOpts: SpawnSubagentOptions,
 	acceptance: AcceptanceConfig,
 	workerResult: SpawnSubagentResult,
+	attempt: number,
 ): Promise<GateVerdict> {
 	const output =
 		spawnOpts.resultSchema && workerResult.value !== undefined
@@ -160,7 +243,7 @@ async function evaluateGate(
 	let usage: SubagentUsage | undefined;
 
 	if (acceptance.criteria) {
-		const verdict = await evaluateCriteria(deps, acceptance.criteria, output, spawnOpts);
+		const verdict = await evaluateCriteria(deps, acceptance.criteria, output, spawnOpts, attempt);
 		criteriaPass = verdict.pass;
 		usage = verdict.usage;
 		if (!verdict.pass) {
@@ -169,7 +252,19 @@ async function evaluateGate(
 	}
 
 	if (acceptance.check) {
-		const check = await runCheckCommand(acceptance.check, spawnOpts.cwd ?? process.cwd(), deps.permissionChecker);
+		const handle = lifecycleHandle(deps.acceptanceLifecycle, attempt, "check");
+		emitLifecycle(deps.acceptanceLifecycle, "onStart", handle ?? "");
+		const check = await runCheckCommand(
+			acceptance.check,
+			spawnOpts.cwd ?? process.cwd(),
+			deps.permissionChecker,
+			spawnOpts.signal,
+			acceptance.check_timeout_ms ?? DEFAULT_ACCEPTANCE_CHECK_TIMEOUT_MS,
+		);
+		emitLifecycle(deps.acceptanceLifecycle, "onProgress", handle ?? "", { turn: 1, lastTool: "bash" });
+		emitLifecycle(deps.acceptanceLifecycle, "onComplete", handle ?? "", check.pass ? "done" : "error", {
+			turns: 1,
+		});
 		checkPass = check.pass;
 		checkOutputTail = check.outputTail;
 		if (!check.pass && !reasons) {
@@ -232,6 +327,19 @@ export async function runWithAcceptance(
 	}
 
 	const maxAttempts = acceptance.max_attempts ?? 2;
+	if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > MAX_ACCEPTANCE_ATTEMPTS) {
+		throw new RangeError(`acceptance.max_attempts must be an integer >= 1 and <= ${MAX_ACCEPTANCE_ATTEMPTS}`);
+	}
+	const checkTimeoutMs = acceptance.check_timeout_ms ?? DEFAULT_ACCEPTANCE_CHECK_TIMEOUT_MS;
+	if (
+		!Number.isInteger(checkTimeoutMs) ||
+		checkTimeoutMs < 1_000 ||
+		checkTimeoutMs > MAX_ACCEPTANCE_CHECK_TIMEOUT_MS
+	) {
+		throw new RangeError(
+			`acceptance.check_timeout_ms must be an integer >= 1000 and <= ${MAX_ACCEPTANCE_CHECK_TIMEOUT_MS}`,
+		);
+	}
 	let attempt = 0;
 	let lastResult: SpawnSubagentResult | undefined;
 	let lastVerdict: GateVerdict | undefined;
@@ -243,6 +351,8 @@ export async function runWithAcceptance(
 	try {
 		while (attempt < maxAttempts) {
 			attempt++;
+			const workerHandle = lifecycleHandle(deps.acceptanceLifecycle, attempt, "worker");
+			emitLifecycle(deps.acceptanceLifecycle, "onStart", workerHandle ?? "");
 			const autoCleanup = usesAutoCleanupWorktree(spawnOpts.worktree);
 			const explicitKeep = usesKeptWorktree(spawnOpts.worktree);
 			let attemptWorktreePath: string | undefined;
@@ -263,6 +373,13 @@ export async function runWithAcceptance(
 					// Fresh worker each attempt — omit taskName on retries so the registry
 					// assigns a unique name instead of colliding.
 					taskName: attempt === 1 ? spawnOpts.taskName : undefined,
+					onSubagentEvent: workerHandle
+						? (info) => emitLifecycle(deps.acceptanceLifecycle, "onProgress", workerHandle, info)
+						: spawnOpts.onSubagentEvent,
+				});
+				emitLifecycle(deps.acceptanceLifecycle, "onComplete", workerHandle ?? "", "done", {
+					turns: lastResult.record.turnCount,
+					totalTokens: lastResult.usage?.totalTokens,
 				});
 				addUsage(usage, lastResult.usage);
 
@@ -281,6 +398,7 @@ export async function runWithAcceptance(
 					{ ...spawnOpts, cwd: effectiveCwd, worktree: undefined },
 					acceptance,
 					lastResult,
+					attempt,
 				);
 				addUsage(usage, verdict.usage);
 				lastVerdict = verdict;
@@ -310,6 +428,14 @@ export async function runWithAcceptance(
 					// checkout for inspection; every rejected earlier attempt is removed.
 					retainAttemptWorktree = explicitKeep;
 				}
+			} catch (error) {
+				emitLifecycle(
+					deps.acceptanceLifecycle,
+					"onComplete",
+					workerHandle ?? "",
+					spawnOpts.signal?.aborted ? "cancelled" : "error",
+				);
+				throw error;
 			} finally {
 				if (attemptWorktreePath && (autoCleanup || (explicitKeep && !retainAttemptWorktree))) {
 					await cleanupSubagentWorktree(spawnOpts.cwd ?? process.cwd(), attemptWorktreePath);
@@ -336,7 +462,7 @@ export async function runWithAcceptance(
 	const text = `${warning}\n\n${lastResult?.output ?? ""}`;
 	return {
 		result: lastResult!,
-		isError: false,
+		isError: true,
 		text,
 		gate,
 		usage,

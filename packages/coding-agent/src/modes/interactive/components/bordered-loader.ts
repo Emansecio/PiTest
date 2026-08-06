@@ -30,9 +30,10 @@ export class BorderedLoader extends Container {
 		}
 		card.addChild(this.loader);
 		if (this.cancellable) {
-			// Dense chrome: the cancel hint rides the loader line itself as a dim
-			// suffix (`⠙ message·esc cancel`) instead of its own hint line + spacers.
-			this.loader.setTrailingSuffix(theme.fg("dim", `·${keyText("tui.select.cancel")} cancel`));
+			// Cancel hint rides the loader line as a dim suffix with spaced middot
+			// (`⠙ message · esc cancel`) — same LOADER_META_SEP rhythm as the
+			// working line, not a welded `message·esc`.
+			this.loader.setTrailingSuffix(theme.fg("dim", ` · ${keyText("tui.select.cancel")} cancel`));
 		}
 		this.addChild(card);
 	}

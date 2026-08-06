@@ -31,7 +31,6 @@ import type {
 	AutocompleteItem,
 	AutocompleteProvider,
 	EditorComponent,
-	Keybinding,
 	KeyId,
 	MarkdownTheme,
 	OverlayHandle,
@@ -137,16 +136,17 @@ import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { type SessionContext, type SessionInfo, SessionManager } from "../../core/session-manager.ts";
 import type { ResolvedSkillDiscoverySettings } from "../../core/settings-manager.ts";
-import { BUILTIN_SLASH_COMMANDS, buildGroupedSlashHelp } from "../../core/slash-commands.ts";
+import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { getCurrentTokenGovernor } from "../../core/token-governor.ts";
 import { consumedTokens } from "../../core/token-usage.ts";
 import {
 	type BashBackgroundJob,
+	getBashBackgroundJob,
 	isBashBackgroundJobStalled,
-	killBashBackgroundJob,
 	listBashBackgroundJobs,
 	onBashBackgroundJobEvent,
+	stopBashBackgroundJob,
 } from "../../core/tools/bash.ts";
 import { resolveReadPath } from "../../core/tools/path-utils.ts";
 import { collapseRepeatedLines, type TruncationResult, truncateTail } from "../../core/tools/truncate.ts";
@@ -199,14 +199,8 @@ import { FooterComponent } from "./components/footer.ts";
 import { FusionLiveComponent } from "./components/fusion-live.ts";
 import { FusionSetupComponent } from "./components/fusion-setup.ts";
 import { createGoalOverlay, type GoalOverlay } from "./components/goal-overlay.ts";
-import {
-	formatKeyText,
-	HINT_SEPARATOR,
-	keyDisplayText,
-	keyHint,
-	keyText,
-	rawKeyHint,
-} from "./components/keybinding-hints.ts";
+import { HelpOverlay } from "./components/help-overlay.ts";
+import { formatKeyText, HINT_SEPARATOR, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.ts";
@@ -215,6 +209,7 @@ import { type PendingDeliveryMode, PendingUserMessageComponent } from "./compone
 import { createPetCompanion, PET_COMPANION_MIN_COLS, type PetCompanion } from "./components/pet-companion.ts";
 import type { PetMoodState } from "./components/pet-mood.ts";
 import { RewindSelectorComponent } from "./components/rewind-selector.ts";
+import { type RunningWorkItem, RunningWorkSelectorComponent } from "./components/running-work-selector.ts";
 import { SendNowChooser } from "./components/send-now-chooser.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
@@ -279,7 +274,7 @@ import {
 	Theme,
 	theme,
 } from "./theme/theme.ts";
-import { deriveThinkingTail } from "./thinking-preview.ts";
+import { clearFenceScanCache, deriveThinkingTail } from "./thinking-preview.ts";
 import { buildTurnDoneSnapshot, shouldRenderTurnDone } from "./turn-done-format.ts";
 import { decideGearboxToolEnd, sessionHasThinkingOnlyAssistant } from "./turn-policy.ts";
 import {
@@ -301,19 +296,47 @@ import {
 	type TurnViewEffect,
 } from "./turn-view.ts";
 
-/**
- * A structural rule for the chat transcript (e.g. hotkeys framing).
- * Muted hairline rather than DynamicBorder's saturated blue default — the rule
- * organizes the flow without competing with content. Modal selectors keep the
- * blue default deliberately, as a focus cue.
- */
-function mutedBorderRule(): DynamicBorder {
-	return new DynamicBorder((str) => theme.fg("borderMuted", str));
-}
-
 /** Normalize a caught value into a human-readable message string. */
 function errMsg(e: unknown): string {
 	return e instanceof Error ? e.message : String(e);
+}
+
+const THINKING_PREVIEW_RAW_MAX_CHARS = 64 * 1024;
+
+type ThinkingPreviewState = {
+	thinkingPreviewRaw: string;
+	thinkingPreviewFenceOpen?: boolean;
+	thinkingPreviewFenceCarry?: string;
+};
+
+function updateThinkingPreviewFenceState(state: ThinkingPreviewState, delta: string): void {
+	const carry = state.thinkingPreviewFenceCarry ?? "";
+	const combined = carry + delta;
+	let searchPos = 0;
+	let index = combined.indexOf("```");
+	while (index !== -1) {
+		state.thinkingPreviewFenceOpen = !(state.thinkingPreviewFenceOpen ?? false);
+		searchPos = index + 3;
+		index = combined.indexOf("```", searchPos);
+	}
+	state.thinkingPreviewFenceCarry = combined.slice(Math.max(searchPos, combined.length - 2));
+}
+
+function capThinkingPreviewRaw(state: ThinkingPreviewState): void {
+	if (state.thinkingPreviewRaw.length <= THINKING_PREVIEW_RAW_MAX_CHARS) return;
+
+	const tail = state.thinkingPreviewRaw.slice(-THINKING_PREVIEW_RAW_MAX_CHARS);
+	let fenceCount = 0;
+	let searchPos = 0;
+	let index = tail.indexOf("```");
+	while (index !== -1) {
+		fenceCount++;
+		searchPos = index + 3;
+		index = tail.indexOf("```", searchPos);
+	}
+	const globalFenceParity = state.thinkingPreviewFenceOpen ? 1 : 0;
+	const syntheticPrefix = fenceCount % 2 === globalFenceParity ? "" : "```";
+	state.thinkingPreviewRaw = syntheticPrefix + tail.slice(-(THINKING_PREVIEW_RAW_MAX_CHARS - syntheticPrefix.length));
 }
 
 /** Compact relative age for a recent-session line (`now`, `5m`, `2h`, `3d`, …).
@@ -384,13 +407,6 @@ const CTRL_C_EXIT_WINDOW_MS = 1500;
 // Source tag on the "Interrupt what?" ask (promptInterruptChoice); agent_end
 // uses it to recognize — and close — an interrupt picker its turn outlived.
 const INTERRUPT_ASK_TOOL_NAME = "interrupt";
-
-/** /hotkeys row for double-Esc, per the configured doubleEscapeAction. */
-const DOUBLE_ESC_HOTKEY_LABELS: Record<"fork" | "tree" | "none", string> = {
-	fork: "Edit a previous message (fork)",
-	tree: "Open the session tree",
-	none: "No action (disabled)",
-};
 
 /** Tools that may change the working tree — refresh git diff stats after success. */
 const MUTATING_TOOLS_FOR_DIFF_REFRESH = new Set(["edit", "edit_v2", "write", "bash", "ast_edit", "code"]);
@@ -522,11 +538,18 @@ export class InteractiveMode {
 	private subagentsContainer: Container;
 	/** Live multi-row subagents strip (one row per parallel agent), or none. */
 	private agentsLive: AgentsLiveComponent | undefined;
-	/** Pending post-settle collapse of the strip (linger), if armed. */
+	/** Pending post-settle collapse of the strip (linger / preview), if armed. */
 	private agentsLiveCollapseTimer: ReturnType<typeof setTimeout> | undefined;
-	/** Post-settle linger before the strip folds into its transcript summary.
-	 * Instance field (not a const) as the tests' escape hatch: 0 folds synchronously. */
+	/**
+	 * Multi-row linger after all agents settle before the collapse preview.
+	 * Instance field (not a const) so tests can set 0 for a synchronous fold.
+	 */
 	private agentsCollapseLingerMs = 2000;
+	/**
+	 * After the multi-row linger, how long the strip paints as a single summary
+	 * line in place before disposing into the transcript (soft height collapse).
+	 */
+	private agentsCollapsePreviewMs = 180;
 	private defaultEditor: CustomEditor;
 	private editor: EditorComponent;
 	private editorComponentFactory: EditorFactory | undefined;
@@ -536,6 +559,8 @@ export class InteractiveMode {
 	// refreshed whenever the autocomplete provider is rebuilt. Used to catch a
 	// typo'd "/command" before it is silently sent to the model as a prompt.
 	private _knownCommandNames = new Set<string>();
+	/** Effective command registry shared by autocomplete, help, and typo hints. */
+	private slashCommandRegistry: SlashCommand[] = [];
 	private fdPath: string | undefined;
 	private editorContainer: Container;
 	private composerChrome: ComposerChrome;
@@ -569,8 +594,14 @@ export class InteractiveMode {
 	// raw, unsanitized accumulator for the in-flight assistant stream's
 	// thinking block(s). Ephemeral — never persisted, reset on every new
 	// assistant stream and cleared the moment text/tool activity starts. See
-	// handleThinkingPreviewEvent / clearThinkingPreview.
-	private thinkingPreviewRaw = "";
+	// handleThinkingPreviewEvent / clearThinkingPreview. Capped at
+	// THINKING_PREVIEW_RAW_MAX_CHARS so long reasoning turns cannot pin
+	// hundreds of KB after only the visible tail is needed.
+	thinkingPreviewRaw = "";
+	/** Internal fence state is passed to the pure cap helpers on each delta. */
+	thinkingPreviewFenceOpen = false;
+	thinkingPreviewFenceCarry = "";
+	/** Keep only the last 64 KiB of raw thinking — deriveThinkingTail only reads a windowed tail. */
 	// Date.now() of the last preview repaint actually pushed to the loader,
 	// for the ~300ms throttle in flushThinkingPreview.
 	private thinkingPreviewLastAppliedAt = 0;
@@ -671,6 +702,7 @@ export class InteractiveMode {
 	// block → all → collapsed); any global setToolsExpanded() clears it.
 	private toolOutputExpanded = false;
 	private scopedExpandTarget: (Component & Expandable) | null = null;
+	private thinkingExpandTarget: AssistantMessageComponent | null = null;
 
 	// Thinking block visibility state
 	private hideThinkingBlock = false;
@@ -749,6 +781,7 @@ export class InteractiveMode {
 
 	// Guard so the cheatsheet hotkey toggles a single overlay (no stacking).
 	private cheatsheetOpen = false;
+	private helpOpen = false;
 
 	// User-input bus: tools (e.g. `ask`) request structured option picks via this.
 	private userInputBus: UserInputBus = createUserInputBus();
@@ -1022,20 +1055,42 @@ export class InteractiveMode {
 	}
 
 	private createBaseAutocompleteProvider(): AutocompleteProvider {
-		// Define commands for autocomplete
-		const slashCommands: SlashCommand[] = BUILTIN_SLASH_COMMANDS.map((command) => ({
-			name: command.name,
-			description: command.description,
-			...(command.argumentHint && { argumentHint: command.argumentHint }),
-			...(command.completeOnly && { completeOnly: true }),
-		}));
-		// Built-ins flagged `hidden` stay "known" (dispatched when typed, still shadow
-		// same-named extension/skill commands) but are dropped from the "/" menu.
-		const hiddenBuiltinNames = new Set(
-			BUILTIN_SLASH_COMMANDS.filter((command) => command.hidden).map((command) => command.name),
-		);
-		const visibleSlashCommands = slashCommands.filter((command) => !hiddenBuiltinNames.has(command.name));
-
+		// Build one effective registry. Every surface below consumes this same
+		// precedence order, so a command cannot be visible in one place and absent
+		// (or shadowed differently) in another.
+		const essentialNames = new Map([
+			["help", 0],
+			["resume", 1],
+			["new", 2],
+			["model", 3],
+			["settings", 4],
+		]);
+		const groupBasePriority: Record<string, number> = {
+			Session: 100,
+			Model: 200,
+			Config: 300,
+			Info: 400,
+			Advanced: 500,
+		};
+		const sectionFor = (group: string | undefined, name: string): string => {
+			if (essentialNames.has(name)) return "ESSENTIAL";
+			if (group === "Model" || group === "Config") return "MODEL & CONFIG";
+			return (group ?? "Advanced").toUpperCase();
+		};
+		const slashCommands: SlashCommand[] = BUILTIN_SLASH_COMMANDS.map((command, index) => {
+			const group = command.group ?? "Advanced";
+			return {
+				name: command.name,
+				description: command.description,
+				section: sectionFor(command.group, command.name),
+				group,
+				badge: "built-in",
+				priority: essentialNames.get(command.name) ?? (groupBasePriority[group] ?? 500) + index,
+				hidden: command.hidden,
+				...(command.argumentHint && { argumentHint: command.argumentHint }),
+				...(command.completeOnly && { completeOnly: true }),
+			};
+		});
 		const modelCommand = slashCommands.find((command) => command.name === "model");
 		if (modelCommand) {
 			modelCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null => {
@@ -1074,49 +1129,69 @@ export class InteractiveMode {
 			};
 		}
 
-		// Convert prompt templates to SlashCommand format for autocomplete
-		const templateCommands: SlashCommand[] = this.session.promptTemplates.map((cmd) => ({
-			name: cmd.name,
-			description: prefixAutocompleteDescription(cmd.description, cmd.sourceInfo),
-			...(cmd.argumentHint && { argumentHint: cmd.argumentHint }),
-		}));
-
 		// Convert extension commands to SlashCommand format
 		const builtinCommandNames = new Set(slashCommands.map((c) => c.name));
 		const extensionCommands: SlashCommand[] = this.session.extensionRunner
 			.getRegisteredCommands()
-			.filter((cmd) => !builtinCommandNames.has(cmd.name))
+			.filter((cmd) => !builtinCommandNames.has(cmd.name) || cmd.invocationName !== cmd.name)
 			.map((cmd) => ({
 				name: cmd.invocationName,
 				description: prefixAutocompleteDescription(cmd.description, cmd.sourceInfo),
+				section: "PROJECT",
+				group: "Project",
+				badge: "extension",
+				priority: 700,
 				getArgumentCompletions: cmd.getArgumentCompletions,
 			}));
+		const extensionNames = new Set(extensionCommands.map((command) => command.name));
 
-		// Build skill commands from session.skills (if enabled). Skills register as
-		// plain `/name` (Claude Code parity). Skip any whose name collides with a
-		// built-in / template / extension command: those take precedence in dispatch,
-		// so a same-named skill would be an unreachable, duplicate menu entry.
+		// Build skill commands before templates because dispatch expands skills first.
+		// Skills register as plain `/name` (Claude Code parity). A same-named
+		// built-in or extension command is unreachable as a skill and is omitted.
 		this.skillCommands.clear();
 		const skillCommandList: SlashCommand[] = [];
 		if (this.settingsManager.getEnableSkillCommands()) {
-			const takenNames = new Set<string>(
-				[...slashCommands, ...templateCommands, ...extensionCommands].map((c) => c.name),
-			);
+			const takenNames = new Set<string>([...builtinCommandNames, ...extensionNames]);
 			for (const skill of this.session.resourceLoader.getSkills().skills) {
 				if (takenNames.has(skill.name)) continue;
 				this.skillCommands.set(skill.name, skill.filePath);
 				skillCommandList.push({
 					name: skill.name,
 					description: prefixAutocompleteDescription(skill.description, skill.sourceInfo),
+					section: "PROJECT",
+					group: "Project",
+					badge: "skill",
+					priority: 800,
 				});
 			}
 		}
+		const skillNames = new Set(skillCommandList.map((command) => command.name));
 
-		this._knownCommandNames = new Set(
-			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList].map((c) => c.name),
-		);
+		// Prompt templates run after skills, so a same-named template is hidden
+		// rather than presented as an entry that dispatch can never reach.
+		const templateCommands: SlashCommand[] = this.session.promptTemplates
+			.filter(
+				(cmd) => !builtinCommandNames.has(cmd.name) && !extensionNames.has(cmd.name) && !skillNames.has(cmd.name),
+			)
+			.map((cmd) => ({
+				name: cmd.name,
+				description: prefixAutocompleteDescription(cmd.description, cmd.sourceInfo),
+				section: "PROJECT",
+				group: "Project",
+				badge: "prompt",
+				priority: 600,
+				...(cmd.argumentHint && { argumentHint: cmd.argumentHint }),
+			}));
+
+		this.slashCommandRegistry = [
+			...slashCommands,
+			...templateCommands,
+			...extensionCommands,
+			...skillCommandList,
+		].sort((a, b) => (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER));
+		this._knownCommandNames = new Set(this.slashCommandRegistry.map((c) => c.name));
 		return new CombinedAutocompleteProvider(
-			[...visibleSlashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList],
+			[...this.slashCommandRegistry.filter((command) => !command.hidden)],
 			this.sessionManager.getCwd(),
 			this.fdPath,
 		);
@@ -1928,6 +2003,7 @@ export class InteractiveMode {
 			version: this.version,
 			tagline: InteractiveMode.STARTUP_TAGLINE,
 			helpHint: "/help",
+			recentSessionsHint: "Recent sessions · /resume",
 			recentSessions,
 			petColors: this.resolvePetColors(),
 			petEnabled: !isTruthyEnvFlag(process.env.PIT_NO_PET),
@@ -1965,14 +2041,46 @@ export class InteractiveMode {
 		const pet = createPetCompanion({
 			getColors: () => this.resolvePetColors(),
 			reducedMotion,
+			isBackpressured: () => this.ui.terminal.isBackpressured?.() ?? false,
 		});
 		this.petCompanion = pet;
+		// Ticker is subscribed only while the perch is visible (same predicate),
+		// so a narrow terminal or the welcome screen does not keep the 16ms loop
+		// alive for an invisible pet. ComposerChrome reports visibility flips.
 		this.composerChrome.setPerch(
 			pet,
-			(width) => width >= PET_COMPANION_MIN_COLS && !this.welcomeActive && !this.ui.hasCapturingOverlay(),
+			(width) => this.isPetCompanionVisible(width),
+			(visible) => this.syncPetCompanionTicker(visible),
 		);
 		if (!reducedMotion) {
-			this.petCompanionUnsub = this.ui.addAnimationCallback((now) => pet.tick(now));
+			this.syncPetCompanionTicker(this.isPetCompanionVisible());
+		}
+	}
+
+	/** Same visibility gate as the perch render predicate. */
+	private isPetCompanionVisible(width = this.ui.terminal.columns): boolean {
+		return width >= PET_COMPANION_MIN_COLS && !this.welcomeActive && !this.ui.hasCapturingOverlay();
+	}
+
+	/**
+	 * Subscribe/unsubscribe the pet animation callback to match perch visibility.
+	 * When the pet is the only animation, unsubscribing stops the shared 16ms timer.
+	 */
+	private syncPetCompanionTicker(visible?: boolean): void {
+		const pet = this.petCompanion;
+		if (!pet || isReducedMotion()) {
+			this.petCompanionUnsub?.();
+			this.petCompanionUnsub = undefined;
+			return;
+		}
+		const shouldTick = visible ?? this.isPetCompanionVisible();
+		if (shouldTick) {
+			if (!this.petCompanionUnsub) {
+				this.petCompanionUnsub = this.ui.addAnimationCallback((now) => pet.tick(now));
+			}
+		} else if (this.petCompanionUnsub) {
+			this.petCompanionUnsub();
+			this.petCompanionUnsub = undefined;
 		}
 	}
 
@@ -2238,16 +2346,6 @@ export class InteractiveMode {
 		this.streamTextCharCount = 0;
 	}
 
-	private countAssistantTextChars(message: AssistantMessage): number {
-		let n = 0;
-		for (const block of message.content) {
-			if (block.type === "text" && typeof block.text === "string") {
-				n += block.text.length;
-			}
-		}
-		return n;
-	}
-
 	/** Output tokens accrued this turn: finalized assistant messages plus whatever
 	 * the in-flight streaming message reports so far (partial until its own
 	 * message_end lands the final count). */
@@ -2257,15 +2355,18 @@ export class InteractiveMode {
 
 	/**
 	 * Dim separator between working-loader meta chips (elapsed is separate).
-	 * Tight `·` with no flanking spaces — the same convention as the activity
-	 * counter's COUNTER_SEP (components/tool-activity.ts). The loader line used to
-	 * mix `" ·"` here with an inline `" · "` inside the interrupt hint, which read
-	 * as a broken edge: `9m14s ·escape stop/cancel · ctrl+c interrupt ·↑11.8k`.
+	 * Flanking spaces on both sides — `3s · esc interrupt · ↑1.2k` — so chips
+	 * never weld to the clock or each other. One constant only: mixing `" ·"`
+	 * with `" · "` used to read as a broken edge on the same line. Matches the
+	 * turn-done line's ` · ` convention (see turn-done-format.ts).
 	 */
-	private static readonly LOADER_META_SEP = "·";
+	private static readonly LOADER_META_SEP = " · ";
 
-	/** Lazily computed, memoized `·<key> interrupt` suffix fragment. See
-	 * `cachedLoaderInterruptSuffix` for why this is worth memoizing. */
+	/**
+	 * Lazily computed, memoized ` · <key> interrupt` suffix fragment.
+	 * Painted **muted** (mid tier in the chip hierarchy — actionable, not chrome).
+	 * See `cachedLoaderInterruptSuffix` for why this is worth memoizing.
+	 */
 	private getLoaderInterruptSuffix(): string {
 		// With TWO OR MORE cancellable tools in flight, Esc opens the stop/cancel
 		// picker instead of interrupting on the spot (onEscape's `<= 1` branch
@@ -2275,7 +2376,7 @@ export class InteractiveMode {
 		if (this.getInterruptiblePendingTools().length > 1) {
 			if (this.cachedLoaderInterruptToolsSuffix === null) {
 				this.cachedLoaderInterruptToolsSuffix = theme.fg(
-					"dim",
+					"muted",
 					`${InteractiveMode.LOADER_META_SEP}${keyText("app.interrupt")} stop/cancel${InteractiveMode.LOADER_META_SEP}ctrl+c interrupt`,
 				);
 			}
@@ -2283,7 +2384,7 @@ export class InteractiveMode {
 		}
 		if (this.cachedLoaderInterruptSuffix === null) {
 			this.cachedLoaderInterruptSuffix = theme.fg(
-				"dim",
+				"muted",
 				`${InteractiveMode.LOADER_META_SEP}${keyText("app.interrupt")} interrupt`,
 			);
 		}
@@ -2297,11 +2398,17 @@ export class InteractiveMode {
 		this.cachedLoaderInterruptToolsSuffix = null;
 	}
 
+	/**
+	 * Trailing meta chips after the elapsed clock, in descending visual weight:
+	 *   clock (text, via Loader.setElapsedColorFn) · interrupt (muted) · ↑/↓ (dim)
+	 * Loader preserves pre-colored ANSI so the hierarchy survives the join.
+	 */
 	private refreshLoaderTrailingSuffix(): void {
 		if (!this.loadingAnimation) return;
 		const interrupt = this.getLoaderInterruptSuffix();
 		const outputTokens = this.currentTurnOutputTokens();
 		const sep = InteractiveMode.LOADER_META_SEP;
+		// Tokens sit a tier below the interrupt — telemetry, not an affordance.
 		const tokens = outputTokens > 0 ? theme.fg("dim", `${sep}↑${formatTokensPrecise(outputTokens)}`) : "";
 		const streamChars =
 			this.streamTextCharCount > 0 ? theme.fg("dim", `${sep}↓${formatTokensPrecise(this.streamTextCharCount)}`) : "";
@@ -2326,17 +2433,55 @@ export class InteractiveMode {
 	private thinkingPreviewMaxWidth(): number {
 		const columns = this.ui.terminal.columns || 0;
 		if (columns <= 0) return InteractiveMode.THINKING_PREVIEW_MAX_WIDTH;
-		const reservedForChrome = 30;
+		// Spinner + phase + elapsed + spaced meta chips (` · esc interrupt` and
+		// optional ↑/↓). Spaced LOADER_META_SEP is wider than the old tight `·`,
+		// so reserve a bit more than the historical 30.
+		const reservedForChrome = 36;
 		return Math.max(16, Math.min(InteractiveMode.THINKING_PREVIEW_MAX_WIDTH, columns - reservedForChrome));
 	}
 
 	/** Push a tail string to the loader, deduped against the last value applied
-	 * to the CURRENT loader instance (reset in createWorkingLoader on rebuild). */
+	 * to the CURRENT loader instance (reset in createWorkingLoader on rebuild).
+	 *
+	 * Display contract (footer working line):
+	 *   no tail  →  `⠋ Thinking… 3s · esc interrupt`
+	 *   with tail →  `⠋ Thinking  reviewing the auth path… 3s · esc interrupt`
+	 *
+	 * Choices, each earning its place:
+	 * - Soft gap (`  `), not a middot. Middots are meta-chip chrome
+	 *   (`3s · esc`); the tail is prose and should not wear chip punctuation.
+	 * - Phase drops its trailing ellipsis while a live tail is up, so a
+	 *   truncated fragment never reads `Thinking…  …mid-sentence`.
+	 * - Italic + `thinkingText` — same monologue family as the transcript's
+	 *   thinking blocks. Loader keeps pre-colored ANSI (no muted rewrap).
+	 * - Elapsed already leads with its own space, so the line stays balanced.
+	 */
 	private applyThinkingPreview(tail: string): void {
 		if (tail === this.lastAppliedThinkingPreview) return;
+		const loader = this.loadingAnimation;
+		// No surface yet: do NOT mark applied. A mid-turn loader rebuild used to
+		// set lastApplied before painting, then skip the rehydrate because the
+		// tail string "matched" a paint that never landed on this instance.
+		if (!loader) return;
 		this.lastAppliedThinkingPreview = tail;
-		const suffix = tail.length > 0 ? theme.fg("dim", `${InteractiveMode.LOADER_META_SEP}${tail}`) : "";
-		this.loadingAnimation?.setDetailSuffix(suffix);
+
+		if (tail.length === 0) {
+			loader.setDetailSuffix("");
+			// Restore the full phase label if we shortened it for a live preview.
+			if (this.userInputPauseDepth === 0 && this.workingMessage === "Thinking…") {
+				loader.setMessage("Thinking…");
+			}
+			return;
+		}
+
+		// Soft gap + italic thinkingText. Pre-colored so the Loader does not
+		// rewrap the monologue in the muted phase painter.
+		loader.setDetailSuffix(`  ${theme.italic(theme.fg("thinkingText", tail))}`);
+		// Drop the phase ellipsis only while we are still in the thinking phase
+		// and not paused for user input (pause owns the label).
+		if (this.userInputPauseDepth === 0 && this.workingMessage === "Thinking…") {
+			loader.setMessage("Thinking");
+		}
 	}
 
 	/** Ephemeral reset: drop the accumulated thinking text and hide the tail.
@@ -2345,7 +2490,12 @@ export class InteractiveMode {
 	 * survive into the transcript, the token count, or a later turn. */
 	private clearThinkingPreview(): void {
 		this.thinkingPreviewRaw = "";
+		this.thinkingPreviewFenceOpen = false;
+		this.thinkingPreviewFenceCarry = "";
 		this.thinkingPreviewLastAppliedAt = 0;
+		// Drop the module-level fence-scan memo so a long prior turn cannot pin
+		// hundreds of KB of thinking text until the next phase starts.
+		clearFenceScanCache();
 		this.applyThinkingPreview("");
 	}
 
@@ -2373,7 +2523,9 @@ export class InteractiveMode {
 				// Ignore whitespace-only deltas: no visible content to add, and
 				// skipping avoids a throttle-timer tick + recompute for nothing.
 				if (!delta || delta.trim().length === 0) return;
+				updateThinkingPreviewFenceState(this, delta);
 				this.thinkingPreviewRaw += delta;
+				capThinkingPreviewRaw(this);
 				this.flushThinkingPreview();
 				break;
 			}
@@ -2400,6 +2552,9 @@ export class InteractiveMode {
 		// A1: paint the phase label with the shared heartbeat shimmer. shimmerColorAt
 		// self-fallbacks to a flat muted painter under no-truecolor / reduced motion.
 		loader.setMessageColorAt((text, now) => shimmerColorAt(now)(text));
+		// Chip hierarchy: clock is the live number — paint it `text` so it sits
+		// above muted interrupt and dim ↑/↓ token chips on the same line.
+		loader.setElapsedColorFn((text) => theme.fg("text", text));
 		// Show a per-turn elapsed counter. The ORIGIN survives mid-turn loader
 		// rebuilds (auto-retry backoff, compaction destroy the loader via
 		// clearStatusContainer): without it, a user who watched a 2-minute
@@ -2420,6 +2575,13 @@ export class InteractiveMode {
 		const interruptSuffix = this.getLoaderInterruptSuffix();
 		loader.setTrailingSuffix(interruptSuffix);
 		this.lastAppliedLoaderSuffix = interruptSuffix;
+		// Mid-turn rebuild (retry backoff, compaction): rehydrate a live thinking
+		// monologue onto THIS instance immediately — waiting for the next delta
+		// left a blank detail gap and restored the full "Thinking…" ellipsis.
+		if (this.thinkingPreviewRaw.length > 0) {
+			this.thinkingPreviewLastAppliedAt = 0;
+			this.flushThinkingPreview();
+		}
 		// If a prompt is open while the loader is (re)built, carry the paused/relabeled
 		// state onto the new instance so the clock stays frozen.
 		if (this.userInputPauseDepth > 0) {
@@ -2443,8 +2605,7 @@ export class InteractiveMode {
 		this.workingClockOriginMs = undefined;
 		this.resetStreamRateCounters();
 		// No live loader left to paint onto — drop the ephemeral preview state too.
-		this.thinkingPreviewRaw = "";
-		this.thinkingPreviewLastAppliedAt = 0;
+		this.clearThinkingPreview();
 		this.lastAppliedThinkingPreview = "";
 		this.clearStatusContainer();
 	}
@@ -2608,8 +2769,12 @@ export class InteractiveMode {
 		return this.agentsLive;
 	}
 
-	/** Arm the post-settle linger (2s by default; tests set 0 for a synchronous
-	 * fold). The timer never outlives the strip — cancelled by any new lifecycle
+	/** Arm the post-settle collapse rhythm:
+	 *  1. multi-row linger (see ✓/✗ settle eases) — {@link agentsCollapseLingerMs}
+	 *  2. single-line summary preview in place — {@link agentsCollapsePreviewMs}
+	 *  3. dispose into transcript summary
+	 * Tests set linger to 0 for a synchronous fold (skips both delays).
+	 * The timer never outlives the strip — cancelled by any new lifecycle
 	 * event (ensureAgentsLive) and by every dispose path. */
 	private scheduleAgentsLiveCollapse(): void {
 		this.cancelAgentsLiveCollapse();
@@ -2619,7 +2784,23 @@ export class InteractiveMode {
 		}
 		this.agentsLiveCollapseTimer = setTimeout(() => {
 			this.agentsLiveCollapseTimer = undefined;
-			this.disposeAgentsLive(true);
+			const strip = this.agentsLive;
+			if (!strip?.hasAgents()) {
+				this.disposeAgentsLive(true);
+				return;
+			}
+			// Beat 2: collapse multi-row → one dense line in the same band, then fold.
+			strip.enterCollapsePreview();
+			const previewMs = Math.max(0, this.agentsCollapsePreviewMs);
+			if (previewMs <= 0) {
+				this.disposeAgentsLive(true);
+				return;
+			}
+			this.agentsLiveCollapseTimer = setTimeout(() => {
+				this.agentsLiveCollapseTimer = undefined;
+				this.disposeAgentsLive(true);
+			}, previewMs);
+			this.agentsLiveCollapseTimer.unref?.();
 		}, this.agentsCollapseLingerMs);
 		this.agentsLiveCollapseTimer.unref?.();
 	}
@@ -3471,9 +3652,13 @@ export class InteractiveMode {
 		}
 		const jobId = labelToJobId.get(picked);
 		if (jobId) {
-			// "ui" source → the session notifies the agent the user ended this job.
-			const killed = killBashBackgroundJob(jobId, "ui");
-			this.showStatus(killed ? `Killed ${jobId}` : `${jobId} already gone`);
+			const job = getBashBackgroundJob(jobId);
+			await this.interruptRunningWorkItem({
+				kind: "background",
+				id: jobId,
+				label: job?.command.split("\n", 1)[0]?.trim() || jobId,
+				state: "stalled",
+			});
 			return;
 		}
 		const id = labelToId.get(picked);
@@ -3504,6 +3689,7 @@ export class InteractiveMode {
 	private setupKeyHandlers(): void {
 		// Set up handlers on defaultEditor - they use this.editor for text access
 		// so they work correctly regardless of which editor is active
+		this.defaultEditor.onNavigateToRunningWork = () => this.showRunningWorkSelector();
 		this.defaultEditor.onEscape = () => {
 			if (this.session.isBusy) {
 				// Per-tool interruption: only with TWO OR MORE tools in flight is
@@ -3638,7 +3824,7 @@ export class InteractiveMode {
 			title: (text: string) => theme.bold(theme.fg("accent", text)),
 			keys: (text: string) => theme.fg("accent", text),
 			description: (text: string) => theme.fg("text", text),
-			hint: (text: string) => theme.fg("dim", text),
+			hint: (text: string) => theme.fg("muted", text),
 		};
 		// Viewport getter mirrors the overlay's maxHeight (80%) so the component
 		// can scroll its body instead of letting the TUI slice off the bottom.
@@ -3651,6 +3837,31 @@ export class InteractiveMode {
 			},
 		).finally(() => {
 			this.cheatsheetOpen = false;
+		});
+	}
+
+	/** Open the effective command registry without mutating the transcript. */
+	private showHelpOverlay(): void {
+		if (this.helpOpen) return;
+		this.helpOpen = true;
+		void this.showExtensionCustom<void>(
+			(_tui, _theme, _kb, done) =>
+				new HelpOverlay(
+					this.slashCommandRegistry,
+					this.getMarkdownThemeWithSettings(),
+					{
+						title: (text) => theme.bold(theme.fg("accent", text)),
+						hint: (text) => theme.fg("muted", text),
+					},
+					() => done(undefined),
+					() => this.ui.terminal.rows,
+				),
+			{
+				overlay: true,
+				overlayOptions: { width: "78%", maxHeight: "80%", anchor: "center" },
+			},
+		).finally(() => {
+			this.helpOpen = false;
 		});
 	}
 
@@ -4521,6 +4732,9 @@ export class InteractiveMode {
 						this.maybeAttachStreamingComponent();
 					}
 
+					// Single pass: tool-call arg updates + text char count (avoids
+					// walking content twice per streamed chunk).
+					let textChars = 0;
 					for (const content of this.streamingMessage.content) {
 						if (content.type === "toolCall") {
 							if (this.pendingTools.has(content.id)) {
@@ -4528,9 +4742,11 @@ export class InteractiveMode {
 							} else {
 								this._ensureToolComponent(content.name, content.id, content.arguments);
 							}
+						} else if (content.type === "text" && typeof content.text === "string") {
+							textChars += content.text.length;
 						}
 					}
-					this.streamTextCharCount = this.countAssistantTextChars(this.streamingMessage);
+					this.streamTextCharCount = textChars;
 					// Visible text is flowing: flip "Thinking…" to "Writing…" so the user can
 					// tell reasoning from response streaming. Only replaces the neutral phase
 					// — tool/check labels set elsewhere are never clobbered.
@@ -6166,9 +6382,26 @@ export class InteractiveMode {
 			this.setStartupHeaderExpanded(!this.startupHeaderExpanded);
 			return;
 		}
+		if (!this.toolOutputExpanded && this.thinkingExpandTarget) {
+			this.thinkingExpandTarget.setThinkingExpanded(false);
+			this.chatContainer.markChildStale(this.thinkingExpandTarget);
+			this.thinkingExpandTarget = null;
+			this.showStatus("Collapsed thinking");
+			this.ui.requestRender();
+			return;
+		}
 		// Scoped-first expansion cycle:
 		// collapsed → last tool in last phase → full phase → everything → collapsed.
 		if (!this.toolOutputExpanded && this.scopedExpandTarget === null) {
+			const thinkingTarget = this.findLastCollapsedThinking();
+			if (thinkingTarget) {
+				thinkingTarget.setThinkingExpanded(true);
+				this.thinkingExpandTarget = thinkingTarget;
+				this.chatContainer.markChildStale(thinkingTarget);
+				this.showStatus("Expanded thinking · ctrl+o again to collapse");
+				this.ui.requestRender();
+				return;
+			}
 			const target = this.findLastExpandableChatChild();
 			if (target) {
 				this.scopedExpandTarget = target;
@@ -6210,6 +6443,14 @@ export class InteractiveMode {
 		for (let i = children.length - 1; i >= 0; i--) {
 			const child = children[i];
 			if (isExpandable(child)) return child;
+		}
+		return null;
+	}
+
+	private findLastCollapsedThinking(): AssistantMessageComponent | null {
+		for (let i = this.chatContainer.children.length - 1; i >= 0; i--) {
+			const child = this.chatContainer.children[i];
+			if (child instanceof AssistantMessageComponent && child.hasCollapsedThinking()) return child;
 		}
 		return null;
 	}
@@ -6480,9 +6721,10 @@ export class InteractiveMode {
 		const { steering: steeringMessages, followUp: followUpMessages } = this.getAllQueuedMessages();
 		if (steeringMessages.length > 0 || followUpMessages.length > 0) {
 			this.pendingMessagesContainer.addChild(new Spacer(1));
-			// The dequeue hint rides the LAST queued row as a dense `·<key> edit`
-			// suffix (the rows render dim already) instead of a hint line of its
-			// own — one queued message must cost one line, not two.
+			// The dequeue hint rides the LAST queued row as a spaced
+			// ` · <key> edit` suffix (same LOADER_META_SEP as the working line)
+			// instead of a hint line of its own — one queued message must cost
+			// one line, not two.
 			const hintSuffix = `${InteractiveMode.LOADER_META_SEP}${keyText("app.message.dequeue")} edit`;
 			const rows: Array<{ mode: PendingDeliveryMode; text: string }> = [
 				...steeringMessages.map((text) => ({ mode: "steer" as const, text })),
@@ -6667,7 +6909,7 @@ export class InteractiveMode {
 	private bindUserInputBus(): void {
 		// Publish the active bus to the module-level registry so tools can
 		// reach it without per-call ctx plumbing across every wrapper.
-		setCurrentUserInputBus(this.userInputBus);
+		setCurrentUserInputBus(this.userInputBus, this.session.sessionId);
 		this.userInputBusUnsubscribe = this.userInputBus.onRequest((req) => {
 			this.handleAskRequest(req);
 		});
@@ -6689,7 +6931,7 @@ export class InteractiveMode {
 			this.askQueue.length = 0;
 			this.pendingAskCancel?.();
 			this.userInputBus.cancelAll("shutdown");
-			setCurrentUserInputBus(undefined);
+			setCurrentUserInputBus(undefined, this.session.sessionId);
 		});
 	}
 
@@ -7121,6 +7363,114 @@ export class InteractiveMode {
 		});
 	}
 
+	private getRunningWorkItems(): RunningWorkItem[] {
+		const items: RunningWorkItem[] = [];
+		for (const [id, component] of this.pendingTools) {
+			// Only Bash has an explicit cooperative-cancel contract that returns the
+			// output accumulated before interruption. Arbitrary extension tools may
+			// ignore AbortSignal and continue mutating after the loop detaches them.
+			if (component.getToolName() !== "bash") continue;
+			const args = component.getArgs() as { command?: unknown; cmd?: unknown } | undefined;
+			const command =
+				typeof args?.command === "string"
+					? args.command
+					: typeof args?.cmd === "string"
+						? args.cmd
+						: component.getToolName();
+			items.push({
+				kind: "foreground",
+				id,
+				label: truncateWithEllipsis(command.split("\n", 1)[0]?.trim() || component.getToolName(), 72),
+				state: "running",
+			});
+		}
+
+		const now = Date.now();
+		for (const job of listBashBackgroundJobs(this.session.sessionId)) {
+			if (job.exited || job.stopping) continue;
+			items.push({
+				kind: "background",
+				id: job.id,
+				label: truncateWithEllipsis(job.command.split("\n", 1)[0]?.trim() || job.command, 72),
+				state: job.stopUnconfirmed
+					? "stop unconfirmed"
+					: isBashBackgroundJobStalled(job, now)
+						? `stalled ${formatJobElapsed(now - Math.max(job.lastOutputAt, job.promotedAt))}`
+						: `running ${formatJobElapsed(now - job.startedAt)}`,
+			});
+		}
+		return items;
+	}
+
+	private viewRunningWorkItem(item: RunningWorkItem): void {
+		if (item.kind === "background") {
+			const job = getBashBackgroundJob(item.id, this.session.sessionId);
+			if (!job) {
+				this.showStatus(`${item.id} already finished`);
+				return;
+			}
+			this.printJobOutput(job);
+			return;
+		}
+
+		const component = this.pendingTools.get(item.id);
+		if (!component) {
+			this.showStatus(`${item.label} already finished`);
+			return;
+		}
+		component.setExpanded(true);
+		this.ui.requestRender();
+		this.showStatus(`Expanded ${item.label}`);
+	}
+
+	private async interruptRunningWorkItem(item: RunningWorkItem): Promise<void> {
+		if (item.kind === "foreground") {
+			const cancelled = this.session.cancelTool(item.id);
+			this.showStatus(
+				cancelled
+					? `Interrupt requested for ${item.label}; waiting for partial output`
+					: `${item.label} already finished`,
+			);
+			return;
+		}
+
+		this.showStatus(`Interrupting ${item.id}…`);
+		const result = await stopBashBackgroundJob(item.id, "ui", undefined, this.session.sessionId);
+		if (!result) {
+			this.showStatus(`${item.id} already finished`);
+			return;
+		}
+		this.showStatus(
+			result.terminationConfirmed
+				? `Interrupted ${item.id}; partial output returned to the agent`
+				: `Stop unconfirmed for ${item.id}; it remains available to retry or inspect`,
+		);
+	}
+
+	private showRunningWorkSelector(): boolean {
+		if (this.getRunningWorkItems().length === 0) return false;
+		this.showSelector((done) => {
+			let closed = false;
+			let selector: RunningWorkSelectorComponent;
+			const close = () => {
+				if (closed) return;
+				closed = true;
+				selector.dispose();
+				done();
+				this.ui.requestRender();
+			};
+			selector = new RunningWorkSelectorComponent({
+				tui: this.ui,
+				getItems: () => this.getRunningWorkItems(),
+				onView: (item) => this.viewRunningWorkItem(item),
+				onInterrupt: (item) => void this.interruptRunningWorkItem(item),
+				onCancel: close,
+			});
+			return { component: selector, focus: selector };
+		});
+		return true;
+	}
+
 	/**
 	 * `/jobs` (or alt+j) — the background tasks panel. Lists tracked background
 	 * bash jobs; Enter prints the selected job's buffered output into the
@@ -7128,21 +7478,27 @@ export class InteractiveMode {
 	 * With no jobs it shows a status line instead of an empty panel.
 	 */
 	private showJobsSelector(): void {
-		if (listBashBackgroundJobs().length === 0) {
+		if (listBashBackgroundJobs(this.session.sessionId).length === 0) {
 			this.showStatus("No background tasks");
 			return;
 		}
 		this.showSelector((done) => {
 			const selector = new BackgroundJobsSelectorComponent({
 				tui: this.ui,
+				ownerSessionId: this.session.sessionId,
 				onView: (job) => {
 					selector.dispose();
 					done();
 					this.printJobOutput(job);
 				},
 				onKilled: (job) => {
-					// Panel stays open (kill several in a row); the row list refreshes itself.
-					this.showStatus(`Killed ${job.id}`);
+					// Panel stays open (interrupt several in a row); the event refreshes it.
+					void this.interruptRunningWorkItem({
+						kind: "background",
+						id: job.id,
+						label: job.command.split("\n", 1)[0]?.trim() || job.id,
+						state: "running",
+					});
 				},
 				onCancel: () => {
 					selector.dispose();
@@ -8912,183 +9268,15 @@ export class InteractiveMode {
 		this.showWarning("Usage: /hindsight list | clear [--yes] | export <path>");
 	}
 
-	/**
-	 * Get capitalized display string for an app keybinding action.
-	 */
-	private getAppKeyDisplay(action: AppKeybinding): string {
-		return keyDisplayText(action);
-	}
-
-	/**
-	 * Get capitalized display string for an editor keybinding action.
-	 */
-	private getEditorKeyDisplay(action: Keybinding): string {
-		return keyDisplayText(action);
-	}
-
 	private handleHelpCommand(): void {
-		const help = `${buildGroupedSlashHelp(BUILTIN_SLASH_COMMANDS)}
-
-Type \`/hotkeys\` for keyboard shortcuts.`;
-
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(mutedBorderRule());
-		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "Help")), 1, 0));
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Markdown(help.trim(), 1, 1, this.getMarkdownThemeWithSettings()));
-		this.chatContainer.addChild(mutedBorderRule());
-		this.ui.requestRender();
+		this.showHelpOverlay();
 	}
 
 	private handleHotkeysCommand(): void {
-		// Navigation keybindings
-		const cursorUp = this.getEditorKeyDisplay("tui.editor.cursorUp");
-		const cursorDown = this.getEditorKeyDisplay("tui.editor.cursorDown");
-		const cursorLeft = this.getEditorKeyDisplay("tui.editor.cursorLeft");
-		const cursorRight = this.getEditorKeyDisplay("tui.editor.cursorRight");
-		const cursorWordLeft = this.getEditorKeyDisplay("tui.editor.cursorWordLeft");
-		const cursorWordRight = this.getEditorKeyDisplay("tui.editor.cursorWordRight");
-		const cursorLineStart = this.getEditorKeyDisplay("tui.editor.cursorLineStart");
-		const cursorLineEnd = this.getEditorKeyDisplay("tui.editor.cursorLineEnd");
-		const jumpForward = this.getEditorKeyDisplay("tui.editor.jumpForward");
-		const jumpBackward = this.getEditorKeyDisplay("tui.editor.jumpBackward");
-		const pageUp = this.getEditorKeyDisplay("tui.editor.pageUp");
-		const pageDown = this.getEditorKeyDisplay("tui.editor.pageDown");
-
-		// Editing keybindings
-		const submit = this.getEditorKeyDisplay("tui.input.submit");
-		const newLine = this.getEditorKeyDisplay("tui.input.newLine");
-		const deleteWordBackward = this.getEditorKeyDisplay("tui.editor.deleteWordBackward");
-		const deleteWordForward = this.getEditorKeyDisplay("tui.editor.deleteWordForward");
-		const deleteToLineStart = this.getEditorKeyDisplay("tui.editor.deleteToLineStart");
-		const deleteToLineEnd = this.getEditorKeyDisplay("tui.editor.deleteToLineEnd");
-		const yank = this.getEditorKeyDisplay("tui.editor.yank");
-		const yankPop = this.getEditorKeyDisplay("tui.editor.yankPop");
-		const undo = this.getEditorKeyDisplay("tui.editor.undo");
-		const historySearch = this.getEditorKeyDisplay("tui.editor.historySearch");
-		const cheatsheet = this.getEditorKeyDisplay("tui.help.cheatsheet");
-		const tab = this.getEditorKeyDisplay("tui.input.tab");
-
-		// App keybindings
-		const interrupt = this.getAppKeyDisplay("app.interrupt");
-		const clear = this.getAppKeyDisplay("app.clear");
-		const exit = this.getAppKeyDisplay("app.exit");
-		const suspend = this.getAppKeyDisplay("app.suspend");
-		const cycleThinkingLevel = this.getAppKeyDisplay("app.thinking.cycle");
-		const cycleModelForward = this.getAppKeyDisplay("app.model.cycleForward");
-		const selectModel = this.getAppKeyDisplay("app.model.select");
-		const expandTools = this.getAppKeyDisplay("app.tools.expand");
-		const toggleThinking = this.getAppKeyDisplay("app.thinking.toggle");
-		const externalEditor = this.getAppKeyDisplay("app.editor.external");
-		const cycleModelBackward = this.getAppKeyDisplay("app.model.cycleBackward");
-		const followUp = this.getAppKeyDisplay("app.message.followUp");
-		const dequeue = this.getAppKeyDisplay("app.message.dequeue");
-		const pasteImage = this.getAppKeyDisplay("app.clipboard.pasteImage");
-		const cyclePermission = this.getAppKeyDisplay("app.permission.cycle");
-
-		// Session-tree / -selector keybindings (active inside /tree, /fork, /resume).
-		const treeRename = this.getAppKeyDisplay("app.session.rename");
-		const treeDelete = this.getAppKeyDisplay("app.session.delete");
-		const treeEditLabel = this.getAppKeyDisplay("app.tree.editLabel");
-		const treeToggleTimestamp = this.getAppKeyDisplay("app.tree.toggleLabelTimestamp");
-		const treeFold = this.getAppKeyDisplay("app.tree.foldOrUp");
-		const treeUnfold = this.getAppKeyDisplay("app.tree.unfoldOrDown");
-		const treeFilterCycleForward = this.getAppKeyDisplay("app.tree.filter.cycleForward");
-		const treeFilterCycleBackward = this.getAppKeyDisplay("app.tree.filter.cycleBackward");
-
-		// Tilde-ify the keybindings path for a compact "Customize" footer line.
-		const agentDir = getAgentDir();
-		const home = os.homedir();
-		const keybindingsPath = `${
-			agentDir.startsWith(home) ? `~${agentDir.slice(home.length)}` : agentDir
-		}/keybindings.json`.replace(/\\/g, "/");
-
-		let hotkeys = `
-**Navigation**
-| Key | Action |
-|-----|--------|
-| \`${cursorUp}\` / \`${cursorDown}\` / \`${cursorLeft}\` / \`${cursorRight}\` | Move cursor / browse history (Up when empty) |
-| \`${cursorWordLeft}\` / \`${cursorWordRight}\` | Move by word |
-| \`${cursorLineStart}\` | Start of line |
-| \`${cursorLineEnd}\` | End of line |
-| \`${jumpForward}\` | Jump forward to character |
-| \`${jumpBackward}\` | Jump backward to character |
-| \`${pageUp}\` / \`${pageDown}\` | Scroll by page |
-| \`${historySearch}\` | Search prompt history |
-
-**Editing**
-| Key | Action |
-|-----|--------|
-| \`${submit}\` | Send message |
-| \`${newLine}\` | New line${process.platform === "win32" ? " (Ctrl+Enter on Windows Terminal)" : ""} |
-| \`${deleteWordBackward}\` | Delete word backwards |
-| \`${deleteWordForward}\` | Delete word forwards |
-| \`${deleteToLineStart}\` | Delete to start of line |
-| \`${deleteToLineEnd}\` | Delete to end of line |
-| \`${yank}\` | Paste the most-recently-deleted text |
-| \`${yankPop}\` | Cycle through the deleted text after pasting |
-| \`${undo}\` | Undo |
-
-**Other**
-| Key | Action |
-|-----|--------|
-| \`${tab}\` | Path completion / accept autocomplete |
-| \`${interrupt}\` | Cancel autocomplete / abort streaming |
-| \`${clear}\` | Clear editor (first) / exit (second) |
-| \`${exit}\` | Exit (when editor is empty) |
-| \`${suspend}\` | Suspend to background |
-| \`${cycleThinkingLevel}\` | Cycle thinking level |
-| \`${cycleModelForward}\` / \`${cycleModelBackward}\` | Cycle models |
-| \`${selectModel}\` | Open model selector |
-| \`${cyclePermission}\` | Cycle mode (plan → ask → auto → fusion) |
-| \`${expandTools}\` | Expand last tool output, then all (cycles) |
-| \`${toggleThinking}\` | Toggle thinking block visibility |
-| \`${externalEditor}\` | Edit message in external editor |
-| \`${followUp}\` | Queue follow-up message |
-| \`${dequeue}\` | Restore queued messages |
-| \`${pasteImage}\` | Paste image from clipboard |
-| \`${cheatsheet}\` | Keybinding cheatsheet (all shortcuts, grouped by scope) |
-| \`Esc Esc\` | ${DOUBLE_ESC_HOTKEY_LABELS[this.settingsManager.getDoubleEscapeAction()]} |
-| \`/\` | Slash commands |
-| \`!\` | Run bash command |
-| \`!!\` | Run bash command (excluded from context) |
-
-**Session tree** (inside \`/tree\`, \`/fork\`, \`/resume\`)
-| Key | Action |
-|-----|--------|
-| \`${treeFold}\` / \`${treeUnfold}\` | Fold / unfold branch (or move up / down) |
-| \`${treeEditLabel}\` | Edit the entry label |
-| \`${treeToggleTimestamp}\` | Toggle label timestamps |
-| \`${treeFilterCycleForward}\` / \`${treeFilterCycleBackward}\` | Cycle tree filter (default/no-tools/user-only/labeled/all) |
-| \`${treeRename}\` | Rename session |
-| \`${treeDelete}\` | Delete session |
-
-Customize: \`${keybindingsPath}\` — \`/reload\` to apply.
-`;
-
-		// Add extension-registered shortcuts
-		const extensionRunner = this.session.extensionRunner;
-		const shortcuts = extensionRunner.getShortcuts(this.keybindings.getEffectiveConfig());
-		if (shortcuts.size > 0) {
-			hotkeys += `
-**Extensions**
-| Key | Action |
-|-----|--------|
-`;
-			for (const [key, shortcut] of shortcuts) {
-				const description = shortcut.description ?? shortcut.extensionPath;
-				const keyDisplay = formatKeyText(key, { capitalize: true });
-				hotkeys += `| \`${keyDisplay}\` | ${description} |\n`;
-			}
-		}
-
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(mutedBorderRule());
-		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "Keyboard Shortcuts")), 1, 0));
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Markdown(hotkeys.trim(), 1, 1, this.getMarkdownThemeWithSettings()));
-		this.chatContainer.addChild(mutedBorderRule());
-		this.ui.requestRender();
+		// Keep `/hotkeys` in the same reversible, scrollable overlay as the global
+		// cheatsheet; appending a large permanent transcript block made the command
+		// costly to revisit and visually displaced the conversation.
+		this.showCheatsheet();
 	}
 
 	private async handleClearCommand(): Promise<void> {
@@ -9107,6 +9295,18 @@ Customize: \`${keybindingsPath}\` — \`/reload\` to apply.
 		}
 	}
 
+	/**
+	 * One dense line naming every rewrite of the cacheable system-prompt prefix this
+	 * session, e.g. `prefix rebuilds:3·tool-surface:2·permission-mode:1`. Returns an
+	 * empty list when nothing rewrote it, so `/debug` stays quiet in the good case.
+	 */
+	private formatPrefixRewriteDebugLine(): string[] {
+		const diag = this.session.getCachePrefixDiagnostics();
+		if (diag.rebuilds === 0) return [];
+		const parts = [`prefix rebuilds:${diag.rebuilds}`, ...diag.reasons.map((r) => `${r.reason}:${r.count}`)];
+		return [parts.join("·")];
+	}
+
 	private handleDebugCommand(): void {
 		const width = this.ui.terminal.columns;
 		const height = this.ui.terminal.rows;
@@ -9122,6 +9322,9 @@ Customize: \`${keybindingsPath}\` — \`/reload\` to apply.
 			`Graphics: sixel=${getSixelSupport()} cell=${getCellDimensions().widthPx}x${getCellDimensions().heightPx}px` +
 				` (${areCellDimensionsMeasured() ? "measured" : "assumed — pets stay on cells"})`,
 			`Total lines: ${allLines.length}`,
+			// Prompt-cache prefix churn, source-measured. Omitted entirely when the
+			// prefix never moved — the healthy case, and the line would read as noise.
+			...this.formatPrefixRewriteDebugLine(),
 			"",
 			"=== All rendered lines with visible widths ===",
 			...allLines.map((line, idx) => {

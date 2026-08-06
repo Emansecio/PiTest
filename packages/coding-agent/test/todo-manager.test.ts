@@ -120,6 +120,20 @@ describe("TodoManager CRUD", () => {
 		expect(mgr.systemPromptSection()).toContain("0 open");
 	});
 
+	it("the dynamic section carries the list only — the how-to lives in the cached prefix", () => {
+		const mgr = new TodoManager();
+		mgr.create({ subject: "first" });
+		mgr.update({ id: 1, status: "in_progress", activeForm: "Doing first" });
+		const section = mgr.systemPromptSection();
+		expect(section).toBe(
+			["<todos>", "Current task list (1 open of 1):", "◐ #1 first (Doing first)", "</todos>"].join("\n"),
+		);
+		// The usage instructions used to be reprinted here on every request of every
+		// turn; they are immutable, so they moved to the Todo-first guideline.
+		expect(section).not.toContain('todo{action:"set"}');
+		expect(section).not.toContain("Add newly discovered follow-up work");
+	});
+
 	it("notifies the change listener on every mutation (live overlay repaint)", () => {
 		const mgr = new TodoManager();
 		let calls = 0;
@@ -207,6 +221,32 @@ describe("TodoManager.set (whole-list rewrite)", () => {
 		const out = mgr.set([{ id: 99, subject: "Ghost" }]);
 		expect(out[0]?.id).not.toBe(99);
 		expect(mgr.get(99)).toBeUndefined();
+	});
+});
+
+describe("TodoManager revision and session ownership", () => {
+	it("increments revision and persists it with the session id", () => {
+		const mgr = new TodoManager();
+		mgr.setSessionId("session-a");
+		expect(mgr.getRevision()).toBe(0);
+		mgr.create({ subject: "work" });
+		const state = mgr.serialize();
+		expect(state.revision).toBe(1);
+		expect(state.sessionId).toBe("session-a");
+		expect(mgr.isCurrentSnapshot({ revision: 1, sessionId: "session-a" })).toBe(true);
+		mgr.update({ id: 1, status: "completed" });
+		expect(mgr.isCurrentSnapshot({ revision: 1, sessionId: "session-a" })).toBe(false);
+	});
+
+	it("does not restore todos owned by another session", () => {
+		const source = new TodoManager();
+		source.setSessionId("session-a");
+		source.create({ subject: "foreign" });
+
+		const target = new TodoManager();
+		target.setSessionId("session-b");
+		target.restore(source.serialize());
+		expect(target.isEmpty()).toBe(true);
 	});
 });
 

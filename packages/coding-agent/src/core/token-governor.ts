@@ -12,6 +12,12 @@ export interface TokenBudgetSnapshot {
 	mainTokens: number;
 	subagentTokens: number;
 	fusionTokens: number;
+	/** USD cost reported for the tracked token channels. */
+	costUsd: number;
+	/** Portion of {@link costUsd} reported by subagents. */
+	subagentCostUsd: number;
+	/** Tokens conservatively held by in-flight subagent orchestration. */
+	reservedSubagentTokens: number;
 	/**
 	 * Tokens the main agent spent while the model gearbox (P8b) held the session
 	 * on the `smol` role — a SUBSET view of {@link mainTokens}, so it is
@@ -29,10 +35,26 @@ export interface SpawnBudgetDecision {
 	reason?: string;
 }
 
+/** A conservative hold released when its subagent orchestration settles. */
+export interface SubagentTokenReservation extends SpawnBudgetDecision {
+	/** Record actual usage against this reservation, even when runs settle out of order. */
+	record(usage: SubagentUsage | undefined): void;
+	release(): void;
+}
+
+/** Default conservative hold per live child; bounded fan-out still permits concurrency. */
+const DEFAULT_SUBAGENT_RESERVATION_TOKENS = 4096;
+
 export class TokenBudgetGovernor {
 	private mainTokens = 0;
 	private subagentTokens = 0;
 	private fusionTokens = 0;
+	private mainCostUsd = 0;
+	private subagentCostUsd = 0;
+	private fusionCostUsd = 0;
+	private reservedSubagentTokens = 0;
+	private readonly reservations = new Map<number, number>();
+	private nextReservationId = 1;
 	/** Subset of mainTokens spent while gearbox-downshifted (see snapshot doc). */
 	private gearboxTokens = 0;
 	private budgetLimit: number | undefined;
@@ -46,6 +68,11 @@ export class TokenBudgetGovernor {
 		this.mainTokens = 0;
 		this.subagentTokens = 0;
 		this.fusionTokens = 0;
+		this.mainCostUsd = 0;
+		this.subagentCostUsd = 0;
+		this.fusionCostUsd = 0;
+		this.reservedSubagentTokens = 0;
+		this.reservations.clear();
 		this.gearboxTokens = 0;
 		this.budgetLimit = undefined;
 	}
@@ -69,24 +96,44 @@ export class TokenBudgetGovernor {
 		// gearboxTokens is a session-live subset counter — not persisted, so a reload
 		// starts it fresh rather than reconstructing it from the goal split.
 		this.gearboxTokens = 0;
+		this.mainCostUsd = 0;
+		this.subagentCostUsd = 0;
+		this.fusionCostUsd = 0;
+		this.reservedSubagentTokens = 0;
+		this.reservations.clear();
 		this.budgetLimit = budget;
 	}
 
-	recordMain(delta: number): void {
-		if (delta <= 0) return;
-		this.mainTokens += Math.round(delta);
+	recordMain(delta: number, costUsd = 0): void {
+		const tokens = positiveRounded(delta);
+		const cost = nonnegativeFinite(costUsd);
+		if (tokens === 0 && cost === 0) return;
+		this.mainTokens += tokens;
+		this.mainCostUsd += cost;
 		this.flushToGoal();
 	}
 
 	recordSubagent(usage: SubagentUsage | undefined): void {
-		if (!usage || usage.totalTokens <= 0) return;
-		this.subagentTokens += Math.round(usage.totalTokens);
+		this.recordSubagentUsage(usage);
+	}
+
+	private recordSubagentUsage(usage: SubagentUsage | undefined, reservationId?: number): void {
+		if (!usage) return;
+		const tokens = positiveRounded(usage.totalTokens);
+		const cost = nonnegativeFinite(usage.costUsd);
+		if (tokens === 0 && cost === 0) return;
+		this.subagentTokens += tokens;
+		this.subagentCostUsd += cost;
+		if (reservationId !== undefined) this.consumeReservation(reservationId, tokens);
 		this.flushToGoal();
 	}
 
-	recordFusion(delta: number): void {
-		if (delta <= 0) return;
-		this.fusionTokens += Math.round(delta);
+	recordFusion(delta: number, costUsd = 0): void {
+		const tokens = positiveRounded(delta);
+		const cost = nonnegativeFinite(costUsd);
+		if (tokens === 0 && cost === 0) return;
+		this.fusionTokens += tokens;
+		this.fusionCostUsd += cost;
 		this.flushToGoal();
 	}
 
@@ -107,13 +154,27 @@ export class TokenBudgetGovernor {
 		return this.mainTokens + this.subagentTokens + this.fusionTokens;
 	}
 
+	/** Total actual spend plus conservative in-flight subagent reservations. */
+	committedTokens(): number {
+		return this.totalSpent() + this.reservedSubagentTokens;
+	}
+
+	/** Aggregate USD cost known to the governor. */
+	totalCostUsd(): number {
+		return this.mainCostUsd + this.subagentCostUsd + this.fusionCostUsd;
+	}
+
 	snapshot(): TokenBudgetSnapshot {
 		const totalSpent = this.totalSpent();
-		const remaining = this.budgetLimit !== undefined ? Math.max(0, this.budgetLimit - totalSpent) : undefined;
+		const remaining =
+			this.budgetLimit !== undefined ? Math.max(0, this.budgetLimit - this.committedTokens()) : undefined;
 		return {
 			mainTokens: this.mainTokens,
 			subagentTokens: this.subagentTokens,
 			fusionTokens: this.fusionTokens,
+			costUsd: this.totalCostUsd(),
+			subagentCostUsd: this.subagentCostUsd,
+			reservedSubagentTokens: this.reservedSubagentTokens,
 			gearboxTokens: this.gearboxTokens,
 			totalSpent,
 			budgetLimit: this.budgetLimit,
@@ -123,7 +184,7 @@ export class TokenBudgetGovernor {
 
 	evaluateSpawn(): SpawnBudgetDecision {
 		if (this.budgetLimit === undefined) return { allowed: true };
-		const spent = this.totalSpent();
+		const spent = this.committedTokens();
 		if (spent >= this.budgetLimit) {
 			return {
 				allowed: false,
@@ -135,6 +196,67 @@ export class TokenBudgetGovernor {
 		return { allowed: true };
 	}
 
+	/**
+	 * Atomically hold a conservative estimate for one coordinator operation. This
+	 * closes the concurrent-spawn race without serializing every child against the
+	 * entire remaining goal budget. Reported usage consumes the hold as it arrives
+	 * and `release()` refunds only the unused portion.
+	 */
+	reserveSubagent(estimatedTokens = DEFAULT_SUBAGENT_RESERVATION_TOKENS): SubagentTokenReservation {
+		const gate = this.evaluateSpawn();
+		if (!gate.allowed || this.budgetLimit === undefined) {
+			return {
+				...gate,
+				record: (usage) => {
+					if (gate.allowed) this.recordSubagent(usage);
+				},
+				release: () => {},
+			};
+		}
+		const remaining = Math.max(0, this.budgetLimit - this.committedTokens());
+		const tokens = Math.min(Math.max(0, Math.round(estimatedTokens)), remaining);
+		if (tokens <= 0 || this.committedTokens() + tokens > this.budgetLimit) {
+			return {
+				allowed: false,
+				reason:
+					`Goal token budget exhausted (${formatTok(this.committedTokens())}/${formatTok(this.budgetLimit)}). ` +
+					"Raise with /goal --tokens <n> before spawning subagents.",
+				record: () => {},
+				release: () => {},
+			};
+		}
+		const id = this.nextReservationId++;
+		this.reservations.set(id, tokens);
+		this.reservedSubagentTokens += tokens;
+		let released = false;
+		return {
+			allowed: true,
+			record: (usage) => this.recordSubagentUsage(usage, id),
+			release: () => {
+				if (released) return;
+				released = true;
+				this.releaseReservation(id);
+			},
+		};
+	}
+
+	private consumeReservation(id: number, tokens: number): void {
+		const held = this.reservations.get(id);
+		if (held === undefined) return;
+		const consumed = Math.min(held, tokens);
+		const next = held - consumed;
+		this.reservedSubagentTokens -= consumed;
+		if (next === 0) this.reservations.delete(id);
+		else this.reservations.set(id, next);
+	}
+
+	private releaseReservation(id: number): void {
+		const held = this.reservations.get(id);
+		if (held === undefined) return;
+		this.reservations.delete(id);
+		this.reservedSubagentTokens -= held;
+	}
+
 	private flushToGoal(): void {
 		if (!this.goalManager) return;
 		const snap = this.snapshot();
@@ -144,6 +266,14 @@ export class TokenBudgetGovernor {
 			fusion: snap.fusionTokens,
 		});
 	}
+}
+
+function nonnegativeFinite(value: unknown): number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+function positiveRounded(value: unknown): number {
+	return Math.round(nonnegativeFinite(value));
 }
 
 function formatTok(n: number): string {

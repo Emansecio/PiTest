@@ -27,7 +27,9 @@ function renderChild(child: Component, width: number): string[] {
  * slice (spinner, streaming, latest blocks) changes each frame.
  */
 export class VirtualizedContainer implements Component, MouseHitContainer {
-	children: Component[] = [];
+	private readonly childList: Component[] = [];
+	private readonly childProxy: Component[];
+	private childrenChangedExternally = false;
 	private tailLineBudget: number;
 	private cacheWidth = -1;
 	private childCaches: ChildRenderCache[] = [];
@@ -42,17 +44,37 @@ export class VirtualizedContainer implements Component, MouseHitContainer {
 
 	constructor(tailLineBudget = DEFAULT_VIRTUALIZED_TAIL_LINE_BUDGET) {
 		this.tailLineBudget = tailLineBudget;
+		this.childProxy = new Proxy(this.childList, {
+			set: (target, property, value) => {
+				this.childrenChangedExternally = true;
+				return Reflect.set(target, property, value);
+			},
+			deleteProperty: (target, property) => {
+				this.childrenChangedExternally = true;
+				return Reflect.deleteProperty(target, property);
+			},
+		});
+	}
+
+	/** Public for compatibility; direct list mutation is tracked and rebuilt safely. */
+	get children(): Component[] {
+		return this.childProxy;
+	}
+
+	set children(next: Component[]) {
+		this.childList.splice(0, this.childList.length, ...next);
+		this.childrenChangedExternally = true;
 	}
 
 	addChild(component: Component): void {
-		this.children.push(component);
-		this.staleIndices.add(this.children.length - 1);
+		this.childList.push(component);
+		this.staleIndices.add(this.childList.length - 1);
 	}
 
 	removeChild(component: Component): void {
-		const index = this.children.indexOf(component);
+		const index = this.childList.indexOf(component);
 		if (index !== -1) {
-			this.children.splice(index, 1);
+			this.childList.splice(index, 1);
 			this.childCaches.splice(index, 1);
 			this.flattenLines = [];
 			this.childOffsets = [];
@@ -61,7 +83,7 @@ export class VirtualizedContainer implements Component, MouseHitContainer {
 	}
 
 	clear(): void {
-		this.children = [];
+		this.childList.length = 0;
 		this.childCaches = [];
 		this.flattenLines = [];
 		this.childOffsets = [];
@@ -70,28 +92,29 @@ export class VirtualizedContainer implements Component, MouseHitContainer {
 	}
 
 	invalidate(): void {
-		for (const child of this.children) {
+		for (const child of this.childList) {
 			child.invalidate?.();
 		}
-		for (let i = 0; i < this.children.length; i++) {
+		for (let i = 0; i < this.childList.length; i++) {
 			this.staleIndices.add(i);
 		}
 	}
 
 	/** Mark one child for re-render on the next frame without invalidating the full tree. */
 	markChildStale(child: Component): void {
-		const index = this.children.indexOf(child);
+		const index = this.childList.indexOf(child);
 		if (index !== -1) {
 			this.staleIndices.add(index);
 		}
 	}
 
 	render(width: number): string[] {
-		const children = this.children;
+		const children = this.childList;
 		const grewByAppend =
-			width === this.cacheWidth && children.length > this.childCaches.length && this.cachedPrefixMatches(children);
+			width === this.cacheWidth && !this.childrenChangedExternally && children.length > this.childCaches.length;
 		const structureChanged =
-			!grewByAppend && (width !== this.cacheWidth || this.childCaches.length !== children.length);
+			!grewByAppend &&
+			(this.childrenChangedExternally || width !== this.cacheWidth || this.childCaches.length !== children.length);
 		if (structureChanged) {
 			this.cacheWidth = width;
 			this.childCaches = new Array(children.length);
@@ -100,6 +123,7 @@ export class VirtualizedContainer implements Component, MouseHitContainer {
 				this.childCaches[i] = { component: children[i], width, lines };
 			}
 			this.staleIndices.clear();
+			this.childrenChangedExternally = false;
 			return this.flattenCaches();
 		}
 
@@ -140,21 +164,6 @@ export class VirtualizedContainer implements Component, MouseHitContainer {
 			return this.flattenFromIndex(minChangedIndex);
 		}
 		return this.flattenCaches();
-	}
-
-	/**
-	 * True iff every already-cached child (index < this.childCaches.length)
-	 * is still the same component instance at that index in `children`. Guards
-	 * the append fast-path against a middle-insertion or external mutation of
-	 * `children` masquerading as a pure length-grew-by-append.
-	 */
-	private cachedPrefixMatches(children: Component[]): boolean {
-		for (let i = 0; i < this.childCaches.length; i++) {
-			if (this.childCaches[i].component !== children[i]) {
-				return false;
-			}
-		}
-		return true;
 	}
 
 	private findHotStartIndex(children: Component[]): number {
@@ -231,7 +240,7 @@ export class VirtualizedContainer implements Component, MouseHitContainer {
 	 * outside the flattened range.
 	 */
 	hitTestChild(localRow: number): MouseHitTarget | null {
-		const children = this.children;
+		const children = this.childList;
 		const offsets = this.childOffsets;
 		if (this.childCaches.length !== children.length || offsets.length !== children.length) {
 			return null;

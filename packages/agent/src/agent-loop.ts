@@ -1245,9 +1245,9 @@ function makePerToolSignal(
 	toolCallId: string,
 	runSignal: AbortSignal | undefined,
 	config: AgentLoopConfig,
-): { signal: AbortSignal | undefined; release: () => void } {
+): { signal: AbortSignal | undefined; cancelSignal: AbortSignal | undefined; release: () => void } {
 	const registry = config.toolAbortControllers;
-	if (!registry) return { signal: runSignal, release: () => {} };
+	if (!registry) return { signal: runSignal, cancelSignal: undefined, release: () => {} };
 	const controller = new AbortController();
 	registry.set(toolCallId, controller);
 	const signal = runSignal ? AbortSignal.any([runSignal, controller.signal]) : controller.signal;
@@ -1262,6 +1262,7 @@ function makePerToolSignal(
 	// a no-op; the real owner's own `release()` still cleans up in its `finally`.
 	return {
 		signal,
+		cancelSignal: controller.signal,
 		release: () => {
 			if (registry.get(toolCallId) === controller) registry.delete(toolCallId);
 		},
@@ -1346,7 +1347,7 @@ class SpeculationController {
 		if (!tool || tool.speculationSafe !== true || tool.executionMode === "sequential") return;
 		if (this.config.canSpeculateToolCall?.(toolCall) === false) return;
 
-		const { signal: toolSignal, release } = makePerToolSignal(toolCall.id, this.signal, this.config);
+		const { signal: toolSignal, cancelSignal, release } = makePerToolSignal(toolCall.id, this.signal, this.config);
 		const events: AgentEvent[] = [];
 		const bufferEmit: AgentEventSink = (event) => {
 			events.push(event);
@@ -1362,7 +1363,10 @@ class SpeculationController {
 				bufferEmit,
 			);
 			if (preparation.kind === "immediate") return { preparation, executed: undefined, events };
-			const executed = await executePreparedToolCall(preparation, toolSignal, bufferEmit, this.config);
+			const executed = await executePreparedToolCall(preparation, toolSignal, bufferEmit, this.config, {
+				runSignal: this.signal,
+				cancelSignal,
+			});
 			return { preparation, executed, events };
 		})();
 		this.entries.set(toolCall.id, {
@@ -1455,9 +1459,12 @@ async function executeToolCallsSequential(
 			if (preparation.kind === "immediate") {
 				finalized = await finalizeImmediatePreparation(toolCall, preparation, config, emit);
 			} else {
-				const { signal: toolSignal, release } = makePerToolSignal(toolCall.id, signal, config);
+				const { signal: toolSignal, cancelSignal, release } = makePerToolSignal(toolCall.id, signal, config);
 				try {
-					const executed = await executePreparedToolCall(preparation, toolSignal, emit, config);
+					const executed = await executePreparedToolCall(preparation, toolSignal, emit, config, {
+						runSignal: signal,
+						cancelSignal,
+					});
 					finalized = await finalizeExecutedToolCall(
 						currentContext,
 						assistantMessage,
@@ -1644,9 +1651,12 @@ async function finalizeParallelCall(
 	// Per-tool abort: run this tool under a signal that a single
 	// cancelTool(id) can trip, while a run abort still cancels it
 	// (AbortSignal.any inside makePerToolSignal).
-	const { signal: toolSignal, release } = makePerToolSignal(toolCall.id, signal, config);
+	const { signal: toolSignal, cancelSignal, release } = makePerToolSignal(toolCall.id, signal, config);
 	try {
-		const executed = await executePreparedToolCall(preparation, toolSignal, emit, config);
+		const executed = await executePreparedToolCall(preparation, toolSignal, emit, config, {
+			runSignal: signal,
+			cancelSignal,
+		});
 		const finalized = await finalizeExecutedToolCall(
 			currentContext,
 			assistantMessage,
@@ -1814,9 +1824,12 @@ async function executeToolCallsPartitioned(
 			if (preparation.kind === "immediate") {
 				finalized = await finalizeImmediatePreparation(toolCall, preparation, config, emit);
 			} else {
-				const { signal: toolSignal, release } = makePerToolSignal(toolCall.id, signal, config);
+				const { signal: toolSignal, cancelSignal, release } = makePerToolSignal(toolCall.id, signal, config);
 				try {
-					const executed = await executePreparedToolCall(preparation, toolSignal, emit, config);
+					const executed = await executePreparedToolCall(preparation, toolSignal, emit, config, {
+						runSignal: signal,
+						cancelSignal,
+					});
 					finalized = await finalizeExecutedToolCall(
 						currentContext,
 						assistantMessage,
@@ -2014,6 +2027,28 @@ export function formatUnknownToolError(name: string, toolMap: Map<string, AgentT
 	return `Tool "${name}" not found.${availableSection}${suggestionSection}${hiddenSection}`;
 }
 
+/**
+ * P0 (harness) — mutating tools (write/edit) whose arguments were pruned for
+ * HISTORY must never be executed with the elision placeholder as the real
+ * payload. The dispatcher treats a pruned call as a hard block with an
+ * actionable error, so a re-driven/continued run cannot silently corrupt a file.
+ *
+ * The marker is produced by `pruneToolCallArguments` in coding-agent's
+ * compaction/message-tokens.ts. This package must not import from coding-agent
+ * (dependency direction), so detection is a marker-prefix match on any string
+ * value. Matches the exact text the marker embeds (`chars elided`).
+ */
+const ELIDED_ARG_MARKER = "chars elided";
+
+function containsElidedArgMarker(args: unknown): boolean {
+	if (typeof args === "string") return args.includes(ELIDED_ARG_MARKER);
+	if (Array.isArray(args)) return args.some(containsElidedArgMarker);
+	if (typeof args === "object" && args !== null) {
+		return Object.values(args as Record<string, unknown>).some(containsElidedArgMarker);
+	}
+	return false;
+}
+
 function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall): AgentToolCall {
 	if (!tool.prepareArguments) {
 		return toolCall;
@@ -2057,6 +2092,22 @@ async function prepareToolCall(
 			kind: "immediate",
 			result: createErrorToolResult(formatUnknownToolError(toolCall.name, toolMap)),
 			isError: true,
+		};
+	}
+
+	// P0 (harness): a mutating tool call whose arguments were elided by the
+	// history pruner must never be executed — the marker would be written to
+	// disk as if it were the payload. Block with an actionable error so the
+	// model re-issues the call instead of corrupting a file.
+	if (tool.mutationGuard === true && containsElidedArgMarker(toolCall.arguments)) {
+		return {
+			kind: "immediate",
+			result: createErrorToolResult(
+				`Tool "${toolCall.name}" arguments were elided by the context pruner and cannot be executed. ` +
+					"Re-issue the call with the full content (the file on disk is the source of truth).",
+			),
+			isError: true,
+			skipHints: true,
 		};
 	}
 
@@ -2188,6 +2239,7 @@ async function executePreparedToolCall(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 	config: AgentLoopConfig,
+	abortSources?: { runSignal: AbortSignal | undefined; cancelSignal: AbortSignal | undefined },
 ): Promise<ExecutedToolCallOutcome> {
 	// Only retain in-flight update emits; each removes itself on settle so a
 	// long-running tool streaming thousands of updates doesn't accumulate
@@ -2226,7 +2278,12 @@ async function executePreparedToolCall(
 			},
 			executeCtx,
 		);
-		const result = await raceToolExecute(executePromise, signal);
+		const result = await raceToolExecute(
+			executePromise,
+			abortSources ? abortSources.runSignal : signal,
+			abortSources?.cancelSignal,
+			prepared.tool.abortResultGraceMs,
+		);
 		await Promise.allSettled(pendingUpdates);
 		// A tool can fail by RETURNING `isError: true` instead of throwing (todo,
 		// plan, chrome_devtools, web_search, ...). Fold that into the loop-level
@@ -2252,22 +2309,51 @@ async function executePreparedToolCall(
  * Unblock tool.execute when the run AbortSignal fires even if the tool never
  * observes it. Late rejections from the abandoned execute are swallowed.
  */
-function raceToolExecute<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-	if (!signal) return promise;
-	if (signal.aborted) {
-		promise.then(undefined, () => {});
-		return Promise.reject(new Error("Request was aborted"));
-	}
-	let onAbort: (() => void) | undefined;
-	const abortPromise = new Promise<never>((_resolve, reject) => {
-		onAbort = () => {
-			promise.then(undefined, () => {});
-			reject(new Error("Request was aborted"));
+function raceToolExecute<T>(
+	promise: Promise<T>,
+	runSignal: AbortSignal | undefined,
+	cancelSignal?: AbortSignal,
+	cancelGraceMs = 0,
+): Promise<T> {
+	if (!runSignal && !cancelSignal) return promise;
+
+	return new Promise<T>((resolve, reject) => {
+		let settled = false;
+		let cancelTimer: ReturnType<typeof setTimeout> | undefined;
+		const cleanup = () => {
+			if (cancelTimer) clearTimeout(cancelTimer);
+			runSignal?.removeEventListener("abort", onRunAbort);
+			cancelSignal?.removeEventListener("abort", onToolCancel);
 		};
-		signal.addEventListener("abort", onAbort, { once: true });
-	});
-	return Promise.race([promise, abortPromise]).finally(() => {
-		if (onAbort) signal.removeEventListener("abort", onAbort);
+		const finish = (fn: (value: any) => void, value: unknown) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			fn(value);
+		};
+		const rejectAborted = () => finish(reject, new Error("Request was aborted"));
+		const onRunAbort = () => rejectAborted();
+		const onToolCancel = () => {
+			const graceMs = Number.isFinite(cancelGraceMs) ? Math.max(0, cancelGraceMs) : 0;
+			if (graceMs === 0) {
+				rejectAborted();
+				return;
+			}
+			cancelTimer = setTimeout(rejectAborted, graceMs);
+			cancelTimer.unref?.();
+		};
+
+		promise.then(
+			(value) => finish(resolve, value),
+			(error) => finish(reject, error),
+		);
+		if (runSignal?.aborted) {
+			onRunAbort();
+			return;
+		}
+		runSignal?.addEventListener("abort", onRunAbort, { once: true });
+		if (cancelSignal?.aborted) onToolCancel();
+		else cancelSignal?.addEventListener("abort", onToolCancel, { once: true });
 	});
 }
 

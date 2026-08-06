@@ -317,15 +317,11 @@ const LSP_DESCRIPTION = `Interacts with Language Server Protocol servers for cod
 - USE lsp for symbol-aware operations (rename, find references, go to definition/implementation, code actions) whenever a language server is available - it is safer and more accurate than text search.
 - NEVER perform cross-file renames with ast_edit, sed, or manual edits when lsp rename can do it. Text-based renames miss shadowing, re-exports, and usages in other files.
 - For project-aware definition/references/hover/rename/code_actions, ALWAYS pass both line=<n> and symbol=<name>. Omitting either guesses column 0 and returns wrong answers silently.
+- Run lsp diagnostics after edits — it catches type errors the way an IDE would.
 - When diagnostics are unavailable, do not treat the file as clean — retry or read the file.
 </critical>`;
 
 const PROMPT_SNIPPET = "Query language servers for diagnostics, definitions, references, renames, and code actions.";
-const PROMPT_GUIDELINES = [
-	"Prefer lsp rename for cross-file symbol renames; it follows re-exports and aliases that text search misses.",
-	"Use lsp diagnostics after edits to catch type errors the way an IDE would.",
-	"On project-aware servers, pass line=<n> and symbol=<name> (optionally symbol#N) for every position-based action — never rely on the default column.",
-];
 
 // =============================================================================
 // Tool Definition
@@ -340,7 +336,6 @@ export function createLspToolDefinition(
 		label: "lsp",
 		description: LSP_DESCRIPTION,
 		promptSnippet: PROMPT_SNIPPET,
-		promptGuidelines: PROMPT_GUIDELINES,
 		parameters: lspSchema,
 		activity: (args: { action?: string }) => (LSP_READONLY_ACTIONS.has(args?.action ?? "") ? "navigation" : "action"),
 		async execute(_toolCallId, params: LspToolInput, callerSignal): Promise<TextResult> {

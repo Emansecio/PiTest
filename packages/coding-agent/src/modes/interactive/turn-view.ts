@@ -88,7 +88,13 @@ export type TurnViewEffect =
 	/** Upsert one subagent's row on the live Agents strip. The component requests its own render. */
 	| { kind: "subagents-start"; handle: string }
 	| { kind: "subagents-progress"; handle: string; turn: number; lastTool?: string; totalTokens?: number }
-	| { kind: "subagents-complete"; handle: string; status: "done" | "error"; turns?: number; totalTokens?: number }
+	| {
+			kind: "subagents-complete";
+			handle: string;
+			status: "done" | "error" | "cancelled";
+			turns?: number;
+			totalTokens?: number;
+	  }
 	/** Replace the status band with the retry countdown spinner. */
 	| { kind: "retry-loader"; attempt: number; maxAttempts: number; delayMs: number; reason: string | undefined }
 	/** Tear down retry loader + countdown + escape handler. */
@@ -310,7 +316,7 @@ export function retryLoaderMessage(
 	interruptKey: string,
 ): string {
 	const prefix = descriptor.reason ? `${descriptor.reason} — ` : "";
-	return `${prefix}retry ${descriptor.attempt}/${descriptor.maxAttempts} in ${seconds}s·${interruptKey} cancel`;
+	return `${prefix}retry ${descriptor.attempt}/${descriptor.maxAttempts} in ${seconds}s · ${interruptKey} cancel`;
 }
 
 export function decideAutoRetryStart(

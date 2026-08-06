@@ -163,7 +163,7 @@ describe("VirtualizedContainer", () => {
 		assert.deepEqual(rendered, fresh.render(80));
 	});
 
-	it("external mutation of children combined with growth does not corrupt output (cachedPrefixMatches forces rebuild)", () => {
+	it("external mutation of children combined with growth does not corrupt output", () => {
 		const container = new VirtualizedContainer(3);
 		const texts = ["a", "b", "c", "d", "e"];
 		for (const t of texts) {
@@ -173,8 +173,8 @@ describe("VirtualizedContainer", () => {
 
 		// Directly replace a slot without going through removeChild/addChild,
 		// then grow the array so the append fast-path's length check fires.
-		// cachedPrefixMatches must notice the prefix no longer matches the
-		// cached components and force a full rebuild instead of reusing stale
+		// The mutation-aware child list must notice the prefix no longer matches
+		// the cached components and force a full rebuild instead of reusing stale
 		// cached lines for the replaced slot.
 		const replacement = new CountingText("REPLACED");
 		container.children[0] = replacement;

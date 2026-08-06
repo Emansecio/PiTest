@@ -205,17 +205,55 @@ describe("HindsightBank", () => {
 });
 
 describe("hindsight prompt formatting (E4)", () => {
-	test("formatHindsightHintForPrompt indexes summaries without inlining bodies", () => {
+	test("formatHindsightHintForPrompt points at the bank without inlining bodies", () => {
 		const { bank } = freshBank();
 		bank.add({ kind: "session-summary", body: "secret prior context", subject: "auth work" });
 		setCurrentHindsightBank(bank);
 		const hint = formatHindsightHintForPrompt();
 		expect(hint).toContain("<hindsight_hint>");
 		expect(hint).toContain("recall({ query:");
-		expect(hint).toContain("auth work");
 		expect(hint).not.toContain("secret prior context");
+		// Mutable bank state must not leak into the cacheable prefix.
+		expect(hint).not.toContain("auth work");
 		const full = formatSessionSummariesForPrompt();
 		expect(full).toContain("secret prior context");
+		setCurrentHindsightBank(undefined);
+	});
+
+	test("formatHindsightHintForPrompt returns undefined with no bank or no summaries", () => {
+		setCurrentHindsightBank(undefined);
+		expect(formatHindsightHintForPrompt()).toBeUndefined();
+		const { bank } = freshBank();
+		bank.add({ kind: "fact", body: "not a session summary" });
+		setCurrentHindsightBank(bank);
+		expect(formatHindsightHintForPrompt()).toBeUndefined();
+		setCurrentHindsightBank(undefined);
+	});
+
+	// Invariant guard: the hint lands in the cacheable system-prompt prefix, so
+	// its bytes must not change as the bank grows during a session.
+	test("formatHindsightHintForPrompt is byte-identical across bank sizes and contents", () => {
+		const small = freshBank().bank;
+		small.add({ kind: "session-summary", body: "only entry", subject: "alpha" });
+		setCurrentHindsightBank(small);
+		const hintSmall = formatHindsightHintForPrompt();
+		expect(hintSmall).toBeDefined();
+
+		const large = freshBank().bank;
+		for (let i = 0; i < 7; i++) {
+			const entry = large.add({
+				kind: "session-summary",
+				body: `summary body number ${i} with distinct content`,
+				subject: `subject-${i}`,
+			});
+			// Spread the timestamps so a date-bearing formatter would diverge here.
+			entry.createdAt = Date.UTC(2020 + i, i % 12, (i % 27) + 1);
+		}
+		large.add({ kind: "fact", body: "unrelated fact", subject: "noise" });
+		setCurrentHindsightBank(large);
+		const hintLarge = formatHindsightHintForPrompt();
+
+		expect(hintLarge).toBe(hintSmall);
 		setCurrentHindsightBank(undefined);
 	});
 });

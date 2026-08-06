@@ -56,7 +56,20 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/permission-mode <mode>` | Switch permission mode (`plan`, `ask`, `confirm`, or `auto`) mid-session. `confirm` is only reachable here or via `--permission-mode` — it is not in the `alt+p` cycle |
 | `/mcp` | List configured MCP servers, connection state, and advertised tools |
 | `/goal` | Show active autonomous goal status, iterations, and budget usage |
+| `/steer <message>` | Steer the active turn without interrupting it |
+| `/todos` | Show the current todo list |
+| `/pin [text or path]` | Pin a critical fact or file so it survives compaction (no args lists pins) |
+| `/unpin <id>` | Remove a pin by id |
+| `/plan` | Enter plan mode (read-only): research and build a plan, then `exit_plan` to execute |
+| `/rewind` | Roll back files to an earlier turn (restores every file that turn touched) |
+| `/jobs` | Background tasks: view output, kill (also `alt+j`) |
+| `/theme` | Pick a color theme (live preview, Esc reverts) |
+| `/mouse` | Toggle mouse behavior: click to position, drag to select+copy, right-click to copy |
+| `/skills` | Skills catalog: `doctor`, `doctor fix`, `doctor verbose` |
+| `/chrome` | Start/connect Chrome; add text before or after to run it in the browser |
 | `/quit` | Quit pit |
+
+> The exhaustive, always-current list is shown in-session by running `/help`. It merges built-in commands, loaded extensions, skills, and prompt templates, so it is the source of truth if your docs differ.
 
 ## Message Queue
 
@@ -181,12 +194,10 @@ cat README.md | pit -p "Summarize this text"
 
 | Option | Description |
 |--------|-------------|
-| Option | Description |
-|--------|-------------|
 | `--provider <name>` | Provider, such as `anthropic`, `openai`, or `google` |
 | `--model <pattern>` | Model pattern or ID; supports `provider/id` and optional `:<thinking>` |
 | `--api-key <key>` | API key, overriding environment variables |
-| `--thinking <level>` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
+| `--thinking <level>` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra` |
 | `--models <patterns>` | Comma-separated patterns for Ctrl+P cycling |
 | `--list-models [search]` | List available models |
 | `--smol [model]` | Use the cheap sub-agent role (fast, low-cost model for fan-out) |
@@ -314,7 +325,7 @@ pit --tools read,grep,find,ls -p "Review the code"
 | `PIT_SKIP_VERSION_CHECK` | Skip the Pit version update check at startup. This prevents the `pit.dev` latest-version request |
 | `PIT_CACHE_RETENTION` | Set to `long` for extended prompt cache where supported |
 | `PIT_DEFER_MCP` | `1`/`true`/`yes` forces every MCP server's tools into the tool-discovery index (same as `mcp.defer: "always"`) |
-| `PIT_READ_DEDUPE` | Per-session de-dup of identical repeat reads is on by default; set to `0` to disable |
+| `PIT_NO_READ_DEDUPE` | Per-session de-dup of identical repeat reads is on by default; `1`/`true`/`yes` disables it (legacy alias: `PIT_READ_DEDUPE=0`) |
 | `PIT_JSON_CRUSH` | Set to `1` to enable structural crushing of large JSON tool outputs |
 | `PIT_DEFER_HISTORY` | Set to `1` to defer large historical tool outputs to a session store, recallable via `recall_tool_output` |
 | `FIRECRAWL_API_KEY` | Optional bearer token for the `web_fetch` Firecrawl fallback. The fallback works without it; set it to use your own quota |
@@ -351,7 +362,7 @@ Optional knobs for power users. None require changes to work correctly — defau
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `PIT_SUBAGENT_MAX_DEPTH` | `1` | Maximum sub-agent nesting depth. `0` disables sub-agents entirely |
-| `PIT_SUBAGENT_MAX_BYTES` | `24576` (24 KB) | Byte cap on the output a sub-agent injects into the parent context (tail is kept; full output stays in-memory) |
+| `PIT_SUBAGENT_MAX_BYTES` | `4096` (4 KB) | Byte cap on the head+tail digest a sub-agent injects into the parent context; full output remains recoverable via `task({op:"read"})` |
 | `PIT_BASH_AUTO_BACKGROUND_SECONDS` | `60` | Bash commands that run longer than this are automatically promoted to background jobs instead of being killed. Set to `0` to disable auto-backgrounding |
 | `PIT_CODE_MODE_MAX_RESULT_BYTES` | `262144` (256 KB) | Byte cap on a single tool result re-injected into the code-mode VM |
 | `PIT_FREQ_OUTLINE` | off | Set to `1` to enable the boot-outline heuristic: a symbol outline of the hottest frequent-files is appended to the system prompt each session |

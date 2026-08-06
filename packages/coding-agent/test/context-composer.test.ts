@@ -46,6 +46,40 @@ describe("predictRelevantFiles", () => {
 		expect(predicted).toContain("src/core/foo.ts");
 	});
 
+	it("does not fuzzy-match ordinary prose", () => {
+		const entries: RepoMapEntry[] = [
+			{ ...entry("grep.ts", [["function", "grep", 1]]), deps: ["grep-dependent.ts"] },
+			entry("run.ts", [["function", "run", 1]]),
+			entry("pct.ts", [["function", "pct", 1]]),
+			entry("item.ts", [["function", "item", 1]]),
+			entry("fan.ts", [["function", "fan", 1]]),
+			entry("grep-dependent.ts", [["function", "dependent", 1]]),
+		];
+		expect(
+			predictRelevantFiles({
+				prompt:
+					"Revise o Graph que o Pit tem atualmente, se é robusto, inteligente e de fato proporciona economia.",
+				entries,
+				env: {},
+			}),
+		).toEqual([]);
+	});
+
+	it("matches an exact plain-language symbol", () => {
+		const entries = [entry("render.ts", [["function", "render", 1]])];
+		expect(predictRelevantFiles({ prompt: "inspect render", entries, env: {} })).toEqual(["render.ts"]);
+	});
+
+	it("does not treat plain-language text as a call inside a code-shaped identifier", () => {
+		const entries = [entry("renderer.ts", [["function", "renderer", 1]])];
+		expect(predictRelevantFiles({ prompt: "describe render; then call my_render(", entries, env: {} })).toEqual([]);
+	});
+
+	it("fuzzy-matches a code-shaped misspelling", () => {
+		const entries = [entry("map.ts", [["function", "getLivingRepoMap", 1]])];
+		expect(predictRelevantFiles({ prompt: "fix `getLivingRepoMop`", entries, env: {} })).toEqual(["map.ts"]);
+	});
+
 	it("fuzzy-matches a lightly-misspelled path mention", () => {
 		const predicted = predictRelevantFiles({ ...BASE, prompt: "look at src/utl/helper.ts" });
 		expect(predicted).toContain("src/util/helper.ts");

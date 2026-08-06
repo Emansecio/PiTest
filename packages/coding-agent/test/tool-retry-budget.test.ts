@@ -83,6 +83,13 @@ describe("ToolRetryBudgetTracker", () => {
 		expect(t.observeFailure("next-call", "k", 3).count).toBe(2);
 	});
 
+	it("a newer revision rearms the same target without changing the target key", () => {
+		const t = new ToolRetryBudgetTracker();
+		t.observeFailure("c1", "a", 3, 1);
+		t.observeFailure("c2", "a", 3, 1);
+		expect(t.observeFailure("c3", "a", 3, 2).count).toBe(1);
+	});
+
 	it("a success resets only that key's streak", () => {
 		const t = new ToolRetryBudgetTracker();
 		t.observeFailure("c1", "a", 3);

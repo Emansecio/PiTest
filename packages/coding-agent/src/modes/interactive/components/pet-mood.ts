@@ -76,7 +76,12 @@ export const PET_MOOD_TIMINGS = {
 	startledMs: 460,
 	/** Uninterrupted idling after which the pet dozes off. */
 	sleepAfterMs: 120_000,
+	/** Mood-change crossfade: ease-lerp from previous pose into the new mood. */
+	crossfadeMs: 100,
 } as const;
+
+/** Mood-change crossfade duration (ms). Alias of {@link PET_MOOD_TIMINGS.crossfadeMs}. */
+export const CROSSFADE_MS = PET_MOOD_TIMINGS.crossfadeMs;
 
 const EYE_OPEN = 1;
 const EYE_CLOSED = 0.08;
@@ -106,13 +111,11 @@ const DOUBLE_BLINK_CHANCE = 0.35;
  * mood that barely moves costs a handful of frames per second instead of the
  * ticker's full 60 — the difference between "alive" and "a space heater".
  *
- * This IS the frame-rate governor: since `PetCompanion.frameKey` stopped rounding
- * poses into pixel buckets, a moving mood repaints exactly once per interval, so
- * these numbers are the pet's real fps. The ladder is 10 / 20 / 25 / 30, scaled to
- * how much each mood actually moves — a sleeping breath does not need what a hop
- * needs. Measured cost of the busiest tier: a perch sprite encodes in ~0.5 ms, so
- * 30 fps is ~1.6% of one core and ~84 KB/s of terminal writes. Reduced motion
- * bypasses all of it (`PetCompanion.tick` returns early and the pose is frozen).
+ * This IS the frame-rate governor: PetCompanion compares quantized poses
+ * field-wise (no string key), so a moving mood repaints once per interval.
+ * The ladder is 10 / 20 / 25 / 30 fps, scaled to how much each mood moves.
+ * Sixel transport applies an extra floor (~15 fps) in pet-companion. Reduced
+ * motion bypasses all of it (`PetCompanion.tick` returns early; pose frozen).
  */
 export function petFrameIntervalMs(state: PetMoodState): number {
 	switch (state) {
@@ -165,6 +168,31 @@ function clamp01(v: number): number {
 	return Math.max(0, Math.min(1, v));
 }
 
+/** Smoothstep ease: slow in, slow out over [0, 1]. */
+function easeSmoothstep(t: number): number {
+	const x = clamp01(t);
+	return x * x * (3 - 2 * x);
+}
+
+/**
+ * Lerp every numeric {@link PetParams} channel. Missing optionals default to 0
+ * (or 1 for `eyeScale` / `blinkK`) so a sparse "from" still blends cleanly.
+ */
+function lerpParams(from: PetParams, to: PetParams, t: number): PetParams {
+	const e = easeSmoothstep(t);
+	const lerp = (a: number, b: number) => a + (b - a) * e;
+	return {
+		blinkK: lerp(from.blinkK ?? EYE_OPEN, to.blinkK ?? EYE_OPEN),
+		eyeShift: lerp(from.eyeShift ?? 0, to.eyeShift ?? 0),
+		eyeShiftY: lerp(from.eyeShiftY ?? 0, to.eyeShiftY ?? 0),
+		eyeScale: lerp(from.eyeScale ?? 1, to.eyeScale ?? 1),
+		bobX: lerp(from.bobX ?? 0, to.bobX ?? 0),
+		bobY: lerp(from.bobY ?? 0, to.bobY ?? 0),
+		tilt: lerp(from.tilt ?? 0, to.tilt ?? 0),
+		squash: lerp(from.squash ?? 0, to.squash ?? 0),
+	};
+}
+
 export interface PetMoodOptions {
 	now?: number;
 	reducedMotion?: boolean;
@@ -196,6 +224,10 @@ export class PetMood {
 	private saccade: Saccade;
 	private readonly rng: () => number;
 	private readonly reducedMotion: boolean;
+	/** Pure pre-transition pose; null when no crossfade is running. */
+	private crossfadeFrom: PetParams | null = null;
+	/** Clock value when the current crossfade began. */
+	private crossfadeStart = 0;
 
 	constructor(options: PetMoodOptions = {}) {
 		const now = options.now ?? 0;
@@ -209,6 +241,16 @@ export class PetMood {
 
 	get current(): PetMoodState {
 		return this.state;
+	}
+
+	/** True until the first sampled frame at or beyond the crossfade endpoint. */
+	get hasPendingCrossfade(): boolean {
+		return this.crossfadeFrom !== null;
+	}
+
+	/** Quantize the animation clock from the active state's entry, never globally. */
+	sampleAt(now: number, intervalMs: number): number {
+		return this.since + Math.floor(Math.max(0, now - this.since) / intervalMs) * intervalMs;
 	}
 
 	/** How long the current blink (single or double) occupies. */
@@ -265,12 +307,23 @@ export class PetMood {
 	/**
 	 * Enter a new mood. Under reduced motion the transient moods collapse to
 	 * `idle`. Returns true when the state actually changed.
+	 *
+	 * On a real change, the current pure pose is captured and {@link params}
+	 * ease-lerps into the new mood over {@link PET_MOOD_TIMINGS.crossfadeMs}
+	 * (skipped under reduced motion).
 	 */
 	setState(next: PetMoodState, now: number): boolean {
 		const transient = next === "done" || next === "error" || next === "startled";
 		const target = this.reducedMotion && transient ? "idle" : next;
 		this.keepAwake(now);
 		if (target === this.state) return false;
+		// Snapshot the DISPLAYED pose (including any in-flight crossfade) so
+		// rapid mood chains (idle→thinking→working) ease from what the user
+		// actually sees, not from the pure previous-mood endpoint.
+		if (!this.reducedMotion) {
+			this.crossfadeFrom = this.params(now);
+			this.crossfadeStart = now;
+		}
 		this.state = target;
 		this.since = now;
 		// Waking up (or settling down) restarts the ambient schedules so the pet
@@ -302,9 +355,12 @@ export class PetMood {
 		return false;
 	}
 
-	/** The pet's scene parameters for the current mood, sampled at `now`. */
-	params(now: number): PetParams {
-		if (this.reducedMotion) return { blinkK: EYE_OPEN, eyeShift: 0 };
+	/**
+	 * Pure scene parameters for the current mood at `now`, ignoring any in-flight
+	 * crossfade. Used as the crossfade target and as the snapshot source in
+	 * {@link setState}.
+	 */
+	private computeParams(now: number): PetParams {
 		const elapsed = now - this.since;
 		switch (this.state) {
 			case "idle":
@@ -330,6 +386,19 @@ export class PetMood {
 			case "startled":
 				return startledParams(elapsed);
 		}
+	}
+
+	/** The pet's scene parameters for the current mood, sampled at `now`. */
+	params(now: number): PetParams {
+		if (this.reducedMotion) return { blinkK: EYE_OPEN, eyeShift: 0 };
+		const target = this.computeParams(now);
+		if (this.crossfadeFrom === null) return target;
+		const t = (now - this.crossfadeStart) / PET_MOOD_TIMINGS.crossfadeMs;
+		if (t >= 1) {
+			this.crossfadeFrom = null;
+			return target;
+		}
+		return lerpParams(this.crossfadeFrom, target, t);
 	}
 
 	/** Resting: breathing, blinking, and glancing around the room. */
@@ -378,12 +447,16 @@ export class PetMood {
 		};
 	}
 
-	/** Reasoning: half-lidded, a slow scan the head leans into. */
+	/**
+	 * Reasoning: half-lidded, a slow scan the head leans into. Micro-blinks ride
+	 * the shared idle blink schedule so the lids aren't frozen forever — base
+	 * {@link THINKING_K} stays dominant; blinks only dip it a little.
+	 */
 	private thinkingParams(now: number, elapsed: number): PetParams {
 		const s = sweep(elapsed, THINKING_PERIOD_MS, THINKING_AMP);
 		const b = breath(now, 3600);
 		return {
-			blinkK: THINKING_K,
+			blinkK: THINKING_K * (0.85 + 0.15 * this.blinkFactor(now)),
 			eyeShift: s,
 			eyeShiftY: -0.02,
 			bobY: b * 0.016,
@@ -392,15 +465,21 @@ export class PetMood {
 		};
 	}
 
-	/** A tool is running: fast scan over a rhythmic hop. */
+	/**
+	 * A tool is running: fast scan over a rhythmic hop. Hop height uses a powered
+	 * sine so the bounce softens near the apex; squash peaks on landing (hop ≈ 0).
+	 */
 	private workingParams(_now: number, elapsed: number): PetParams {
 		const s = sweep(elapsed, WORKING_PERIOD_MS, WORKING_AMP);
-		const hop = Math.abs(Math.sin((Math.PI * elapsed) / WORKING_HOP_PERIOD_MS));
+		const raw = Math.abs(Math.sin((Math.PI * elapsed) / WORKING_HOP_PERIOD_MS));
+		// Power > 1: more time near the ground, a slightly softer landing/takeoff.
+		const hop = raw ** 1.25;
 		return {
 			blinkK: WORKING_K,
 			eyeShift: s,
 			bobY: -hop * 0.028,
-			squash: 0.045 * (1 - hop) - 0.02 * hop,
+			// Landing squash peaks when hop is low; mild stretch at the apex.
+			squash: 0.05 * (1 - hop) - 0.018 * hop,
 			tilt: s * 0.6,
 		};
 	}

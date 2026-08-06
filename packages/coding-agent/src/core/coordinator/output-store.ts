@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { redactForDisk } from "../secret-redactor.ts";
@@ -29,37 +29,46 @@ import { redactForDisk } from "../secret-redactor.ts";
  */
 export interface SubagentOutputStore {
 	/** Persist the full output for `handle` (redacted). Best-effort; a disk failure is swallowed. */
-	put(handle: string, content: string): void;
+	put(handle: string, content: string): Promise<void>;
 	/** Retrieve the full output for `handle`, or undefined if never stored / unavailable. */
-	get(handle: string): string | undefined;
+	get(handle: string): Promise<string | undefined>;
 	/** Remove the temp dir and clear the index. Idempotent. */
-	dispose(): void;
+	dispose(): Promise<void>;
 }
 
 export interface SubagentOutputStoreOptions {
 	/** Directory outputs are written to (created lazily on first write). Test seam; defaults to a fresh temp dir. */
 	dir?: string;
+	/** Maximum number of integral outputs retained in one session. */
+	maxEntries?: number;
+	/** Maximum UTF-8 bytes retained in one session. */
+	maxBytes?: number;
 }
 
 export function createSubagentOutputStore(options?: SubagentOutputStoreOptions): SubagentOutputStore {
-	// handle -> "s<seq>.txt"; only the mapping is held in memory, never the content.
-	const index = new Map<string, string>();
+	// handle -> filename/size; only the mapping is held in memory, never the content.
+	const index = new Map<string, { file: string; bytes: number }>();
+	const maxEntries = Math.max(1, options?.maxEntries ?? 256);
+	const maxBytes = Math.max(1, options?.maxBytes ?? 16 * 1024 * 1024);
+	let totalBytes = 0;
 	let seq = 0;
 	// Created lazily on first write so a session that never spawns touches no filesystem.
 	let dir: string | undefined;
 	// Set on the first write failure: degrade to a no-op for the rest of the session
 	// instead of re-failing on every subsequent put.
 	let diskUnavailable = false;
+	let disposed = false;
+	let queue: Promise<void> = Promise.resolve();
 
-	function ensureDir(): string | undefined {
+	async function ensureDir(): Promise<string | undefined> {
 		if (diskUnavailable) return undefined;
 		if (dir === undefined) {
 			try {
 				if (options?.dir !== undefined) {
-					mkdirSync(options.dir, { recursive: true });
+					await mkdir(options.dir, { recursive: true });
 					dir = options.dir;
 				} else {
-					dir = mkdtempSync(join(tmpdir(), "pit-subagent-"));
+					dir = await mkdtemp(join(tmpdir(), "pit-subagent-"));
 				}
 			} catch {
 				diskUnavailable = true;
@@ -69,41 +78,105 @@ export function createSubagentOutputStore(options?: SubagentOutputStoreOptions):
 		return dir;
 	}
 
+	function enqueue(work: () => Promise<void>): Promise<void> {
+		const next = queue.then(work, work);
+		queue = next.catch(() => {});
+		return next;
+	}
+
+	async function trim(target: string, protectedHandle: string): Promise<void> {
+		while (index.size > maxEntries || totalBytes > maxBytes) {
+			const oldest = index.keys().next().value;
+			if (oldest === undefined) break;
+			const entry = index.get(oldest);
+			if (!entry) {
+				index.delete(oldest);
+				continue;
+			}
+			// A single oversized output is not useful as a retained side channel.
+			// Evict it immediately rather than allowing the cap to be exceeded forever.
+			if (oldest === protectedHandle && index.size === 1) {
+				try {
+					await unlink(join(target, entry.file));
+				} catch {
+					// best-effort
+				}
+				index.delete(oldest);
+				totalBytes -= entry.bytes;
+				break;
+			}
+			try {
+				await unlink(join(target, entry.file));
+			} catch {
+				// best-effort
+			}
+			index.delete(oldest);
+			totalBytes -= entry.bytes;
+		}
+	}
+
 	return {
 		put(handle, content) {
-			const target = ensureDir();
-			if (target === undefined) return;
-			// Reuse the same filename when a handle is re-stored (resume/continue), so a
-			// later op:"read" always resolves to the latest output.
-			const file = index.get(handle) ?? `s${++seq}.txt`;
-			try {
-				// Repo invariant: bytes that land on disk pass through redactForDisk.
-				writeFileSync(join(target, file), redactForDisk(content), "utf8");
-				index.set(handle, file);
-			} catch {
-				diskUnavailable = true;
-			}
+			if (disposed) return Promise.resolve();
+			return enqueue(async () => {
+				const target = await ensureDir();
+				if (target === undefined || disposed) return;
+				try {
+					const redacted = redactForDisk(content);
+					const bytes = Buffer.byteLength(redacted, "utf8");
+					const previous = index.get(handle);
+					if (bytes > maxBytes) {
+						// Do not write an output that will be evicted immediately. Remove an
+						// older value for the same handle so the cap remains meaningful.
+						if (previous) {
+							try {
+								await unlink(join(target, previous.file));
+							} catch {
+								// best-effort
+							}
+							index.delete(handle);
+							totalBytes -= previous.bytes;
+						}
+						return;
+					}
+					const file = previous?.file ?? `s${++seq}.txt`;
+					await writeFile(join(target, file), redacted, "utf8");
+					if (previous) totalBytes -= previous.bytes;
+					index.delete(handle);
+					index.set(handle, { file, bytes });
+					totalBytes += bytes;
+					await trim(target, handle);
+				} catch {
+					diskUnavailable = true;
+				}
+			});
 		},
-		get(handle) {
-			const file = index.get(handle);
-			if (file === undefined || dir === undefined) return undefined;
-			const path = join(dir, file);
-			if (!existsSync(path)) return undefined;
+		async get(handle) {
+			if (disposed) return undefined;
+			await queue;
+			if (disposed || dir === undefined) return undefined;
+			const entry = index.get(handle);
+			if (entry === undefined) return undefined;
 			try {
-				return readFileSync(path, "utf8");
+				return await readFile(join(dir, entry.file), "utf8");
 			} catch {
 				return undefined;
 			}
 		},
-		dispose() {
+		async dispose() {
+			if (disposed) return;
+			disposed = true;
+			await queue;
 			index.clear();
+			totalBytes = 0;
 			if (dir !== undefined) {
+				const target = dir;
+				dir = undefined;
 				try {
-					rmSync(dir, { recursive: true, force: true });
+					await rm(target, { recursive: true, force: true });
 				} catch {
 					// best-effort
 				}
-				dir = undefined;
 			}
 		},
 	};

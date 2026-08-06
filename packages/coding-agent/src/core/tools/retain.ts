@@ -56,11 +56,8 @@ export function createRetainToolDefinition(
 		name: "retain",
 		label: "retain",
 		description:
-			"Save a durable fact, decision, or pattern to the project's hindsight memory bank. Use for things worth remembering across sessions (NOT session-only state). Searchable later via `recall` and `reflect`.",
+			"Save a durable fact, decision, or pattern to the project's hindsight memory bank. Call it proactively after non-trivial work, for things worth remembering across sessions (NOT session-only state). Searchable later via `recall` and `reflect`.",
 		promptSnippet: "Save a durable fact to project hindsight memory",
-		promptGuidelines: [
-			"After non-trivial work, proactively retain concise, specific facts a future session would otherwise rediscover; skip transient state.",
-		],
 		parameters: retainSchema,
 		async execute(toolCallId: string, input: RetainToolInput) {
 			const bank = options?.bank ?? getCurrentHindsightBank();

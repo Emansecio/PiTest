@@ -8,25 +8,25 @@
  * read-only warning and drops the whole plan ritual, explicitly.
  *
  * The blocked-tools list is DERIVED from the same canonical side-effect source as
- * `<plan_mode>` ({@link planBlockedToolNames}) so neither prompt can drift from
- * what the checker actually denies. Injected by the permissions extension from
- * `before_agent_start` (pre-model band), appended AFTER the system prompt's
- * dynamic marker so it never invalidates the cacheable prefix.
+ * `<plan_mode>` ({@link blockedToolsBullet}) so neither prompt can drift from
+ * what the checker actually denies, and it is narrowed to the session's own tool
+ * surface when the caller passes it. Rendered into the system prompt's CACHEABLE
+ * PREFIX by the host (`BuildSystemPromptOptions.permissionModeSection`), which
+ * rebuilds only when the permission mode (or the tool surface) changes.
  */
 
-import { planBlockedToolNames } from "./plan-mode-prompt.ts";
+import { blockedToolsBullet } from "./plan-mode-prompt.ts";
 
 /**
  * The `<ask_mode>` block appended to the system prompt while ask mode is active.
  * Keep these invariants in the text: read-only warning with the derived blocked
  * list, answer-directly instruction, and the explicit no-plan-ritual ban.
  */
-export function buildAskModeSection(): string {
-	const blocked = planBlockedToolNames().join(", ");
+export function buildAskModeSection(sessionToolNames?: readonly string[]): string {
 	return [
 		"<ask_mode>",
 		"Ask mode is ACTIVE: this session is READ-ONLY.",
-		`- Mutating tools (${blocked}, and MCP tools) are BLOCKED at the permission layer. Do not attempt them; do not promise edits.`,
+		blockedToolsBullet(sessionToolNames),
 		"- Subagents/spawn (`task`, `parallel`, `fanout`) are also blocked — there is no read-only carve-out; do your own research with the read-only tools directly.",
 		"Your job is to ANSWER the user's question, directly:",
 		"1. Investigate with read-only tools (read, grep, find, ls, symbol, lsp navigation) until the answer is grounded in the actual code — cite files/symbols you looked at.",

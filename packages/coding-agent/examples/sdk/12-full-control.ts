@@ -75,5 +75,5 @@ try {
 	await session.prompt("List files in the current directory.");
 	console.log();
 } finally {
-	session.dispose();
+	await session.dispose();
 }

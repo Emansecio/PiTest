@@ -99,16 +99,28 @@ export type DiagnosticCategory =
 	| "guard.failed"
 	// Band C grounding for the DEFAULT in-turn verification mode: a cycle modified
 	// files and ran no verification-class command. `ruleId` distinguishes the
-	// correction (`in-turn-check-missing`) from the bounded give-up
-	// (`in-turn-check-gave-up`); `count` carries the unheeded streak.
+	// correction (`in-turn-check-missing`), autonomous-goal handoff
+	// (`in-turn-check-gave-up`), and bounded fallback outcomes (`*-passed`,
+	// `*-failed`, `*-timeout`); `count` carries the streak/outcome count.
 	| "quality.in-turn-check"
 	// Corrective (Band C): a Tier-4 tool-error-hint rule fired, carrying the
 	// rule id + tool name so dead/noisy hint rules can be found from the tally.
 	| "hint.fired"
 	| "conditioning.context"
+	| "graph.prefetch.warm"
+	| "graph.prefetch.hit"
+	| "graph.prefetch.stale"
 	| "quality.contract"
 	| "quality.self-review"
 	| "quality.cache-marker"
+	// The cacheable system-prompt prefix (everything before
+	// SYSTEM_PROMPT_DYNAMIC_MARKER) was REWRITTEN mid-session, so the next request
+	// re-bills the whole cached prefix as a cache write — the largest single-event
+	// cost in the system. `reason` names the trigger, `rebuildCount` the running
+	// total, `historyTokens` the wire size about to be re-billed. Deliberate,
+	// budgeted transitions (mode switch, goal lifecycle) carry `deliberate: true`
+	// and drop to `info`: still recorded, but not an alarm.
+	| "quality.cache-prefix-rewrite"
 	// Code-graph Fase 2 (import-edge blast radius): a post-edit advisory fired
 	// (or the goal_complete R10 gate blocked completion) because dependents of
 	// the changed file were surfaced by `built-ins/impact-extension.ts`.
@@ -189,6 +201,26 @@ export interface DiagnosticContext {
 	reclaimedTokens?: number;
 	/** Generic count for a classified event (e.g. failing-file total). */
 	count?: number;
+	/**
+	 * On `quality.cache-prefix-rewrite`: the rebuild trigger, matching the `reason`
+	 * argument threaded through the system-prompt rebuild path (`tool-surface`,
+	 * `permission-mode`, `model-profile`, …).
+	 */
+	reason?: string;
+	/** On `quality.cache-prefix-rewrite`: prefix rewrites this session, including this one. */
+	rebuildCount?: number;
+	/**
+	 * On `quality.cache-prefix-rewrite`: estimated wire tokens (history + system +
+	 * tool schemas) that the rewrite forces to be re-billed as a cache write.
+	 * Omitted when no context estimate is available (no model / no context window).
+	 */
+	historyTokens?: number;
+	/**
+	 * True when the recorded event is an intentional, budgeted cost rather than
+	 * churn — e.g. a permission-mode switch or a goal transition, each of which
+	 * buys a cheaper cacheable prefix for every subsequent request.
+	 */
+	deliberate?: boolean;
 	/** How many of `count` were cross-file (failing files the turn never touched). */
 	crossFileCount?: number;
 	/**

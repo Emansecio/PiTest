@@ -8,11 +8,13 @@
 import { fauxAssistantMessage } from "@pit/ai";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	_emitBashBackgroundJobEventForTest,
 	_registerBashBackgroundJobForTest,
 	_resetBashBackgroundJobsForTest,
 	type BashBackgroundJob,
+	type BashBackgroundJobEvent,
 } from "../src/core/tools/bash.js";
-import { createHarness, getUserTexts, type Harness } from "./suite/harness.js";
+import { createHarness, getMessageText, getUserTexts, type Harness } from "./suite/harness.js";
 
 const FAILED_MARKER = "has FAILED";
 const RUNNING_MARKER = "is STILL running";
@@ -60,6 +62,7 @@ describe("background-check guard", () => {
 
 		const job = bgJob({
 			id: "bg-7",
+			ownerSessionId: harness.session.sessionId,
 			command: "npm run check",
 			exited: false,
 			ringBuffer: "src/foo.ts(9,1): error TS2304: Cannot find name 'bar'.",
@@ -97,7 +100,9 @@ describe("background-check guard", () => {
 			fauxAssistantMessage("ok, I'll wait for the test"),
 		]);
 
-		_registerBashBackgroundJobForTest(bgJob({ id: "bg-8", command: "npm test", exited: false }));
+		_registerBashBackgroundJobForTest(
+			bgJob({ id: "bg-8", ownerSessionId: harness.session.sessionId, command: "npm test", exited: false }),
+		);
 
 		await harness.session.prompt("ship it");
 
@@ -111,7 +116,12 @@ describe("background-check guard", () => {
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("All done.")]);
 
-		const job = bgJob({ id: "bg-9", command: "npm run check", exited: false });
+		const job = bgJob({
+			id: "bg-9",
+			ownerSessionId: harness.session.sessionId,
+			command: "npm run check",
+			exited: false,
+		});
 		_registerBashBackgroundJobForTest(job);
 		setTimeout(() => {
 			job.exited = true;
@@ -123,6 +133,29 @@ describe("background-check guard", () => {
 		const v = harness.eventsOfType("pending_check");
 		expect(v.some((e) => e.phase === "passed")).toBe(true);
 		expect(getUserTexts(harness)).toEqual(["ship it"]);
+	});
+
+	it("returns a completed background check to the model in default in-turn mode", async () => {
+		const harness = await createHarness({ settings: { verification: { mode: "in-turn" as const } } });
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("done"), fauxAssistantMessage("acknowledged")]);
+
+		const job = bgJob({
+			id: "bg-in-turn",
+			ownerSessionId: harness.session.sessionId,
+			exited: true,
+			exitCode: 1,
+			ringBuffer: "check failed",
+		});
+		_registerBashBackgroundJobForTest(job);
+		_emitBashBackgroundJobEventForTest({ type: "exited", job } satisfies BashBackgroundJobEvent);
+
+		await harness.session.prompt("next task");
+
+		const customMessages = harness.session.messages.filter(
+			(message) => message.role === "custom" && message.customType === "pit.background-job",
+		);
+		expect(customMessages.some((message) => getMessageText(message).includes("bg-in-turn"))).toBe(true);
 	});
 
 	it("ignores a backgrounded dev server (not a check)", async () => {

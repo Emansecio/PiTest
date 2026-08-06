@@ -185,21 +185,29 @@ export function sanitizeBinaryOutput(str: string): string {
  * Detached child processes must be tracked so they can be killed on parent
  * shutdown signals (SIGHUP/SIGTERM).
  */
-const trackedDetachedChildPids = new Set<number>();
+const trackedDetachedChildPids = new Map<number, string | undefined>();
+let trackedChildrenExitHookRegistered = false;
 
-export function trackDetachedChildPid(pid: number): void {
-	trackedDetachedChildPids.add(pid);
+function registerTrackedChildrenExitHook(): void {
+	if (trackedChildrenExitHookRegistered) return;
+	trackedChildrenExitHookRegistered = true;
+	process.once("exit", killTrackedDetachedChildren);
+}
+
+export function trackDetachedChildPid(pid: number, ownerSessionId?: string): void {
+	trackedDetachedChildPids.set(pid, ownerSessionId);
+	registerTrackedChildrenExitHook();
 }
 
 export function untrackDetachedChildPid(pid: number): void {
 	trackedDetachedChildPids.delete(pid);
 }
 
-export function killTrackedDetachedChildren(): void {
-	for (const pid of trackedDetachedChildPids) {
-		killProcessTree(pid);
+export function killTrackedDetachedChildren(ownerSessionId?: string): void {
+	for (const [pid, owner] of trackedDetachedChildPids) {
+		if (ownerSessionId === undefined || owner === ownerSessionId) killProcessTree(pid);
+		if (ownerSessionId === undefined || owner === ownerSessionId) trackedDetachedChildPids.delete(pid);
 	}
-	trackedDetachedChildPids.clear();
 }
 
 // Grace window for taskkill to actually remove the tree before we double-check
@@ -209,6 +217,141 @@ export function killTrackedDetachedChildren(): void {
 // that was already a zombie — would otherwise go unnoticed by every caller that
 // assumes the tree is gone once this function returns.
 const KILL_VERIFY_DELAY_MS = 2_000;
+const PROCESS_TREE_POLL_MS = 25;
+
+function isPidAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function waitForPidExit(pid: number, deadlineMs: number): Promise<boolean> {
+	while (isPidAlive(pid) && Date.now() < deadlineMs) {
+		await new Promise<void>((resolve) => setTimeout(resolve, PROCESS_TREE_POLL_MS));
+	}
+	return !isPidAlive(pid);
+}
+
+function collectProcessTreePids(rootPid: number, rows: Array<{ pid: number; parentPid: number }>): number[] {
+	const result = [rootPid];
+	const seen = new Set(result);
+	for (let index = 0; index < result.length; index++) {
+		const parentPid = result[index];
+		for (const row of rows) {
+			if (row.parentPid !== parentPid || seen.has(row.pid)) continue;
+			seen.add(row.pid);
+			result.push(row.pid);
+		}
+	}
+	return result;
+}
+
+/**
+ * Snapshot a Windows process tree after taskkill failed. Descendants retain
+ * their ParentProcessId even when the root has just exited, which lets this
+ * fallback reap the exact orphaned tree instead of treating a missing root as
+ * proof that every descendant is gone.
+ */
+async function snapshotWindowsProcessTree(rootPid: number, timeoutMs: number): Promise<number[] | undefined> {
+	return new Promise((resolve) => {
+		let settled = false;
+		let stdout = "";
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const finish = (pids: number[] | undefined) => {
+			if (settled) return;
+			settled = true;
+			if (timer) clearTimeout(timer);
+			resolve(pids);
+		};
+		let child: ReturnType<typeof spawn>;
+		try {
+			child = spawn(
+				"powershell.exe",
+				[
+					"-NoProfile",
+					"-NonInteractive",
+					"-Command",
+					'Get-CimInstance Win32_Process | ForEach-Object { [Console]::Out.WriteLine($_.ProcessId.ToString() + "," + $_.ParentProcessId.ToString()) }',
+				],
+				{ stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
+			);
+		} catch {
+			finish(undefined);
+			return;
+		}
+		child.stdout?.setEncoding("utf8");
+		child.stdout?.on("data", (chunk: string) => {
+			if (stdout.length <= 1024 * 1024) stdout += chunk;
+		});
+		child.once("error", () => finish(undefined));
+		child.once("close", (code) => {
+			if (code !== 0) {
+				finish(undefined);
+				return;
+			}
+			const rows = stdout
+				.split(/\r?\n/)
+				.map((line) => line.split(",").map(Number))
+				.filter((pair) => pair.length === 2 && pair.every(Number.isInteger))
+				.map(([pid, parentPid]) => ({ pid, parentPid }));
+			finish(collectProcessTreePids(rootPid, rows));
+		});
+		timer = setTimeout(
+			() => {
+				try {
+					child.kill("SIGKILL");
+				} catch {
+					// PowerShell already exited.
+				}
+				finish(undefined);
+			},
+			Math.max(1, timeoutMs),
+		);
+	});
+}
+
+async function waitForPidsExit(pids: number[], deadlineMs: number): Promise<boolean> {
+	while (pids.some(isPidAlive) && Date.now() < deadlineMs) {
+		await new Promise<void>((resolve) => setTimeout(resolve, PROCESS_TREE_POLL_MS));
+	}
+	return pids.every((pid) => !isPidAlive(pid));
+}
+
+async function runTaskkill(pid: number, deadlineMs: number): Promise<boolean> {
+	return new Promise<boolean>((resolve) => {
+		let settled = false;
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		const finish = (succeeded: boolean) => {
+			if (settled) return;
+			settled = true;
+			if (timeout) clearTimeout(timeout);
+			resolve(succeeded);
+		};
+		let killer: ReturnType<typeof spawn>;
+		try {
+			killer = spawn("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore", windowsHide: true });
+		} catch {
+			finish(false);
+			return;
+		}
+		killer.once("error", () => finish(false));
+		killer.once("close", (code) => finish(code === 0));
+		timeout = setTimeout(
+			() => {
+				try {
+					killer.kill();
+				} catch {
+					// taskkill already exited or could not be killed
+				}
+				finish(false);
+			},
+			Math.max(0, deadlineMs - Date.now()),
+		);
+	});
+}
 
 /**
  * Kill a process and all its children (cross-platform)
@@ -290,4 +433,52 @@ export function killProcessTree(pid: number): void {
 			}
 		}
 	}
+}
+
+/**
+ * Kill a process tree and wait a bounded amount of time for its root PID to
+ * disappear. Async callers use this before reporting a cancelled operation;
+ * `killProcessTree` stays synchronous and best-effort for exit handlers.
+ */
+export async function killProcessTreeAndWait(pid: number, timeoutMs = KILL_VERIFY_DELAY_MS): Promise<boolean> {
+	const deadlineMs = Date.now() + timeoutMs;
+	if (process.platform === "win32") {
+		const treeKillSucceeded = await runTaskkill(pid, deadlineMs);
+		// taskkill reports success as soon as it has accepted the tree, not when
+		// every descendant has released its handles. Enumerate after taskkill as
+		// well: descendants that break away from the taskkill job can still retain
+		// the root as their recorded parent, and must be terminated explicitly.
+		const capturedPids = await snapshotWindowsProcessTree(pid, Math.max(1, deadlineMs - Date.now()));
+		const pids = capturedPids ?? [pid];
+		if (treeKillSucceeded && (await waitForPidsExit(pids, deadlineMs))) return true;
+		if (!treeKillSucceeded && !capturedPids) {
+			try {
+				process.kill(pid, "SIGKILL");
+			} catch {
+				// The root already exited and its tree could not be enumerated.
+			}
+			return waitForPidExit(pid, deadlineMs);
+		}
+
+		// taskkill can miss descendants that break away from its job. Terminate
+		// the PIDs from the process-tree snapshot directly, then wait for all.
+		for (const capturedPid of pids.slice().reverse()) {
+			try {
+				process.kill(capturedPid, "SIGKILL");
+			} catch {
+				// Already gone.
+			}
+		}
+		return waitForPidsExit(pids, deadlineMs);
+	}
+	try {
+		process.kill(-pid, "SIGKILL");
+	} catch {
+		try {
+			process.kill(pid, "SIGKILL");
+		} catch {
+			// Process already dead.
+		}
+	}
+	return waitForPidExit(pid, deadlineMs);
 }

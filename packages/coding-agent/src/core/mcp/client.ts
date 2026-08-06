@@ -31,6 +31,24 @@ export { McpTransportError };
 const PROTOCOL_VERSION = "2025-06-18";
 const CLIENT_INFO = { name: "pi-coding-agent", version: "0.1.0" };
 
+function waitUntilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+	if (signal.aborted) return Promise.reject(signal.reason ?? new Error("aborted"));
+	return new Promise<T>((resolve, reject) => {
+		const onAbort = () => reject(signal.reason ?? new Error("aborted"));
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(
+			(value) => {
+				signal.removeEventListener("abort", onAbort);
+				resolve(value);
+			},
+			(error) => {
+				signal.removeEventListener("abort", onAbort);
+				reject(error);
+			},
+		);
+	});
+}
+
 /**
  * Whether a transport error is an HTTP 401 — the bearer was rejected at the auth
  * gate, BEFORE the request reached business logic. This is the only status for
@@ -248,7 +266,7 @@ export class McpClient {
 			// so a reconnect after token expiry re-handshakes with a valid token.
 			await this.ensureFreshAuth();
 			throwIfAborted();
-			this.transport.updateConfig?.(await this.transportConfigAsync(activeSignal));
+			this.transport.updateConfig?.(await waitUntilAborted(this.transportConfigAsync(activeSignal), activeSignal));
 			throwIfAborted();
 			// start() resets/(re)opens the transport so a reconnect re-handshakes with
 			// fresh state (no stale HTTP session id, no dead subprocess, no dead channel).

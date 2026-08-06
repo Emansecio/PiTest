@@ -115,6 +115,8 @@ function releaseOne(): void {
 export class SlotLease {
 	private held = true;
 	private closed = false;
+	/** Promises for work that outlived the caller's abort/timeout race. */
+	private pendingSettlements = 0;
 	/** Number of concurrent descendants this lease yielded for and still awaits. */
 	private suspendedByDescendants = 0;
 	private chain: Promise<void> = Promise.resolve();
@@ -164,11 +166,32 @@ export class SlotLease {
 		});
 	}
 
+	/**
+	 * Keep this physical slot occupied until work that escaped an abort race has
+	 * actually settled. The caller may return meanwhile, but a later Agent must
+	 * not be admitted while the old prompt/tool is still executing.
+	 */
+	holdUntil(settlement: Promise<unknown>): void {
+		this.pendingSettlements++;
+		settlement.then(
+			() => this.finishSettlement(),
+			() => this.finishSettlement(),
+		);
+	}
+
+	private finishSettlement(): void {
+		if (this.pendingSettlements > 0) this.pendingSettlements--;
+		if (this.closed && this.pendingSettlements === 0 && this.held) {
+			this.held = false;
+			releaseOne();
+		}
+	}
+
 	/** Final release. The lease cannot be reacquired afterwards. Idempotent. */
 	close(): Promise<void> {
 		return this.enqueue(() => {
 			this.closed = true;
-			if (this.held) {
+			if (this.pendingSettlements === 0 && this.held) {
 				this.held = false;
 				releaseOne();
 			}
@@ -181,6 +204,15 @@ const leaseContext = new AsyncLocalStorage<SlotLease | undefined>();
 /** The lease held by the agent loop this code is running under, if any. */
 export function currentLease(): SlotLease | undefined {
 	return leaseContext.getStore();
+}
+
+/**
+ * Register work that may continue after the enclosing callback returns (for
+ * example an Agent prompt after its abort race rejected). Its slot is retained
+ * until the promise settles.
+ */
+export function holdCurrentSlotUntil(settlement: Promise<unknown>): void {
+	leaseContext.getStore()?.holdUntil(settlement);
 }
 
 /**

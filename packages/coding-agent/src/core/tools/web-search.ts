@@ -185,14 +185,8 @@ export function createWebSearchToolDefinition(
 		name: "web_search",
 		label: "web_search",
 		description:
-			"Search the live web for current information through one of several ranked providers. Set extract=true to also fetch and inline a clean markdown excerpt of each result.",
-		promptSnippet: "Search the web for current information",
-		promptGuidelines: [
-			"Use when local context lacks current or external information (docs, releases, news, API specs).",
-			'Prefer provider="auto" so the chain picks whichever provider is configured.',
-			"Set extract=true only when you need page content; it costs extra network round-trips.",
-			"Keep limit small (default 8, max 20) — results are markdown lines, not a database query.",
-		],
+			"Search the live web through one of several ranked providers, for information local context lacks (docs, releases, news, API specs). Set extract=true to also fetch and inline a clean markdown excerpt of each result — only when you need page content, since it costs extra round-trips.",
+		promptSnippet: "Search the web for current information; extract=true also inlines a markdown excerpt per result",
 		parameters: webSearchSchema,
 		async execute(_toolCallId, input: WebSearchToolInput, signal) {
 			// `isError: true` is the flag the execution pipeline / TUI read to treat a

@@ -13,7 +13,7 @@ import type { ImageContent } from "@pit/ai";
 // import line doesn't force the full provider/typebox graph at boot.
 import { modelsAreEqual } from "@pit/ai/models-compare";
 import chalk from "chalk";
-import { type Args, type Mode, parseArgs, printHelp } from "./cli/args.ts";
+import { type Args, type Mode, parseArgs, printHelp, suggestCliOption } from "./cli/args.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { withTuiSignalGuard } from "./cli/with-tui-signal-guard.ts";
@@ -147,11 +147,30 @@ function collectSettingsDiagnostics(
 	}));
 }
 
+function unknownOptionHint(message: string): string | undefined {
+	const match = /^Unknown option:\s+([^\s,]+)$/.exec(message.trim());
+	if (!match) {
+		return undefined;
+	}
+	const suggestion = suggestCliOption(match[1]);
+	return `${suggestion ? `Did you mean ${suggestion}? ` : ""}Run ${APP_NAME} --help to list available options.`;
+}
+
+function reportDiagnostic(diagnostic: { type: "warning" | "error" | "info"; message: string }): void {
+	const color = diagnostic.type === "error" ? chalk.red : diagnostic.type === "warning" ? chalk.yellow : chalk.dim;
+	const prefix = diagnostic.type === "error" ? "Error: " : diagnostic.type === "warning" ? "Warning: " : "";
+	console.error(color(`${prefix}${diagnostic.message}`));
+	if (diagnostic.type === "error") {
+		const hint = unknownOptionHint(diagnostic.message);
+		if (hint) {
+			console.error(chalk.dim(`Hint: ${hint}`));
+		}
+	}
+}
+
 function reportDiagnostics(diagnostics: readonly AgentSessionRuntimeDiagnostic[]): void {
 	for (const diagnostic of diagnostics) {
-		const color = diagnostic.type === "error" ? chalk.red : diagnostic.type === "warning" ? chalk.yellow : chalk.dim;
-		const prefix = diagnostic.type === "error" ? "Error: " : diagnostic.type === "warning" ? "Warning: " : "";
-		console.error(color(`${prefix}${diagnostic.message}`));
+		reportDiagnostic(diagnostic);
 	}
 }
 
@@ -624,8 +643,7 @@ export async function main(args: string[], options?: MainOptions) {
 	const parsed = parseArgs(args);
 	if (parsed.diagnostics.length > 0) {
 		for (const d of parsed.diagnostics) {
-			const color = d.type === "error" ? chalk.red : chalk.yellow;
-			console.error(color(`${d.type === "error" ? "Error" : "Warning"}: ${d.message}`));
+			reportDiagnostic(d);
 		}
 		if (parsed.diagnostics.some((d) => d.type === "error")) {
 			process.exit(1);
@@ -885,6 +903,15 @@ export async function main(args: string[], options?: MainOptions) {
 	});
 	const { services, session, modelFallbackMessage } = runtime;
 	const { settingsManager, modelRegistry, resourceLoader } = services;
+	const finishEarlyExit = async (exitCode: number): Promise<void> => {
+		try {
+			await runtime.dispose();
+		} finally {
+			await stopThemeWatcherLazy();
+			restoreStdout();
+			process.exitCode = exitCode;
+		}
+	};
 
 	if (parsed.help) {
 		const extensionsResult = resourceLoader.getExtensions();
@@ -906,14 +933,16 @@ export async function main(args: string[], options?: MainOptions) {
 		// stderr timings before the early exit so PIT_TIMING covers the full
 		// (cache-miss) --help path too (previously unreachable).
 		printTimings();
-		process.exit(0);
+		await finishEarlyExit(0);
+		return;
 	}
 
 	if (parsed.listModels !== undefined) {
 		const { listModels } = await import("./cli/list-models.ts");
 		const searchPattern = typeof parsed.listModels === "string" ? parsed.listModels : undefined;
 		await listModels(modelRegistry, searchPattern);
-		process.exit(0);
+		await finishEarlyExit(0);
+		return;
 	}
 
 	if (parsed.dryRun) {
@@ -933,9 +962,8 @@ export async function main(args: string[], options?: MainOptions) {
 		// Timings go to stderr (never the raw-stdout payload callers parse) and
 		// print before the early exit so PIT_TIMING covers --dry-run too.
 		printTimings();
-		await runtime.dispose();
-		restoreStdout();
-		process.exit(report.overallStatus === "blocked" ? 1 : 0);
+		await finishEarlyExit(report.overallStatus === "blocked" ? 1 : 0);
+		return;
 	}
 
 	// Read piped stdin content (if any) - skip for RPC mode which uses stdin for JSON-RPC
@@ -967,19 +995,22 @@ export async function main(args: string[], options?: MainOptions) {
 	time("resolveModelScope");
 	reportDiagnostics(runtime.diagnostics);
 	if (runtime.diagnostics.some((diagnostic) => diagnostic.type === "error")) {
-		process.exit(1);
+		await finishEarlyExit(1);
+		return;
 	}
 	time("createAgentSession");
 
 	if (appMode !== "interactive" && !session.model) {
 		console.error(chalk.red(formatNoModelsAvailableMessage()));
-		process.exit(1);
+		await finishEarlyExit(1);
+		return;
 	}
 
 	const startupBenchmark = isTruthyEnvFlag(process.env.PIT_STARTUP_BENCHMARK);
 	if (startupBenchmark && appMode !== "interactive") {
 		console.error(chalk.red("Error: PIT_STARTUP_BENCHMARK only supports interactive mode"));
-		process.exit(1);
+		await finishEarlyExit(1);
+		return;
 	}
 
 	if (appMode === "rpc") {
@@ -1022,7 +1053,8 @@ export async function main(args: string[], options?: MainOptions) {
 			console.error(
 				chalk.red(`No prompt provided. Pass a message (${APP_NAME} -p "...") or pipe input (… | ${APP_NAME} -p).`),
 			);
-			process.exit(1);
+			await finishEarlyExit(1);
+			return;
 		}
 		const { runPrintMode } = await import("./modes/print-mode.ts");
 		printTimings();

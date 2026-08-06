@@ -42,7 +42,12 @@ function cleanProviderEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 	return cleaned;
 }
 
-function runCliSpawn(args: string[], cwd: string, agentDir: string): { status: number; stdout: string } {
+function runCliSpawn(
+	args: string[],
+	cwd: string,
+	agentDir: string,
+	extraEnv: NodeJS.ProcessEnv = {},
+): { status: number; stdout: string; stderr: string } {
 	const result = crossSpawnSync(TSX_BIN, ["--tsconfig", TSCONFIG, CLI_ENTRY, ...args], {
 		cwd,
 		env: {
@@ -54,6 +59,7 @@ function runCliSpawn(args: string[], cwd: string, agentDir: string): { status: n
 			COLUMNS: "120",
 			NO_COLOR: "1",
 			FORCE_COLOR: "0",
+			...extraEnv,
 		},
 		encoding: "utf-8",
 		timeout: 90_000,
@@ -61,6 +67,7 @@ function runCliSpawn(args: string[], cwd: string, agentDir: string): { status: n
 	return {
 		status: typeof result.status === "number" ? result.status : -1,
 		stdout: result.stdout ?? "",
+		stderr: result.stderr ?? "",
 	};
 }
 
@@ -92,6 +99,8 @@ describe("pi --dry-run", () => {
 	let tempDir: string;
 	let cwd: string;
 	let agentDir: string;
+	let shutdownExtension: string;
+	let shutdownMarker: string;
 
 	beforeAll(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-dryrun-"));
@@ -99,6 +108,19 @@ describe("pi --dry-run", () => {
 		agentDir = path.join(tempDir, "agent");
 		fs.mkdirSync(cwd, { recursive: true });
 		fs.mkdirSync(agentDir, { recursive: true });
+		shutdownExtension = path.join(tempDir, "shutdown-marker.ts");
+		shutdownMarker = path.join(tempDir, "shutdown.marker");
+		fs.writeFileSync(
+			shutdownExtension,
+			[
+				'import { writeFileSync } from "node:fs";',
+				"export default function (pi: any) {",
+				'  pi.on("session_shutdown", () => {',
+				'    writeFileSync(process.env.PIT_TEST_SHUTDOWN_MARKER!, "disposed");',
+				"  });",
+				"}",
+			].join("\n"),
+		);
 	});
 
 	afterAll(() => {
@@ -194,11 +216,29 @@ describe("pi --dry-run", () => {
 	}
 
 	spawnSuite("E2E smoke (tsx spawn)", () => {
+		it("explains how to recover from an unknown option without touching stdout", () => {
+			const result = runCliSpawn(["-mod"], cwd, agentDir);
+			expect(result.status).toBe(1);
+			expect(result.stdout).toBe("");
+			expect(result.stderr).toContain("Error: Unknown option: -mod");
+			expect(result.stderr).toContain("Did you mean --mode?");
+			expect(result.stderr).toContain("Run pit --help to list available options.");
+		});
+
 		it("blocked dry-run exits 1 through the real CLI entry", () => {
 			const result = runCliSpawn(["--dry-run", "json", "--no-extensions", "--no-skills"], cwd, agentDir);
 			expect(result.status).toBe(1);
 			const report = JSON.parse(result.stdout.trim()) as { overallStatus: string };
 			expect(report.overallStatus).toBe("blocked");
+		});
+
+		it("awaits runtime disposal before the post-startup --help path exits", () => {
+			fs.rmSync(shutdownMarker, { force: true });
+			const result = runCliSpawn(["--help", "--extension", shutdownExtension], cwd, agentDir, {
+				PIT_TEST_SHUTDOWN_MARKER: shutdownMarker,
+			});
+			expect(result.status).toBe(0);
+			expect(fs.readFileSync(shutdownMarker, "utf-8")).toBe("disposed");
 		});
 	});
 });

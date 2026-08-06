@@ -25,6 +25,27 @@ const COMMANDS = [
 ];
 
 describe("slash autocomplete completeOnly (required argument)", () => {
+	it("uses registry priority for browsing while preserving exact matches", async () => {
+		const provider = new CombinedAutocompleteProvider(
+			[
+				{ name: "later", description: "later", section: "PROJECT", priority: 20, badge: "extension" },
+				{ name: "help", description: "help", section: "ESSENTIAL", priority: 0, badge: "built-in" },
+				{ name: "model", description: "model", section: "MODEL", priority: 10, badge: "built-in" },
+			],
+			process.cwd(),
+		);
+		const browse = await provider.getSuggestions(["/"], 0, 1, { signal: new AbortController().signal });
+		assert.deepEqual(
+			browse?.items.map((item) => item.value),
+			["help", "model", "later"],
+		);
+		assert.equal(browse?.items[0]?.section, "ESSENTIAL");
+		assert.equal(browse?.items[0]?.badge, "built-in");
+
+		const exact = await provider.getSuggestions(["/later"], 0, 6, { signal: new AbortController().signal });
+		assert.equal(exact?.items[0]?.value, "later");
+	});
+
 	it("propagates completeOnly from the command declaration, never inferring it from the hint", async () => {
 		const provider = new CombinedAutocompleteProvider(COMMANDS, process.cwd());
 		const suggestions = await provider.getSuggestions(["/"], 0, 1, { signal: new AbortController().signal });

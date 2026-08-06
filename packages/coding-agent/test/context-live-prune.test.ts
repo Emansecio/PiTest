@@ -1,10 +1,14 @@
 import type { AgentMessage } from "@pit/agent-core";
 import { getRuntimeDiagnostics, resetRuntimeDiagnostics } from "@pit/ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { applyLiveContextEconomyAfterToolSuccess } from "../src/core/agent-session-live-prune.js";
+import {
+	applyLightContextEconomyAtTurnEnd,
+	applyLiveContextEconomyAfterToolSuccess,
+} from "../src/core/agent-session-live-prune.js";
 import {
 	applySupersedeOnly,
 	cloneToolResultMessagesForPrune,
+	elideAllMutatingToolCallArguments,
 	elideMutatingToolCallArguments,
 	planContextPrune,
 	pruneOldToolOutputs,
@@ -406,5 +410,98 @@ describe("incremental supersede scan cache (planContextPrune)", () => {
 		const incremental = planContextPrune(messages, 2).supersededIndices;
 		expect(sorted(incremental)).toEqual(sorted(fullRebuild(messages, 2)));
 		expect(sorted(incremental)).toEqual([0]);
+	});
+});
+
+// P0 — elision must NEVER prune a mutation call's args before its tool-result
+// exists in the transcript: the call may still be dispatched (batch re-drive,
+// continue/resume), and the dispatcher would then execute the elision marker
+// as the payload. Regression for the silent `write`/`edit` corruption bug.
+describe("P0 elision never prunes un-executed mutation calls", () => {
+	afterEach(() => {
+		delete process.env.PIT_NO_LIVE_SUPERSEDE;
+		delete process.env.PIT_NO_LIVE_ARG_ELISION;
+		resetRuntimeDiagnostics();
+	});
+
+	it("elideMutatingToolCallArguments leaves args intact when the tool-result is absent", () => {
+		const oldBody = "x".repeat(5000);
+		const messages = [
+			toolCall("write", "w1", { path: "a.ts", content: oldBody }),
+			// NO toolResult for w1 — the call is still pending execution.
+			user("checkpoint"),
+		];
+
+		const reclaimed = elideMutatingToolCallArguments(messages, "w1");
+		expect(reclaimed).toBe(0);
+		expect(argsAt(messages, 0).content).toBe(oldBody);
+	});
+
+	it("elideMutatingToolCallArguments prunes once the tool-result landed", () => {
+		const oldBody = "x".repeat(5000);
+		const messages = [
+			toolCall("write", "w1", { path: "a.ts", content: oldBody }),
+			toolResult("write", "w1", "Wrote a.ts"),
+			user("checkpoint"),
+		];
+
+		const reclaimed = elideMutatingToolCallArguments(messages, "w1");
+		expect(reclaimed).toBeGreaterThan(1000);
+		expect(JSON.stringify(argsAt(messages, 0))).toContain("chars elided");
+	});
+
+	it("elideAllMutatingToolCallArguments skips calls without a tool-result", () => {
+		const oldBody = "x".repeat(5000);
+		const messages = [
+			toolCall("write", "w1", { path: "a.ts", content: oldBody }),
+			toolCall("write", "w2", { path: "b.ts", content: oldBody }),
+			toolResult("write", "w2", "Wrote b.ts"),
+			user("checkpoint"),
+		];
+
+		const reclaimed = elideAllMutatingToolCallArguments(messages);
+		// Only w2 (with a result) is pruned; w1 stays intact.
+		expect(reclaimed).toBeGreaterThan(1000);
+		const w1 = argsAt(messages, 0).content;
+		const w2 = argsAt(messages, 1).content;
+		expect(w1).toBe(oldBody);
+		expect(w2).not.toBe(oldBody);
+	});
+
+	it("applyLightContextEconomyAtTurnEnd does not elide a pending write call", () => {
+		const oldBody = "x".repeat(5000);
+		const messages = [
+			toolCall("write", "w1", { path: "a.ts", content: oldBody }),
+			// No result yet: w1 still needs to run.
+			user("checkpoint"),
+			user("final"),
+		];
+
+		const outcome = applyLightContextEconomyAtTurnEnd(messages, [], CONTEXT_WINDOW);
+		expect(outcome.argElisionReclaimed).toBe(0);
+		expect(outcome.messages).toBe(messages);
+		expect(argsAt(messages, 0).content).toBe(oldBody);
+	});
+
+	it("applyLightContextEconomyAtTurnEnd elides a write call whose result is present", () => {
+		const oldBody = "x".repeat(5000);
+		const messages = [
+			toolCall("write", "w1", { path: "a.ts", content: oldBody }),
+			toolResult("write", "w1", "Wrote a.ts"),
+			user("checkpoint"),
+			user("final"),
+		];
+		const result: AgentMessage = {
+			role: "toolResult",
+			toolCallId: "w1",
+			toolName: "write",
+			content: [{ type: "text", text: "Wrote a.ts" }],
+			isError: false,
+			timestamp: 1,
+		} as AgentMessage;
+
+		const outcome = applyLightContextEconomyAtTurnEnd(messages, [result as never], CONTEXT_WINDOW);
+		expect(outcome.argElisionReclaimed).toBeGreaterThan(1000);
+		expect(JSON.stringify(argsAt(outcome.messages, 0))).toContain("chars elided");
 	});
 });

@@ -189,4 +189,21 @@ describe("buildGroupedSlashHelp", () => {
 		expect(advancedIdx).toBeGreaterThan(-1);
 		expect(help.indexOf("/orphan")).toBeGreaterThan(advancedIdx);
 	});
+
+	test("renders project sources with their origin badge", () => {
+		const help = buildGroupedSlashHelp([
+			{ name: "deploy", description: "Deploy project", group: "Project", badge: "extension" },
+			{ name: "review", description: "Review changes", group: "Project", badge: "skill" },
+		]);
+		expect(help).toContain("**Project**");
+		expect(help).toContain("/deploy [extension]");
+		expect(help).toContain("/review [skill]");
+	});
+
+	test("escapes markdown table separators and flattens multiline descriptions", () => {
+		const help = buildGroupedSlashHelp([{ name: "docs", description: "A | B\nC", group: "Info" }]);
+
+		expect(help).toContain("A \\| B C");
+		expect(help).not.toContain("A | B");
+	});
 });

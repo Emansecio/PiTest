@@ -12,10 +12,11 @@
  * "least recent + lowest hits" (a tiny LRU+LFU hybrid).
  */
 
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { dirname, join, relative, sep } from "node:path";
+import { killProcessTree, killProcessTreeAndWait } from "../utils/shell.ts";
 import type { FileToolOp } from "./compaction/utils.ts";
 
 export interface FrequentFileStat {
@@ -468,21 +469,58 @@ async function runGitLog(
 	signal: AbortSignal | undefined,
 ): Promise<Array<{ path: string; count: number }> | undefined> {
 	const counts = new Map<string, number>();
-	// `execFile`'s callback only fires after the child has fully exited, so
-	// resolving/rejecting from inside it (and ONLY from inside it) guarantees
-	// the child no longer holds `cwd`. On abort/timeout we kill the child but
-	// wait for the callback before settling — otherwise on Windows the cwd
-	// stays locked just long enough for `rmSync(tempDir)` in tests to EBUSY.
+	// The `close` event fires only after the child has exited and its stdio has
+	// closed. Settling only from there guarantees the child no longer holds
+	// `cwd`; otherwise Windows can leave the directory briefly locked.
 	let aborted = false;
 	let timedOut = false;
 	await new Promise<void>((resolve, reject) => {
-		const child = execFile(
-			"git",
-			["log", "--pretty=format:", "--name-only", `--since=${sinceDays}.days.ago`],
-			{ cwd, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
-			(error, stdout) => {
+		let termination: Promise<boolean> | undefined;
+		let failed = false;
+		let stdout = "";
+		let stdoutBytes = 0;
+		const child = spawn("git", ["log", "--pretty=format:", "--name-only", `--since=${sinceDays}.days.ago`], {
+			cwd,
+			detached: process.platform !== "win32",
+			stdio: ["ignore", "pipe", "ignore"],
+			windowsHide: true,
+		});
+		const terminate = () => {
+			if (termination) return;
+			termination = child.pid ? killProcessTreeAndWait(child.pid).catch(() => false) : Promise.resolve(child.kill());
+		};
+		const onParentExit = () => {
+			if (child.pid) killProcessTree(child.pid);
+			else child.kill();
+		};
+		const timer = setTimeout(() => {
+			timedOut = true;
+			terminate();
+		}, timeoutMs);
+		const onAbort = () => {
+			aborted = true;
+			terminate();
+		};
+		child.stdout.setEncoding("utf8");
+		child.stdout.on("data", (chunk: string) => {
+			if (failed) return;
+			stdout += chunk;
+			stdoutBytes += Buffer.byteLength(chunk);
+			if (stdoutBytes > 16 * 1024 * 1024) {
+				failed = true;
+				stdout = "";
+				terminate();
+			}
+		});
+		child.once("error", () => {
+			failed = true;
+		});
+		child.once("close", (code) => {
+			const finish = async () => {
+				if (termination) await termination.catch(() => false);
 				clearTimeout(timer);
 				signal?.removeEventListener("abort", onAbort);
+				process.removeListener("exit", onParentExit);
 				if (aborted) {
 					reject(new Error("aborted"));
 					return;
@@ -491,9 +529,8 @@ async function runGitLog(
 					reject(new Error("git log timed out"));
 					return;
 				}
-				if (error) {
-					// `git log` on a non-repo or with no commits exits non-zero; treat as
-					// "no data" and let the caller fall back to mtime.
+				if (failed || code !== 0) {
+					// A non-repo, an empty history, or oversized output falls back to mtime.
 					resolve();
 					return;
 				}
@@ -503,17 +540,12 @@ async function runGitLog(
 					counts.set(line, (counts.get(line) ?? 0) + 1);
 				}
 				resolve();
-			},
-		);
-		const timer = setTimeout(() => {
-			timedOut = true;
-			child.kill();
-		}, timeoutMs);
-		const onAbort = () => {
-			aborted = true;
-			child.kill();
-		};
+			};
+			void finish();
+		});
+		process.once("exit", onParentExit);
 		signal?.addEventListener("abort", onAbort, { once: true });
+		if (signal?.aborted) onAbort();
 	});
 	if (counts.size === 0) return undefined;
 	return Array.from(counts.entries())

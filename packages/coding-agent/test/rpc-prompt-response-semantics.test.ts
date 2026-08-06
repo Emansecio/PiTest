@@ -154,7 +154,7 @@ function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number
 			} catch {
 				// ignore test cleanup failures
 			}
-			session.dispose();
+			await session.dispose();
 			// On Windows the session's file handles can linger briefly after
 			// dispose; under suite load the rmSync races the OS releasing them
 			// (EBUSY/EPERM). Retry + force, and never let teardown fail the test.

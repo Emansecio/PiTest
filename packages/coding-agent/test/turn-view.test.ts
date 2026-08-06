@@ -245,14 +245,14 @@ describe("auto retry", () => {
 		expect(find(effects, "pet-mood")?.mood).toBe("waiting");
 		const loader = find(effects, "retry-loader");
 		expect(loader?.reason).toBeTruthy();
-		expect(retryLoaderMessage(loader as never, 8, "esc")).toContain("retry 2/5 in 8s·esc cancel");
+		expect(retryLoaderMessage(loader as never, 8, "esc")).toContain("retry 2/5 in 8s · esc cancel");
 		expect(retryLoaderMessage(loader as never, 8, "esc")).toMatch(/ — retry/);
 	});
 
 	test("an unclassifiable error keeps the wording unchanged", () => {
 		const effects = decideAutoRetryStart({ attempt: 1, maxAttempts: 3, delayMs: 1000, errorMessage: "???" });
 		const loader = find(effects, "retry-loader");
-		expect(retryLoaderMessage(loader as never, 1, "esc")).toBe("retry 1/3 in 1s·esc cancel");
+		expect(retryLoaderMessage(loader as never, 1, "esc")).toBe("retry 1/3 in 1s · esc cancel");
 	});
 
 	test("a cancelled retry is a muted status, not sticky error red", () => {

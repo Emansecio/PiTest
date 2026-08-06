@@ -294,6 +294,14 @@ export class Markdown implements Component {
 	// the trailing (changed) token. Self-prunes: each render keeps only the
 	// tokens currently present.
 	private tokenLineCache?: Map<string, string[]>;
+	// Flattened token output from the previous render. Incremental streaming can
+	// copy the rendered prefix with one native slice and append only the changed
+	// tail instead of walking every cached line on every frame.
+	private renderedTokenRefs?: Token[];
+	private renderedTokenKeys?: string[];
+	private renderedTokenLines?: string[][];
+	private renderedTokenOffsets?: number[];
+	private renderedContentLines?: string[];
 	// Cached default inline style context (invalidated alongside other caches).
 	private cachedDefaultInlineStyleContext?: InlineStyleContext;
 	// Incremental-lexing state. Tracks the last successfully lexed buffer so that
@@ -455,6 +463,11 @@ export class Markdown implements Component {
 		this.lastNormalizedText = undefined;
 		this.lastTokens = undefined;
 		this.tokenLineCache = undefined;
+		this.renderedTokenRefs = undefined;
+		this.renderedTokenKeys = undefined;
+		this.renderedTokenLines = undefined;
+		this.renderedTokenOffsets = undefined;
+		this.renderedContentLines = undefined;
 		this.cellMeasureCache.clear();
 		this.cellWrapCache.clear();
 		this.deferredCodeLineCache.clear();
@@ -532,7 +545,10 @@ export class Markdown implements Component {
 		// path, incl. all normal streaming) this is byte- and perf-identical.
 		const prevTokenCache = hasLinkDefs(tokens) ? undefined : this.tokenLineCache;
 		const nextTokenCache = new Map<string, string[]>();
-		const contentLines: string[] = [];
+		const tokenLineSets: string[][] = new Array(tokens.length);
+		const tokenKeys: string[] = new Array(tokens.length);
+		const tokenOffsets: number[] = new Array(tokens.length);
+		let totalContentLines = 0;
 
 		let deferHighlightCodeIdx = -1;
 		if (this.hasOpenCodeFenceIncremental(normalizedText)) {
@@ -590,11 +606,43 @@ export class Markdown implements Component {
 				);
 			}
 			nextTokenCache.set(cacheKey, tokenLines);
-			for (const line of tokenLines) {
-				contentLines.push(line);
-			}
+			tokenLineSets[i] = tokenLines;
+			tokenKeys[i] = cacheKey;
+			tokenOffsets[i] = totalContentLines;
+			totalContentLines += tokenLines.length;
 		}
 		this.tokenLineCache = nextTokenCache;
+
+		let stablePrefix = 0;
+		const previousRefs = this.renderedTokenRefs;
+		const previousKeys = this.renderedTokenKeys;
+		const previousLines = this.renderedTokenLines;
+		if (previousRefs && previousKeys && previousLines) {
+			while (
+				stablePrefix < tokens.length &&
+				stablePrefix < previousRefs.length &&
+				previousRefs[stablePrefix] === tokens[stablePrefix] &&
+				previousKeys[stablePrefix] === tokenKeys[stablePrefix] &&
+				previousLines[stablePrefix] === tokenLineSets[stablePrefix]
+			) {
+				stablePrefix++;
+			}
+		}
+		const contentLines: string[] =
+			stablePrefix > 0 && this.renderedContentLines && this.renderedTokenOffsets
+				? this.renderedContentLines.slice(
+						0,
+						this.renderedTokenOffsets[stablePrefix] ?? this.renderedContentLines.length,
+					)
+				: [];
+		for (let i = stablePrefix; i < tokenLineSets.length; i++) {
+			contentLines.push(...tokenLineSets[i]!);
+		}
+		this.renderedTokenRefs = tokens;
+		this.renderedTokenKeys = tokenKeys;
+		this.renderedTokenLines = tokenLineSets;
+		this.renderedTokenOffsets = tokenOffsets;
+		this.renderedContentLines = contentLines;
 
 		// Add top/bottom padding (empty lines).
 		// No background: emit "" (same rule as Text/TruncatedText — no trailing-space pad without bgFn).
@@ -1711,9 +1759,10 @@ export class Markdown implements Component {
 
 		const tableBorder = this.theme.tableBorder ?? ((text: string) => text);
 
-		// Render top border
+		// Rounded box corners match code-fence frames (`╭─…` / `╰─…`) so the
+		// markdown renderer speaks one box language instead of mixing ┌ and ╭.
 		const topBorderCells = columnWidths.map((w) => "─".repeat(w));
-		lines.push(tableBorder(`┌─${topBorderCells.join("─┬─")}─┐`));
+		lines.push(tableBorder(`╭─${topBorderCells.join("─┬─")}─╮`));
 
 		// Render header with wrapping
 		const headerCellLines: string[][] = token.header.map((_cell, i) => {
@@ -1764,7 +1813,7 @@ export class Markdown implements Component {
 
 		// Render bottom border
 		const bottomBorderCells = columnWidths.map((w) => "─".repeat(w));
-		lines.push(tableBorder(`└─${bottomBorderCells.join("─┴─")}─┘`));
+		lines.push(tableBorder(`╰─${bottomBorderCells.join("─┴─")}─╯`));
 
 		if (nextTokenType && nextTokenType !== "space") {
 			this.pushBlockSpacing(lines); // Add spacing after table

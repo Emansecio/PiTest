@@ -7,8 +7,9 @@ import type { Model } from "@pit/ai";
 import type { TSchema } from "typebox";
 import { Type } from "typebox";
 import { mergeSubagentUsage } from "../token-usage.ts";
+import { truncateHeadTail } from "../tools/truncate.ts";
 import { type AcceptanceConfig, type AcceptanceDependencies, runWithAcceptance } from "./acceptance.ts";
-import { type ParallelTaskResult, resolveMaxSubagentConcurrency, spawnAll } from "./parallel.ts";
+import { type ParallelTaskResult, resolveMaxSubagentConcurrency, spawnAll, type TaskReservation } from "./parallel.ts";
 import { attachSubagentUsageToError, getSubagentErrorUsage, spawnSubagent } from "./spawn.ts";
 import type { SpawnSubagentOptions, SubagentProgressInfo, SubagentUsage } from "./types.ts";
 
@@ -22,8 +23,10 @@ function safeNotify(fn: (() => void) | undefined): void {
 }
 
 const SCOUT_RESULT_SCHEMA = Type.Object({
-	targets: Type.Array(Type.Union([Type.String(), Type.Unknown()])),
+	targets: Type.Array(Type.Union([Type.String(), Type.Unknown()]), { maxItems: 32 }),
 });
+export const MAX_FANOUT_TARGETS = 32;
+const MAX_REVIEW_SYNTHESIS_BYTES = 32 * 1024;
 
 export interface FanoutStage {
 	prompt: string;
@@ -92,9 +95,11 @@ export interface FanoutContext {
 	/** Fired when a stage settles, with turns/tokens for the TUI. */
 	onStageComplete?: (
 		handle: string,
-		status: "done" | "error",
+		status: "done" | "error" | "cancelled",
 		meta?: { turns?: number; totalTokens?: number },
 	) => void;
+	/** Optional per-stage/reviewer token-budget hold. */
+	onStageReserve?: (handle: string) => TaskReservation;
 }
 
 /** Simple `{{target}}` templating — objects are JSON-stringified. */
@@ -150,12 +155,19 @@ export async function runFanout(
 	};
 
 	safeNotify(() => context.onStageStart?.("fanout-scout"));
+	const scoutReservation = context.onStageReserve?.("fanout-scout");
+	if (scoutReservation && !scoutReservation.allowed) {
+		safeNotify(() => context.onStageComplete?.("fanout-scout", context.signal?.aborted ? "cancelled" : "error"));
+		throw new Error(scoutReservation.reason ?? "Token budget blocks subagent spawn.");
+	}
 	let scoutResult: Awaited<ReturnType<typeof spawnSubagent>>;
+	let scoutUsage: SubagentUsage | undefined;
 	try {
 		scoutResult = await spawnSubagent(spec.scout.tools ? { ...deps, availableTools: spec.scout.tools } : deps, {
 			...scoutBase,
 			systemPrompt: spec.scout.systemPrompt,
 		});
+		scoutUsage = scoutResult.usage;
 		safeNotify(() =>
 			context.onStageComplete?.("fanout-scout", "done", {
 				turns: scoutResult.record.turnCount,
@@ -163,11 +175,15 @@ export async function runFanout(
 			}),
 		);
 	} catch (error) {
-		safeNotify(() => context.onStageComplete?.("fanout-scout", "error"));
+		scoutUsage = getSubagentErrorUsage(error);
+		safeNotify(() => context.onStageComplete?.("fanout-scout", context.signal?.aborted ? "cancelled" : "error"));
 		throw error;
+	} finally {
+		scoutReservation?.record?.(scoutUsage);
+		scoutReservation?.release();
 	}
 	const scoutValue = scoutResult.value as { targets?: unknown[] } | undefined;
-	const targets = Array.isArray(scoutValue?.targets) ? scoutValue.targets : [];
+	const targets = Array.isArray(scoutValue?.targets) ? scoutValue.targets.slice(0, MAX_FANOUT_TARGETS) : [];
 
 	const reviewerTasks = targets.map((target, i) => ({
 		name: `fanout-reviewer-${i}`,
@@ -193,14 +209,21 @@ export async function runFanout(
 		onTaskStart: context.onStageStart,
 		onTaskEvent: context.onStageEvent,
 		onTaskComplete: context.onStageComplete,
+		onTaskReserve: context.onStageReserve,
 	});
 
-	const reviewsText = formatReviews(reviews);
+	const reviewsText = truncateHeadTail(formatReviews(reviews), { maxBytes: MAX_REVIEW_SYNTHESIS_BYTES }).content;
 	const workerPrompt = `${spec.worker.prompt}\n\n## Reviewer findings\n${reviewsText}`;
 	const completedUsage = mergeSubagentUsage(scoutResult.usage, ...reviews.map((review) => review.usage));
 
 	safeNotify(() => context.onStageStart?.("fanout-worker"));
+	const workerReservation = context.onStageReserve?.("fanout-worker");
+	if (workerReservation && !workerReservation.allowed) {
+		safeNotify(() => context.onStageComplete?.("fanout-worker", context.signal?.aborted ? "cancelled" : "error"));
+		throw new Error(workerReservation.reason ?? "Token budget blocks subagent spawn.");
+	}
 	let workerOutput: Awaited<ReturnType<typeof runWithAcceptance>>;
+	let workerUsage: SubagentUsage | undefined;
 	try {
 		workerOutput = await runWithAcceptance(
 			spec.worker.tools ? { ...deps, availableTools: spec.worker.tools } : deps,
@@ -220,6 +243,7 @@ export async function runFanout(
 			},
 			spec.worker.acceptance,
 		);
+		workerUsage = workerOutput.usage;
 		safeNotify(() =>
 			context.onStageComplete?.("fanout-worker", workerOutput.isError ? "error" : "done", {
 				turns: workerOutput.result.record.turnCount,
@@ -227,9 +251,13 @@ export async function runFanout(
 			}),
 		);
 	} catch (error) {
-		safeNotify(() => context.onStageComplete?.("fanout-worker", "error"));
+		workerUsage = getSubagentErrorUsage(error);
+		safeNotify(() => context.onStageComplete?.("fanout-worker", context.signal?.aborted ? "cancelled" : "error"));
 		attachSubagentUsageToError(error, mergeSubagentUsage(completedUsage, getSubagentErrorUsage(error)));
 		throw error;
+	} finally {
+		workerReservation?.record?.(workerUsage);
+		workerReservation?.release();
 	}
 
 	return {

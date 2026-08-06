@@ -30,6 +30,7 @@ import type { AuthStatus, AuthStorage } from "./auth-storage.ts";
 import {
 	getCuratedExtraModels,
 	getPresetProviderModels,
+	normalizePresetModelId,
 	PRESET_PROVIDER_DISPLAY_NAMES,
 } from "./openai-compatible-presets.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.ts";
@@ -751,7 +752,7 @@ export class ModelRegistry {
 	 * full model list. First-wins semantics match the previous `.find()`.
 	 */
 	find(provider: string, modelId: string): Model<Api> | undefined {
-		return this.findIndex.get(`${provider}/${modelId}`);
+		return this.findIndex.get(`${provider}/${normalizePresetModelId(provider, modelId)}`);
 	}
 
 	/**

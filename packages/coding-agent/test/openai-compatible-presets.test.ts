@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
+import { resolveCliModel } from "../src/core/model-resolver.js";
 import {
 	deriveProviderIdFromBaseUrl,
 	getPresetProviderModels,
@@ -24,9 +25,9 @@ describe("openai-compatible presets", () => {
 		expect(models.some((m) => m.provider === "verboo")).toBe(true);
 	});
 
-	test("qwencloud qwen3.8-max-preview opts out of developer role (Aliyun rejects it)", () => {
+	test("qwencloud qwen3.8-max opts out of developer role (Aliyun rejects it)", () => {
 		const models = getPresetProviderModels();
-		const qwen = models.find((m) => m.provider === "qwencloud" && m.id === "qwen3.8-max-preview");
+		const qwen = models.find((m) => m.provider === "qwencloud" && m.id === "qwen3.8-max");
 		expect(qwen).toBeDefined();
 		expect(qwen?.reasoning).toBe(true);
 		expect(qwen?.api).toBe("openai-completions");
@@ -45,6 +46,19 @@ describe("openai-compatible presets", () => {
 		expect(compat?.supportsStore).toBe(false);
 		expect(compat?.supportsLongCacheRetention).toBe(false);
 		expect(compat?.supportsReasoningEffort).toBe(true);
+	});
+
+	test("qwencloud includes max, flash, pro, and glm model ids", () => {
+		const models = getPresetProviderModels().filter((m) => m.provider === "qwencloud");
+		const ids = models.map((m) => m.id);
+		expect(ids).toEqual(["qwen3.8-max", "glm-5.2", "deepseek-v4-pro", "deepseek-v4-flash-0731"]);
+		expect(ids).not.toContain("qwen3.8-max-preview");
+
+		const flash = models.find((m) => m.id === "deepseek-v4-flash-0731");
+		expect(flash?.name).toBe("DeepSeek V4 Flash");
+		expect(flash?.reasoning).toBe(true);
+		const flashCompat = flash?.compat as { thinkingFormat?: string } | undefined;
+		expect(flashCompat?.thinkingFormat).toBe("deepseek");
 	});
 
 	test("isPresetProviderId recognizes preset ids only", () => {
@@ -89,6 +103,20 @@ describe("preset providers in the model registry", () => {
 		const registry = ModelRegistry.create(authStorage, modelsJsonPath);
 		expect(registry.getAll().some((m) => m.provider === "zai" && m.id === "glm-5.2")).toBe(true);
 		expect(registry.getProviderDisplayName("zai")).toBe("Z.ai GLM (Coding Plan)");
+	});
+
+	test("legacy qwencloud ids resolve to their canonical replacements", () => {
+		const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+
+		expect(registry.find("qwencloud", "qwen3.8-max-preview")?.id).toBe("qwen3.8-max");
+		expect(registry.find("qwencloud", "deepseek-v4-flash")?.id).toBe("deepseek-v4-flash-0731");
+		expect(
+			resolveCliModel({
+				cliProvider: "qwencloud",
+				cliModel: "qwen3.8-max-preview",
+				modelRegistry: registry,
+			}).model?.id,
+		).toBe("qwen3.8-max");
 	});
 
 	test("a preset model becomes available only after a key is stored", () => {

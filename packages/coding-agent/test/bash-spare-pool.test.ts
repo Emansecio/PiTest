@@ -247,7 +247,7 @@ describe.skipIf(!BASH_AVAILABLE)("bash spare-shell pool", () => {
 		// Short idle window, but wide enough that a loaded full-suite run can't
 		// burn the whole TTL between the refill (mid-run) and our first peek —
 		// the original 80ms did exactly that and flaked.
-		_setBashSpareIdleTtlForTest(500);
+		_setBashSpareIdleTtlForTest(2000);
 		const ops = createLocalBashOperations({ enableSparePool: true });
 
 		await run(ops, "echo warm", cwdA);
@@ -256,7 +256,7 @@ describe.skipIf(!BASH_AVAILABLE)("bash spare-shell pool", () => {
 
 		// Leave it idle past the TTL — it should self-evict and be killed, releasing
 		// any open handle on its cwd.
-		expect(await waitForPidExit(pid, 2000)).toBe(true);
+		expect(await waitForPidExit(pid, 4000)).toBe(true);
 		expect(poolEntryForCwd(cwdA)).toBeUndefined();
 	});
 

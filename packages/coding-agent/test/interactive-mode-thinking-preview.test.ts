@@ -2,6 +2,7 @@ import type { AssistantMessage, AssistantMessageEvent, Usage } from "@pit/ai";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { deriveThinkingTail } from "../src/modes/interactive/thinking-preview.js";
 import { stripAnsi } from "../src/utils/ansi.js";
 
 beforeAll(() => {
@@ -53,7 +54,7 @@ describe("InteractiveMode thinking preview", () => {
 		this: Record<string, unknown>,
 	) => number;
 
-	function makeFakeThis(columns = 80) {
+	function makeFakeThis(columns = 80): Record<string, any> {
 		const setDetailSuffix = vi.fn();
 		return {
 			loadingAnimation: { setDetailSuffix },
@@ -75,11 +76,36 @@ describe("InteractiveMode thinking preview", () => {
 
 	test("accumulates thinking_delta text and pushes a sanitized tail to the loader", () => {
 		const fakeThis = makeFakeThis();
+		// Phase starts as Thinking… so the live-preview path can drop the ellipsis.
+		fakeThis.workingMessage = "Thinking…";
+		fakeThis.userInputPauseDepth = 0;
+		const setMessage = vi.fn();
+		(fakeThis.loadingAnimation as { setMessage: typeof setMessage }).setMessage = setMessage;
 		handleThinkingPreviewEvent.call(fakeThis, thinkingDelta("let me check the edit-precondition case"));
 		expect(fakeThis.setDetailSuffix).toHaveBeenCalledTimes(1);
 		const shown = stripAnsi(String(fakeThis.setDetailSuffix.mock.calls[0]![0]));
 		expect(shown).toContain("let me check the edit-precondition case");
+		// Soft gap (no middot chrome); italic + thinkingText stripped by stripAnsi.
+		expect(shown).toMatch(/^ {2}let me check the edit-precondition case$/);
+		expect(shown).not.toContain("·");
+		// Pre-colored with thinkingText (lavender) so the Loader keeps monologue tone.
+		const raw = String(fakeThis.setDetailSuffix.mock.calls[0]![0]);
+		expect(raw).not.toBe(shown); // ANSI present
+		// Phase ellipsis drops while the live tail is the motion.
+		expect(setMessage).toHaveBeenCalledWith("Thinking");
 		expect(fakeThis.thinkingPreviewRaw).toBe("let me check the edit-precondition case");
+	});
+
+	test("clearing the preview restores the Thinking… phase ellipsis", () => {
+		const fakeThis = makeFakeThis();
+		fakeThis.workingMessage = "Thinking…";
+		fakeThis.userInputPauseDepth = 0;
+		const setMessage = vi.fn();
+		(fakeThis.loadingAnimation as { setMessage: typeof setMessage }).setMessage = setMessage;
+		handleThinkingPreviewEvent.call(fakeThis, thinkingDelta("some thought"));
+		clearThinkingPreview.call(fakeThis);
+		expect(stripAnsi(String(fakeThis.setDetailSuffix.mock.calls.at(-1)![0]))).toBe("");
+		expect(setMessage).toHaveBeenCalledWith("Thinking…");
 	});
 
 	test("ignores whitespace-only deltas: no accumulation, no repaint", () => {
@@ -182,9 +208,45 @@ describe("InteractiveMode thinking preview", () => {
 		expect(fakeThis.thinkingPreviewRaw).toBe("still accumulates");
 	});
 
+	test("preserves an open fence across the raw preview cap", () => {
+		const fakeThis = makeFakeThis() as Record<string, unknown>;
+		const openFence = `\`\`\`\n${"x".repeat(70 * 1024)}`;
+		handleThinkingPreviewEvent.call(fakeThis, thinkingDelta(openFence));
+
+		expect(String(fakeThis.thinkingPreviewRaw).startsWith("```")).toBe(true);
+		expect(deriveThinkingTail(String(fakeThis.thinkingPreviewRaw), 70)).toBe("");
+
+		handleThinkingPreviewEvent.call(fakeThis, thinkingDelta("``` visible prose"));
+		expect(deriveThinkingTail(String(fakeThis.thinkingPreviewRaw), 70)).toContain("visible prose");
+	});
+
+	test("does not mark a tail applied when there is no loader (rebuild rehydrate)", () => {
+		// Regression: marking lastApplied before paint made a later createWorkingLoader
+		// rehydrate skip because the tail "matched" a paint that never landed.
+		const fakeThis = makeFakeThis() as Record<string, unknown>;
+		fakeThis.loadingAnimation = undefined;
+		applyThinkingPreview.call(fakeThis, "orphan tail");
+		expect(fakeThis.lastAppliedThinkingPreview).toBe("");
+		expect(fakeThis.setDetailSuffix).not.toHaveBeenCalled();
+
+		// Surface appears: the same tail must still paint.
+		const setDetailSuffix = vi.fn();
+		const setMessage = vi.fn();
+		fakeThis.loadingAnimation = { setDetailSuffix, setMessage };
+		fakeThis.workingMessage = "Thinking…";
+		fakeThis.userInputPauseDepth = 0;
+		applyThinkingPreview.call(fakeThis, "orphan tail");
+		expect(setDetailSuffix).toHaveBeenCalledTimes(1);
+		expect(stripAnsi(String(setDetailSuffix.mock.calls[0]![0]))).toContain("orphan tail");
+		expect(setMessage).toHaveBeenCalledWith("Thinking");
+	});
+
 	test("thinkingPreviewMaxWidth clamps to the terminal width minus reserved chrome", () => {
 		expect(thinkingPreviewMaxWidth.call(makeFakeThis(200))).toBe(70); // capped at 70
-		expect(thinkingPreviewMaxWidth.call(makeFakeThis(40))).toBe(16); // floored at 16
+		// reservedForChrome=36 → floor at 16 on narrow terminals
+		expect(thinkingPreviewMaxWidth.call(makeFakeThis(40))).toBe(16);
+		expect(thinkingPreviewMaxWidth.call(makeFakeThis(52))).toBe(16); // 52-36=16
+		expect(thinkingPreviewMaxWidth.call(makeFakeThis(60))).toBe(24); // 60-36=24
 		expect(thinkingPreviewMaxWidth.call(makeFakeThis(0))).toBe(70); // no terminal info: fall back to the cap
 	});
 
@@ -211,7 +273,7 @@ describe("InteractiveMode.handleEvent wires message_update into the thinking pre
 			settingsManager: { getToolActivity: () => "legacy" },
 			pendingTools: { has: () => false, get: () => undefined, size: 0 },
 			_ensureToolComponent: vi.fn(),
-			countAssistantTextChars: () => 0,
+			streamTextCharCount: 0,
 			workingMessage: "Thinking…",
 			setWorkingPhase: vi.fn(),
 			refreshLoaderTrailingSuffix: vi.fn(),

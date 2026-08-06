@@ -314,7 +314,6 @@ export async function fusionVerify(
 				allowedTools: ["read", "grep", "find", "ls", "symbol", "find_symbol"],
 				resultSchema: VERIFICATION_SCHEMA,
 				cwd: host.cwd,
-				timeoutMs: host.settingsManager.getFusionSettings().verifyTimeoutMs,
 				maxTurns: 6,
 				thinkingLevel: "medium",
 				signal: host.fusionAbort?.signal,

@@ -8,6 +8,14 @@ import chalk from "chalk";
 import { resolve } from "path";
 import { resolveReadPath } from "../core/tools/path-utils.ts";
 import { formatSize, truncateHead } from "../core/tools/truncate.ts";
+import {
+	encodedImageBytes,
+	formatImageLimitNote,
+	MAX_IMAGE_ATTACH_BASE64_BYTES,
+	MAX_IMAGE_FILE_BYTES,
+	MAX_INITIAL_IMAGE_ATTACH_BASE64_BYTES,
+	MAX_INITIAL_IMAGE_ATTACHMENTS,
+} from "../utils/image-attachment-limits.ts";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize.ts";
 import { detectSupportedImageMimeTypeFromFile } from "../utils/mime.ts";
 
@@ -35,6 +43,7 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 	const autoResizeImages = options?.autoResizeImages ?? true;
 	let text = "";
 	const images: ImageContent[] = [];
+	let totalImageBase64Bytes = 0;
 
 	for (const fileArg of fileArgs) {
 		// Expand and resolve path (handles ~ expansion and macOS screenshot Unicode spaces)
@@ -58,6 +67,14 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 		const mimeType = await detectSupportedImageMimeTypeFromFile(absolutePath);
 
 		if (mimeType) {
+			if (stats.size > MAX_IMAGE_FILE_BYTES) {
+				text += `<file name="${absolutePath}">${formatImageLimitNote(absolutePath, stats.size)}</file>\n`;
+				continue;
+			}
+			if (images.length >= MAX_INITIAL_IMAGE_ATTACHMENTS) {
+				text += `<file name="${absolutePath}">[Image omitted: the initial message is limited to ${MAX_INITIAL_IMAGE_ATTACHMENTS} image attachments.]</file>\n`;
+				continue;
+			}
 			// Handle image file
 			const content = await readFile(absolutePath);
 			const base64Content = content.toString("base64");
@@ -78,6 +95,10 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 					data: resized.data,
 				};
 			} else {
+				if (encodedImageBytes(base64Content) > MAX_IMAGE_ATTACH_BASE64_BYTES) {
+					text += `<file name="${absolutePath}">[Image omitted: the encoded image exceeds the ${MAX_IMAGE_ATTACH_BASE64_BYTES / (1024 * 1024)}MB attachment limit. Enable image resizing or downscale it first.]</file>\n`;
+					continue;
+				}
 				attachment = {
 					type: "image",
 					mimeType,
@@ -85,7 +106,18 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 				};
 			}
 
+			const encodedBytes = encodedImageBytes(attachment.data);
+			if (encodedBytes > MAX_IMAGE_ATTACH_BASE64_BYTES) {
+				text += `<file name="${absolutePath}">[Image omitted: the encoded image exceeds the ${MAX_IMAGE_ATTACH_BASE64_BYTES / (1024 * 1024)}MB attachment limit.]</file>\n`;
+				continue;
+			}
+			if (totalImageBase64Bytes + encodedBytes > MAX_INITIAL_IMAGE_ATTACH_BASE64_BYTES) {
+				text += `<file name="${absolutePath}">[Image omitted: the initial image payload is limited to ${MAX_INITIAL_IMAGE_ATTACH_BASE64_BYTES / (1024 * 1024)}MB encoded.]</file>\n`;
+				continue;
+			}
+
 			images.push(attachment);
+			totalImageBase64Bytes += encodedBytes;
 
 			// Add text reference to image with optional dimension note
 			if (dimensionNote) {

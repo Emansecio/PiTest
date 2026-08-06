@@ -77,7 +77,10 @@ describe("coordinator op:resume from disk (Tier 2)", () => {
 		expect(existsSync(stateFile)).toBe(true); // op:run awaits the save → durable the moment it returns
 
 		// Process #2: brand-new coordinator (empty in-memory map), same cwd.
-		const task2 = freshCoordinator(root, [fauxAssistantMessage("RESUMED FROM DISK")]);
+		const task2 = freshCoordinator(root, [
+			fauxAssistantMessage("RESUMED FROM DISK"),
+			fauxAssistantMessage("FOLLOW-UP AFTER DISK RESUME"),
+		]);
 		const list = await exec(task2, { op: "list" });
 		expect(textOf(list)).toMatch(/[Rr]esumable[\s\S]*probe/);
 
@@ -87,6 +90,12 @@ describe("coordinator op:resume from disk (Tier 2)", () => {
 
 		// File removed after a successful resume.
 		expect(existsSync(stateFile)).toBe(false);
+		const listAfterResume = await exec(task2, { op: "list" });
+		expect(textOf(listAfterResume)).not.toMatch(/Resumable[\s\S]*probe/);
+		expect(textOf(listAfterResume)).toMatch(/Continuable[\s\S]*probe/);
+		const followedUp = await exec(task2, { op: "continue", name: "probe", prompt: "one more thing" });
+		expect(isErr(followedUp)).toBe(false);
+		expect(textOf(followedUp)).toContain("FOLLOW-UP AFTER DISK RESUME");
 	});
 
 	it("a disk resume that ENDS ON AN ERROR TURN keeps the state file and reports failure (still resumable)", async () => {

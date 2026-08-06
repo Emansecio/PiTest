@@ -47,7 +47,7 @@ export interface HookCommand {
 	matcher?: string;
 	/** Shell command line executed via `bash -c` (POSIX) or `cmd /c` (Win) when shell=true. */
 	command: string;
-	/** Run via a shell. Default: true. When false, command is split on whitespace and exec'd directly. */
+	/** Run via a shell. Default: true. When false, quoted argv is parsed and exec'd directly. */
 	shell?: boolean;
 	/** Optional timeout (ms). Default 30000. */
 	timeoutMs?: number;

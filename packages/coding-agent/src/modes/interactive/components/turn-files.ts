@@ -198,7 +198,7 @@ export class TurnFilesComponent implements Component {
 			// Too narrow for both → the name wins; the counters are the redundant
 			// half (the footer still has the repo total).
 			if (nameCols < MIN_NAME_COLS) {
-				lines.push(theme.fg("muted", truncateToWidth(label, width, "…")));
+				lines.push(theme.fg("muted", truncateToWidth(label, width, theme.ellipsis())));
 				continue;
 			}
 			const name = fitName(label, nameCols);

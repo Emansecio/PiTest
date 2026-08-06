@@ -1,5 +1,6 @@
+import { performance } from "node:perf_hooks";
 import { getRuntimeDiagnostics } from "@pit/ai";
-import { type Component, SPINNER_FRAMES, type TUI, truncateToWidth, visibleWidth } from "@pit/tui";
+import { type Component, type TUI, truncateToWidth, visibleWidth } from "@pit/tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import type { ContextUsage } from "../../../core/extensions/index.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
@@ -13,6 +14,7 @@ import { interpolateFg } from "../theme/color-interpolation.ts";
 import { CONTEXT_USAGE_CRITICAL_PERCENT, theme } from "../theme/theme.ts";
 import { COLOR_EASE_MS } from "./color-ease.ts";
 import { resolveGaugeGlyphs } from "./gauge-glyphs.ts";
+import { resolveSpinnerFrames } from "./glyph-resolver.ts";
 import { spinnerGlyphAt } from "./spinner-ticker.ts";
 
 /** Minimum terminal width for single-line identity (pwd + model). */
@@ -616,7 +618,7 @@ export class FooterComponent implements Component {
 			// Model id is the bright identity token on the right; thinking chip stays
 			// its own colored protected suffix.
 			rightColor: (text: string) => theme.bold(theme.fg("text", text)),
-			ellipsis: theme.fg("muted", "…"),
+			ellipsis: theme.ellipsis("muted"),
 			protectedSuffix: thinkingChip,
 			protectedSuffix2: modeSuffix,
 		};
@@ -638,7 +640,7 @@ export class FooterComponent implements Component {
 				width < FOOTER_IDENTITY_SINGLE_LINE_MIN ||
 				identityLineWouldOverflow(pwd, identityRight, width, suffixWidth);
 			if (splitIdentity) {
-				lines.push(truncateToWidth(pwd, width, theme.fg("muted", "…")));
+				lines.push(truncateToWidth(pwd, width, theme.ellipsis("muted")));
 				lines.push(
 					composeLeftRight("", identityRight, width, {
 						...identityComposeOptions,
@@ -651,7 +653,7 @@ export class FooterComponent implements Component {
 		} else if (visibleWidth(pwd) > 0) {
 			// Non-pristine: identity line carries ONLY the pwd/branch. Skipped entirely
 			// when pwd is empty so no blank line floats above the context row.
-			lines.push(truncateToWidth(pwd, width, theme.fg("muted", "…")));
+			lines.push(truncateToWidth(pwd, width, theme.ellipsis("muted")));
 		}
 
 		// --- Metrics (line 2) ------------------------------------------------
@@ -670,7 +672,7 @@ export class FooterComponent implements Component {
 						return sanitized.includes("\u001b") ? sanitized : theme.fg("dim", sanitized);
 					})
 					.join(theme.fg("dim", "·"));
-				lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "…")));
+				lines.push(truncateToWidth(statusLine, width, theme.ellipsis("dim")));
 			}
 			this.renderCacheKey = cacheKey;
 			this.renderCacheLines = lines;
@@ -771,7 +773,7 @@ export class FooterComponent implements Component {
 				{
 					leftColor: (text) => text,
 					rightColor: (text) => theme.fg("dim", text),
-					ellipsis: theme.fg("dim", "…"),
+					ellipsis: theme.ellipsis("dim"),
 				},
 				modelCluster,
 			),
@@ -798,7 +800,7 @@ export class FooterComponent implements Component {
 					return sanitized.includes("\u001b") ? sanitized : theme.fg("dim", sanitized);
 				})
 				.join(theme.fg("dim", "·"));
-			lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "…")));
+			lines.push(truncateToWidth(statusLine, width, theme.ellipsis("dim")));
 		}
 
 		this.renderCacheKey = cacheKey;
@@ -811,12 +813,14 @@ export class FooterComponent implements Component {
 		if (!this.session.goalIsDriving()) return lines;
 		const goal = this.session.goalStatusLine();
 		if (!goal || !goal.includes("active")) return lines;
-		const glyph = spinnerGlyphAt(Date.now());
+		// Monotonic clock — matches Loader / goal-overlay / todo-overlay so NTP
+		// wall-clock jumps cannot skip a frame (see spinner-ticker P7).
+		const glyph = spinnerGlyphAt(performance.now());
 		const out = lines.slice();
 		for (let i = 0; i < out.length; i++) {
 			let plain = out[i]!;
 			if (!plain.includes(goal)) continue;
-			for (const frame of SPINNER_FRAMES) {
+			for (const frame of resolveSpinnerFrames()) {
 				plain = plain.split(` ${frame}`).join("");
 			}
 			out[i] = plain.replace(goal, `${goal} ${glyph}`);

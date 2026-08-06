@@ -360,7 +360,7 @@ See [memory.md](memory.md) for the file format and discovery order.
 
 Where verification happens is governed by `verification.mode`:
 
-- **`in-turn`** (default) — the model is instructed via system prompt to run the project check (configured or auto-detected) and fix failures **before** writing its final reply. Nothing runs after the turn: no post-reply check command, no injected fix turns, no self-review pass, no pending-checks drain. Claude Code-like.
+- **`in-turn`** (default) — the model is instructed via system prompt to run the project check (configured or auto-detected) and fix failures **before** writing its final reply. Pit adds a bounded grounding safety net: after two ignored check corrections on ordinary tasks, it runs the check once and injects only a terminal honesty prompt if red. There is no automatic fix loop or pending-checks drain; risk-gated self-review still applies.
 - **`post-turn`** — the legacy harness gate: after a code-modifying turn the harness runs the check, re-injects failures as fix turns (bounded by `maxAttempts`), runs the visual/functional-web DoD and the P4 self-review, and drains backgrounded checks.
 - **`off`** — neither.
 
@@ -380,11 +380,11 @@ Back-compat: explicit `enabled: false` resolves to `off`; explicit `enabled: tru
 
 ### Pending Checks
 
-Long-running project checks can be backgrounded and drained at end of turn; Pit waits for them to settle and self-corrects on failure. The drain only runs in `verification.mode: "post-turn"` — in the default `in-turn` mode nothing runs after the reply.
+Long-running project checks can be backgrounded and drained at end of turn; Pit waits for them to settle and self-corrects on failure. The drain only runs in `verification.mode: "post-turn"`; the bounded `in-turn` grounding fallback is separate and never drains background jobs.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `pendingChecks.enabled` | boolean | `true` | Drain backgrounded checks at end of turn. Forced off by `PIT_NO_PENDING_CHECKS=1` (env wins) |
+| `pendingChecks.enabled` | boolean | `true` | Drain backgrounded checks at end of turn. Forced off by `PIT_NO_PENDING_CHECKS` (`1`/`true`/`yes`; env wins) |
 | `pendingChecks.maxWaitMs` | number | `900000` | Max time to wait for a backgrounded check to settle (15m). Floor 50ms so an explicitly configured short wait is honored |
 | `pendingChecks.maxFixAttempts` | number | `2` | Fix attempts before giving up and reporting the failure (floor 0) |
 | `pendingChecks.pollIntervalMs` | number | `500` | How often the end-of-turn drain re-checks whether a backgrounded check has settled (floor 5ms; mainly a test seam) |
@@ -601,7 +601,7 @@ A few `PIT_*` env flags silently shadow a settings key at resolve time. The prec
 |----------|-----------------|------------|
 | `PIT_CLEAR_ON_SHRINK` | `terminal.clearOnShrink` | Setting wins; env is only the fallback default when the setting is unset |
 | `PIT_HARDWARE_CURSOR` | `showHardwareCursor` | Setting wins; env is only the fallback default when the setting is unset |
-| `PIT_NO_PENDING_CHECKS` | `pendingChecks.enabled` | Env wins — `=1` forces the checks off regardless of the setting |
+| `PIT_NO_PENDING_CHECKS` | `pendingChecks.enabled` | Env wins — any truthy value (`1`/`true`/`yes`) forces the checks off regardless of the setting |
 | `PIT_NO_OVERTHINK_GUARD` | `toolFeedback.overthinkGuard.enabled` | Legacy no-op: overthink guard is permanently off for all models |
 | `PIT_NO_CLAUDE_CODE_SKILLS` | `skillDiscovery.noClaudeCode` | OR — either the setting or the env flag opts out (also `PIT_DISABLE_CLAUDE_CODE_SKILLS`) |
 | `PIT_NO_LEGACY_SKILLS` | `skillDiscovery.noLegacy` | OR — either the setting or the env flag opts out |

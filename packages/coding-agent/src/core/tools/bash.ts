@@ -54,7 +54,7 @@ const bashSchema = Type.Object(
 		timeout: Type.Optional(
 			Type.Number({
 				description:
-					"Timeout in seconds. Without a timeout (or 0) the command runs to completion. For servers and long-running processes, prefer `background: true` over holding the shell. Never leave a command that may block on interactive input without a timeout.",
+					"Timeout in seconds. Without a timeout (or 0), ordinary commands run to completion; verification commands receive a 180s safety timeout. For servers and long-running processes, prefer `background: true` over holding the shell. Never leave a command that may block on interactive input without a timeout.",
 			}),
 		),
 		background: Type.Optional(
@@ -135,6 +135,18 @@ function normalizeBashTimeout(timeout: number | undefined): number | undefined {
 	return Math.min(86400, seconds);
 }
 
+// Verification commands stay in the foreground so their verdict is known, but
+// an omitted timeout must not let a broken runner hold the agent forever. Keep
+// this aligned with SettingsManager's default verification timeout (180s).
+const BASH_VERIFICATION_DEFAULT_TIMEOUT_SECONDS = 180;
+
+function resolveBashExecutionTimeout(timeout: number | undefined, command: string): number | undefined {
+	return (
+		normalizeBashTimeout(timeout) ??
+		(isVerificationJobCommand(command) ? BASH_VERIFICATION_DEFAULT_TIMEOUT_SECONDS : undefined)
+	);
+}
+
 export type BashToolInput = Static<typeof bashSchema>;
 
 export interface BashToolDetails {
@@ -170,6 +182,8 @@ export interface BashOperations {
 			env?: NodeJS.ProcessEnv;
 			/** Command label used for the background-job record on promotion. */
 			label?: string;
+			/** Session owner copied to a promoted background-job record. */
+			ownerSessionId?: string;
 			/**
 			 * Opt IN to auto-backgrounding. When true, a command WITHOUT an explicit
 			 * `timeout` that outruns the threshold is promoted to a tracked background
@@ -248,6 +262,8 @@ const BASH_KILL_GRACE_MS = 5_000;
  */
 export interface BashBackgroundJob {
 	id: string;
+	/** AgentSession that created this job; lifecycle messages never cross owners. */
+	ownerSessionId?: string;
 	pid: number | undefined;
 	command: string;
 	startedAt: number;
@@ -265,11 +281,23 @@ export interface BashBackgroundJob {
 	/** Bounded post-promotion output (oldest bytes dropped past the cap). */
 	ringBuffer: string;
 	ringTruncated: boolean;
+	/** UI stop in progress; suppresses the competing natural-exit notification. */
+	stopping?: boolean;
+	/** The last bounded UI stop did not observe process exit; job remains retryable. */
+	stopUnconfirmed?: boolean;
 	kill: () => void;
 }
 
 /** Who initiated a background-job kill — drives whether the agent is notified. */
 export type BashBackgroundJobKillSource = "tool" | "ui" | "shutdown";
+
+export interface BashBackgroundJobStopResult {
+	job: BashBackgroundJob;
+	terminationConfirmed: boolean;
+	alreadyExited: boolean;
+	output: string;
+	outputTruncated: boolean;
+}
 
 /**
  * Lifecycle events for promoted background jobs. `killed` carries the kill
@@ -279,7 +307,12 @@ export type BashBackgroundJobKillSource = "tool" | "ui" | "shutdown";
 export type BashBackgroundJobEvent =
 	| { type: "promoted"; job: BashBackgroundJob }
 	| { type: "exited"; job: BashBackgroundJob }
-	| { type: "killed"; job: BashBackgroundJob; source: BashBackgroundJobKillSource };
+	| {
+			type: "killed";
+			job: BashBackgroundJob;
+			source: BashBackgroundJobKillSource;
+			stopResult?: BashBackgroundJobStopResult;
+	  };
 
 const backgroundJobListeners = new Set<(event: BashBackgroundJobEvent) => void>();
 
@@ -342,21 +375,28 @@ const backgroundJobs = new Map<string, BashBackgroundJob>();
 let backgroundJobSeq = 0;
 
 /** Snapshot of currently tracked background jobs (poll surface for callers). */
-export function listBashBackgroundJobs(): BashBackgroundJob[] {
-	return [...backgroundJobs.values()];
+export function listBashBackgroundJobs(ownerSessionId?: string): BashBackgroundJob[] {
+	return [...backgroundJobs.values()].filter(
+		(job) => ownerSessionId === undefined || job.ownerSessionId === ownerSessionId,
+	);
 }
 
 /** Look up a single promoted background job by id. */
-export function getBashBackgroundJob(id: string): BashBackgroundJob | undefined {
-	return backgroundJobs.get(id);
+export function getBashBackgroundJob(id: string, ownerSessionId?: string): BashBackgroundJob | undefined {
+	const job = backgroundJobs.get(id);
+	return job && (ownerSessionId === undefined || job.ownerSessionId === ownerSessionId) ? job : undefined;
 }
 
 /** Kill a promoted background job's tree and drop it from the registry.
  * `source` says who asked — a `"ui"` kill is surfaced to the agent by the
  * session's event subscriber; `"tool"` (the agent's own kill) and `"shutdown"`
  * stay silent. */
-export function killBashBackgroundJob(id: string, source: BashBackgroundJobKillSource = "tool"): boolean {
-	const job = backgroundJobs.get(id);
+export function killBashBackgroundJob(
+	id: string,
+	source: BashBackgroundJobKillSource = "tool",
+	ownerSessionId?: string,
+): boolean {
+	const job = getBashBackgroundJob(id, ownerSessionId);
 	if (!job) return false;
 	job.kill();
 	if (job.pid) untrackDetachedChildPid(job.pid);
@@ -366,12 +406,67 @@ export function killBashBackgroundJob(id: string, source: BashBackgroundJobKillS
 }
 
 /**
+ * UI-oriented stop: keep the job queryable until its process closes so the last
+ * stdout/stderr chunks can reach the ring buffer. The wait is bounded; an
+ * unconfirmed pid remains in the detached-child tracker for shutdown cleanup.
+ */
+export async function stopBashBackgroundJob(
+	id: string,
+	source: BashBackgroundJobKillSource = "ui",
+	timeoutMs = BASH_KILL_GRACE_MS,
+	ownerSessionId?: string,
+): Promise<BashBackgroundJobStopResult | undefined> {
+	const job = getBashBackgroundJob(id, ownerSessionId);
+	if (!job) return undefined;
+	if (job.stopping) return undefined;
+	const alreadyExited = job.exited;
+	job.stopping = true;
+	job.stopUnconfirmed = false;
+
+	if (!alreadyExited) {
+		try {
+			job.kill();
+		} catch {
+			// The bounded wait below still produces an explicit unconfirmed result.
+		}
+	}
+
+	const deadline = Date.now() + Math.max(0, timeoutMs);
+	while (!job.exited && Date.now() < deadline) {
+		await new Promise<void>((resolve) => setTimeout(resolve, Math.min(25, Math.max(1, deadline - Date.now()))));
+	}
+
+	const terminationConfirmed = job.exited;
+	const snapshot = snapshotBackgroundJobOutput(job);
+	job.resultSeen = terminationConfirmed;
+	if (terminationConfirmed) {
+		if (job.pid) untrackDetachedChildPid(job.pid);
+		if (backgroundJobs.get(id) === job) backgroundJobs.delete(id);
+	} else {
+		// The kill request returned, but we did not observe process exit. Keep the
+		// job addressable so the user/model can poll it or retry the stop instead of
+		// hiding a potentially live process until application shutdown.
+		job.stopping = false;
+		job.stopUnconfirmed = true;
+	}
+
+	const result: BashBackgroundJobStopResult = {
+		job,
+		terminationConfirmed,
+		alreadyExited,
+		...snapshot,
+	};
+	emitBackgroundJobEvent({ type: "killed", job, source, stopResult: result });
+	return result;
+}
+
+/**
  * Kill every tracked background bash job and clear the registry.
  * Called on session dispose and process shutdown so promoted/auto-bg jobs
  * cannot outlive the session (or the agent process on graceful quit).
  */
-export function disposeBashBackgroundJobs(): void {
-	for (const job of [...backgroundJobs.values()]) {
+export function disposeBashBackgroundJobs(ownerSessionId?: string): void {
+	for (const job of listBashBackgroundJobs(ownerSessionId)) {
 		if (!job.exited) {
 			try {
 				job.kill();
@@ -382,7 +477,8 @@ export function disposeBashBackgroundJobs(): void {
 		if (job.pid) untrackDetachedChildPid(job.pid);
 		emitBackgroundJobEvent({ type: "killed", job, source: "shutdown" });
 	}
-	backgroundJobs.clear();
+	if (ownerSessionId === undefined) backgroundJobs.clear();
+	else for (const job of listBashBackgroundJobs(ownerSessionId)) backgroundJobs.delete(job.id);
 }
 
 // Test-only reset so suites don't leak registry state across cases. No prod path
@@ -396,6 +492,11 @@ export function _resetBashBackgroundJobsForTest(): void {
 // pending-check guards without spawning a real long-running process.
 export function _registerBashBackgroundJobForTest(job: BashBackgroundJob): void {
 	backgroundJobs.set(job.id, job);
+}
+
+// Test-only: replay a lifecycle event through the real session subscriber path.
+export function _emitBashBackgroundJobEventForTest(event: BashBackgroundJobEvent): void {
+	emitBackgroundJobEvent(event);
 }
 
 function registerBackgroundJob(job: BashBackgroundJob): void {
@@ -467,6 +568,18 @@ function formatBackgroundJobPoll(job: BashBackgroundJob): string {
 	return lines.join("\n");
 }
 
+function snapshotBackgroundJobOutput(job: BashBackgroundJob): { output: string; outputTruncated: boolean } {
+	if (!job.ringBuffer) return { output: "", outputTruncated: job.ringTruncated };
+	const truncation = truncateTail(collapseRepeatedLines(job.ringBuffer), {
+		maxLines: BASH_MAX_LINES,
+		maxBytes: effectiveBashMaxBytes(),
+	});
+	return {
+		output: truncation.content,
+		outputTruncated: job.ringTruncated || truncation.truncated,
+	};
+}
+
 /** Actionable error for a job id that is not (or no longer) tracked. */
 function formatUnknownBackgroundJob(jobId: string): string {
 	const jobs = listBashBackgroundJobs();
@@ -520,6 +633,7 @@ interface SpareShell {
 	args: string[];
 	cwd: string;
 	env: NodeJS.ProcessEnv;
+	ownerSessionId?: string;
 	/** Set by the 'error'/'exit' listeners below — a dead spare must never be handed out. */
 	dead: boolean;
 	/** Idle-eviction timer (see SPARE_IDLE_TTL_MS). Cleared when the spare is
@@ -600,7 +714,13 @@ function spawnContextsMatch(
 	);
 }
 
-function spawnSpareShell(shell: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): SpareShell {
+function spawnSpareShell(
+	shell: string,
+	args: string[],
+	cwd: string,
+	env: NodeJS.ProcessEnv,
+	ownerSessionId?: string,
+): SpareShell {
 	const child = spawn(shell, [...args, SPARE_SHELL_WRAPPER], {
 		cwd,
 		detached: process.platform !== "win32",
@@ -613,8 +733,8 @@ function spawnSpareShell(shell: string, args: string[], cwd: string, env: NodeJS
 	// Swallow stdin EPIPE so a dead/broken spare never surfaces as
 	// uncaughtException on the write path (stdin.end(command)).
 	child.stdin?.on("error", () => {});
-	const spare: SpareShell = { child, shell, args, cwd, env, dead: false, ttlHandle: undefined };
-	if (child.pid) trackDetachedChildPid(child.pid);
+	const spare: SpareShell = { child, shell, args, cwd, env, ownerSessionId, dead: false, ttlHandle: undefined };
+	if (child.pid) trackDetachedChildPid(child.pid, ownerSessionId);
 	// A spare that dies before ever being consumed (bad shell/cwd, killed
 	// while idle, ...) must not be handed out, and must not leak a tracked
 	// pid or a dangling slot reference.
@@ -643,12 +763,23 @@ function evictSpare(spare: SpareShell): void {
  * disabled or a live spare for this exact context already waits; otherwise adds
  * one and LRU-evicts the oldest beyond the pool size. Safe to call
  * unconditionally. */
-function prewarmSpareShell(shell: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): void {
+function prewarmSpareShell(
+	shell: string,
+	args: string[],
+	cwd: string,
+	env: NodeJS.ProcessEnv,
+	ownerSessionId?: string,
+): void {
 	const size = resolveSparePoolSize();
 	if (size <= 0) return;
 	// Already have a live spare for this exact context — one is enough.
-	if (sparePool.some((s) => !s.dead && spawnContextsMatch(s, shell, args, cwd, env))) return;
-	const spare = spawnSpareShell(shell, args, cwd, env);
+	if (
+		sparePool.some(
+			(s) => !s.dead && s.ownerSessionId === ownerSessionId && spawnContextsMatch(s, shell, args, cwd, env),
+		)
+	)
+		return;
+	const spare = spawnSpareShell(shell, args, cwd, env, ownerSessionId);
 	spare.ttlHandle = setTimeout(() => evictSpare(spare), spareIdleTtlMs());
 	spare.ttlHandle.unref?.();
 	sparePool.push(spare);
@@ -678,8 +809,11 @@ function takeMatchingSpareShell(
 	args: string[],
 	cwd: string,
 	env: NodeJS.ProcessEnv,
+	ownerSessionId?: string,
 ): SpareShell | undefined {
-	const idx = sparePool.findIndex((s) => !s.dead && spawnContextsMatch(s, shell, args, cwd, env));
+	const idx = sparePool.findIndex(
+		(s) => !s.dead && s.ownerSessionId === ownerSessionId && spawnContextsMatch(s, shell, args, cwd, env),
+	);
 	if (idx === -1) {
 		sparePoolMissesForTest++;
 		return undefined;
@@ -693,9 +827,11 @@ function takeMatchingSpareShell(
 /** Kill and discard every pooled spare — called on session/process shutdown so
  * a spare that was never consumed can't leak a process (or, on Windows, keep an
  * open handle on its cwd). */
-export function disposeBashSparePool(): void {
+export function disposeBashSparePool(ownerSessionId?: string): void {
 	// evictSpare mutates sparePool, so drain a copy.
-	for (const spare of [...sparePool]) evictSpare(spare);
+	for (const spare of [...sparePool]) {
+		if (ownerSessionId === undefined || spare.ownerSessionId === ownerSessionId) evictSpare(spare);
+	}
 }
 
 /** Test-only: force the pool back to empty without killing the child processes
@@ -745,7 +881,11 @@ export function createLocalBashOperations(options?: {
 	enableSparePool?: boolean;
 }): BashOperations {
 	return {
-		exec: (command, cwd, { onData, signal, timeout, env, label, autoBackground, backgroundImmediate }) => {
+		exec: (
+			command,
+			cwd,
+			{ onData, signal, timeout, env, label, ownerSessionId, autoBackground, backgroundImmediate },
+		) => {
 			return new Promise((resolve, reject) => {
 				const { shell, args } = getShellConfig(options?.shellPath);
 				if (!existsSync(cwd)) {
@@ -759,7 +899,9 @@ export function createLocalBashOperations(options?: {
 				// wrapper below). Either being false means the direct-spawn path runs
 				// unchanged from before pooling existed.
 				const poolEnabled = options?.enableSparePool === true && isPosixShellPath(shell);
-				const spare = poolEnabled ? takeMatchingSpareShell(shell, args, cwd, effectiveEnv) : undefined;
+				const spare = poolEnabled
+					? takeMatchingSpareShell(shell, args, cwd, effectiveEnv, ownerSessionId)
+					: undefined;
 				const child = spare
 					? spare.child
 					: spawn(shell, [...args, command], {
@@ -775,14 +917,14 @@ export function createLocalBashOperations(options?: {
 					// no longer has a spare — refill it in the background, off this call's
 					// critical path, so the next same-context call hits again.
 					child.stdin?.end(command);
-					prewarmSpareShell(shell, args, cwd, effectiveEnv);
+					prewarmSpareShell(shell, args, cwd, effectiveEnv, ownerSessionId);
 				} else {
-					if (child.pid) trackDetachedChildPid(child.pid);
+					if (child.pid) trackDetachedChildPid(child.pid, ownerSessionId);
 					if (poolEnabled) {
 						// First call of the session, or a context change (cwd/env) meant no
 						// spare matched — this call paid the direct-spawn cost; leave a spare
 						// ready for next time.
-						prewarmSpareShell(shell, args, cwd, effectiveEnv);
+						prewarmSpareShell(shell, args, cwd, effectiveEnv, ownerSessionId);
 					}
 				}
 				const startedAt = Date.now();
@@ -886,6 +1028,7 @@ export function createLocalBashOperations(options?: {
 					const promotedAt = Date.now();
 					const job: BashBackgroundJob = {
 						id,
+						ownerSessionId,
 						pid: child.pid,
 						command: label ?? command,
 						startedAt,
@@ -990,7 +1133,7 @@ export function createLocalBashOperations(options?: {
 							if (child.pid) untrackDetachedChildPid(child.pid);
 							// Only a job still in the registry gets an exit event — one already
 							// killed/evicted (and thus dropped) already emitted its terminal event.
-							if (getBashBackgroundJob(promoted.id) === promoted) {
+							if (!promoted.stopping && getBashBackgroundJob(promoted.id) === promoted) {
 								emitBackgroundJobEvent({ type: "exited", job: promoted });
 							}
 							return;
@@ -1015,7 +1158,7 @@ export function createLocalBashOperations(options?: {
 						if (promoted) {
 							promoted.exited = true;
 							if (child.pid) untrackDetachedChildPid(child.pid);
-							if (getBashBackgroundJob(promoted.id) === promoted) {
+							if (!promoted.stopping && getBashBackgroundJob(promoted.id) === promoted) {
 								emitBackgroundJobEvent({ type: "exited", job: promoted });
 							}
 							return;
@@ -1068,6 +1211,8 @@ export interface BashToolOptions {
 	shellPath?: string;
 	/** Hook to adjust command, cwd, or env before execution */
 	spawnHook?: BashSpawnHook;
+	/** Session owner stamped onto promoted jobs for lifecycle isolation. */
+	ownerSessionId?: string;
 	/**
 	 * Opt IN to the pre-warmed spare-shell pool when using the default local
 	 * operations (ignored when `operations` is supplied). See
@@ -1463,6 +1608,7 @@ export function createBashToolDefinition(
 		createLocalBashOperations({ shellPath: options?.shellPath, enableSparePool: options?.enableSparePool });
 	const commandPrefix = options?.commandPrefix;
 	const spawnHook = options?.spawnHook;
+	const ownerSessionId = options?.ownerSessionId;
 	return {
 		name: "bash",
 		label: "bash",
@@ -1475,9 +1621,14 @@ export function createBashToolDefinition(
 		description: `Execute a bash command in the current working directory. Use bash only for what no dedicated tool covers: build/test/install scripts, git, network requests, process management, shell pipelines/redirects. Prefer read/grep/find/ls/write/edit for file operations.
 
 Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BASH_MAX_BYTES / 1024}KB (whichever is hit first); full output is saved to a temp file when truncated. Pass one "command" string (join steps with " && "); each call runs in a fresh shell with no carried state. To run somewhere other than the session root, set the "cwd" parameter instead of prefixing "cd /path &&" — it keeps the command line clean. Optional timeout in seconds. To read or stop a background job, call this tool with "jobId" instead of "command" ("action":"wait" blocks until it exits or a deadline, replacing a poll loop; "action":"kill" stops it) — a fresh shell cannot see those processes, so \`jobs\`/\`tail\` never will.`,
-		promptSnippet: "Execute bash commands",
+		promptSnippet:
+			'Execute bash commands (one "command" string, fresh shell each call; use cwd instead of "cd path &&")',
 		parameters: bashSchema,
 		prepareArguments: prepareBashArguments,
+		// A per-tool cancel waits for Bash to finish killing the process tree and
+		// format the output captured before the abort. The loop's run-level abort
+		// remains immediate.
+		abortResultGraceMs: BASH_KILL_GRACE_MS + 250,
 		async execute(
 			_toolCallId,
 			{
@@ -1515,7 +1666,7 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 				};
 			}
 			if (trimmedJobId) {
-				const job = getBashBackgroundJob(trimmedJobId);
+				const job = getBashBackgroundJob(trimmedJobId, ownerSessionId);
 				if (!job) {
 					return {
 						content: [{ type: "text" as const, text: formatUnknownBackgroundJob(trimmedJobId) }],
@@ -1526,7 +1677,7 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 				if (action === "kill") {
 					const wasExited = job.exited;
 					const state = describeJobState(job);
-					killBashBackgroundJob(trimmedJobId);
+					killBashBackgroundJob(trimmedJobId, "tool", ownerSessionId);
 					const text = wasExited
 						? `Job ${job.id} had already ${state}; dropped from the registry (buffered output discarded).`
 						: `Killed job ${job.id} ($ ${clampJobCommand(job.command)}) and dropped it from the registry.`;
@@ -1542,7 +1693,7 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 					);
 					const deadline = Date.now() + waitSeconds * 1000;
 					while (!job.exited && Date.now() < deadline && !signal?.aborted) {
-						if (getBashBackgroundJob(trimmedJobId) !== job) break;
+						if (getBashBackgroundJob(trimmedJobId, ownerSessionId) !== job) break;
 						await new Promise<void>((res) => {
 							const delay = Math.max(0, Math.min(BASH_BG_WAIT_POLL_MS, deadline - Date.now()));
 							const onAbort = () => {
@@ -1558,7 +1709,7 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 					}
 					// Killed/evicted mid-wait: the registry entry is gone and the buffered
 					// output with it — report that instead of a stale snapshot.
-					if (getBashBackgroundJob(trimmedJobId) !== job) {
+					if (getBashBackgroundJob(trimmedJobId, ownerSessionId) !== job) {
 						return {
 							content: [
 								{
@@ -1706,9 +1857,10 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 					const result = await ops.exec(spawnContext.command, spawnContext.cwd, {
 						onData: handleData,
 						signal,
-						timeout: normalizeBashTimeout(timeout),
+						timeout: resolveBashExecutionTimeout(timeout, command),
 						env: spawnContext.env,
 						label: command,
+						ownerSessionId,
 						// The agent tool consumes `promotedJobId` (surfaces the handle in the
 						// returned message), so it opts IN to auto-backgrounding. The user `!`
 						// path (bash-executor) does not read it and therefore leaves it OFF.

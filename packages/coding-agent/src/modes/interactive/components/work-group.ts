@@ -1,9 +1,10 @@
 import { basename } from "node:path";
-import { Container, SPINNER_FRAMES, type TUI, truncateToWidth } from "@pit/tui";
+import { Container, type TUI, truncateToWidth } from "@pit/tui";
 import { isTruthyEnvFlag } from "../../../utils/env-flags.ts";
 import { type ThemeColor, theme } from "../theme/theme.ts";
 import { ActivityLineComponent } from "./activity-line.ts";
 import { ColorEase } from "./color-ease.ts";
+import { resolveSpinnerFrames } from "./glyph-resolver.ts";
 import { createSpinnerTicker, type SpinnerTicker } from "./spinner-ticker.ts";
 import {
 	actionCoalesceKey,
@@ -311,9 +312,9 @@ export class WorkGroupComponent extends Container {
 	 * on {@link trailingIcon}). Sealed phases always snap — they are history, not
 	 * live chrome. */
 	private gutter(state: GroupState): string {
-		if (state === "pending") return theme.fg("gutterToolPending", this.spinnerGlyph ?? SPINNER_FRAMES[0]);
+		if (state === "pending") return theme.fg("gutterToolPending", this.spinnerGlyph ?? resolveSpinnerFrames()[0]!);
 		if (!this.sealed && this.iconEase.active && this.iconEase.progress < 0.5) {
-			return this.iconEase.colorize(GUTTER_DOT_COLOR, this.lastSpinnerGlyph ?? SPINNER_FRAMES[0]);
+			return this.iconEase.colorize(GUTTER_DOT_COLOR, this.lastSpinnerGlyph ?? resolveSpinnerFrames()[0]!);
 		}
 		return this.iconEase.colorize(GUTTER_DOT_COLOR, GUTTER_DOT);
 	}

@@ -209,12 +209,26 @@ export function createUserInputBus(): UserInputBus {
 // process-global resources in the coding-agent (see `event-bus.ts`).
 // ---------------------------------------------------------------------------
 
-let currentUserInputBus: UserInputBus | undefined;
+const userInputBuses = new Map<string, UserInputBus>();
+let legacyUserInputBus: UserInputBus | undefined;
 
-export function setCurrentUserInputBus(bus: UserInputBus | undefined): void {
-	currentUserInputBus = bus;
+/** Publish a bus for a session. The owner argument is optional for CLI/process callers. */
+export function setCurrentUserInputBus(bus: UserInputBus | undefined, ownerSessionId?: string): void {
+	if (ownerSessionId === undefined) {
+		legacyUserInputBus = bus;
+		return;
+	}
+	const previous = userInputBuses.get(ownerSessionId);
+	if (bus) {
+		userInputBuses.set(ownerSessionId, bus);
+		legacyUserInputBus = bus;
+	} else {
+		userInputBuses.delete(ownerSessionId);
+		if (legacyUserInputBus === previous) legacyUserInputBus = undefined;
+	}
 }
 
-export function getCurrentUserInputBus(): UserInputBus | undefined {
-	return currentUserInputBus;
+/** Resolve only the requested session's bus; ownerless callers retain legacy behavior. */
+export function getCurrentUserInputBus(ownerSessionId?: string): UserInputBus | undefined {
+	return ownerSessionId === undefined ? legacyUserInputBus : userInputBuses.get(ownerSessionId);
 }

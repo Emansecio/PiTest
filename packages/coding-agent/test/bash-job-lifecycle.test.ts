@@ -11,7 +11,8 @@
  * the suite is hermetic and fast.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AgentSession } from "../src/core/agent-session.ts";
 import {
 	_registerBashBackgroundJobForTest,
 	_resetBashBackgroundJobsForTest,
@@ -22,6 +23,7 @@ import {
 	isBashBackgroundJobStalled,
 	killBashBackgroundJob,
 	onBashBackgroundJobEvent,
+	stopBashBackgroundJob,
 } from "../src/core/tools/bash.ts";
 import { isWatchOrServerCommand } from "../src/core/verification/pending-checks.ts";
 
@@ -125,6 +127,119 @@ describe("onBashBackgroundJobEvent", () => {
 			unsubBad();
 			unsubGood();
 		}
+	});
+
+	it("UI stop keeps the job registered until final output is captured", async () => {
+		const events: BashBackgroundJobEvent[] = [];
+		const unsubscribe = onBashBackgroundJobEvent((event) => events.push(event));
+		let job!: BashBackgroundJob;
+		job = seedJob({
+			id: "bg-1",
+			ringBuffer: "first line\n",
+			kill: () => {
+				setTimeout(() => {
+					job.ringBuffer += "last partial line\n";
+					job.exited = true;
+				}, 10);
+			},
+		});
+		try {
+			const pending = stopBashBackgroundJob("bg-1", "ui", 200);
+			expect(getBashBackgroundJob("bg-1")).toBe(job);
+			const result = await pending;
+
+			expect(result).toMatchObject({ terminationConfirmed: true, alreadyExited: false });
+			expect(result?.output).toContain("last partial line");
+			expect(getBashBackgroundJob("bg-1")).toBeUndefined();
+			expect(events).toHaveLength(1);
+			expect(events[0]).toMatchObject({ type: "killed", source: "ui", stopResult: result });
+		} finally {
+			unsubscribe();
+		}
+	});
+
+	it("UI stop timeout keeps the job visible and retryable", async () => {
+		let killCalls = 0;
+		let job!: BashBackgroundJob;
+		job = seedJob({
+			id: "bg-1",
+			ringBuffer: "still here\n",
+			kill: () => {
+				killCalls += 1;
+				if (killCalls === 2) job.exited = true;
+			},
+		});
+		const startedAt = Date.now();
+		const result = await stopBashBackgroundJob("bg-1", "ui", 20);
+
+		expect(Date.now() - startedAt).toBeLessThan(500);
+		expect(result).toMatchObject({ terminationConfirmed: false, alreadyExited: false, output: "still here\n" });
+		expect(job.stopping).toBe(false);
+		expect(job.stopUnconfirmed).toBe(true);
+		expect(getBashBackgroundJob("bg-1")).toBe(job);
+
+		const retry = await stopBashBackgroundJob("bg-1", "ui", 20);
+		expect(retry?.terminationConfirmed).toBe(true);
+		expect(getBashBackgroundJob("bg-1")).toBeUndefined();
+	});
+
+	it("session notification is delivered only to the job owner and contains partial output", async () => {
+		const sendCustomMessage = vi.fn().mockResolvedValue(undefined);
+		const job = seedJob({
+			id: "bg-1",
+			ownerSessionId: "session-a",
+			command: "npm test",
+			ringBuffer: "passed 17 tests\n",
+		});
+		const stopResult = {
+			job,
+			terminationConfirmed: true,
+			alreadyExited: false,
+			output: "passed 17 tests\n",
+			outputTruncated: false,
+		};
+
+		(AgentSession.prototype as any)._onBashBackgroundJobEvent.call(
+			{ _disposed: false, sessionId: "session-b", sendCustomMessage, isStreaming: true },
+			{ type: "killed", source: "ui", job, stopResult },
+		);
+		await Promise.resolve();
+		expect(sendCustomMessage).not.toHaveBeenCalled();
+
+		(AgentSession.prototype as any)._onBashBackgroundJobEvent.call(
+			{ _disposed: false, sessionId: "session-a", sendCustomMessage, isStreaming: true },
+			{ type: "killed", source: "ui", job, stopResult },
+		);
+		await Promise.resolve();
+
+		expect(sendCustomMessage).toHaveBeenCalledOnce();
+		const content = sendCustomMessage.mock.calls[0]![0].content as string;
+		expect(content).toContain("passed 17 tests");
+		expect(content).toContain("continue from the work completed so far");
+		expect(content).not.toContain("do not poll");
+	});
+
+	it("unconfirmed stop tells the owner that the job remains pollable", async () => {
+		const sendCustomMessage = vi.fn().mockResolvedValue(undefined);
+		const job = seedJob({ id: "bg-1", ownerSessionId: "session-a", ringBuffer: "partial\n" });
+		const stopResult = {
+			job,
+			terminationConfirmed: false,
+			alreadyExited: false,
+			output: "partial\n",
+			outputTruncated: false,
+		};
+
+		(AgentSession.prototype as any)._onBashBackgroundJobEvent.call(
+			{ _disposed: false, sessionId: "session-a", sendCustomMessage, isStreaming: true },
+			{ type: "killed", source: "ui", job, stopResult },
+		);
+		await Promise.resolve();
+
+		const content = sendCustomMessage.mock.calls[0]![0].content as string;
+		expect(content).toContain("remains pollable");
+		expect(content).toContain("stop can be retried");
+		expect(content).not.toContain("job is no longer pollable");
 	});
 });
 

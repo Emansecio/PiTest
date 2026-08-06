@@ -16,12 +16,17 @@
  * `pi` whose `registerTool` captures the `task` tool by name.
  */
 
+import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { type FauxProviderRegistration, fauxAssistantMessage, registerFauxProvider } from "@pit/ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { createCoordinatorExtension } from "../src/core/built-ins/coordinator-extension.js";
 import { convertToLlm } from "../src/core/messages.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
+import { SessionManager } from "../src/core/session-manager.js";
 
 describe("coordinator op:spawn re-injection", () => {
 	let faux: FauxProviderRegistration | undefined;
@@ -30,7 +35,7 @@ describe("coordinator op:spawn re-injection", () => {
 	// Build the `task` tool wired to the given onAsyncComplete, with a scripted
 	// one-turn faux subagent. Sets the suite-level `faux` so afterEach cleans up.
 	function buildTask(
-		onAsyncComplete?: (handle: string, text: string, status: "done" | "error") => boolean,
+		onAsyncComplete?: (handle: string, text: string, status: "done" | "error" | "cancelled") => boolean,
 		response = "the answer is 42",
 	) {
 		faux = registerFauxProvider();
@@ -69,8 +74,8 @@ describe("coordinator op:spawn re-injection", () => {
 	const textOf = (res: unknown): string => (res as { content: { text: string }[] }).content[0].text;
 
 	it("invokes onAsyncComplete with the result when a spawned subagent settles", async () => {
-		let resolve!: (v: { handle: string; text: string; status: "done" | "error" }) => void;
-		const fired = new Promise<{ handle: string; text: string; status: "done" | "error" }>((r) => {
+		let resolve!: (v: { handle: string; text: string; status: "done" | "error" | "cancelled" }) => void;
+		const fired = new Promise<{ handle: string; text: string; status: "done" | "error" | "cancelled" }>((r) => {
 			resolve = r;
 		});
 		const task = buildTask((handle, text, status) => {
@@ -191,26 +196,58 @@ describe("coordinator op:spawn re-injection", () => {
 		expect(textOf(join)).not.toContain("already delivered");
 	});
 
-	it("delivers through the full ref chain: coordinator → onAsyncComplete → asyncDeliverRef → deliver", async () => {
-		// Reproduce the exact glue production wires (index.ts + agent-session-services.ts):
-		// the coordinator's onAsyncComplete reads through a ref that __bindBuiltInRefs
-		// points at the session's _deliverAsyncResult after construction.
-		const asyncDeliverRef: { current?: (h: string, t: string, s: "done" | "error") => boolean } = {};
-		let resolve!: () => void;
-		const delivered = new Promise<void>((r) => {
-			resolve = r;
-		});
-		const deliver = vi.fn((_h: string, _t: string, _s: "done" | "error") => {
-			resolve();
-			return true;
-		});
+	it("binds the coordinator's async completion to the real AgentSession", async () => {
+		const tempDir = join(tmpdir(), `pit-coordinator-async-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(tempDir, { recursive: true });
+		let session: Awaited<ReturnType<typeof createAgentSessionFromServices>>["session"] | undefined;
+		try {
+			faux = registerFauxProvider();
+			faux.setResponses([fauxAssistantMessage("the answer is 42")]);
+			const model = faux.getModel();
+			const authStorage = AuthStorage.inMemory();
+			authStorage.setRuntimeApiKey(model.provider, "faux-key");
 
-		const task = buildTask((handle, text, status) => asyncDeliverRef.current?.(handle, text, status) ?? false);
-		// Bind happens after construction, before any spawn settles — as in production.
-		asyncDeliverRef.current = deliver;
+			const services = await createAgentSessionServices({
+				cwd: tempDir,
+				agentDir: tempDir,
+				authStorage,
+				resourceLoaderOptions: { noSkills: true, noPromptTemplates: true, noThemes: true },
+			});
+			({ session } = await createAgentSessionFromServices({
+				services,
+				sessionManager: SessionManager.inMemory(),
+				model,
+			}));
+			await session.bindExtensions({});
 
-		await spawn(task, "wired");
-		await delivered;
-		expect(deliver).toHaveBeenCalledWith("wired", expect.stringContaining("the answer is 42"), "done");
-	});
+			const task = session.agent.state.tools.find((tool) => tool.name === "task");
+			expect(task).toBeDefined();
+			const taskTool = task as unknown as { execute: (...a: unknown[]) => Promise<unknown> };
+			let resolve!: (event: { handle: string; status: "done" | "error" | "cancelled" }) => void;
+			const completed = new Promise<{ handle: string; status: "done" | "error" | "cancelled" }>((r) => {
+				resolve = r;
+			});
+			const unsubscribe = session.subscribe((event) => {
+				if (event.type === "subagent_complete" && event.handle === "wired") {
+					resolve({ handle: event.handle, status: event.status });
+				}
+			});
+			try {
+				const spawned = await spawn(taskTool, "wired");
+				expect((spawned as { details?: { async?: boolean } }).details?.async).toBe(true);
+				expect(await completed).toEqual({ handle: "wired", status: "done" });
+			} finally {
+				unsubscribe();
+			}
+		} finally {
+			await session?.dispose();
+			if (existsSync(tempDir)) {
+				try {
+					rmSync(tempDir, { recursive: true, force: true });
+				} catch {
+					// Best-effort on Windows handle-release races.
+				}
+			}
+		}
+	}, 60_000);
 });

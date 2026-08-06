@@ -10,7 +10,7 @@ import {
 	createChromeReadConsoleDefinition,
 	createChromeWaitForDefinition,
 } from "../src/core/tools/chrome-devtools.js";
-import { TOOL_OUTPUT_HARD_CAP_BYTES } from "../src/core/tools/truncate.js";
+import { RECALL_OUTPUT_CAP_BYTES, TOOL_OUTPUT_HARD_CAP_BYTES } from "../src/core/tools/truncate.js";
 import { createWebSearchToolDefinition } from "../src/core/tools/web-search.js";
 import type { SearchProvider } from "../src/core/web-search/index.js";
 
@@ -113,14 +113,14 @@ describe("chrome_devtools_read_console level filtering (6.3)", () => {
 
 // --- 6.2/M20 limit schema clamped to the real effective cap -----------------
 
-// get_text/get_network_body carry a DEDICATED 256KB head+tail wrapper cap
-// (same opt-in recall_tool_output uses), so the advertised schema maximum is
-// honest: it matches the byte ceiling the wrapper actually enforces instead of
-// promising 1M chars and head-cutting at the generic 64KB net.
-const GET_TEXT_CAP = 256 * 1024;
+// get_text/get_network_body carry a DEDICATED 96KB head+tail wrapper cap (same
+// opt-in AND same ceiling recall_tool_output uses), so the advertised schema
+// maximum is honest: it matches the byte ceiling the wrapper actually enforces
+// instead of promising 1M chars and head-cutting at the generic 64KB net.
+const GET_TEXT_CAP = 96 * 1024;
 
 describe("chrome_devtools text limit is clamped to the real cap (6.2/M20)", () => {
-	it("advertises the dedicated 256KB ceiling, not a fictional 1M", () => {
+	it("advertises the dedicated 96KB ceiling, not a fictional 1M", () => {
 		for (const def of [createChromeGetTextDefinition(), createChromeGetNetworkBodyDefinition()]) {
 			const limit = (def.parameters as any).properties.limit;
 			expect(limit.minimum).toBe(1);
@@ -128,6 +128,13 @@ describe("chrome_devtools text limit is clamped to the real cap (6.2/M20)", () =
 			expect(limit.maximum).toBeLessThan(1_000_000);
 			// The schema promise must sit ABOVE the generic net it escapes…
 			expect(limit.maximum).toBeGreaterThan(TOOL_OUTPUT_HARD_CAP_BYTES);
+		}
+	});
+
+	it("stays at parity with the recall ceiling (one number, not two)", () => {
+		expect(GET_TEXT_CAP).toBe(RECALL_OUTPUT_CAP_BYTES);
+		for (const def of [createChromeGetTextDefinition(), createChromeGetNetworkBodyDefinition()]) {
+			expect((def as any).outputCap.maxBytes).toBe(RECALL_OUTPUT_CAP_BYTES);
 		}
 	});
 

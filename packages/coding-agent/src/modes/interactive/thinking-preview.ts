@@ -51,6 +51,14 @@ export function sanitizeThinkingText(raw: string): string {
  */
 let fenceScanCache: { text: string; searchPos: number; indices: number[] } | null = null;
 
+/**
+ * Drop the module-level fence-scan memo. Call when a thinking phase ends so a
+ * long prior buffer (hundreds of KB) is not retained until the next phase.
+ */
+export function clearFenceScanCache(): void {
+	fenceScanCache = null;
+}
+
 /** Positions of every ``` marker in raw, ascending; incremental on appends. */
 function getFenceIndices(raw: string): number[] {
 	let searchPos = 0;

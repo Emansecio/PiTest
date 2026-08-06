@@ -1,0 +1,11 @@
+pit · light · <repo>
+────────────────────────────────────────
+ … +2 earlier lines (expand key to expa…
+line three
+line four
+line five
+line six
+line seven
+line eight
+
+ctrl+c sair · /help ajuda

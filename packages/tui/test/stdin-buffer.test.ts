@@ -450,6 +450,51 @@ describe("StdinBuffer", () => {
 		});
 	});
 
+	describe("Large chunks (O(n) scan)", () => {
+		it("should emit large plain-text chunks char-by-char", () => {
+			// Regression: extractCompleteSequences used to slice the whole tail per
+			// character (O(n²)), freezing the event loop on large piped input. The
+			// fix scans by index; keep the observable output identical.
+			const text = "abcdefghijklmnop".repeat(8192); // 128 KiB
+			processInput(text);
+			assert.strictEqual(emittedSequences.length, text.length);
+			assert.strictEqual(emittedSequences[0], "a");
+			assert.strictEqual(emittedSequences[1], "b");
+			assert.strictEqual(emittedSequences[text.length - 1], "p");
+			assert.strictEqual(buffer.getBuffer(), "");
+		});
+
+		it("should handle large mixed input with escape sequences interspersed", () => {
+			const chunk = "abcd\x1b[A".repeat(1000);
+			processInput(chunk);
+			assert.strictEqual(emittedSequences.length, 5000);
+			for (let i = 4; i < emittedSequences.length; i += 5) {
+				assert.strictEqual(emittedSequences[i], "\x1b[A");
+			}
+			assert.strictEqual(emittedSequences[0], "a");
+			assert.strictEqual(buffer.getBuffer(), "");
+		});
+
+		it("should handle large input full of surrogate pairs", () => {
+			const emoji = String.fromCodePoint(0x1f600);
+			processInput(`a${emoji}`.repeat(20000));
+			assert.strictEqual(emittedSequences.length, 40000);
+			assert.strictEqual(emittedSequences[1], emoji);
+			assert.strictEqual(emittedSequences[39999], emoji);
+			assert.strictEqual(buffer.getBuffer(), "");
+		});
+
+		it("should hold an incomplete escape as remainder even after a large plain run", () => {
+			processInput(`${"x".repeat(100000)}\x1b[<35`);
+			assert.strictEqual(emittedSequences.length, 100000);
+			assert.strictEqual(buffer.getBuffer(), "\x1b[<35");
+
+			processInput(";20;5m");
+			assert.strictEqual(emittedSequences.length, 100001);
+			assert.strictEqual(emittedSequences[100000], "\x1b[<35;20;5m");
+		});
+	});
+
 	describe("Destroy", () => {
 		it("should clear buffer on destroy", () => {
 			processInput("\x1b[<35");

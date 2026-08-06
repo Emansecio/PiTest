@@ -24,6 +24,10 @@ export interface TodoItem {
 export interface TodoState {
 	items: TodoItem[];
 	nextId: number;
+	/** Monotonic revision used to reject stale reminder snapshots. */
+	revision?: number;
+	/** Session owner for reminders restored from a persisted session. */
+	sessionId?: string;
 }
 
 export interface CreateTodoInput {
@@ -63,6 +67,8 @@ function clampSubject(s: string): string {
 export class TodoManager {
 	private items: TodoItem[] = [];
 	private nextId = 1;
+	private revision = 0;
+	private sessionId = "";
 	private dirty = false;
 	private changeListener?: () => void;
 
@@ -85,6 +91,7 @@ export class TodoManager {
 
 	/** Mark the state dirty (for persistence) and notify the live-render listener. */
 	private markChanged(): void {
+		this.revision++;
 		this.dirty = true;
 		this.changeListener?.();
 	}
@@ -212,13 +219,39 @@ export class TodoManager {
 	}
 
 	serialize(): TodoState {
-		return { items: this.items.map((t) => ({ ...t })), nextId: this.nextId };
+		return {
+			items: this.items.map((t) => ({ ...t })),
+			nextId: this.nextId,
+			revision: this.revision,
+			sessionId: this.sessionId || undefined,
+		};
+	}
+
+	setSessionId(sessionId: string): void {
+		this.sessionId = sessionId;
+	}
+
+	getRevision(): number {
+		return this.revision;
+	}
+
+	getSessionId(): string {
+		return this.sessionId;
+	}
+
+	isCurrentSnapshot(snapshot: { revision: number; sessionId?: string }): boolean {
+		return snapshot.revision === this.revision && (snapshot.sessionId ?? this.sessionId) === this.sessionId;
 	}
 
 	restore(data: TodoState | undefined): void {
-		if (!data || !Array.isArray(data.items)) {
+		if (
+			!data ||
+			!Array.isArray(data.items) ||
+			(this.sessionId && data.sessionId && data.sessionId !== this.sessionId)
+		) {
 			this.items = [];
 			this.nextId = 1;
+			this.revision = 0;
 			return;
 		}
 		// Validate id/status from untrusted persisted state. A non-numeric id
@@ -236,6 +269,9 @@ export class TodoManager {
 		const maxId = this.items.reduce((m, t) => Math.max(m, t.id), 0);
 		const nextIdRaw = typeof data.nextId === "number" && Number.isFinite(data.nextId) ? data.nextId : 1;
 		this.nextId = Math.max(nextIdRaw, maxId + 1);
+		this.revision =
+			typeof data.revision === "number" && Number.isFinite(data.revision) ? Math.max(0, data.revision) : 0;
+		if (!this.sessionId && typeof data.sessionId === "string") this.sessionId = data.sessionId;
 	}
 
 	/** Human-readable multi-line summary for the `/todos` command. */
@@ -250,7 +286,15 @@ export class TodoManager {
 		return lines.join("\n");
 	}
 
-	/** Section injected into the system prompt while there is (or could be) work to track. */
+	/**
+	 * Dynamic-suffix section: the live list, and nothing else.
+	 *
+	 * How to keep the list current ("rewrite it whole with `set`", "one item
+	 * in_progress", …) is immutable text and lives in the cacheable prefix, folded
+	 * into the Todo-first guideline (system-prompt.ts). Repeating it here billed
+	 * ~370 chars at full price on every request of every turn for a string that
+	 * never changed — only the items below are dynamic.
+	 */
 	systemPromptSection(): string {
 		if (this.items.length === 0) return "";
 		const open = this.items.filter((t) => t.status !== "completed").length;
@@ -258,18 +302,9 @@ export class TodoManager {
 			const active = t.status === "in_progress" && t.activeForm ? ` (${t.activeForm})` : "";
 			return `${STATUS_GLYPH[t.status]} #${t.id} ${t.subject}${active}`;
 		});
-		return [
-			"<todos>",
-			`Current task list (${open} open of ${this.items.length}):`,
-			...itemLines,
-			'Keep it current with `todo{action:"set"}` — one call rewrites the whole list, so advancing it costs',
-			"the same whether one item changed or five. Send every item you want to keep, each with its `id`.",
-			"- Update it in the SAME turn as the work, not in a batch afterwards: close what you just finished and",
-			"  open the next item in one `set` call.",
-			"- Exactly one item in_progress at a time, with a short present-continuous activeForm.",
-			"- Add newly discovered follow-up work as you find it; keep subjects short and outcome-focused.",
-			"</todos>",
-		].join("\n");
+		return ["<todos>", `Current task list (${open} open of ${this.items.length}):`, ...itemLines, "</todos>"].join(
+			"\n",
+		);
 	}
 }
 

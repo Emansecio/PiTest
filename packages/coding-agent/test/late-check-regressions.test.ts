@@ -145,7 +145,14 @@ describe("late-check regressions", () => {
 		]);
 
 		// Job que nunca termina (simula um npm run check pesado).
-		_registerBashBackgroundJobForTest(bgJob({ id: "bg-stale", command: "npm run check", exited: false }));
+		_registerBashBackgroundJobForTest(
+			bgJob({
+				id: "bg-stale",
+				ownerSessionId: harness.session.sessionId,
+				command: "npm run check",
+				exited: false,
+			}),
+		);
 
 		await harness.session.prompt("primeiro pedido");
 		const eventsAfterFirst = harness.eventsOfType("pending_check").length;
@@ -178,7 +185,12 @@ describe("late-check regressions", () => {
 		// simulando um check backgroundado num fix turn; ele termina verde quando
 		// o drain pÃ³s-gate comeÃ§a a esperar por ele. Tudo dirigido por eventos â€”
 		// sem corridas de relÃ³gio.
-		const job = bgJob({ id: "bg-mid-gate", command: "npm run check", exited: false });
+		const job = bgJob({
+			id: "bg-mid-gate",
+			ownerSessionId: harness.session.sessionId,
+			command: "npm run check",
+			exited: false,
+		});
 		let registered = false;
 		harness.session.subscribe((e: { type: string; phase?: string }) => {
 			if (e.type === "verification" && e.phase === "running" && !registered) {

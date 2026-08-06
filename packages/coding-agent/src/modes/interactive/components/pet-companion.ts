@@ -78,11 +78,88 @@ const PET_PERCH_ASPECT = 2;
 export const PET_PERCH_CELL_ROWS = 4;
 export const PET_PERCH_CELL_COLS = 16;
 
+/**
+ * Floor for sixel sample cadence (~15 fps). Full sixel erase + encode + write is
+ * much heavier than half-block cells; capping idle/busy sixel below the cell
+ * ladder cuts terminal traffic and flicker without slowing the cell path.
+ */
+const PET_SIXEL_MIN_INTERVAL_MS = 66;
+/** 30 fps only while crossfading so a new mood has visible intermediate poses. */
+const PET_SIXEL_TRANSITION_INTERVAL_MS = 33;
+/** Keep the low-traffic cell transport briefly after stdout drains. */
+const PET_SIXEL_BACKPRESSURE_RECOVERY_MS = 500;
+
+/**
+ * Pose quantization scale (4 decimal places). Matches the old `toFixed(4)` frame
+ * key resolution — float-dust immunity, not pixel bucketing.
+ */
+const POSE_Q = 10_000;
+
+/** Moods with short, high-motion windows that prefer cells over sixel (see render). */
+const SHORT_TRANSIENT_MOODS: ReadonlySet<PetMoodState> = new Set(["done", "error", "startled"]);
+
 export interface PetCompanionOptions extends PetMoodOptions {
 	/** Resolved pet colors, read fresh each render so a theme switch is picked up. */
 	getColors: () => PetColors;
 	/** Injectable clock (defaults to performance.now) for the render-time sample. */
 	clock?: () => number;
+	/** True while terminal output is congested; cells avoid a large sixel rewrite. */
+	isBackpressured?: () => boolean;
+}
+
+/**
+ * Repaint interval for the active transport. Cells keep the mood ladder from
+ * {@link petFrameIntervalMs}; steady sixel never samples faster than
+ * {@link PET_SIXEL_MIN_INTERVAL_MS} (~15 fps). During a mood crossfade, sixel
+ * temporarily uses {@link PET_SIXEL_TRANSITION_INTERVAL_MS} so the 100ms blend
+ * produces several visible poses before returning to the low-traffic cadence.
+ */
+export function petFrameIntervalMsForTransport(state: PetMoodState, sixel: boolean, crossfading = false): number {
+	const base = petFrameIntervalMs(state);
+	if (!sixel) return base;
+	return crossfading ? PET_SIXEL_TRANSITION_INTERVAL_MS : Math.max(base, PET_SIXEL_MIN_INTERVAL_MS);
+}
+
+/** Quantize a pose channel to 4-decimal fixed point (integer). */
+function quantPose(v: number): number {
+	return Math.round(v * POSE_Q);
+}
+
+/**
+ * True when two poses match at 4-decimal resolution. Replaces the old string
+ * `frameKey` (toFixed + join) so tick/render memo comparisons allocate nothing.
+ */
+function samePose(a: PetParams, b: PetParams): boolean {
+	return (
+		quantPose(a.blinkK) === quantPose(b.blinkK) &&
+		quantPose(a.eyeShift ?? 0) === quantPose(b.eyeShift ?? 0) &&
+		quantPose(a.eyeShiftY ?? 0) === quantPose(b.eyeShiftY ?? 0) &&
+		quantPose(a.eyeScale ?? 1) === quantPose(b.eyeScale ?? 1) &&
+		quantPose(a.bobX ?? 0) === quantPose(b.bobX ?? 0) &&
+		quantPose(a.bobY ?? 0) === quantPose(b.bobY ?? 0) &&
+		quantPose(a.tilt ?? 0) === quantPose(b.tilt ?? 0) &&
+		quantPose(a.squash ?? 0) === quantPose(b.squash ?? 0)
+	);
+}
+
+function sameColors(a: PetColors, b: PetColors): boolean {
+	const as = a.stroke;
+	const bs = b.stroke;
+	const ae = a.eye;
+	const be = b.eye;
+	const ab = a.bg;
+	const bb = b.bg;
+	return (
+		as[0] === bs[0] &&
+		as[1] === bs[1] &&
+		as[2] === bs[2] &&
+		ae[0] === be[0] &&
+		ae[1] === be[1] &&
+		ae[2] === be[2] &&
+		ab[0] === bb[0] &&
+		ab[1] === bb[1] &&
+		ab[2] === bb[2]
+	);
 }
 
 export class PetCompanion implements Component {
@@ -90,10 +167,15 @@ export class PetCompanion implements Component {
 	private readonly getColors: () => PetColors;
 	private readonly clock: () => number;
 	private readonly reducedMotion: boolean;
-	// Dirty-tracking for the ticker: last quantized frame key requested a render for.
-	private lastTickKey = "";
+	private readonly isBackpressured: () => boolean;
+	private sixelCooldownUntil = 0;
+	// Dirty-tracking for the ticker: last pose that requested a render.
+	private lastTickParams: PetParams | undefined;
 	// Render memo: identical (width, mode, params, colors) hands back the same array.
-	private renderKey = "";
+	private memoWidth = -1;
+	private memoSixel = false;
+	private memoParams: PetParams | undefined;
+	private memoColors: PetColors | undefined;
 	private renderLines: string[] = [];
 	// Standing user-driven state (draft in the composer or not), independent of what
 	// the turn is doing. See setAmbientMood / tick.
@@ -103,6 +185,7 @@ export class PetCompanion implements Component {
 		this.getColors = options.getColors;
 		this.clock = options.clock ?? (() => performance.now());
 		this.reducedMotion = options.reducedMotion ?? false;
+		this.isBackpressured = options.isBackpressured ?? (() => false);
 		this.mood = new PetMood(options);
 	}
 
@@ -136,14 +219,37 @@ export class PetCompanion implements Component {
 	}
 
 	/**
-	 * Sample clock for the CURRENT mood, quantized to that mood's repaint cadence
-	 * ({@link petFrameIntervalMs}). This is the pet's frame-rate governor: idle
-	 * breathing samples ~12×/s while a `done` hop samples ~30×/s, so continuous
-	 * motion never costs a sprite re-encode on every 16 ms ticker frame.
+	 * Whether this frame will emit sixel (vs half-block cells). Same capability
+	 * check as render: measured cell size required. Short hop/shake moods and
+	 * congested output force cells so a large sixel rewrite cannot worsen a stall.
+	 * The short cooldown survives the drain event: TUI resumes rendering as soon as
+	 * stdout drains, while the pet remains on its low-traffic transport briefly.
+	 */
+	private usesSixelTransport(now = this.clock()): boolean {
+		if (!(getSixelSupport() && areCellDimensionsMeasured())) return false;
+		if (this.isBackpressured()) {
+			this.sixelCooldownUntil = Math.max(this.sixelCooldownUntil, now + PET_SIXEL_BACKPRESSURE_RECOVERY_MS);
+			return false;
+		}
+		if (now < this.sixelCooldownUntil) return false;
+		// done/error/startled: prefer cells (see render).
+		if (SHORT_TRANSIENT_MOODS.has(this.mood.current)) return false;
+		return true;
+	}
+
+	/**
+	 * Sample clock for the CURRENT mood, quantized from the state's entry time.
+	 * This lets a mood changed between global ticker slots render its first pose
+	 * immediately, rather than sampling before it existed. A pending crossfade
+	 * temporarily raises sixel to 30 fps; steady sixel remains capped at 15 fps.
 	 */
 	private sampleAt(now: number): number {
-		const step = petFrameIntervalMs(this.mood.current);
-		return Math.floor(now / step) * step;
+		const step = petFrameIntervalMsForTransport(
+			this.mood.current,
+			this.usesSixelTransport(now),
+			this.mood.hasPendingCrossfade,
+		);
+		return this.mood.sampleAt(now, step);
 	}
 
 	/**
@@ -161,51 +267,20 @@ export class PetCompanion implements Component {
 		if (stateChanged && this.mood.current === "idle" && this.ambientBaseline !== "idle") {
 			stateChanged = this.mood.setState(this.ambientBaseline, now) || stateChanged;
 		}
-		const key = this.frameKey(this.mood.params(this.sampleAt(now)));
-		const dirty = stateChanged || key !== this.lastTickKey;
-		this.lastTickKey = key;
-		return dirty;
-	}
-
-	/**
-	 * Faithful signature of a frame: two samples differ iff the pose differs.
-	 *
-	 * This used to round each channel into PIXEL-sized buckets so a sub-pixel
-	 * change could not trigger a repaint. The reasoning was sound and the result
-	 * was not: idle breathing has an amplitude of ±0.02u ≈ ±1px, so a whole breath
-	 * crossed about one bucket. Measured over a simulated 20s at the 16 ms ticker,
-	 * that bought **2.5 repaints/s while idle with stalls up to 1.36 s**, and 9.4/s
-	 * while thinking — the pet was not animating slowly, it was holding still and
-	 * then jumping. The bucket, not the sample cadence, was the frame-rate limiter.
-	 *
-	 * The rate limiter is now {@link sampleAt} alone, which is what the design
-	 * intended: params are evaluated on a clock already quantized to the mood's
-	 * cadence, so a moving pose repaints once per sample and no more. The saving
-	 * the bucket was protecting is small — a perch sprite encodes in ~0.5 ms, so
-	 * even a 60 fps pet costs ~3% of one core, and at these cadences it is ~1%.
-	 *
-	 * What survives is the property actually worth having: a pose that does NOT
-	 * move produces an identical signature, so the render memo holds and nothing is
-	 * re-encoded — which is what keeps a reduced-motion pet (params pinned to
-	 * `{ blinkK: 1 }`) free. The 4-decimal rounding is float-dust immunity, not
-	 * bucketing: at ~48px per canvas unit it resolves 0.005px.
-	 */
-	private frameKey(p: PetParams): string {
-		const q = (v: number | undefined): string => (v ?? 0).toFixed(4);
-		return [
-			q(p.blinkK),
-			q(p.eyeShift),
-			q(p.eyeShiftY),
-			q(p.eyeScale ?? 1),
-			q(p.bobX),
-			q(p.bobY),
-			q(p.tilt),
-			q(p.squash),
-		].join(":");
+		// Rate limiter is {@link sampleAt} alone: params are on a clock already
+		// quantized to the mood/transport cadence, so a moving pose dirties once per
+		// sample. A static pose (e.g. reduced-motion `{ blinkK: 1 }`) compares equal
+		// at 4-decimal resolution and never repaints. Field-wise quant compare — no
+		// string key — keeps the hot path allocation-free.
+		const params = this.mood.params(this.sampleAt(now));
+		const poseChanged = !this.lastTickParams || !samePose(params, this.lastTickParams);
+		this.lastTickParams = params;
+		return stateChanged || poseChanged;
 	}
 
 	invalidate(): void {
-		this.renderKey = "";
+		this.memoWidth = -1;
+		this.memoParams = undefined;
 	}
 
 	render(width: number): string[] {
@@ -217,10 +292,26 @@ export class PetCompanion implements Component {
 		// of the screen, nothing below it to push); the perch lives one row above
 		// the editor at the bottom of the screen, and cannot. Cells until the
 		// terminal answers — the fallback is exact by construction.
-		const sixel = getSixelSupport() && areCellDimensionsMeasured();
-		const key = `${width}|${sixel ? "s" : "c"}|${this.frameKey(params)}|${colors.stroke.join(",")}|${colors.eye.join(",")}|${colors.bg.join(",")}`;
-		if (key === this.renderKey) return this.renderLines;
-		this.renderKey = key;
+		//
+		// Short transients (done/error/startled, <~700ms) force the half-block cell
+		// path even when sixel is available: each sixel frame full-row-erases the
+		// whole perch before redrawing, which flickers badly during hop/shake. Cells
+		// repaint in place with no erase choreography — better for brief, big motion.
+		const sixel = this.usesSixelTransport();
+		if (
+			width === this.memoWidth &&
+			sixel === this.memoSixel &&
+			this.memoParams &&
+			samePose(params, this.memoParams) &&
+			this.memoColors &&
+			sameColors(colors, this.memoColors)
+		) {
+			return this.renderLines;
+		}
+		this.memoWidth = width;
+		this.memoSixel = sixel;
+		this.memoParams = params;
+		this.memoColors = colors;
 		this.renderLines = sixel
 			? this.renderPerchSixel(width, colors, params)
 			: this.renderPerchCells(width, colors, params);
@@ -267,6 +358,11 @@ export class PetCompanion implements Component {
 		// walk up ends on the block's TOP row, which is exactly where the
 		// drawing has to start for the slack row to end up at the bottom, under
 		// the sprite.
+		// Full-row erase + full sprite rewrite every frame is inherent to sixel:
+		// terminals do not expose a cheap partial-update path for graphics cells,
+		// and transparent P2 keeps previous silhouettes unless we blank the span.
+		// Flicker risk is real on slow links; the half-block cell path below is the
+		// intentional non-sixel fallback when sixel is unavailable or disabled.
 		const eraseRow = `\x1b[2K${" ".repeat(petCols)}\x1b[${petCols}D`;
 		const clearAll = `${eraseRow}${`\x1b[1A${eraseRow}`.repeat(PET_PERCH_SIXEL_ROWS - 1)}`;
 		lines.push(`${" ".repeat(leftPad)}\x1b7${clearAll}${sixel}\x1b8`);

@@ -123,7 +123,7 @@ describe("streaming reveal (headless InteractiveMode)", () => {
 
 		const piece = (i: number) =>
 			i % 20 === 10
-				? "\n```ts\nconst x" + i + " = compute(" + i + ");\n```\n"
+				? `\n\`\`\`ts\nconst x${i} = compute(${i});\n\`\`\`\n`
 				: `Paragraph ${i} with some **bold** and \`inline\` code. `;
 		let text = "";
 		const emitMs: number[] = [];

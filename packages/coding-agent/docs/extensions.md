@@ -1663,13 +1663,15 @@ Register tools the LLM can call via `pit.registerTool()`. Tools appear in the sy
 
 Use `promptSnippet` for a short one-line entry in the `Available tools` section in the default system prompt. If omitted, custom tools are left out of that section.
 
+`promptSnippet` is also the description the tool ships with on the provider wire: tool descriptions are compacted before the request (see `PIT_NO_LAZY_TOOL_SCHEMAS`), and a snippet is sent whole (capped at 140 chars) instead of the first line of `description` truncated to 110. Write it as one complete sentence naming the capabilities the model would otherwise miss.
+
 Use `promptGuidelines` to add tool-specific bullets to the default system prompt `Guidelines` section. These bullets are included only while the tool is active (for example, after `pit.setActiveTools([...])`).
 
 **Important:** `promptGuidelines` bullets are appended flat to the `Guidelines` section with no tool name prefix or grouping. Each guideline must name the tool it refers to — avoid "Use this tool when..." because the LLM cannot tell which tool "this" means. Write "Use my_tool when..." instead.
 
 Note: Some models are idiots and include the @ prefix in tool path arguments. Built-in tools strip a leading @ before resolving paths. If your custom tool accepts a path, normalize a leading @ as well.
 
-If your custom tool mutates files, use `withFileMutationQueue()` so it participates in the same per-file queue as built-in `edit` and `write`. This matters because tool calls run in parallel by default. Without the queue, two tools can read the same old file contents, compute different updates, and then whichever write lands last overwrites the other.
+If your custom tool mutates files, set `mutationGuard: true` and use `withFileMutationQueue()` so it participates in the same per-file queue as built-in `edit` and `write`. `mutationGuard` rejects an internal elision marker before execution. The queue matters because tool calls run in parallel by default. Without the queue, two tools can read the same old file contents, compute different updates, and then whichever write lands last overwrites the other.
 
 Example failure case: your custom tool edits `foo.ts` while built-in `edit` also changes `foo.ts` in the same assistant turn. If your tool does not participate in the queue, both can read the original `foo.ts`, apply separate changes, and one of those changes is lost.
 

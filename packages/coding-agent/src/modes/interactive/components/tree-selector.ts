@@ -14,6 +14,7 @@ import {
 import type { SessionTreeNode } from "../../../core/session-manager.ts";
 import { formatDisplayPath } from "../display-utils.ts";
 import { theme } from "../theme/theme.ts";
+import { resolveFoldGlyphs, resolveTreeConnectors } from "./glyph-resolver.ts";
 import { HINT_SEPARATOR, keyHint, keyText, scrollPositionHint, selectionCursor } from "./keybinding-hints.ts";
 import { paintSelectedRow } from "./selectable-row.ts";
 import { beginSelectorSurface } from "./selector-surface.ts";
@@ -677,20 +678,22 @@ class TreeList implements Component, MouseTarget {
 				const posInLevel = i % 3;
 
 				// Check if there's a gutter at this level
+				const tree = resolveTreeConnectors();
 				const gutter = gutterByLevel.get(level);
 				if (gutter) {
 					if (posInLevel === 0) {
-						prefixChars.push(gutter.show ? "│" : " ");
+						prefixChars.push(gutter.show ? tree.pipe : " ");
 					} else {
 						prefixChars.push(" ");
 					}
 				} else if (connector && level === connectorPosition) {
 					// Connector at this level, with fold indicator
 					if (posInLevel === 0) {
-						prefixChars.push(flatNode.isLast ? "└" : "├");
+						prefixChars.push(flatNode.isLast ? tree.last : tree.branch);
 					} else if (posInLevel === 1) {
 						const foldable = this.isFoldable(entry.id);
-						prefixChars.push(isFolded ? "⊞" : foldable ? "⊟" : "─");
+						const fold = resolveFoldGlyphs();
+						prefixChars.push(isFolded ? fold.folded : foldable ? fold.expanded : fold.leaf);
 					} else {
 						prefixChars.push(" ");
 					}
@@ -702,7 +705,8 @@ class TreeList implements Component, MouseTarget {
 
 			// Fold marker for nodes without connectors (roots)
 			const showsFoldInConnector = flatNode.showConnector && !flatNode.isVirtualRootChild;
-			const foldMarker = isFolded && !showsFoldInConnector ? theme.fg("accent", "⊞ ") : "";
+			const foldOpen = resolveFoldGlyphs().folded;
+			const foldMarker = isFolded && !showsFoldInConnector ? theme.fg("accent", `${foldOpen} `) : "";
 
 			// Active path marker - shown right before the entry text
 			const isOnActivePath = this.activePathIds.has(entry.id);

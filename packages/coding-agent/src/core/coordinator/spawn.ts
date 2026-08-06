@@ -17,7 +17,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import {
 	Agent,
@@ -38,10 +38,12 @@ import { describeToolAction, type PermissionChecker, subagentConfirmDenyReason }
 import { formatSkillsForPrompt, type Skill } from "../skills.ts";
 import { aggregateAssistantUsage, mergeSubagentUsage } from "../token-usage.ts";
 import type { SubagentRegistry } from "./registry.ts";
-import { withRunSlot } from "./slots.ts";
+import { holdCurrentSlotUntil, withRunSlot } from "./slots.ts";
 import type {
 	SpawnSubagentOptions,
 	SpawnSubagentResult,
+	SubagentExecutionManifest,
+	SubagentMutationPolicy,
 	SubagentRecord,
 	SubagentUsage,
 	WorktreeSpec,
@@ -306,6 +308,70 @@ export function evaluateSubagentToolPermission(
 	return undefined;
 }
 
+function manifestFilePath(args: unknown): string | undefined {
+	if (!args || typeof args !== "object") return undefined;
+	const input = args as Record<string, unknown>;
+	for (const key of ["path", "file", "filePath"]) {
+		if (typeof input[key] === "string") return input[key];
+	}
+	return undefined;
+}
+
+function mutationEditPairs(args: unknown): Array<{ oldText: string; newText: string }> {
+	if (!args || typeof args !== "object") return [];
+	const input = args as Record<string, unknown>;
+	const values = Array.isArray(input.edits) ? input.edits : [input];
+	return values.flatMap((value) => {
+		if (!value || typeof value !== "object") return [];
+		const edit = value as Record<string, unknown>;
+		return typeof edit.oldText === "string" && typeof edit.newText === "string"
+			? [{ oldText: edit.oldText, newText: edit.newText }]
+			: [];
+	});
+}
+
+function largestTimeout(text: string): number {
+	return Math.max(0, ...[...text.matchAll(/timeout\D{0,20}(\d+)/gi)].map((match) => Number(match[1])));
+}
+
+export function evaluateSubagentMutationPolicy(
+	policy: SubagentMutationPolicy | undefined,
+	path: string | undefined,
+	args?: unknown,
+): string | undefined {
+	if (!policy || !path) return undefined;
+	const normalized = path.split("\\").join("/").replace(/^\.\//, "");
+	const matches = (prefix: string) => {
+		const clean = prefix.split("\\").join("/").replace(/^\.\//, "").replace(/\/$/, "");
+		return normalized === clean || normalized.startsWith(`${clean}/`);
+	};
+	if (policy.deniedPaths?.some(matches)) return `Subagent policy denies changes to ${path}`;
+	if (policy.allowedPaths?.length && !policy.allowedPaths.some(matches))
+		return `Subagent policy does not allow changes to ${path}`;
+	const editPairs = mutationEditPairs(args);
+	if (policy.forbidTestChanges && /(^|\/)(__tests__|tests?)(\/|$)|\.(test|spec)\.[^/]+$/.test(normalized)) {
+		return `Subagent policy forbids test changes: ${path}`;
+	}
+	if (
+		policy.forbidAssertionRemoval &&
+		editPairs.some((edit) => /\b(expect|assert)\b/.test(edit.oldText) && !/\b(expect|assert)\b/.test(edit.newText))
+	)
+		return `Subagent policy forbids assertion removal: ${path}`;
+	const timeoutRaised = editPairs.some(({ oldText, newText }) => largestTimeout(newText) > largestTimeout(oldText));
+	if (policy.forbidTimeoutIncrease && timeoutRaised) return `Subagent policy forbids timeout increases: ${path}`;
+	return undefined;
+}
+
+function manifestCommand(args: unknown): string | undefined {
+	if (!args || typeof args !== "object") return undefined;
+	const command = (args as Record<string, unknown>).command;
+	return typeof command === "string" ? command : undefined;
+}
+
+function formatPartialOutput(output: string, reason: string, files: readonly string[]): string {
+	return `${output}\n\n[partial: true]\nReason: ${reason}\nFiles touched: ${files.join(", ") || "(none)"}`;
+}
+
 function filterTools(tools: readonly AgentTool[], allowed: readonly string[] | undefined): AgentTool[] {
 	if (!allowed) return [...tools];
 	const allowSet = new Set(allowed);
@@ -402,20 +468,47 @@ export async function cleanupPartialWorktree(parentCwd: string, dir: string): Pr
 		// prune is best-effort; a missing/locked repo just means nothing to prune.
 	}
 	try {
-		await rm(dir, { recursive: true, force: true });
+		await removeManagedWorktreeDirectory(parentCwd, dir);
 	} catch {
 		// dir may never have been created — nothing to remove.
 	}
 }
 
-export async function cleanupSubagentWorktree(parentCwd: string, path: string): Promise<void> {
+/** Whether a cleanup target is a child of this parent's managed worktree directory. */
+function isManagedWorktreePath(parentCwd: string, worktreePath: string): boolean {
+	const worktreesRoot = resolve(parentCwd, ".pit", "worktrees");
+	const relativePath = relative(worktreesRoot, resolve(worktreePath));
+	return (
+		relativePath !== "" && relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath)
+	);
+}
+
+/** Remove a residual worktree directory only when it is within the managed root. */
+async function removeManagedWorktreeDirectory(parentCwd: string, worktreePath: string): Promise<void> {
+	if (!isManagedWorktreePath(parentCwd, worktreePath)) return;
+	try {
+		await rm(worktreePath, { recursive: true, force: true });
+	} catch {
+		// The path may never have been created, or may already be gone.
+	}
+}
+
+export async function cleanupSubagentWorktree(parentCwd: string, worktreePath: string): Promise<void> {
 	try {
 		const timeoutMs = resolveWorktreeGitTimeoutMs();
-		await execFileWithTimeout("git", ["worktree", "remove", "--force", path], { cwd: parentCwd }, timeoutMs);
+		await execFileWithTimeout("git", ["worktree", "remove", "--force", worktreePath], { cwd: parentCwd }, timeoutMs);
+		return;
 	} catch {
-		// Best-effort cleanup: git may have already pruned, or the directory is
-		// gone. Swallow to avoid masking the real task error.
+		// A failed remove can leave a stale git admin entry and checkout directory.
+		// Both fallback operations are best-effort and never mask task completion.
 	}
+	const timeoutMs = resolveWorktreeGitTimeoutMs();
+	try {
+		await execFileWithTimeout("git", ["worktree", "prune"], { cwd: parentCwd }, timeoutMs);
+	} catch {
+		// A locked or missing repository leaves the residual directory cleanup below.
+	}
+	await removeManagedWorktreeDirectory(parentCwd, worktreePath);
 }
 
 /** System-prompt preamble that points a worktree-isolated subagent at its checkout. */
@@ -443,9 +536,8 @@ export async function spawnSubagent(
 
 	// Single concurrency chokepoint: every live subagent Agent — blocking runs,
 	// detached spawns, parallel/fanout children, acceptance judges — costs one
-	// process-wide slot for exactly as long as it runs. Queue time is not counted
-	// toward the task timeout (the timer is armed inside runSpawned, after the
-	// slot is held). Nested spawns yield the enclosing agent's slot while their
+	// process-wide slot for exactly as long as it runs. Nested spawns yield the
+	// enclosing agent's slot while their
 	// descendant runs (see slots.ts), so depth>=2 nesting cannot deadlock.
 	try {
 		return await withRunSlot(options.signal, () => runSpawned(deps, options, record));
@@ -518,8 +610,8 @@ async function runSpawned(
 		}
 	}
 
-	// Combine the caller's signal with any internally-derived ones (timeout,
-	// turn cap). We own the controller so we can fire abort in either case.
+	// Combine the caller's signal with the internally-derived turn cap. We own
+	// the controller so either source can abort the run.
 	const controller = new AbortController();
 	// Propagate the parent's abort reason so a parent-driven cancel stays
 	// distinguishable downstream (falls back to a generic note if unset).
@@ -527,14 +619,6 @@ async function runSpawned(
 	if (options.signal) {
 		if (options.signal.aborted) controller.abort(options.signal.reason ?? new Error("aborted: parent signal"));
 		else options.signal.addEventListener("abort", onParentAbort, { once: true });
-	}
-
-	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-	if (options.timeoutMs && options.timeoutMs > 0) {
-		const ms = options.timeoutMs;
-		timeoutHandle = setTimeout(() => controller.abort(new Error(`aborted: timeout after ${ms}ms`)), ms);
-		// Do not pin the process open solely for an idle subagent timeout.
-		timeoutHandle.unref?.();
 	}
 
 	const systemPromptBase = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
@@ -569,6 +653,10 @@ async function runSpawned(
 			throw error;
 		}
 	}
+	const manifest: SubagentExecutionManifest = { filesTouched: [], commands: [], worktreePath: worktree?.path };
+	const manifestFiles = new Set<string>();
+	const mutatingToolNames = new Set(tools.filter((tool) => tool.mutationGuard).map((tool) => tool.name));
+	deps.registry.update(record.id, { manifest });
 	const maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
 	let turnCount = 0;
 	// GAP #5 token accounting: sum each assistant turn's reported usage so the
@@ -634,6 +722,9 @@ async function runSpawned(
 					return decision;
 				}
 			}
+			const mutationPath = mutatingToolNames.has(toolCall.name) ? manifestFilePath(args) : undefined;
+			const policyViolation = evaluateSubagentMutationPolicy(options.mutationPolicy, mutationPath, args);
+			if (policyViolation) return { block: true, reason: policyViolation };
 			// Propagate the parent's grounding guards (read-guard, edit-precondition,
 			// symbol/import/path/pattern/bash grounding) so a subagent can't edit an
 			// unread file, submit a non-matching edit, or write a broken import —
@@ -662,22 +753,26 @@ async function runSpawned(
 			}
 			return undefined;
 		},
-		afterToolCall: guardChain
-			? async ({ toolCall, args, result, isError }) => {
-					// Lets the read-guard re-stamp the file the subagent just wrote so a
-					// follow-up write isn't seen as external drift (false positive).
-					await guardChain.afterToolCall({
-						type: "tool_result",
-						toolName: toolCall.name,
-						toolCallId: toolCall.id,
-						input: (args ?? {}) as Record<string, unknown>,
-						content: result.content,
-						details: result.details,
-						isError,
-					} as ToolResultEvent);
-					return undefined;
-				}
-			: undefined,
+		afterToolCall: async ({ toolCall, args, result, isError }) => {
+			const path = mutatingToolNames.has(toolCall.name) ? manifestFilePath(args) : undefined;
+			if (path) manifestFiles.add(path);
+			const command = toolCall.name === "bash" ? manifestCommand(args) : undefined;
+			if (command) manifest.commands.push(command);
+			manifest.filesTouched = [...manifestFiles];
+			deps.registry.update(record.id, { manifest: { ...manifest } });
+			// Lets the read-guard re-stamp the file the subagent just wrote so a
+			// follow-up write isn't seen as external drift (false positive).
+			await guardChain?.afterToolCall({
+				type: "tool_result",
+				toolName: toolCall.name,
+				toolCallId: toolCall.id,
+				input: (args ?? {}) as Record<string, unknown>,
+				content: result.content,
+				details: result.details,
+				isError,
+			} as ToolResultEvent);
+			return undefined;
+		},
 		streamFn: async (model, context, streamOptions) => {
 			const auth = await deps.modelRegistry.getApiKeyAndHeaders(model);
 			if (!auth.ok) {
@@ -781,7 +876,6 @@ async function runSpawned(
 		} catch {
 			// onSettle is best-effort teardown; never mask the task result.
 		}
-		if (timeoutHandle) clearTimeout(timeoutHandle);
 		if (options.signal) options.signal.removeEventListener("abort", onParentAbort);
 		if (worktree && worktree.cleanup === "auto") {
 			// Let an aborted run settle so it isn't still writing into the worktree
@@ -795,6 +889,7 @@ async function runSpawned(
 		const promptText = options.prompt;
 		const racePrompt = async () => {
 			runPromise = agent.prompt(promptText);
+			holdCurrentSlotUntil(runPromise);
 			const promise = runPromise;
 			const aborted = new Promise<void>((_, reject) => {
 				const fail = () => reject(toAbortError(controller.signal.reason));
@@ -857,6 +952,7 @@ async function runSpawned(
 						timestamp: Date.now(),
 					});
 					runPromise = agent.continue();
+					holdCurrentSlotUntil(runPromise);
 					const promise = runPromise;
 					const aborted = new Promise<void>((_, reject) => {
 						const fail = () => reject(toAbortError(controller.signal.reason));
@@ -869,6 +965,21 @@ async function runSpawned(
 					await Promise.race([promise, aborted]);
 				}
 			}
+		}
+
+		// A transport retry can resolve normally while still appending a terminal
+		// assistant error/aborted turn. Re-check settlement after every retry path;
+		// otherwise the registry below would misclassify the run as completed.
+		const finalMessage = agent.state.messages[agent.state.messages.length - 1] as AgentMessage | undefined;
+		if (
+			finalMessage?.role === "assistant" &&
+			(finalMessage.stopReason === "error" || finalMessage.stopReason === "aborted")
+		) {
+			throw new Error(
+				finalMessage.errorMessage ||
+					agent.state.errorMessage ||
+					`Subagent ended with stopReason "${finalMessage.stopReason}"`,
+			);
 		}
 
 		const output = extractAssistantText(agent.state.messages);
@@ -925,11 +1036,22 @@ async function runSpawned(
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		attachSubagentUsageToError(err, usage);
+		const transcriptOutput = extractAssistantText(agent.state.messages);
+		manifest.lastError = message;
+		manifest.filesTouched = [...manifestFiles];
+		const partialOutput = formatPartialOutput(transcriptOutput, message, manifest.filesTouched);
 		// Any controller-driven abort (parent / timeout / turn cap) => cancelled.
 		// Decoupled from the message string so richer reasons don't get miscategorized.
-		const status = controller.signal.aborted ? "cancelled" : "failed";
+		const finalMessage = agent.state.messages[agent.state.messages.length - 1] as AgentMessage | undefined;
+		const status =
+			controller.signal.aborted || (finalMessage?.role === "assistant" && finalMessage.stopReason === "aborted")
+				? "cancelled"
+				: "failed";
 		deps.registry.update(record.id, {
 			status,
+			partial: true,
+			output: partialOutput,
+			manifest: { ...manifest, filesTouched: [...manifestFiles] },
 			endedAt: Date.now(),
 			error: message,
 			turnCount,

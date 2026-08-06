@@ -423,6 +423,44 @@ describe("SelectList mouse", () => {
 		assert.deepEqual(confirmed, ["item-4"]);
 	});
 
+	it("keeps section headers non-selectable and maps rows after them", () => {
+		const list = new SelectList(
+			[
+				{ value: "one", label: "one", section: "ESSENTIAL", badge: "built-in" },
+				{ value: "two", label: "two", section: "PROJECT", badge: "extension" },
+			],
+			5,
+			{ ...testTheme, section: testTheme.description },
+		);
+		const confirmed: string[] = [];
+		list.onSelect = (item) => confirmed.push(item.value);
+		const rendered = list.render(80);
+
+		assert.equal(rendered[0]?.includes("ESSENTIAL"), true);
+		assert.equal(list.onMouse(leftPress(), 0, 4), false);
+		assert.equal(list.onMouse(leftPress(), 3, 4), true);
+		assert.deepEqual(confirmed, ["two"]);
+	});
+
+	it("keeps section headers inside the visible row budget", () => {
+		const list = new SelectList(
+			[
+				{ value: "a", label: "a", section: "A" },
+				{ value: "b", label: "b", section: "A" },
+				{ value: "c", label: "c", section: "B" },
+			],
+			3,
+			{ ...testTheme, section: testTheme.description },
+		);
+
+		const rendered = list.render(80);
+		assert.equal(rendered.slice(0, 3).length, 3, "header + two items must fit in maxVisible rows");
+		assert.deepEqual(
+			rendered.slice(0, 3).map((line) => line.replace(/^\s+/, "")),
+			["A", "→ a", "b"],
+		);
+	});
+
 	it("declines clicks below the items (scroll info / hint rows)", () => {
 		const list = new SelectList(makeItems(10), 3, testTheme);
 		const confirmed: string[] = [];
