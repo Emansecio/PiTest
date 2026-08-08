@@ -20,6 +20,7 @@ import { type CompactionController, checkCompaction } from "./agent-session-comp
 import type { AgentSessionEvent } from "./agent-session-events.ts";
 import { estimateCharsAsTokens } from "./compaction/utils.ts";
 import { getSubagentErrorUsage, SubagentRegistry, spawnSubagent } from "./coordinator/index.ts";
+import type { SubagentRequestPolicy } from "./coordinator/types.ts";
 import type { ContextUsage } from "./extensions/index.js";
 import { providerForCli, runPanelMember } from "./fusion/cli-runner.ts";
 import {
@@ -56,6 +57,7 @@ export interface FusionHost {
 	readonly userInterrupted: boolean;
 	emit(event: AgentSessionEvent): void;
 	getRequiredRequestAuth(model: Model<any>): Promise<{ apiKey?: string; headers?: Record<string, string> }>;
+	getSubagentRequestPolicy?(signal?: AbortSignal): SubagentRequestPolicy;
 	setLastAssistantMessage(message: AssistantMessage): void;
 	/** F3: record Fusion-stage token spend into the unified budget ledger. */
 	recordFusionSpend?(tokens: number): void;
@@ -307,6 +309,9 @@ export async function fusionVerify(
 				availableTools: host.agent.state.tools as AgentTool[],
 				convertToLlm: (m) => m as never,
 				permissionChecker: host.permissionChecker,
+				requestPolicy: host.getSubagentRequestPolicy
+					? (signal) => host.getSubagentRequestPolicy?.(signal)
+					: undefined,
 			},
 			{
 				prompt: buildVerifierPrompt(userPrompt, results, analysis),

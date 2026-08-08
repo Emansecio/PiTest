@@ -437,10 +437,10 @@ export class Agent {
 	 * tool sees an aborted signal (combined via AbortSignal.any in the loop) and
 	 * the run continues with the remaining tools.
 	 */
-	cancelTool(toolCallId: string): boolean {
+	cancelTool(toolCallId: string, options?: { preserveCoordinatorChildren?: boolean }): boolean {
 		const controller = this.toolAbortControllers.get(toolCallId);
 		if (!controller) return false;
-		controller.abort();
+		controller.abort(options?.preserveCoordinatorChildren ? { preserveCoordinatorChildren: true } : undefined);
 		return true;
 	}
 

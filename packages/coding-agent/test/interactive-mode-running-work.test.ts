@@ -79,6 +79,70 @@ describe("InteractiveMode running-work bridge", () => {
 		expect(showStatus).toHaveBeenCalledWith("Interrupt requested for npm test; waiting for partial output");
 	});
 
+	test("custom editors inherit the background-job navigation callbacks", () => {
+		const callbacks = {
+			onNavigateToRunningWork: vi.fn(() => true),
+			onNavigateToBackgroundJobs: vi.fn(() => true),
+			onOpenBackgroundJobs: vi.fn(() => true),
+			onBlurBackgroundJobs: vi.fn(),
+		};
+		const defaultEditor: any = { ...callbacks, actionHandlers: new Map(), borderColor: undefined };
+		const customEditor: any = {
+			actionHandlers: new Map(),
+			setText: vi.fn(),
+		};
+		const fakeThis: any = {
+			editor: { getExpandedText: () => "draft", getText: () => "collapsed" },
+			defaultEditor,
+			editorContainer: { clear: vi.fn(), addChild: vi.fn() },
+			ui: { setFocus: vi.fn(), requestRender: vi.fn() },
+			autocompleteProvider: undefined,
+		};
+
+		proto.setCustomEditorComponent.call(fakeThis, () => customEditor);
+
+		expect(customEditor.onNavigateToBackgroundJobs()).toBe(true);
+		expect(customEditor.onOpenBackgroundJobs()).toBe(true);
+		customEditor.onBlurBackgroundJobs();
+		expect(callbacks.onNavigateToBackgroundJobs).toHaveBeenCalledOnce();
+		expect(callbacks.onOpenBackgroundJobs).toHaveBeenCalledOnce();
+		expect(callbacks.onBlurBackgroundJobs).toHaveBeenCalledOnce();
+	});
+
+	test("Escape ignores stalled jobs owned by another session", () => {
+		_registerBashBackgroundJobForTest({
+			...backgroundJob("foreign-bg"),
+			ownerSessionId: "session-b",
+			lastOutputAt: Date.now() - 120_000,
+			promotedAt: Date.now() - 120_000,
+		});
+		const editor: any = { onAction: vi.fn() };
+		const interrupt = vi.fn();
+		const promptInterruptChoice = vi.fn();
+		const fakeThis: any = {
+			defaultEditor: editor,
+			editor: { getText: () => "" },
+			ui: { addInputListener: vi.fn(() => vi.fn()), onDebug: undefined },
+			signalCleanupHandlers: [],
+			session: { isBusy: true, sessionId: "session-a", interrupt },
+			isBashMode: false,
+			getInterruptiblePendingTools: () => [],
+			restoreQueuedMessagesToEditor: vi.fn(),
+			disposeFusionLive: vi.fn(),
+			disposeAgentsLive: vi.fn(),
+			stopWorkingLoader: vi.fn(),
+			showStatus: vi.fn(),
+			armInterruptWatchdog: vi.fn(),
+			promptInterruptChoice,
+		};
+
+		proto.setupKeyHandlers.call(fakeThis);
+		editor.onEscape();
+
+		expect(interrupt).toHaveBeenCalledOnce();
+		expect(promptInterruptChoice).not.toHaveBeenCalled();
+	});
+
 	test("setupKeyHandlers routes empty-composer Up through the running-work surface", () => {
 		const editor: any = { onAction: vi.fn() };
 		const showRunningWorkSelector = vi.fn(() => true);

@@ -25,6 +25,8 @@
  * never part of the mode cycle).
  */
 
+import type { AgentTool } from "@pit/agent-core";
+import { isCoordinatorTool } from "../coordinator/index.ts";
 import type { ExtensionAPI } from "../extensions/types.ts";
 import type { Orchestration } from "../fusion/types.ts";
 import { createExitPlanToolDefinition } from "../permissions/exit-plan-tool.ts";
@@ -123,6 +125,8 @@ export function reconcileFusionModeInvariant(
 export interface PermissionsExtensionOptions {
 	cwd: string;
 	checker: PermissionChecker;
+	/** Resolves the live active definition so coordinator identity cannot be inferred from its name. */
+	getActiveTool?: (toolName: string) => AgentTool | undefined;
 	/** Optional callback fired whenever a decision is made (for audit/logging). */
 	onDecision?: (info: { toolName: string; decision: "allow" | "deny"; reason?: string }) => void;
 	/** Fired after the permission mode changes (via /permission-mode, the cycle key, or exit_plan approval). Lets the host swap model roles etc. */
@@ -170,7 +174,11 @@ export function createPermissionsExtension(options: PermissionsExtensionOptions)
 		// the checker itself stays pure and synchronous.
 		pi.on("tool_call", async (event, _ctx) => {
 			const action = describeToolAction(event.toolName, event.input);
-			const decision = checker.check(action);
+			const activeTool = options.getActiveTool?.(event.toolName);
+			const metadata = await checker.resolveMetadata(event.toolName, event.input, {
+				isNativeCoordinator: activeTool !== undefined && isCoordinatorTool(activeTool),
+			});
+			const decision = checker.check(action, metadata);
 			// Resolve the confirm deferral to a real verdict BEFORE anything is
 			// audited or blocked, so the audit callback and the transcript notice only
 			// ever see allow/deny. Never fall through: an unhandled "confirm" here

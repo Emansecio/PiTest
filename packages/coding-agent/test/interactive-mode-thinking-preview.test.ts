@@ -96,7 +96,7 @@ describe("InteractiveMode thinking preview", () => {
 		expect(fakeThis.thinkingPreviewRaw).toBe("let me check the edit-precondition case");
 	});
 
-	test("clearing the preview restores the Thinking… phase ellipsis", () => {
+	test("clearing the preview restores the Thinking phase label", () => {
 		const fakeThis = makeFakeThis();
 		fakeThis.workingMessage = "Thinking…";
 		fakeThis.userInputPauseDepth = 0;
@@ -105,7 +105,7 @@ describe("InteractiveMode thinking preview", () => {
 		handleThinkingPreviewEvent.call(fakeThis, thinkingDelta("some thought"));
 		clearThinkingPreview.call(fakeThis);
 		expect(stripAnsi(String(fakeThis.setDetailSuffix.mock.calls.at(-1)![0]))).toBe("");
-		expect(setMessage).toHaveBeenCalledWith("Thinking…");
+		expect(setMessage).toHaveBeenCalledWith("Thinking");
 	});
 
 	test("ignores whitespace-only deltas: no accumulation, no repaint", () => {

@@ -27,7 +27,14 @@ import { LruMap } from "../lru-map.ts";
 import { createRegexTestDeadline } from "../regex-budget.ts";
 import { PATH_KEY_ALIASES } from "../tools/argument-prep.ts";
 import { findMatchingCommandRule, findMatchingGlob, normalizeTargetPath, wasRegexBudgetExceeded } from "./matcher.ts";
-import { EXTENSION_TOOL_SIDE_EFFECTS, isPlanBlockingSideEffect, type ToolSideEffect } from "./side-effect.ts";
+import {
+	EXTENSION_TOOL_SIDE_EFFECTS,
+	isPlanBlockingSideEffect,
+	type PermissionCheckMetadata,
+	type PermissionMetadataContext,
+	type PermissionMetadataResolver,
+	type ToolSideEffect,
+} from "./side-effect.ts";
 import {
 	BUILTIN_DANGEROUS_COMMANDS,
 	BUILTIN_SENSITIVE_PATHS,
@@ -172,6 +179,7 @@ export class PermissionChecker {
 	private ctx: PermissionContext;
 	/** Session-refreshed side-effect overrides (extension tools, opaque defaults). */
 	private sideEffectOverrides = new Map<string, ToolSideEffect>();
+	private metadataResolver: PermissionMetadataResolver | undefined;
 
 	constructor(ctx: PermissionContext) {
 		this.ctx = ctx;
@@ -209,6 +217,24 @@ export class PermissionChecker {
 	 */
 	setToolSideEffects(entries: Iterable<readonly [string, ToolSideEffect]>): void {
 		this.sideEffectOverrides = new Map(entries);
+	}
+
+	/** Install the trusted host resolver used before read-only coordinator calls. */
+	setMetadataResolver(resolver: PermissionMetadataResolver | undefined): void {
+		this.metadataResolver = resolver;
+	}
+
+	/** Resolve host authorization facts; resolver failures remain fail-closed. */
+	async resolveMetadata(
+		toolName: string,
+		input: Record<string, unknown>,
+		context: PermissionMetadataContext,
+	): Promise<PermissionCheckMetadata | undefined> {
+		try {
+			return await this.metadataResolver?.(toolName, input, context);
+		} catch {
+			return undefined;
+		}
 	}
 
 	/** Resolve side-effect class for a tool name (overrides → ctx → builtins). */
@@ -256,7 +282,7 @@ export class PermissionChecker {
 	}
 
 	/** Public entry point. */
-	check(action: PermissionAction): PermissionDecision {
+	check(action: PermissionAction, metadata?: PermissionCheckMetadata): PermissionDecision {
 		const { settings, mode } = this.ctx;
 
 		// Explicit tool-level deny always wins, in every mode (supports globs).
@@ -267,7 +293,7 @@ export class PermissionChecker {
 		// plan and ask share ONE read-only gate — they differ only in the prompt
 		// posture injected by the permissions extension, never in enforcement.
 		if (mode === "plan" || mode === "ask") {
-			return this.checkReadOnly(action, mode);
+			return this.checkReadOnly(action, mode, metadata);
 		}
 
 		// auto (and confirm, which shares this whole chain) — writes and commands
@@ -438,7 +464,11 @@ export class PermissionChecker {
 	 * rules. `mode` only shapes the deny REASON — the model is told which stance it
 	 * is actually in, so "switch to auto" advice is never misattributed.
 	 */
-	private checkReadOnly(action: PermissionAction, mode: "plan" | "ask"): PermissionDecision {
+	private checkReadOnly(
+		action: PermissionAction,
+		mode: "plan" | "ask",
+		metadata?: PermissionCheckMetadata,
+	): PermissionDecision {
 		const label = mode === "ask" ? "Ask" : "Plan";
 		if (action.type === "write" || action.type === "exec") {
 			return { decision: "deny", reason: `${label} mode is read-only — tool "${action.toolName}" is blocked.` };
@@ -451,6 +481,17 @@ export class PermissionChecker {
 				decision: "deny",
 				reason: `${label} mode blocks MCP tools (they may mutate). Switch to auto mode to use "${action.toolName}".`,
 			};
+		}
+
+		// The host may authorize coordinator delegation only after deriving this
+		// fact from the effective child tool catalog and worktree request. Missing
+		// metadata remains fail-closed; model-supplied args are never consulted.
+		if (
+			action.type === "tool" &&
+			COORDINATOR_TOOL_NAMES.has(action.toolName) &&
+			metadata?.readOnlyDelegation === true
+		) {
+			return { decision: "allow" };
 		}
 
 		if (action.type === "tool") {

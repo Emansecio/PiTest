@@ -48,13 +48,14 @@ Monorepo (npm workspaces). Four packages:
 
 Turn flow: user input → `agent-session.ts` → `agent-loop.ts` → tool dispatch/execution
 → compaction check → provider call. `agent-session.ts` owns lifecycle orchestration,
-prompt/session state, compaction, verification and self-review seams. New separable
-behaviors should normally live in built-in extensions.
+prompt/session state, compaction, verification and self-review seams. Verification
+command lifecycle ownership is split with `core/tools/bash.ts`,
+`core/verification/pending-checks.ts`, and `core/tools/goal-complete.ts`. New
+separable behaviors should normally live in built-in extensions.
 
 ## Documentation layout
 
 - `docs/agents/` — agent-facing maps (`already-built`, prevention layers, workflow).
-- `docs/proposals/` — design proposals.
 - `docs/token-economy-tuning.md` — `PIT_*` token-economy tuning flags.
 - `Taxonomia.md` — product/architecture area map (linked from README).
 - Package user docs live under `packages/*/docs/` (especially `packages/coding-agent/docs/`).

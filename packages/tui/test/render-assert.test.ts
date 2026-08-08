@@ -1,7 +1,13 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
 import { encodeKitty } from "../src/terminal-image.js";
-import { assertComponentWidth, type Component, setRenderAssertEnabled, TUI } from "../src/tui.js";
+import {
+	assertComponentWidth,
+	type Component,
+	sanitizeRenderFaultMessage,
+	setRenderAssertEnabled,
+	TUI,
+} from "../src/tui.js";
 import { visibleWidth } from "../src/utils.js";
 import { VirtualTerminal } from "./virtual-terminal.js";
 
@@ -21,6 +27,14 @@ class FixedComponent implements Component {
 	}
 	invalidate(): void {}
 }
+
+describe("render-fault sanitization", () => {
+	it("removes C1 controls as well as C0 controls", () => {
+		const sanitized = sanitizeRenderFaultMessage("before\u0080middle\u009fafter");
+		assert.equal(sanitized, "before middle after");
+		assert.doesNotMatch(sanitized, /[\u0080-\u009f]/);
+	});
+});
 
 describe("per-component render width assert", () => {
 	it("does not throw when every line fits", () => {

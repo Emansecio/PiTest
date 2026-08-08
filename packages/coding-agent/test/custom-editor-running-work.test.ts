@@ -59,6 +59,21 @@ describe("CustomEditor running-work navigation", () => {
 		expect(editor.getText()).toBe("older prompt");
 	});
 
+	test("Down focuses background jobs and Enter opens the focused chip", () => {
+		const editor = makeEditor();
+		const onNavigate = vi.fn(() => true);
+		const onOpen = vi.fn(() => true);
+		editor.onNavigateToBackgroundJobs = onNavigate;
+		editor.onOpenBackgroundJobs = onOpen;
+
+		editor.handleInput("\x1b[B");
+		editor.handleInput("\r");
+
+		expect(onNavigate).toHaveBeenCalledOnce();
+		expect(onOpen).toHaveBeenCalledOnce();
+		expect(editor.getText()).toBe("");
+	});
+
 	test("Up keeps editing non-empty content without invoking running work", () => {
 		const editor = makeEditor();
 		const onNavigate = vi.fn(() => true);

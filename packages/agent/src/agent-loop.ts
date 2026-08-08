@@ -179,6 +179,60 @@ function resolveRoundWallClockMs(configValue?: number): number {
 	return parsed;
 }
 
+/** Race stream construction against cancellation and the round's remaining wall-clock budget. */
+function raceStreamConstruction<T>(
+	pending: Promise<T>,
+	signal: AbortSignal,
+	wallClockMs: number,
+	remainingMs: number | undefined,
+	onTimeout: () => void,
+): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		let settled = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const cleanup = () => {
+			if (timer !== undefined) clearTimeout(timer);
+			signal.removeEventListener("abort", onAbort);
+		};
+		const finish = (settle: (value: any) => void, value: unknown) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			settle(value);
+		};
+		const onAbort = () => finish(reject, new Error("Request was aborted"));
+		const onWallClock = () => {
+			if (settled) return;
+			const error = new RoundWallClockTimeoutError(wallClockMs);
+			finish(reject, error);
+			onTimeout();
+			recordDiagnostic({
+				category: "stream.wall-clock-timeout",
+				level: "warn",
+				source: "agent-loop.streamAssistantResponse",
+				context: { ms: wallClockMs, note: "stream construction" },
+			});
+		};
+
+		pending.then(
+			(value) => finish(resolve, value),
+			(error) => finish(reject, error),
+		);
+		if (signal.aborted) {
+			onAbort();
+			return;
+		}
+		signal.addEventListener("abort", onAbort, { once: true });
+		if (remainingMs === undefined) return;
+		if (remainingMs <= 0) {
+			onWallClock();
+			return;
+		}
+		timer = setTimeout(onWallClock, remainingMs);
+		(timer as { unref?: () => void }).unref?.();
+	});
+}
+
 /**
  * Default hard backstop on model turns per `runAgentLoop` invocation when a
  * caller does not set `config.maxTurns`. High enough to never bite a legitimate
@@ -837,17 +891,31 @@ async function streamAssistantResponse(
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
 	let drainStreamUpdates: (() => Promise<void>) | undefined;
+	const roundWallClockMs = resolveRoundWallClockMs(config.roundWallClockMs);
+	const roundDeadline = roundWallClockMs > 0 ? performance.now() + roundWallClockMs : undefined;
 
 	// Single cleanup point: every exit path (normal returns, TTSR interrupt, and
 	// — the case the per-return removals missed — an exception from streamFunction,
 	// response.result(), or the `for await`) runs the finally, so the abort
 	// listener is never left attached to the outer run signal.
 	try {
-		const response = await streamFunction(config.model, llmContext, {
-			...config,
-			apiKey: resolvedApiKey,
-			signal: ttsrAbort.signal,
-		});
+		if (ttsrAbort.signal.aborted) {
+			throw new Error("Request was aborted");
+		}
+		const streamPending = Promise.resolve(
+			streamFunction(config.model, llmContext, {
+				...config,
+				apiKey: resolvedApiKey,
+				signal: ttsrAbort.signal,
+			}),
+		);
+		const response = await raceStreamConstruction(
+			streamPending,
+			ttsrAbort.signal,
+			roundWallClockMs,
+			roundDeadline === undefined ? undefined : roundDeadline - performance.now(),
+			() => ttsrAbort.abort(),
+		);
 
 		// Delta coalescing: accumulate consecutive *_delta events of the same kind
 		// and contentIndex, emitting at most once per 16ms (60fps frame budget).
@@ -940,11 +1008,16 @@ async function streamAssistantResponse(
 		// Round watchdog: hard wall-clock ceiling over the whole stream attempt.
 		// Provider-agnostic on purpose — wrapping here covers every provider with
 		// one guard instead of threading a second timeout through each SSE loop.
-		const roundWallClockMs = resolveRoundWallClockMs(config.roundWallClockMs);
+		const remainingRoundWallClockMs =
+			roundDeadline === undefined ? undefined : Math.ceil(roundDeadline - performance.now());
+		if (remainingRoundWallClockMs !== undefined && remainingRoundWallClockMs <= 0) {
+			ttsrAbort.abort();
+			throw new RoundWallClockTimeoutError(roundWallClockMs);
+		}
 		const eventSource =
-			roundWallClockMs > 0
+			remainingRoundWallClockMs !== undefined
 				? iterateWithWallClock(response, {
-						wallClockMs: roundWallClockMs,
+						wallClockMs: remainingRoundWallClockMs,
 						// Cancel just this stream (frees the socket); the outer run signal
 						// stays clean so the session-level retry can start a fresh attempt.
 						onTimeout: () => ttsrAbort.abort(),
@@ -1137,7 +1210,7 @@ async function streamAssistantResponse(
 			// it up and the standard retry/fallback path takes over, instead of the
 			// run pending until an external orchestrator kills the process.
 			await drainStreamUpdates?.().catch(() => {});
-			const errorTurn = buildErrorTurn(config.model, err.message);
+			const errorTurn = buildErrorTurn(config.model, new RoundWallClockTimeoutError(roundWallClockMs).message);
 			await publishFinalAssistantMessage(context, errorTurn, addedPartial, emit);
 			return errorTurn;
 		}
@@ -2253,6 +2326,13 @@ async function executePreparedToolCall(
 		} catch {
 			executeCtx = undefined;
 		}
+	}
+	if (abortSources) {
+		executeCtx = {
+			...(executeCtx ?? {}),
+			runSignal: abortSources.runSignal,
+			cancelSignal: abortSources.cancelSignal,
+		};
 	}
 
 	try {

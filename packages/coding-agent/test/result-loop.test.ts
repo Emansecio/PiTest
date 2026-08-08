@@ -87,7 +87,7 @@ describe("result-only doom-loop (thrash) detector", () => {
 
 	it("stays silent (no double-steer) when args are identical — the args-keyed ladder owns it", async () => {
 		const harness = await createHarness({
-			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 2 } } },
+			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 2, cooldownMs: 0 } } },
 			tools: [makeConstantErrorTool("repeater")],
 		});
 		harnesses.push(harness);

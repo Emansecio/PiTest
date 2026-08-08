@@ -162,6 +162,45 @@ describe("withRunSlot", () => {
 		expect(completed).toEqual(["detached", "parent"]);
 	});
 
+	it("reacquires accounting after per-tool cancellation before the cancelled parent settles", async () => {
+		setEnv("PIT_SUBAGENT_MAX_CONCURRENCY", "1");
+		const toolController = new AbortController();
+		const agentController = new AbortController();
+		let markCompetitorStarted: (() => void) | undefined;
+		const competitorStarted = new Promise<void>((resolve) => {
+			markCompetitorStarted = resolve;
+		});
+		let releaseCompetitor: (() => void) | undefined;
+		const competitorGate = new Promise<void>((resolve) => {
+			releaseCompetitor = resolve;
+		});
+		let competitor: Promise<void> | undefined;
+		let parentSettled = false;
+		const parent = withRunSlot(agentController.signal, async () => {
+			await yieldRunSlotWhile(toolController.signal, async () => {
+				competitor = withoutLease(() =>
+					withRunSlot(undefined, async () => {
+						markCompetitorStarted?.();
+						await competitorGate;
+					}),
+				);
+				await competitorStarted;
+				toolController.abort(new Error("aborted: one tool only"));
+				agentController.abort(new Error("aborted: whole agent"));
+			});
+		}).then(() => {
+			parentSettled = true;
+		});
+
+		await competitorStarted;
+		await sleep(20);
+		expect(parentSettled).toBe(false);
+		expect(slotStats()).toEqual({ active: 1, queued: 1 });
+		releaseCompetitor?.();
+		await Promise.all([parent, competitor]);
+		expect(slotStats()).toEqual({ active: 0, queued: 0 });
+	});
+
 	it("reports active/queued in slotStats while a run is held", async () => {
 		setEnv("PIT_SUBAGENT_MAX_CONCURRENCY", "1");
 		let release: () => void = () => {};

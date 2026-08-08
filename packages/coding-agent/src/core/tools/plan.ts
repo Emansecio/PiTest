@@ -38,8 +38,7 @@ const stepSchema = Type.Object(
 		),
 		verify_command: Type.Optional(
 			Type.String({
-				description:
-					"Executable command that proves this step is done. Runs automatically on step_done (60s timeout).",
+				description: "Executable command that proves this step is done. Runs automatically on step_done.",
 			}),
 		),
 		verify_description: Type.Optional(
@@ -102,10 +101,14 @@ export interface PlanToolOptions {
 	 * the same infra `!`-prefixed shell commands use) — override only for tests.
 	 */
 	runStepVerify?: PlanStepVerifyRunner;
+	/** Per-command timeout in milliseconds. Default 60000; settings clamp it to 1..600000. */
+	verifyTimeoutMs?: number;
+	/** Host authorization check for executable verification. Omit only outside a permission-managed session. */
+	canExecuteVerify?: () => boolean;
 }
 
-/** Hard timeout for a step's verify command. Fixed by design — not model/user configurable. */
-const STEP_VERIFY_TIMEOUT_MS = 60_000;
+const DEFAULT_STEP_VERIFY_TIMEOUT_MS = 60_000;
+const MAX_STEP_VERIFY_TIMEOUT_MS = 600_000;
 /** Byte budget for the head+tail excerpt of verify output kept in a failure result. */
 const VERIFY_OUTPUT_MAX_BYTES = 2000;
 
@@ -145,8 +148,9 @@ async function runStepVerify(
 	cwd: string,
 	runner: PlanStepVerifyRunner,
 	callerSignal: AbortSignal | undefined,
+	timeoutMs: number,
 ): Promise<VerifyOutcome> {
-	const timeoutSignal = AbortSignal.timeout(STEP_VERIFY_TIMEOUT_MS);
+	const timeoutSignal = AbortSignal.timeout(timeoutMs);
 	const signal = callerSignal ? AbortSignal.any([callerSignal, timeoutSignal]) : timeoutSignal;
 	let result: BashResult;
 	try {
@@ -158,7 +162,7 @@ async function runStepVerify(
 	if (result.cancelled) {
 		return {
 			ok: false,
-			message: verifyFailureMessage(cmd, `timed out after ${STEP_VERIFY_TIMEOUT_MS}ms`, result.output),
+			message: verifyFailureMessage(cmd, `timed out after ${timeoutMs}ms`, result.output),
 		};
 	}
 	if (result.exitCode !== 0) {
@@ -199,6 +203,12 @@ export function createPlanToolDefinition(
 	options?: PlanToolOptions,
 ): ToolDefinition<typeof planSchema, PlanToolDetails> {
 	const verifyRunner = options?.runStepVerify ?? defaultRunStepVerify;
+	const verifyTimeoutMs =
+		typeof options?.verifyTimeoutMs === "number" &&
+		Number.isFinite(options.verifyTimeoutMs) &&
+		options.verifyTimeoutMs >= 1
+			? Math.min(Math.floor(options.verifyTimeoutMs), MAX_STEP_VERIFY_TIMEOUT_MS)
+			: DEFAULT_STEP_VERIFY_TIMEOUT_MS;
 	const snapshot = () => {
 		const mgr = getCurrentPlanManager();
 		const cur = mgr?.current();
@@ -263,6 +273,12 @@ export function createPlanToolDefinition(
 					// executes anything, exactly like before this feature existed.
 					const verifyDisabled = isStepVerifyDisabled();
 					if (target.verifyCmd && !verifyDisabled) {
+						if (options?.canExecuteVerify?.() === false) {
+							return fail(
+								"step_done",
+								"Executable plan verification is blocked in the current read-only permission mode. Switch to Auto or Confirm before completing this verified step.",
+							);
+						}
 						// Validate dependsOn BEFORE spending a verify run — mirrors
 						// PlanManager.stepDone's own check so an unmet dependency never pays for
 						// a command execution it was always going to reject anyway.
@@ -275,7 +291,7 @@ export function createPlanToolDefinition(
 							);
 						}
 
-						const outcome = await runStepVerify(target.verifyCmd, cwd, verifyRunner, signal);
+						const outcome = await runStepVerify(target.verifyCmd, cwd, verifyRunner, signal, verifyTimeoutMs);
 						if (!outcome.ok) {
 							// Fail-closed: the step stays exactly as it was — never marked done.
 							return {

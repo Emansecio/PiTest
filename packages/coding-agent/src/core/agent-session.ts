@@ -110,7 +110,14 @@ import {
 import { extractToolFileOp } from "./compaction/utils.js";
 import { composeContext, isContextComposerDisabled } from "./conditioning/context-composer.ts";
 import { buildAsyncDeliveryBody } from "./coordinator/async-delivery.ts";
-import { retargetToolsForWorktree, SubagentRegistry, spawnSubagent } from "./coordinator/index.ts";
+import {
+	COORDINATOR_TOOL_NAMES,
+	isCoordinatorTool,
+	retargetToolsForWorktree,
+	SubagentRegistry,
+	spawnSubagent,
+} from "./coordinator/index.ts";
+import type { SubagentRequestPolicy } from "./coordinator/types.ts";
 import { debugVerifyContextPrompt, maybeRunDebugVerify } from "./debug-verify.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import {
@@ -304,7 +311,7 @@ import {
 	IN_TURN_CHECK_MAX_IGNORED,
 	isInTurnCheckSteerDisabled,
 } from "./verification/in-turn-check.ts";
-import { isVerificationJobCommand, pendingVerificationJobs } from "./verification/pending-checks.ts";
+import { isVerificationJobCommand, verificationJobVerdict } from "./verification/pending-checks.ts";
 import {
 	type CheckResult,
 	classifyCrossFileEscape,
@@ -354,6 +361,8 @@ export interface AgentSessionConfig {
 	baseToolsOverride?: Record<string, AgentTool>;
 	/** Mutable ref used by Agent to access the current ExtensionRunner */
 	extensionRunnerRef?: { current?: ExtensionRunner };
+	/** Builds provider hooks bound to the active parent or child run signal. */
+	requestPolicyHooks?: (signal?: AbortSignal) => Pick<SubagentRequestPolicy, "onPayload" | "onResponse">;
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
 	/** When true, suppress the hashline-anchor block normally appended to full-file reads. */
@@ -748,6 +757,9 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
 	private _cwd: string;
 	private _extensionRunnerRef?: { current?: ExtensionRunner };
+	private readonly _requestPolicyHooks:
+		| ((signal?: AbortSignal) => Pick<SubagentRequestPolicy, "onPayload" | "onResponse">)
+		| undefined;
 	private _initialActiveToolNames?: string[];
 	private _allowedToolNames?: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
@@ -978,6 +990,8 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	private _userInterrupted = false;
 	/** Wired from coordinator: abort all detached op:"spawn" subagents on Esc. */
 	_abortDetachedSubagents: (() => void) | undefined;
+	/** Wired from coordinator: release all session-scoped coordinator resources. */
+	_disposeCoordinator: (() => Promise<void>) | undefined;
 	// Native verification gate: `_turnTouchedFiles` arms it (set when a file tool
 	// writes/edits this prompt cycle), `_inVerification` guards re-entry, and
 	// `_verificationAbort` cancels an in-flight check on interrupt/dispose.
@@ -1051,6 +1065,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		this._cwd = config.cwd;
 		this._modelRegistry = config.modelRegistry;
 		this._extensionRunnerRef = config.extensionRunnerRef;
+		this._requestPolicyHooks = config.requestPolicyHooks;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
@@ -1984,15 +1999,20 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 				);
 				if (result?.block) return result;
 				// Permissions run early in emitToolCall; grounding/hooks may rewrite
-				// args afterwards. Re-check the deny floor on the final args.
-				if (argsMutation?.mutated && this.permissionChecker) {
+				// args afterwards. Coordinator args are always rechecked because nested
+				// rewrites are not guaranteed to trip the shallow mutation tracker.
+				if ((argsMutation?.mutated || COORDINATOR_TOOL_NAMES.has(toolCall.name)) && this.permissionChecker) {
 					const action = describeToolAction(toolCall.name, args as Record<string, unknown>);
-					const decision = this.permissionChecker.check(action);
-					// Confirm mode: the user approved the args the extension layer showed
-					// them, and those args have since been rewritten. Re-ask rather than
-					// inherit the stale approval — "Allow for session" already short-circuits
-					// this, so the extra prompt only appears when the grant was one-shot AND
-					// a later handler moved the target.
+					const activeTool = this.agent.state.tools.find((tool) => tool.name === toolCall.name);
+					const metadata = await this.permissionChecker.resolveMetadata(
+						toolCall.name,
+						args as Record<string, unknown>,
+						{ isNativeCoordinator: activeTool !== undefined && isCoordinatorTool(activeTool) },
+					);
+					const decision = this.permissionChecker.check(action, metadata);
+					// Confirm mode re-asks rather than inheriting an approval from the early
+					// handler. "Allow for session" already short-circuits this; a one-shot
+					// coordinator approval may prompt again at the final security boundary.
 					const resolved =
 						decision.decision === "confirm"
 							? await resolveConfirmDecision(this.permissionChecker, action, decision.reason)
@@ -3131,14 +3151,51 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		// First synchronous step: mark disposed so a subagent
 		// settlement during teardown is dropped immediately.
 		this._disposed = true;
-		this._disposePromise = this._disposeAfterAbort();
+		// Direct SDK callers do not emit session_shutdown before dispose. Abort the
+		// registered coordinator work before waiting for the principal to become idle.
+		const abortDetachedSubagents = this._abortDetachedSubagents;
+		this._abortDetachedSubagents = undefined;
+		const disposeCoordinator = this._disposeCoordinator;
+		this._disposeCoordinator = undefined;
+		let coordinatorDisposePromise: Promise<void> | undefined;
+		try {
+			abortDetachedSubagents?.();
+		} catch (error) {
+			recordDiagnostic({
+				category: "error.isolated",
+				level: "error",
+				source: "agent-session.dispose",
+				context: { note: error instanceof Error ? error.message : String(error) },
+			});
+		}
+		try {
+			coordinatorDisposePromise = disposeCoordinator?.();
+		} catch (error) {
+			recordDiagnostic({
+				category: "error.isolated",
+				level: "error",
+				source: "agent-session.dispose",
+				context: { note: error instanceof Error ? error.message : String(error) },
+			});
+		}
+		this._disposePromise = this._disposeAfterAbort(coordinatorDisposePromise);
 		return this._disposePromise;
 	}
 
-	private async _disposeAfterAbort(): Promise<void> {
+	private async _disposeAfterAbort(coordinatorDisposePromise?: Promise<void>): Promise<void> {
 		// Abort the Agent principal, Fusion, branch summary, and cooperative tools;
 		// waitForIdle is bounded inside abort() so teardown cannot deadlock.
 		await this.abort();
+		try {
+			await coordinatorDisposePromise;
+		} catch (error) {
+			recordDiagnostic({
+				category: "error.isolated",
+				level: "error",
+				source: "agent-session.dispose",
+				context: { note: error instanceof Error ? error.message : String(error) },
+			});
+		}
 		// First synchronous step: mark disposed so a subagent that settles during/after
 		// teardown is dropped by _deliverAsyncResult instead of mutating a dead session.
 		// Disarm the cache-keepalive: its unref'd idle timer would otherwise survive
@@ -3370,6 +3427,22 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		return this._cacheRetention;
 	}
 
+	/** Request behavior inherited by every subagent owned by this session. */
+	getSubagentRequestPolicy(signal?: AbortSignal): SubagentRequestPolicy {
+		const hooks = this._requestPolicyHooks?.(signal) ?? {
+			onPayload: this.agent.onPayload,
+			onResponse: this.agent.onResponse,
+		};
+		return {
+			streamFn: this.agent.streamFn,
+			...hooks,
+			transport: this.agent.transport,
+			maxRetryDelayMs: this.agent.maxRetryDelayMs,
+			idleTimeoutMs: this.agent.idleTimeoutMs,
+			thinkingBudgets: this.agent.thinkingBudgets,
+		};
+	}
+
 	/** The id under which this session is registered on the inter-agent message bus, if any. */
 	get messagingId(): string | undefined {
 		return this._messagingId;
@@ -3458,6 +3531,11 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		return this._goal.summaryText();
 	}
 
+	/** Read-only rendering of the last persisted completion receipt. */
+	goalReceiptText(): string {
+		return this._goal.receiptText();
+	}
+
 	/** Whether the agent should auto-continue after the current prompt. */
 	goalShouldAutoContinue(): boolean {
 		return this._goal.shouldAutoContinue();
@@ -3539,6 +3617,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		const m = message as { usage?: TokenUsageComponents; stopReason?: string } | undefined;
 		this._tokenGovernor.recordMain(consumedTokens(m?.usage), m?.usage?.cost?.total);
 		this._goal.recordIteration();
+		this._goal.reconcileCompletedReceiptUsage();
 		if (typeof m?.stopReason === "string") this._goal.onInterrupted(m.stopReason);
 		// Persist progress so token/iteration counts survive /reload. Status
 		// changes flush immediately; otherwise writes are throttled.
@@ -3700,7 +3779,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 					}
 				}
 			}
-			if (latestGoal && latestGoal.status !== "complete") {
+			if (latestGoal) {
 				this._goal.restore(latestGoal);
 				const restoredGoal = this._goal.get();
 				this._tokenGovernor.restoreSpend(
@@ -3708,7 +3787,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 					restoredGoal?.tokenBudget,
 					restoredGoal?.tokenSpendSplit,
 				);
-				this._activateGoalTool(true);
+				this._activateGoalTool(latestGoal.status !== "complete");
 			}
 			if (latestTodo) this._todo.restore(latestTodo);
 			if (latestPlan) this._plan.restore(latestPlan);
@@ -3933,7 +4012,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 				? `run the project's check (\`${checkCmd}\`)`
 				: "run the project's check command (look for check/typecheck/lint/test scripts) or the tests covering your change";
 			promptGuidelines.push(
-				`Verify before replying: after modifying code, ${checkRef} and fix what it surfaces BEFORE writing your final answer. Never claim success on an unrun or failing check, and do not background the check and answer while it is still running.`,
+				`Verify before replying: after modifying code, ${checkRef} and fix what it surfaces BEFORE writing your final answer. Command lifecycle: run finite commands normally; verification commands still running after 10 seconds are promoted automatically, continue useful independent work without starting the same check again, and never claim success or call goal_complete while verification is pending.`,
 			);
 		}
 
@@ -4520,8 +4599,8 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 
 	/** Verification jobs still running that no drain this session has handed off yet. */
 	private _undrainedVerificationJobs(): BashBackgroundJob[] {
-		return pendingVerificationJobs(listBashBackgroundJobs(this.sessionId)).filter(
-			(j) => !this._handledCheckJobIds.has(j.id),
+		return listBashBackgroundJobs(this.sessionId).filter(
+			(j) => isVerificationJobCommand(j.command) && !this._handledCheckJobIds.has(j.id),
 		);
 	}
 
@@ -4537,7 +4616,9 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 		for (const id of this._handledCheckJobIds) {
 			if (!liveIds.has(id)) this._handledCheckJobIds.delete(id);
 		}
-		for (const job of pendingVerificationJobs(live)) this._handledCheckJobIds.add(job.id);
+		for (const job of live) {
+			if (isVerificationJobCommand(job.command)) this._handledCheckJobIds.add(job.id);
+		}
 	}
 
 	/**
@@ -4564,7 +4645,13 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 				const ids = new Set(pending.map((j) => j.id));
 				const label = pending.length === 1 ? pending[0].command : `${pending.length} background checks`;
 				const startMs = Date.now();
-				const deadline = startMs + settings.maxWaitMs;
+				const jobDeadlines = pending
+					.map((job) => job.deadlineAt)
+					.filter((value): value is number => value !== undefined);
+				const deadline = Math.min(
+					startMs + settings.maxWaitMs,
+					...(jobDeadlines.length > 0 ? jobDeadlines : [Number.POSITIVE_INFINITY]),
+				);
 
 				this._inPendingChecksDrain = true;
 				try {
@@ -4599,7 +4686,9 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 				// An exited job whose exitCode stayed `null` (spawn error / waitForChildProcess
 				// rejection — see tools/bash.ts .catch) never actually succeeded, so it must
 				// count as a non-success, not a silent pass.
-				const failed = jobs.filter((j) => j.exited && j.exitCode !== 0);
+				const failed = jobs.filter(
+					(j) => verificationJobVerdict(j) === "failed" || verificationJobVerdict(j) === "timed-out",
+				);
 				const running = jobs.filter((j) => !j.exited);
 				if (failed.length === 0 && running.length === 0) {
 					this.emit({ type: "pending_check", phase: "passed", command: label });
@@ -5718,6 +5807,7 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 					modelRegistry: this.modelRegistry,
 					availableTools: this.agent.state.tools as AgentTool[],
 					convertToLlm: (m) => m as never,
+					requestPolicy: (signal) => this.getSubagentRequestPolicy(signal),
 				},
 				{
 					prompt: args.prompt,
@@ -6529,8 +6619,8 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 	 * with the run signal in the loop — and the run continues with the remaining
 	 * tools. Returns true if a live per-tool controller matched.
 	 */
-	cancelTool(toolCallId: string): boolean {
-		return this.agent.cancelTool(toolCallId);
+	cancelTool(toolCallId: string, options?: { preserveCoordinatorChildren?: boolean }): boolean {
+		return this.agent.cancelTool(toolCallId, options);
 	}
 
 	// =========================================================================
@@ -7247,6 +7337,14 @@ export class AgentSession implements CompactionHost, FusionHost, CacheKeepaliveH
 				shellPath,
 				enableSparePool: true,
 				ownerSessionId: this.sessionId,
+			},
+			goal_complete: { getOwnerSessionId: () => this.sessionId },
+			plan: {
+				verifyTimeoutMs: this.settingsManager.getVerificationSettings().planStepTimeoutMs,
+				canExecuteVerify: () => {
+					const mode = this.permissionChecker?.mode;
+					return mode !== "plan" && mode !== "ask";
+				},
 			},
 			grep: { engine: this.settingsManager.getGrepSettings().engine },
 			find: { engine: this.settingsManager.getGrepSettings().engine === "fff" ? "fff" : "fd" },

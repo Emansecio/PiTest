@@ -13,6 +13,20 @@ function runExec(def: { execute: (...args: any[]) => any }, input: unknown) {
 	return def.execute("call", input, undefined, undefined, undefined);
 }
 
+function goalCompleteInput(mgr: GoalManager, summary: string) {
+	const contract = mgr.get()?.contract;
+	if (!contract) throw new Error("active Goal contract required by test helper");
+	return {
+		summary,
+		contractRevision: contract.revision,
+		criteria: contract.criteria.map((criterion) => ({
+			id: criterion.id,
+			outcome: `${criterion.text} completed`,
+			evidence: [{ kind: "claim", note: "verified by the focused test fixture" }],
+		})),
+	};
+}
+
 describe("goal_complete tool", () => {
 	it("is a no-op when no goal is active", async () => {
 		setCurrentGoalManager(undefined);
@@ -29,12 +43,16 @@ describe("goal_complete tool", () => {
 		expect(mgr.shouldAutoContinue()).toBe(true);
 
 		const def = createGoalCompleteToolDefinition("/tmp");
-		const res = await runExec(def, { summary: "all tests pass" });
+		const res = await runExec(def, goalCompleteInput(mgr, "all tests pass"));
 		const details = res.details as GoalCompleteToolDetails;
 		expect(details.completed).toBe(true);
 		expect(details.objective).toBe("Ship the feature");
 		expect(text(res)).toContain("Goal complete: Ship the feature");
 		expect(text(res)).toContain("all tests pass");
+		expect(details.receipt?.safeguards).toMatchObject({
+			selfReview: "not_applicable",
+			impactReview: "not_applicable",
+		});
 		expect(mgr.get()?.status).toBe("complete");
 		expect(mgr.shouldAutoContinue()).toBe(false);
 	});

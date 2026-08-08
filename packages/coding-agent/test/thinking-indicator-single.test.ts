@@ -27,8 +27,23 @@ afterEach(() => {
 	harness = undefined;
 });
 
+/** Strip OSC/SGR so word-boundary matches are not broken by ANSI (e.g. `mThinking`). */
+function stripAnsiForCount(text: string): string {
+	return text.replace(/\x1b\][^\x07]*\x07/g, "").replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+/**
+ * Count on-screen thinking indicators. The footer loader stores phase as
+ * `Thinking…` but paints the compact form `Thinking` (ellipsis dropped — the
+ * spinner already communicates motion; see getWorkingLoaderDisplayMessage).
+ * The in-transcript hidden-thinking label still uses the ellipsis form when it
+ * is not stood down. Match both so this guard tracks the product contract.
+ *
+ * Do not require a trailing `\b` after `…` — the ellipsis is a non-word char, so
+ * `\bThinking…\b` never matches at end-of-string in JS.
+ */
 function countThinking(text: string): number {
-	return text.split("Thinking…").length - 1;
+	return (stripAnsiForCount(text).match(/\bThinking(?:…)?(?!\w)/g) ?? []).length;
 }
 
 /** Minimal TUI stand-in: enough for the component to consider itself live. */

@@ -117,6 +117,43 @@ describe("coordinator N7 digest + op:read", () => {
 		expect(textOf(read)).toContain("needs `name`");
 	});
 
+	it("registers idempotent coordinator cleanup used by direct dispose and session_shutdown", async () => {
+		faux = registerFauxProvider();
+		faux.setResponses([fauxAssistantMessage(bigOutput())]);
+		const model = faux.getModel();
+		const authStorage = AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey(model.provider, "faux-key");
+		let disposeCoordinator: (() => Promise<void>) | undefined;
+		let shutdownHandler: (() => Promise<void>) | undefined;
+		const ext = createCoordinatorExtension({
+			modelRegistry: ModelRegistry.inMemory(authStorage),
+			getParentModel: () => model,
+			getAvailableTools: () => [],
+			convertToLlm: (messages) => convertToLlm(messages),
+			registerDisposeCoordinator: (dispose) => {
+				disposeCoordinator = dispose;
+			},
+		});
+		let taskDef: { execute: (...args: unknown[]) => Promise<unknown> } | undefined;
+		ext({
+			registerTool: (def: { name: string }) => {
+				if (def.name === "task") taskDef = def as never;
+			},
+			on: (_event: string, handler: () => Promise<void>) => {
+				shutdownHandler = handler;
+			},
+		} as never);
+		expect(disposeCoordinator).toBeDefined();
+		if (!disposeCoordinator || !taskDef) return;
+		await exec(taskDef, { op: "run", name: "cleanup", prompt: "produce a lot" });
+		expect(isErr(await exec(taskDef, { op: SUBAGENT_READ_OP, name: "cleanup" }))).toBe(false);
+
+		await disposeCoordinator();
+		expect(isErr(await exec(taskDef, { op: SUBAGENT_READ_OP, name: "cleanup" }))).toBe(true);
+		await expect(disposeCoordinator()).resolves.toBeUndefined();
+		await expect(shutdownHandler?.()).resolves.toBeUndefined();
+	});
+
 	it("M18: pointer, tool description, and schema op are bound to one shared constant", () => {
 		const task = buildTask([fauxAssistantMessage("ok")]);
 		expect(SUBAGENT_READ_OP).toBe("read");

@@ -123,9 +123,8 @@ describe("InteractiveMode.refreshLoaderTrailingSuffix", () => {
 	test("tells the truth while TWO OR MORE cancellable tools are in flight: stop/cancel + ctrl+c", () => {
 		const fakeThis = makeFakeThis(0);
 		const idle = stripAnsi(getLoaderInterruptSuffix.call(fakeThis));
-		// Dense hint grammar: `<key> interrupt`, never "<key> to interrupt".
-		expect(idle).toContain(`${keyText("app.interrupt")} interrupt`);
-		expect(idle).not.toContain("to interrupt");
+		// The action hint reads as a complete instruction instead of two adjacent labels.
+		expect(idle).toContain(`${keyText("app.interrupt")} to interrupt`);
 
 		fakeThis.getInterruptiblePendingTools = () => [
 			{ id: "t1", name: "bash" },
@@ -133,7 +132,7 @@ describe("InteractiveMode.refreshLoaderTrailingSuffix", () => {
 		];
 		const busy = stripAnsi(getLoaderInterruptSuffix.call(fakeThis));
 		expect(busy).toContain("stop/cancel");
-		expect(busy).toContain("ctrl+c interrupt");
+		expect(busy).toContain("ctrl+c to interrupt");
 
 		// A SINGLE tool no longer opens the picker (onEscape interrupts directly),
 		// so the hint must stay the plain one — "stop/cancel" would lie here.

@@ -56,6 +56,22 @@ describe("TUI animation callback isolation", () => {
 		tui.stop();
 	});
 
+	it("honors an explicitly slower callback cadence", () => {
+		const terminal = new VirtualTerminal(40, 10);
+		const tui = new TUI(terminal);
+		let calls = 0;
+		tui.addAnimationCallback(() => {
+			calls++;
+			return false;
+		}, 1000);
+
+		const tick = () => (tui as unknown as TickableTUI).tickAnimations();
+		tick();
+		tick();
+		assert.equal(calls, 1, "back-to-back shared ticks must not invoke a one-second callback twice");
+		tui.stop();
+	});
+
 	it("renders a transient diagnostic when an animation callback throws", async () => {
 		const terminal = new VirtualTerminal(60, 10);
 		const tui = new TUI(terminal);

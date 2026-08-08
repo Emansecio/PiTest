@@ -71,10 +71,12 @@ export class Loader extends Text {
 	// Raw (uncolored) message text, kept so a time-aware color fn can repaint the
 	// label from scratch each frame (see setMessageColorAt / refreshMessageColor).
 	private message: string;
-	// Optional time-aware label color: when set, the message label is recolored
-	// every animation frame from `(text, now)` instead of the static messageColorFn.
+	// Optional time-aware label color. Its clock is quantized to the loader's
+	// visible cadence so a smooth shimmer does not force otherwise identical
+	// terminal repaints at the ticker's 60 Hz sampling rate.
 	// Backward compatible — null by default, so existing static callers are unchanged.
 	private messageColorAtFn: ((text: string, now: number) => string) | null = null;
+	private lastMessageColorSample = -1;
 
 	// Pre-computed once per setIndicator()/setMessage() so the hot tick callback
 	// never calls into the color functions or re-allocates strings beyond the
@@ -175,16 +177,20 @@ export class Loader extends Text {
 
 	setMessage(message: string): void {
 		this.message = message;
-		this.coloredMessage = this.messageColorAtFn
-			? this.messageColorAtFn(message, performance.now())
-			: this.messageColorFn(message);
+		if (this.messageColorAtFn) {
+			const sample = this.messageColorSampleAt(performance.now());
+			this.lastMessageColorSample = sample;
+			this.coloredMessage = this.messageColorAtFn(message, sample);
+		} else {
+			this.coloredMessage = this.messageColorFn(message);
+		}
 		this.updateDisplay();
 	}
 
 	/**
-	 * Opt into a time-aware label color: `fn(text, now)` is called every animation
-	 * frame to repaint the message label (e.g. a shimmer that sweeps across the
-	 * text). Distinct from the static `messageColorFn` (plain suffixes), from
+	 * Opt into a time-aware label color: `fn(text, now)` repaints the message label
+	 * (e.g. a shimmer that sweeps across the text) at the loader's visible cadence.
+	 * Distinct from the static `messageColorFn` (plain suffixes), from
 	 * {@link setElapsedColorFn} (clock), and from pre-colored trailing/detail
 	 * suffixes that keep their own ANSI. Setting this ensures the shared ticker
 	 * is subscribed even for a single frozen indicator frame, and invalidates
@@ -192,7 +198,9 @@ export class Loader extends Text {
 	 */
 	setMessageColorAt(fn: (text: string, now: number) => string): void {
 		this.messageColorAtFn = fn;
-		this.coloredMessage = fn(this.message, performance.now());
+		const sample = this.messageColorSampleAt(performance.now());
+		this.lastMessageColorSample = sample;
+		this.coloredMessage = fn(this.message, sample);
 		this.subscribeAnimation();
 		this.updateDisplay();
 	}
@@ -357,10 +365,19 @@ export class Loader extends Text {
 	 */
 	private refreshMessageColor(now: number): boolean {
 		if (!this.messageColorAtFn) return false;
-		const next = this.messageColorAtFn(this.message, now);
+		const sample = this.messageColorSampleAt(now);
+		if (sample === this.lastMessageColorSample) return false;
+		this.lastMessageColorSample = sample;
+		const next = this.messageColorAtFn(this.message, sample);
 		if (next === this.coloredMessage) return false;
 		this.coloredMessage = next;
 		return true;
+	}
+
+	/** Quantize decorative color motion to a perceptually smooth, visible cadence. */
+	private messageColorSampleAt(now: number): number {
+		const cadence = Math.max(16, Math.min(DEFAULT_INTERVAL_MS, this.intervalMs));
+		return Math.floor(now / cadence) * cadence;
 	}
 
 	setIndicator(indicator?: LoaderIndicatorOptions): void {
@@ -385,14 +402,20 @@ export class Loader extends Text {
 		this.unsubscribeAnimation();
 		// Empty indicator: nothing to tick. A single frozen frame still needs the
 		// ticker when elapsed is enabled (reduced-motion working loader) or a
-		// time-aware label color is set (it repaints every frame).
-		const needsTicker =
-			this.frames.length > 1 ||
-			(this.frames.length === 1 && (this.elapsedEnabled || this.messageColorAtFn !== null));
+		// time-aware label color is set.
+		const needsTicker = this.frames.length > 1 || this.elapsedEnabled || this.messageColorAtFn !== null;
 		if (!needsTicker || !this.ui) {
 			return;
 		}
-		this.animationUnsub = this.ui.addAnimationCallback((now) => this.tick(now));
+		const cadences: number[] = [];
+		if (this.frames.length > 1) cadences.push(this.intervalMs);
+		if (this.frames.length > 0 && this.coloredFrames.length > 1) {
+			cadences.push(PULSE_CYCLE_MS / this.coloredFrames.length);
+		}
+		if (this.messageColorAtFn) cadences.push(Math.min(DEFAULT_INTERVAL_MS, this.intervalMs));
+		if (this.elapsedEnabled) cadences.push(1000);
+		const cadence = Math.max(16, Math.floor(Math.min(...cadences)));
+		this.animationUnsub = this.ui.addAnimationCallback((now) => this.tick(now), cadence);
 	}
 
 	private unsubscribeAnimation(): void {
@@ -434,11 +457,8 @@ export class Loader extends Text {
 	 * the boolean return lets the ticker coalesce a single render per frame.
 	 */
 	private tick(now: number): boolean {
-		if (this.frames.length === 0) {
-			return false;
-		}
-		const frame = this.frameAt(now);
-		const paletteIndex = this.paletteAt(now);
+		const frame = this.frames.length > 0 ? this.frameAt(now) : 0;
+		const paletteIndex = this.frames.length > 0 ? this.paletteAt(now) : 0;
 		const elapsedChanged = this.refreshElapsed();
 		const messageChanged = this.refreshMessageColor(now);
 		if (frame === this.currentFrame && paletteIndex === this.paletteIndex && !elapsedChanged && !messageChanged) {

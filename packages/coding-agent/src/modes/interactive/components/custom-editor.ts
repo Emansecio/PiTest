@@ -14,6 +14,12 @@ export class CustomEditor extends Editor {
 	public onPasteImage?: () => void;
 	/** Move focus from an empty composer to running work. True consumes the Up key. */
 	public onNavigateToRunningWork?: () => boolean;
+	/** Focus the background-job footer chip. True consumes the Down key. */
+	public onNavigateToBackgroundJobs?: () => boolean;
+	/** Open the focused background-job footer chip. */
+	public onOpenBackgroundJobs?: () => boolean;
+	/** Clear footer-chip focus when the user resumes editing. */
+	public onBlurBackgroundJobs?: () => void;
 	/** Handler for extension-registered shortcuts. Returns true if handled. */
 	public onExtensionShortcut?: (data: string) => boolean;
 
@@ -74,6 +80,24 @@ export class CustomEditor extends Editor {
 			// Fall through to editor handling for delete-char-forward when not empty
 		}
 
+		if (
+			this.getText().length === 0 &&
+			!this.isShowingAutocomplete() &&
+			this.keybindings.matches(data, "tui.editor.cursorDown") &&
+			this.onNavigateToBackgroundJobs?.()
+		) {
+			return;
+		}
+
+		if (
+			this.getText().length === 0 &&
+			!this.isShowingAutocomplete() &&
+			this.keybindings.matches(data, "tui.select.confirm") &&
+			this.onOpenBackgroundJobs?.()
+		) {
+			return;
+		}
+
 		// Empty-composer Up can enter the running-work surface. If the host has
 		// nothing actionable it returns false and ordinary prompt history remains
 		// byte-for-byte the parent Editor's responsibility.
@@ -85,6 +109,8 @@ export class CustomEditor extends Editor {
 		) {
 			return;
 		}
+
+		this.onBlurBackgroundJobs?.();
 
 		// Check all other app actions
 		for (const [action, handler] of this.actionHandlers) {

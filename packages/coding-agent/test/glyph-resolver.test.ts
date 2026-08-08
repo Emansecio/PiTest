@@ -32,12 +32,12 @@ describe("isAsciiGlyphMode / glyph resolver", () => {
 		expect(isAsciiGlyphMode({ TERM: "dumb" })).toBe(true);
 	});
 
-	it("gauge falls back to ●/○ under ASCII mode", () => {
+	it("gauge falls back to true ASCII under ASCII mode", () => {
 		expect(resolveGaugeGlyphs({}).filled).toBe(GAUGE_FILLED);
 		expect(resolveGaugeGlyphs({}).empty).toBe(GAUGE_EMPTY);
 		const ascii = resolveGaugeGlyphs({ PIT_ASCII: "1" });
-		expect(ascii.filled).toBe("●");
-		expect(ascii.empty).toBe("○");
+		expect(ascii.filled).toBe("#");
+		expect(ascii.empty).toBe(".");
 	});
 
 	it("tree connectors and fold glyphs fall back under ASCII mode", () => {

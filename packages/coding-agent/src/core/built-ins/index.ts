@@ -10,6 +10,7 @@
 
 import type { AgentTool } from "@pit/agent-core";
 import type { Model } from "@pit/ai";
+import type { SubagentRequestPolicy } from "../coordinator/types.ts";
 import type { ExtensionFactory } from "../extensions/types.ts";
 import { getCurrentGoalManager } from "../goal/goal-manager.ts";
 import type { HooksSettings } from "../hooks/index.ts";
@@ -60,6 +61,10 @@ export interface BuiltInExtensionsOptions {
 	mcp: McpSettings;
 	/** Returns the parent's active model — used by the coordinator. */
 	getParentModel: () => Model<any> | undefined;
+	/** Unified registry + SDK-scoped + exact-current model surface. */
+	getSelectableModels?: () => readonly Model<any>[];
+	/** Parent Agent provider/request behavior, resolved lazily at spawn time. */
+	getSubagentRequestPolicy?: (signal?: AbortSignal) => SubagentRequestPolicy | undefined;
 	/** Returns the parent session's id — used by the coordinator to derive subagent prompt_cache_keys. */
 	getParentSessionId?: () => string | undefined;
 	/** Returns the parent's tool catalog — used by the coordinator. */
@@ -100,6 +105,8 @@ export interface BuiltInExtensionsOptions {
 	) => void;
 	/** Called once with a function that aborts all detached spawns (wired to session.interrupt). */
 	registerAbortDetached?: (abortFn: () => void) => void;
+	/** Called once with the coordinator's idempotent async session cleanup. */
+	registerDisposeCoordinator?: (dispose: () => Promise<void>) => void;
 	/** Forwarded to the coordinator: true when subagent memory should be scoped by agent type. */
 	isScopedHindsightEnabled?: () => boolean;
 	/**
@@ -150,6 +157,7 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 		createPermissionsExtension({
 			cwd: options.cwd,
 			checker: permissionChecker,
+			getActiveTool: (toolName) => options.getAvailableTools().find((tool) => tool.name === toolName),
 			onDecision: options.onPermissionDecision,
 			onModeChange: options.onPermissionModeChange,
 			isFusionPanelReady: options.isFusionPanelReady,
@@ -236,6 +244,8 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 			modelRegistry: options.modelRegistry,
 			permissionChecker,
 			getParentModel: options.getParentModel,
+			getSelectableModels: options.getSelectableModels,
+			getRequestPolicy: options.getSubagentRequestPolicy,
 			getParentSessionId: options.getParentSessionId,
 			getAvailableTools: options.getAvailableTools,
 			retargetToolsForCwd: options.retargetToolsForCwd,
@@ -248,6 +258,7 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 			onSubagentProgress: options.onSubagentProgress,
 			onSubagentComplete: options.onSubagentComplete,
 			registerAbortDetached: options.registerAbortDetached,
+			registerDisposeCoordinator: options.registerDisposeCoordinator,
 			isScopedHindsightEnabled: options.isScopedHindsightEnabled,
 			getTokenGovernor: () => getCurrentTokenGovernor(),
 		}),

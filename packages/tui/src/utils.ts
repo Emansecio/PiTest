@@ -19,6 +19,42 @@ export function getSegmenter(): Intl.Segmenter {
 }
 
 /**
+ * Truncate to a UTF-8 byte budget without splitting a multi-byte sequence.
+ * Uses byte-length probes rather than encoding the complete input, so callers
+ * can pre-cap oversized payloads without first allocating an equally large
+ * byte buffer.
+ */
+export function truncateToUtf8Bytes(text: string, maxBytes: number): string {
+	const budget = Math.max(0, Math.floor(maxBytes));
+	if (Buffer.byteLength(text, "utf8") <= budget) return text;
+
+	// Every UTF-16 code unit needs at least one UTF-8 byte, so no fitting prefix
+	// can end beyond `budget`. Prefix byte length is monotonic, allowing a binary
+	// search without encoding the whole string.
+	let low = 0;
+	let high = Math.min(text.length, budget);
+	while (low < high) {
+		const mid = Math.ceil((low + high) / 2);
+		if (Buffer.byteLength(text.slice(0, mid), "utf8") <= budget) low = mid;
+		else high = mid - 1;
+	}
+
+	// Do not return a dangling high surrogate as U+FFFD when the budget cuts an
+	// astral code point between its UTF-16 halves.
+	if (
+		low > 0 &&
+		low < text.length &&
+		text.charCodeAt(low - 1) >= 0xd800 &&
+		text.charCodeAt(low - 1) <= 0xdbff &&
+		text.charCodeAt(low) >= 0xdc00 &&
+		text.charCodeAt(low) <= 0xdfff
+	) {
+		low--;
+	}
+	return text.slice(0, low);
+}
+
+/**
  * Check if a grapheme cluster (after segmentation) could possibly be an RGI emoji.
  * This is a fast heuristic to avoid the expensive rgiEmojiRegex test.
  * The tested Unicode blocks are deliberately broad to account for future

@@ -30,6 +30,16 @@ export interface Keybindings {
 	"tui.editor.redo": true;
 	"tui.editor.historySearch": true;
 	"tui.editor.copySelection": true;
+	"tui.editor.selectLeft": true;
+	"tui.editor.selectRight": true;
+	"tui.editor.selectUp": true;
+	"tui.editor.selectDown": true;
+	"tui.editor.selectPageUp": true;
+	"tui.editor.selectPageDown": true;
+	"tui.editor.selectLineStart": true;
+	"tui.editor.selectLineEnd": true;
+	"tui.editor.selectWordLeft": true;
+	"tui.editor.selectWordRight": true;
 	// Help
 	"tui.help.cheatsheet": true;
 	// Generic input actions
@@ -127,6 +137,22 @@ export const TUI_KEYBINDINGS = {
 	// alt+c, not ctrl+c: Ctrl+C is the app interrupt (tui.input.copy → exit/clear),
 	// so it can't double as copy-selection without stealing the interrupt.
 	"tui.editor.copySelection": { defaultKeys: "alt+c", description: "Copy selection" },
+	"tui.editor.selectLeft": { defaultKeys: "shift+left", description: "Extend selection left" },
+	"tui.editor.selectRight": { defaultKeys: "shift+right", description: "Extend selection right" },
+	"tui.editor.selectUp": { defaultKeys: "shift+up", description: "Extend selection up" },
+	"tui.editor.selectDown": { defaultKeys: "shift+down", description: "Extend selection down" },
+	"tui.editor.selectPageUp": { defaultKeys: "shift+pageUp", description: "Extend selection one page up" },
+	"tui.editor.selectPageDown": { defaultKeys: "shift+pageDown", description: "Extend selection one page down" },
+	"tui.editor.selectLineStart": { defaultKeys: "shift+home", description: "Extend selection to line start" },
+	"tui.editor.selectLineEnd": { defaultKeys: "shift+end", description: "Extend selection to line end" },
+	"tui.editor.selectWordLeft": {
+		defaultKeys: ["ctrl+shift+left", "alt+shift+left"],
+		description: "Extend selection one word left",
+	},
+	"tui.editor.selectWordRight": {
+		defaultKeys: ["ctrl+shift+right", "alt+shift+right"],
+		description: "Extend selection one word right",
+	},
 	"tui.help.cheatsheet": { defaultKeys: ["f1", "ctrl+/"], description: "Show keybinding cheatsheet" },
 	"tui.input.newLine": { defaultKeys: "shift+enter", description: "Insert newline" },
 	"tui.input.submit": { defaultKeys: "enter", description: "Submit input" },

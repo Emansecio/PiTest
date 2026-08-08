@@ -54,12 +54,10 @@ export function resolveKeepAliveOptions(
  * color-eases, the icon crossfade, the "Thinking…" pulse, the streaming reveal,
  * and live spinner glyphs all snap to a static frame (frame 0). Elapsed counters
  * and per-second clocks keep updating. Opt-in via PIT_NO_MOTION /
- * PIT_REDUCED_MOTION, or a `TERM=dumb` terminal that can't render it cleanly.
+ * PIT_REDUCED_MOTION. `TERM=dumb` is handled separately by the glyph resolver:
+ * it selects ASCII-safe glyphs, but does not imply that an interactive TUI
+ * should stop repainting (Windows terminals commonly expose this TERM value).
  */
 export function isReducedMotion(): boolean {
-	return (
-		isTruthyEnvFlag(process.env.PIT_NO_MOTION) ||
-		isTruthyEnvFlag(process.env.PIT_REDUCED_MOTION) ||
-		process.env.TERM === "dumb"
-	);
+	return isTruthyEnvFlag(process.env.PIT_NO_MOTION) || isTruthyEnvFlag(process.env.PIT_REDUCED_MOTION);
 }

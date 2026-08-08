@@ -4,7 +4,14 @@ import { KillRing } from "../kill-ring.ts";
 import { computeWordDeletion, computeWordMoveColumn, decodeBracketedPasteCsiU } from "../text-edit-core.ts";
 import { type Component, CURSOR_MARKER, type Focusable } from "../tui.ts";
 import { UndoStack } from "../undo-stack.ts";
-import { getSegmenter, isWhitespaceChar, sliceByColumn, truncateToWidth, visibleWidth } from "../utils.ts";
+import {
+	getSegmenter,
+	isWhitespaceChar,
+	sliceByColumn,
+	truncateToUtf8Bytes,
+	truncateToWidth,
+	visibleWidth,
+} from "../utils.ts";
 
 const segmenter = getSegmenter();
 
@@ -12,9 +19,28 @@ const segmenter = getSegmenter();
 // expanded to spaces; mirrors the old `charCode >= 32` filter without
 // materializing a 1-char-per-cell array.
 const CONTROL_CHARS_RE = /[\x00-\x1f]/g;
-// Hard cap on a single paste (10 MiB) applied before any full-string pass, so a
-// huge blob can't freeze the event loop or OOM.
+// Hard cap on a single cleaned paste (10 MiB). Tabs are expanded before
+// measuring so normalization cannot bypass the byte limit.
 const MAX_PASTE_BYTES = 10 * 1024 * 1024;
+const BRACKETED_PASTE_END = "\x1b[201~";
+
+/** Exclude a possible chunk-split end-marker prefix from the buffered payload. */
+function bufferedPastePayloadBytes(buffer: string, totalBytes: number): number {
+	for (let length = BRACKETED_PASTE_END.length - 1; length > 0; length--) {
+		const suffix = buffer.slice(-length);
+		if (BRACKETED_PASTE_END.startsWith(suffix)) return totalBytes - length;
+	}
+	return totalBytes;
+}
+
+function ansiStylesEnabled(): boolean {
+	const force = process.env.FORCE_COLOR;
+	if (force !== undefined) {
+		const normalized = force.toLowerCase();
+		return force !== "0" && normalized !== "false";
+	}
+	return !("NO_COLOR" in process.env);
+}
 
 interface InputState {
 	value: string;
@@ -25,8 +51,9 @@ export interface InputOptions {
 	/**
 	 * Called when a paste exceeds MAX_PASTE_BYTES and is truncated. Input has no
 	 * warning surface of its own, so the consumer plumbs this to its own warning
-	 * mechanism. `originalBytes` is the pre-truncation length, `keptBytes` the
-	 * length actually inserted.
+	 * mechanism. `originalBytes` is the complete raw payload size when the
+	 * pre-normalization cap applies, otherwise the cleaned pre-truncation size;
+	 * `keptBytes` is the normalized length actually inserted.
 	 */
 	onPasteTruncated?: (info: { originalBytes: number; keptBytes: number }) => void;
 	/**
@@ -69,6 +96,7 @@ export class Input implements Component, Focusable {
 
 	// Bracketed paste mode buffering
 	private pasteBuffer: string = "";
+	private pasteBufferBytes = 0;
 	private isInPaste: boolean = false;
 
 	// Kill ring for Emacs-style kill/yank operations
@@ -96,6 +124,7 @@ export class Input implements Component, Focusable {
 		if (data.includes("\x1b[200~")) {
 			this.isInPaste = true;
 			this.pasteBuffer = "";
+			this.pasteBufferBytes = 0;
 			data = data.replace("\x1b[200~", "");
 		}
 
@@ -109,6 +138,7 @@ export class Input implements Component, Focusable {
 			// the windowed search in stdin-buffer.ts.
 			const prevLen = this.pasteBuffer.length;
 			this.pasteBuffer += data;
+			this.pasteBufferBytes += Buffer.byteLength(data, "utf8");
 
 			const searchFrom = Math.max(0, prevLen - 5); // "\x1b[201~".length - 1 = 5
 			const endIndex = this.pasteBuffer.indexOf("\x1b[201~", searchFrom);
@@ -125,6 +155,7 @@ export class Input implements Component, Focusable {
 				// Handle any remaining input after the paste marker
 				const remaining = this.pasteBuffer.substring(endIndex + 6); // 6 = length of \x1b[201~
 				this.pasteBuffer = "";
+				this.pasteBufferBytes = 0;
 				if (remaining) {
 					this.handleInput(remaining);
 				}
@@ -137,10 +168,13 @@ export class Input implements Component, Focusable {
 			// swallowed because we stay in paste mode forever). Once we have clearly
 			// exceeded the cap with no end marker in sight, flush what we have
 			// (handlePaste truncates at MAX_PASTE_BYTES) and exit paste mode.
-			if (this.pasteBuffer.length > MAX_PASTE_BYTES) {
+			// Ignore only an actual chunk-split prefix of the end marker. A fixed
+			// five-byte allowance would fail to flush a UTF-8 payload just over cap.
+			if (bufferedPastePayloadBytes(this.pasteBuffer, this.pasteBufferBytes) > MAX_PASTE_BYTES) {
 				const pasteContent = this.pasteBuffer;
 				this.isInPaste = false;
 				this.pasteBuffer = "";
+				this.pasteBufferBytes = 0;
 				if (pasteContent.length > 0) {
 					this.handlePaste(pasteContent);
 				}
@@ -438,23 +472,25 @@ export class Input implements Component, Focusable {
 		this.lastAction = null;
 		this.pushUndo();
 
-		// Cap the paste BEFORE any full-string pass so a multi-MB blob can't freeze
-		// the event loop or OOM (the cleanup below is O(n) over the whole string).
-		// Input has no warning surface; the consumer's onPasteTruncated surfaces it.
-		const wasTruncated = pastedText.length > MAX_PASTE_BYTES;
-		const cappedText = wasTruncated ? pastedText.slice(0, MAX_PASTE_BYTES) : pastedText;
-		if (wasTruncated) {
-			this.onPasteTruncated?.({ originalBytes: pastedText.length, keptBytes: cappedText.length });
+		// Cap the raw UTF-8 payload before decode/tab expansion so those full-string
+		// passes cannot allocate in proportion to an arbitrarily large complete
+		// paste. Normalization may expand the bounded prefix, so enforce the same cap
+		// again afterward.
+		const rawOriginalBytes = Buffer.byteLength(pastedText, "utf8");
+		const rawWasTruncated = rawOriginalBytes > MAX_PASTE_BYTES;
+		const rawText = rawWasTruncated ? truncateToUtf8Bytes(pastedText, MAX_PASTE_BYTES) : pastedText;
+		const decodedText = decodeBracketedPasteCsiU(rawText);
+		let cleanText = decodedText.replace(/\t/g, "    ").replace(CONTROL_CHARS_RE, "");
+		const normalizedBytes = Buffer.byteLength(cleanText, "utf8");
+		if (normalizedBytes > MAX_PASTE_BYTES) {
+			cleanText = truncateToUtf8Bytes(cleanText, MAX_PASTE_BYTES);
 		}
-
-		// Decode CSI-u-encoded control bytes some terminals inject into pastes
-		// (see decodeBracketedPasteCsiU) before the cleanup below strips them.
-		const decodedText = decodeBracketedPasteCsiU(cappedText);
-
-		// Clean the pasted text - expand tabs, then strip all control bytes
-		// (charCode < 32, incl. newlines/carriage returns). Regex mirrors the old
-		// split/filter/join (charCode >= 32 kept) without allocating a 1-char array.
-		const cleanText = decodedText.replace(/\t/g, "    ").replace(CONTROL_CHARS_RE, "");
+		if (rawWasTruncated || normalizedBytes > MAX_PASTE_BYTES) {
+			this.onPasteTruncated?.({
+				originalBytes: rawWasTruncated ? rawOriginalBytes : normalizedBytes,
+				keptBytes: Buffer.byteLength(cleanText, "utf8"),
+			});
+		}
 
 		// Insert at cursor position
 		this.value = this.value.slice(0, this.cursor) + cleanText + this.value.slice(this.cursor);
@@ -466,13 +502,13 @@ export class Input implements Component, Focusable {
 	}
 
 	render(width: number): string[] {
+		if (width <= 0) return [];
+		const useAnsiStyles = ansiStylesEnabled();
 		// Calculate visible window
-		const prompt = "> ";
-		const availableWidth = width - prompt.length;
+		const prompt = truncateToWidth("> ", width);
+		const availableWidth = width - visibleWidth(prompt);
 
-		if (availableWidth <= 0) {
-			return [prompt];
-		}
+		if (availableWidth <= 0) return [prompt];
 
 		// Empty-field placeholder: reverse-video space cursor, then full dim hint
 		// (do not reverse the first letter of the placeholder — that looked like
@@ -480,7 +516,7 @@ export class Input implements Component, Focusable {
 		if (this.value.length === 0 && this.placeholder) {
 			const colorize = this.placeholderColor ?? ((t: string) => t);
 			const marker = this.focused ? CURSOR_MARKER : "";
-			const cursor = this.focused ? "\x1b[7m \x1b[27m" : " ";
+			const cursor = this.focused && useAnsiStyles ? "\x1b[7m \x1b[27m" : " ";
 			const hintBudget = Math.max(0, availableWidth - 1);
 			const truncated = hintBudget > 0 ? truncateToWidth(this.placeholder, hintBudget, "…") : "";
 			const body = marker + cursor + (truncated ? colorize(truncated) : "");
@@ -538,7 +574,7 @@ export class Input implements Component, Focusable {
 		const marker = this.focused ? CURSOR_MARKER : "";
 
 		// Use inverse video to show cursor
-		const cursorChar = `\x1b[7m${atCursor}\x1b[27m`; // ESC[7m = reverse video, ESC[27m = normal
+		const cursorChar = useAnsiStyles ? `\x1b[7m${atCursor}\x1b[27m` : atCursor;
 		const textWithCursor = beforeCursor + marker + cursorChar + afterCursor;
 
 		// Calculate visual width

@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { Agent, type AgentMessage, type ThinkingLevel } from "@pit/agent-core";
+import { Agent, type AgentMessage, type StreamFn, type ThinkingLevel } from "@pit/agent-core";
 import {
 	type CacheRetention,
 	clampThinkingLevel,
@@ -15,7 +15,7 @@ import {
 } from "@pit/ai";
 import { getAgentDir } from "../config.ts";
 import { settleOrAbort } from "../utils/abort-race.ts";
-import { AgentSession } from "./agent-session.ts";
+import { AgentSession, type AgentSessionConfig } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage, formatOAuthReauthMessage, isOAuthReauthRequired } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
@@ -31,6 +31,7 @@ import { ModelRegistry } from "./model-registry.ts";
 import { defaultModelPerProvider, findInitialModel } from "./model-resolver.ts";
 import { resolveOverthinkGuardForModel } from "./overthink-policy.ts";
 import { resolveEmitRepairNotes } from "./repair-note-policy.ts";
+import { ProviderAuthError } from "./request-policy.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
@@ -190,6 +191,57 @@ function loadLearnedErrorsSafe(): AggregatedLearnedError[] {
 	} catch {
 		return [];
 	}
+}
+
+export interface CreateSessionRequestStreamOptions {
+	modelRegistry: ModelRegistry;
+	settingsManager: SettingsManager;
+	sessionManager: SessionManager;
+	cacheRetention?: CacheRetention;
+}
+
+/** Shared provider request path used by the parent Agent and its subagents. */
+export function createSessionRequestStream(options: CreateSessionRequestStreamOptions): StreamFn {
+	const { modelRegistry, settingsManager, sessionManager, cacheRetention } = options;
+	return async (model, context, streamOptions) => {
+		const auth = await modelRegistry.getApiKeyAndHeaders(model);
+		if (!auth.ok) {
+			const message = isOAuthReauthRequired(auth.error) ? formatOAuthReauthMessage(model.provider) : auth.error;
+			throw new ProviderAuthError(model.provider, message);
+		}
+		const providerRetrySettings = settingsManager.getProviderRetrySettings();
+		let apiKey = auth.apiKey;
+		const pool = getCredentialPool();
+		if (pool.count(model.provider) > 1) {
+			const picked = getApiKeyFor(model.provider, sessionManager.getSessionId());
+			if (picked) apiKey = picked;
+		}
+
+		const stream = streamSimple(model, context, {
+			...streamOptions,
+			apiKey,
+			timeoutMs: streamOptions?.timeoutMs ?? providerRetrySettings.timeoutMs,
+			maxRetries: streamOptions?.maxRetries ?? providerRetrySettings.maxRetries,
+			maxRetryDelayMs: streamOptions?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
+			idleTimeoutMs: streamOptions?.idleTimeoutMs ?? providerRetrySettings.idleTimeoutMs,
+			cacheRetention: streamOptions?.cacheRetention ?? cacheRetention ?? "long",
+			headers: auth.headers || streamOptions?.headers ? { ...auth.headers, ...streamOptions?.headers } : undefined,
+		});
+
+		if (apiKey && pool.count(model.provider) > 0) {
+			stream.result().then(
+				(message) => {
+					if (message.stopReason === "error" && message.errorMessage) {
+						reportCredentialFailure(model.provider, apiKey, { message: message.errorMessage });
+					} else {
+						reportCredentialSuccess(model.provider, apiKey);
+					}
+				},
+				(error) => reportCredentialFailure(model.provider, apiKey, error),
+			);
+		}
+		return stream;
+	};
 }
 
 /**
@@ -419,10 +471,29 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	};
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
-
-	// Alias the session-level retention before the Agent is constructed: the
-	// streamFn below shadows `options` with the per-call stream options.
-	const sessionCacheRetention = options.cacheRetention;
+	const requestPolicyHooks: NonNullable<AgentSessionConfig["requestPolicyHooks"]> = (signal) => ({
+		onPayload: async (payload, _model) => {
+			const runner = extensionRunnerRef.current;
+			if (!runner?.hasHandlers("before_provider_request")) {
+				return payload;
+			}
+			return settleOrAbort(runner.emitBeforeProviderRequest(payload), signal ?? agent.signal);
+		},
+		onResponse: async (response, _model) => {
+			const runner = extensionRunnerRef.current;
+			if (!runner?.hasHandlers("after_provider_response")) {
+				return;
+			}
+			await settleOrAbort(
+				runner.emit({
+					type: "after_provider_response",
+					status: response.status,
+					headers: response.headers,
+				}),
+				signal ?? agent.signal,
+			);
+		},
+	});
 
 	agent = new Agent({
 		initialState: {
@@ -432,94 +503,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			tools: [],
 		},
 		convertToLlm: convertToLlmWithBlockImages,
-		streamFn: async (model, context, options) => {
-			const auth = await modelRegistry.getApiKeyAndHeaders(model);
-			if (!auth.ok) {
-				// A permanently-failed OAuth refresh (revoked/expired token) surfaces as
-				// a raw "Failed to refresh OAuth token for …" string. Replace it with a
-				// short /login prompt so the user sees the fix, not a traceback.
-				if (isOAuthReauthRequired(auth.error)) {
-					throw new Error(formatOAuthReauthMessage(model.provider));
-				}
-				throw new Error(auth.error);
-			}
-			const providerRetrySettings = settingsManager.getProviderRetrySettings();
-			// Adaptive cache retention: "long" (Anthropic 1h, OpenAI 24h) only for
-			// the long-lived interactive session, which benefits from keeping system
-			// prompt + tools cached across multi-minute pauses. One-shot runs
-			// (print/RPC — see main.ts) pass sessionCacheRetention: "short", since
-			// they never idle past the 5-minute short TTL and long cache writes cost
-			// 2.0× input price vs 1.25×. Providers without long retention fall back
-			// to short automatically. Precedence: PIT_CACHE_RETENTION env (resolved
-			// inside the provider layer) > per-call options.cacheRetention > this
-			// session-level option > "long".
-			const defaultCacheRetention = sessionCacheRetention ?? "long";
-
-			// Multi-key round-robin: if the credential pool has more than one
-			// entry for this provider, use a sessionId-sticky pick so prompt-cache
-			// continuity survives within a session while still rotating across
-			// sessions and cooling-down rate-limited keys. Single-key providers
-			// fall through to the legacy auth.apiKey path unchanged.
-			let apiKey = auth.apiKey;
-			const sessionId = sessionManager.getSessionId();
-			const pool = getCredentialPool();
-			if (pool.count(model.provider) > 1) {
-				const picked = getApiKeyFor(model.provider, sessionId);
-				if (picked) apiKey = picked;
-			}
-
-			const stream = streamSimple(model, context, {
-				...options,
-				apiKey,
-				timeoutMs: options?.timeoutMs ?? providerRetrySettings.timeoutMs,
-				maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
-				maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
-				idleTimeoutMs: options?.idleTimeoutMs ?? providerRetrySettings.idleTimeoutMs,
-				cacheRetention: options?.cacheRetention ?? defaultCacheRetention,
-				headers: auth.headers || options?.headers ? { ...auth.headers, ...options?.headers } : undefined,
-			});
-
-			// Side-tap the result promise so credential-pool cooldown / success
-			// tracking happens regardless of how the loop consumes the stream.
-			// Failures surface either as a rejected promise (sync throw) or as
-			// an `error`-typed event whose payload contains errorMessage.
-			if (apiKey && pool.count(model.provider) > 0) {
-				stream.result().then(
-					(msg) => {
-						if (msg.stopReason === "error" && msg.errorMessage) {
-							reportCredentialFailure(model.provider, apiKey, { message: msg.errorMessage });
-						} else {
-							reportCredentialSuccess(model.provider, apiKey);
-						}
-					},
-					(err) => {
-						reportCredentialFailure(model.provider, apiKey, err);
-					},
-				);
-			}
-
-			return stream;
-		},
-		onPayload: async (payload, _model) => {
-			const runner = extensionRunnerRef.current;
-			if (!runner?.hasHandlers("before_provider_request")) {
-				return payload;
-			}
-			// Race against the run signal so a wedged BPR handler cannot block Esc
-			// (same pattern as transformContext below).
-			return settleOrAbort(runner.emitBeforeProviderRequest(payload), agent.signal);
-		},
-		onResponse: async (response, _model) => {
-			const runner = extensionRunnerRef.current;
-			if (!runner?.hasHandlers("after_provider_response")) {
-				return;
-			}
-			await runner.emit({
-				type: "after_provider_response",
-				status: response.status,
-				headers: response.headers,
-			});
-		},
+		streamFn: createSessionRequestStream({
+			modelRegistry,
+			settingsManager,
+			sessionManager,
+			cacheRetention: options.cacheRetention,
+		}),
+		...requestPolicyHooks(),
 		sessionId: sessionManager.getSessionId(),
 		transformContext: async (messages, signal) => {
 			const runner = extensionRunnerRef.current;
@@ -579,6 +569,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		initialActiveToolNames,
 		allowedToolNames,
 		extensionRunnerRef,
+		requestPolicyHooks,
 		sessionStartEvent: options.sessionStartEvent,
 		disableHashlineAnchors: options.disableHashlineAnchors,
 		permissionChecker: options.permissionChecker,

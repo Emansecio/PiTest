@@ -36,7 +36,7 @@ describe("doom-loop abort — transcript tool-call/result pairing invariant", ()
 
 	it("leaves no orphaned toolCall when the loop aborts on a Tier-3 relapse", async () => {
 		const harness = await createHarness({
-			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 2 } } },
+			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 2, cooldownMs: 0 } } },
 		});
 		harnesses.push(harness);
 
@@ -67,7 +67,7 @@ describe("doom-loop abort — transcript tool-call/result pairing invariant", ()
 
 	it("keeps the invariant with a higher threshold (abort lands later in the streak)", async () => {
 		const harness = await createHarness({
-			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 5 } } },
+			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 5, cooldownMs: 0 } } },
 		});
 		harnesses.push(harness);
 

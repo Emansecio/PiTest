@@ -42,7 +42,7 @@ const EMPTY_KITTY_IDS: Set<number> = new Set();
 const RENDER_FAULT_VISIBLE_MS = 5000;
 const RENDER_FAULT_MAX_MESSAGE_WIDTH = 240;
 const ANSI_ESCAPE_PATTERN = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)?|_[^\x07]*(?:\x07|\x1b\\)?|.)/g;
-const CONTROL_PATTERN = /[\x00-\x1f\x7f]/g;
+const CONTROL_PATTERN = /[\x00-\x1f\x7f-\x9f]/g;
 const SPACES_PATTERN = /\s+/g;
 const UNKNOWN_RENDER_FAULT = "unknown error";
 // Floor for a cell size DERIVED from the window-pixel-size reply. A terminal that
@@ -122,21 +122,21 @@ interface RenderFault {
 	expiresAt: number;
 }
 
-function sanitizeRenderFaultMessage(message: string): string {
+export function sanitizeRenderFaultMessage(message: string, maxWidth = RENDER_FAULT_MAX_MESSAGE_WIDTH): string {
 	const sanitized = message
 		.replace(ANSI_ESCAPE_PATTERN, "")
 		.replace(CONTROL_PATTERN, " ")
 		.replace(SPACES_PATTERN, " ")
 		.trim();
 	if (sanitized.length === 0) return UNKNOWN_RENDER_FAULT;
-	return truncateToWidth(sanitized, RENDER_FAULT_MAX_MESSAGE_WIDTH, "…");
+	return truncateToWidth(sanitized, Math.max(1, maxWidth), "…");
 }
 
-function errorToMessage(error: unknown): string {
+export function errorToMessage(error: unknown, maxWidth = RENDER_FAULT_MAX_MESSAGE_WIDTH): string {
 	try {
-		if (error instanceof Error) return sanitizeRenderFaultMessage(error.message);
-		if (typeof error === "string") return sanitizeRenderFaultMessage(error);
-		return sanitizeRenderFaultMessage(String(error));
+		if (error instanceof Error) return sanitizeRenderFaultMessage(error.message, maxWidth);
+		if (typeof error === "string") return sanitizeRenderFaultMessage(error, maxWidth);
+		return sanitizeRenderFaultMessage(String(error), maxWidth);
 	} catch {
 		return UNKNOWN_RENDER_FAULT;
 	}
@@ -604,10 +604,17 @@ export class TUI extends Container {
 	// (spinners, pulses) off one monotonic clock so their phases stay locked and a
 	// frame that changes nothing never schedules a render. See addAnimationCallback().
 	private animationCallbacks = new Set<AnimationFrameCallback>();
+	// Optional per-callback cadence. Most animations use the default 60 Hz clock,
+	// while low-frequency state (for example an elapsed-only loader) can avoid
+	// waking and recomputing 60 times per second. The shared timer follows the
+	// fastest subscriber and tickAnimations skips slower callbacks until due.
+	private animationCallbackIntervals = new Map<AnimationFrameCallback, number>();
+	private animationCallbackLastTicks = new Map<AnimationFrameCallback, number>();
 	// Reused each tick to snapshot callbacks without allocating an array per
 	// frame; preserves the snapshot semantics (mutation mid-tick is deferred).
 	private animationTickBuffer: AnimationFrameCallback[] = [];
 	private animationTimer: NodeJS.Timeout | undefined;
+	private animationTimerIntervalMs = 0;
 	private static readonly ANIMATION_FRAME_MS = 16;
 	// Tracks CONSECUTIVE failures per callback so a persistently-throwing
 	// animation (e.g. a spinner tick with a bug) can be evicted instead of
@@ -1023,6 +1030,7 @@ export class TUI extends Container {
 	}
 
 	private queryCellSize(): void {
+		if (process.env.TERM?.toLowerCase() === "dumb") return;
 		// Cell size is used for both image rendering AND mapping the pet sixel to a
 		// cell footprint, so query it whenever images OR sixel are (possibly) live.
 		if (!getCapabilities().images && isSixelForcedOff()) {
@@ -1048,7 +1056,7 @@ export class TUI extends Container {
 	 * simply keep the conservative default (cells).
 	 */
 	private querySixelSupport(): void {
-		if (isSixelForcedOff()) return;
+		if (process.env.TERM?.toLowerCase() === "dumb" || isSixelForcedOff()) return;
 		this.terminal.write("\x1b[c");
 	}
 
@@ -1064,6 +1072,8 @@ export class TUI extends Container {
 		this.stopped = true;
 		this.stopAnimationLoop();
 		this.animationCallbacks.clear();
+		this.animationCallbackIntervals.clear();
+		this.animationCallbackLastTicks.clear();
 		this.animationFaultCounts.clear();
 		if (this.renderTimer) {
 			clearTimeout(this.renderTimer);
@@ -1199,19 +1209,35 @@ export class TUI extends Container {
 	 * unsubscribe function; the underlying timer stops once the last callback is
 	 * removed. Safe to call before start() — the loop resumes there.
 	 */
-	addAnimationCallback(callback: AnimationFrameCallback): () => void {
+	addAnimationCallback(callback: AnimationFrameCallback, intervalMs = TUI.ANIMATION_FRAME_MS): () => void {
 		this.animationCallbacks.add(callback);
+		this.animationCallbackIntervals.set(
+			callback,
+			Math.max(TUI.ANIMATION_FRAME_MS, Math.floor(intervalMs) || TUI.ANIMATION_FRAME_MS),
+		);
+		this.animationCallbackLastTicks.delete(callback);
 		this.startAnimationLoop();
 		return () => {
 			this.animationCallbacks.delete(callback);
+			this.animationCallbackIntervals.delete(callback);
+			this.animationCallbackLastTicks.delete(callback);
 			this.animationFaultCounts.delete(callback);
 			if (this.animationCallbacks.size === 0) this.stopAnimationLoop();
+			else this.startAnimationLoop();
 		};
 	}
 
 	private startAnimationLoop(): void {
-		if (this.animationTimer || this.stopped || this.animationCallbacks.size === 0) return;
-		this.animationTimer = setInterval(() => this.tickAnimations(), TUI.ANIMATION_FRAME_MS);
+		if (this.stopped || this.animationCallbacks.size === 0) return;
+		let intervalMs = Number.POSITIVE_INFINITY;
+		for (const callback of this.animationCallbacks) {
+			intervalMs = Math.min(intervalMs, this.animationCallbackIntervals.get(callback) ?? TUI.ANIMATION_FRAME_MS);
+		}
+		if (!Number.isFinite(intervalMs)) return;
+		if (this.animationTimer && this.animationTimerIntervalMs === intervalMs) return;
+		if (this.animationTimer) clearInterval(this.animationTimer);
+		this.animationTimerIntervalMs = intervalMs;
+		this.animationTimer = setInterval(() => this.tickAnimations(), intervalMs);
 		// Don't keep the event loop alive just for animations.
 		(this.animationTimer as { unref?: () => void }).unref?.();
 	}
@@ -1221,6 +1247,7 @@ export class TUI extends Container {
 			clearInterval(this.animationTimer);
 			this.animationTimer = undefined;
 		}
+		this.animationTimerIntervalMs = 0;
 	}
 
 	private tickAnimations(): void {
@@ -1238,6 +1265,10 @@ export class TUI extends Container {
 		for (const callback of this.animationCallbacks) buf.push(callback);
 		for (let i = 0; i < buf.length; i++) {
 			const callback = buf[i]!;
+			const intervalMs = this.animationCallbackIntervals.get(callback) ?? TUI.ANIMATION_FRAME_MS;
+			const lastTick = this.animationCallbackLastTicks.get(callback);
+			if (intervalMs > TUI.ANIMATION_FRAME_MS && lastTick !== undefined && now - lastTick < intervalMs) continue;
+			this.animationCallbackLastTicks.set(callback, now);
 			// Isolate each callback: a throwing animation tick (spinner/pulse) must not
 			// escape the setInterval and crash the process, nor stop the other callbacks.
 			try {
@@ -1257,6 +1288,8 @@ export class TUI extends Container {
 					// A persistently-throwing callback would otherwise re-throw every
 					// 16ms forever, pinning the render loop at 60fps. Evict it instead.
 					this.animationCallbacks.delete(callback);
+					this.animationCallbackIntervals.delete(callback);
+					this.animationCallbackLastTicks.delete(callback);
 					this.animationFaultCounts.delete(callback);
 				} else {
 					this.animationFaultCounts.set(callback, failures);
@@ -1264,6 +1297,8 @@ export class TUI extends Container {
 			}
 		}
 		buf.length = 0;
+		if (this.animationCallbacks.size === 0) this.stopAnimationLoop();
+		else if (this.animationTimer) this.startAnimationLoop();
 		if (dirty) this.requestRender();
 	}
 
@@ -2066,6 +2101,16 @@ export class TUI extends Container {
 	// bookkeeping so the two caches' hit-rates can't starve each other.
 	private static readonly WIDTH_CACHE_MIN = 4096;
 	private static readonly WIDTH_CACHE_HARD_MAX = 1 << 16;
+	private static readonly CACHE_MAX_KEY_LENGTH = 16 * 1024;
+
+	/** Shrink an insertion-ordered cache before any hit/fast-return path. */
+	private static shrinkFifoCache<V>(cache: Map<string, V>, maxSize: number): void {
+		while (cache.size > maxSize) {
+			const oldest = cache.keys().next().value;
+			if (oldest === undefined) break;
+			cache.delete(oldest);
+		}
+	}
 
 	/**
 	 * @param lines - Pre-reset frame. Read-only: may be a Container's memoized
@@ -2087,6 +2132,10 @@ export class TUI extends Container {
 		// per-frame string recompute. 2× headroom absorbs the few lines that
 		// actually change per frame; the hard max bounds memory.
 		const cap = Math.min(TUI.RESET_CACHE_HARD_MAX, Math.max(TUI.RESET_CACHE_MIN, lines.length * 2));
+		// The cap is dynamic, so enforce it before cache hits and the unchanged-frame
+		// fast return; neither path inserts an entry that could otherwise trigger
+		// eviction after a large -> small frame transition.
+		TUI.shrinkFifoCache(cache, cap);
 		// Single in-place input buffer: it is both last frame's input (the key for
 		// the pointer compare below) and this frame's, since every index we do not
 		// prove stable is rewritten before the method returns. See the field comment
@@ -2169,19 +2218,18 @@ export class TUI extends Container {
 				nextOutput[i] = line;
 				continue;
 			}
-			const cached = cache.get(line);
+			const cacheable = line.length <= TUI.CACHE_MAX_KEY_LENGTH;
+			const cached = cacheable ? cache.get(line) : undefined;
 			if (cached !== undefined) {
 				inputCache[i] = line;
 				nextOutput[i] = cached;
 				continue;
 			}
 			const normalized = normalizeTerminalOutput(line) + reset;
-			if (cache.size >= cap) {
-				// FIFO eviction: drop the oldest insertion. Map iteration is insertion-ordered.
-				const oldest = cache.keys().next().value;
-				if (oldest !== undefined) cache.delete(oldest);
+			if (cacheable) {
+				TUI.shrinkFifoCache(cache, cap - 1);
+				cache.set(line, normalized);
 			}
-			cache.set(line, normalized);
 			inputCache[i] = line;
 			nextOutput[i] = normalized;
 		}
@@ -2420,15 +2468,16 @@ export class TUI extends Container {
 
 	/** Memoized visibleWidth(line); see the widthCache field comment. */
 	private measureWidthCached(line: string, transcriptLen: number): number {
+		const cap = Math.min(TUI.WIDTH_CACHE_HARD_MAX, Math.max(TUI.WIDTH_CACHE_MIN, transcriptLen * 2));
+		// Enforce the lowered dynamic cap before uncacheable lines and cache hits;
+		// both return without inserting and therefore used to retain a large frame's
+		// excess entries indefinitely.
+		TUI.shrinkFifoCache(this.widthCache, cap);
+		if (line.length > TUI.CACHE_MAX_KEY_LENGTH) return visibleWidth(line);
 		const cached = this.widthCache.get(line);
 		if (cached !== undefined) return cached;
 		const w = visibleWidth(line);
-		const cap = Math.min(TUI.WIDTH_CACHE_HARD_MAX, Math.max(TUI.WIDTH_CACHE_MIN, transcriptLen * 2));
-		if (this.widthCache.size >= cap) {
-			// FIFO eviction: drop the oldest insertion. Map iteration is insertion-ordered.
-			const oldest = this.widthCache.keys().next().value;
-			if (oldest !== undefined) this.widthCache.delete(oldest);
-		}
+		TUI.shrinkFifoCache(this.widthCache, cap - 1);
 		this.widthCache.set(line, w);
 		return w;
 	}

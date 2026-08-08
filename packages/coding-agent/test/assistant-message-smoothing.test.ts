@@ -42,8 +42,7 @@ function rendered(comp: AssistantMessageComponent): string {
 describe("assistant message streaming smoothing", () => {
 	beforeAll(() => {
 		initTheme("dark");
-		// Reveal smoothing is suppressed when TERM=dumb (isReducedMotion). Pin a
-		// capable TERM so these tests exercise the wavefront path in any shell.
+		// Pin a capable TERM so these tests exercise the wavefront path in any shell.
 		process.env.TERM = "xterm-256color";
 		delete process.env.PIT_NO_MOTION;
 		delete process.env.PIT_REDUCED_MOTION;
@@ -304,8 +303,7 @@ describe("assistant message reveal keeps station with the stream", () => {
 describe("reveal edge fade (fadeLineTail)", () => {
 	beforeAll(() => {
 		initTheme("dark");
-		// Reveal smoothing is suppressed when TERM=dumb (isReducedMotion). Pin a
-		// capable TERM so these tests exercise the wavefront path in any shell.
+		// Pin a capable TERM so these tests exercise the wavefront path in any shell.
 		process.env.TERM = "xterm-256color";
 		delete process.env.PIT_NO_MOTION;
 		delete process.env.PIT_REDUCED_MOTION;
@@ -346,8 +344,7 @@ describe("reveal edge fade (fadeLineTail)", () => {
 describe("reveal caret (appendRevealCaret)", () => {
 	beforeAll(() => {
 		initTheme("dark");
-		// Reveal smoothing is suppressed when TERM=dumb (isReducedMotion). Pin a
-		// capable TERM so these tests exercise the wavefront path in any shell.
+		// Pin a capable TERM so these tests exercise the wavefront path in any shell.
 		process.env.TERM = "xterm-256color";
 		delete process.env.PIT_NO_MOTION;
 		delete process.env.PIT_REDUCED_MOTION;
@@ -370,8 +367,7 @@ describe("reveal caret (appendRevealCaret)", () => {
 describe("reveal caret on live stream", () => {
 	beforeAll(() => {
 		initTheme("dark");
-		// Reveal smoothing is suppressed when TERM=dumb (isReducedMotion). Pin a
-		// capable TERM so these tests exercise the wavefront path in any shell.
+		// Pin a capable TERM so these tests exercise the wavefront path in any shell.
 		process.env.TERM = "xterm-256color";
 		delete process.env.PIT_NO_MOTION;
 		delete process.env.PIT_REDUCED_MOTION;

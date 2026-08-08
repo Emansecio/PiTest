@@ -10,7 +10,7 @@ import {
 	_setCoveringTestsForTest,
 	_setUnreviewedImpactForTest,
 } from "../src/core/built-ins/impact-extension.ts";
-import { GoalManager, setCurrentGoalManager } from "../src/core/goal/goal-manager.js";
+import { GoalManager, getCurrentGoalManager, setCurrentGoalManager } from "../src/core/goal/goal-manager.js";
 import {
 	_resetGoalCompleteGateStateForTest,
 	createGoalCompleteToolDefinition,
@@ -19,7 +19,23 @@ import {
 const tool = createGoalCompleteToolDefinition(process.cwd());
 
 function complete(id: string, summary: string) {
-	return tool.execute(id, { summary }, undefined, undefined, undefined as never);
+	const contract = getCurrentGoalManager()?.get()?.contract;
+	if (!contract) throw new Error("active Goal contract required by test helper");
+	return tool.execute(
+		id,
+		{
+			summary,
+			contractRevision: contract.revision,
+			criteria: contract.criteria.map((criterion) => ({
+				id: criterion.id,
+				outcome: `${criterion.text} completed`,
+				evidence: [{ kind: "claim" as const, note: "verified by the focused test fixture" }],
+			})),
+		},
+		undefined,
+		undefined,
+		undefined as never,
+	);
 }
 
 function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -60,6 +76,7 @@ describe("goal_complete R10 (unreviewed impact-graph dependents)", () => {
 		_resetImpactStateForTest();
 		const ok = await complete("c2", "done");
 		expect(ok.details?.completed).toBe(true);
+		expect(ok.details?.receipt?.safeguards.impactReview).toBe("passed");
 		expect(mgr.get()?.status).toBe("complete");
 	});
 
@@ -140,6 +157,7 @@ describe("goal_complete R10 (unreviewed impact-graph dependents)", () => {
 		// of walling it forever (the doom-loop the R7 gate used to produce).
 		const ok = await complete("c2", "done");
 		expect(ok.details?.completed).toBe(true);
+		expect(ok.details?.receipt?.safeguards.impactReview).toBe("waived");
 		expect(mgr.get()?.status).toBe("complete");
 
 		const waived = getRuntimeDiagnostics().recent.find((e) => e.context?.ruleId === "impact-gate-waived");

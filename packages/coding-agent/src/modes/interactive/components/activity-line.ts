@@ -1,4 +1,4 @@
-import { Container, type TUI, truncateToWidth } from "@pit/tui";
+import { Container, type TUI, truncateToWidth, visibleWidth } from "@pit/tui";
 import { formatElapsed } from "../../../core/goal/goal-manager.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { truncateWithEllipsis } from "../../../utils/surrogate.ts";
@@ -355,17 +355,20 @@ export class ActivityLineComponent extends Container {
 		const countSuffix = this.count > 1 ? ` ${theme.fg("muted", `×${this.count}`)}` : "";
 		const elapsedSuffix = pending ? this.pendingElapsedSuffix() : "";
 		const trailing = this.trailingIcon(state);
-		const trailingSuffix = trailing ? ` ${trailing}` : "";
 		const rawHeader = stripAnsi(target).trim()
-			? `${this.gutter(state)} ${styledVerb} ${target}${countSuffix}${elapsedSuffix}${trailingSuffix}`
-			: `${this.gutter(state)} ${styledVerb}${countSuffix}${elapsedSuffix}${trailingSuffix}`;
-		const headerText = rawHeader;
-		// Cap the assembled header once so no branch (free-form agent label, MCP tool
-		// name, web_search query, edit path) can overflow the terminal width. ANSI is
-		// width-free here, so the colorized header is clamped to `width` cells; the
-		// reticência is U+2026 (truncateToWidth's default).
-		const header = truncateToWidth(headerText, width);
-		const bodyWidth = width - 2;
+			? `${this.gutter(state)} ${styledVerb} ${target}${countSuffix}${elapsedSuffix}`
+			: `${this.gutter(state)} ${styledVerb}${countSuffix}${elapsedSuffix}`;
+		// Outcome is the only success/error signal in the settled row, so reserve it
+		// before truncating an arbitrarily long target. At width 1 the glyph itself
+		// wins; at wider widths keep its separating space as well.
+		let header: string;
+		if (trailing && width > 0) {
+			const suffix = width === 1 ? trailing : ` ${trailing}`;
+			header = `${truncateToWidth(rawHeader, Math.max(0, width - visibleWidth(suffix)))}${suffix}`;
+		} else {
+			header = truncateToWidth(rawHeader, Math.max(0, width));
+		}
+		const bodyWidth = Math.max(0, width - 2);
 		const lines = [header];
 		if (this.expanded) {
 			const bodyLines = this.exec.render(bodyWidth);
@@ -389,12 +392,13 @@ export class ActivityLineComponent extends Container {
 			const capped = capErrorPreview(bodyLines.slice(start, end), bodyWidth, ACTIVITY_ERROR_PREVIEW_LINES);
 			for (const l of capped) lines.push(`  ${l}`);
 		}
+		const widthSafeLines = lines.map((line) => truncateToWidth(line, Math.max(0, width)));
 		if (cacheable) {
-			this.linesCache = lines;
+			this.linesCache = widthSafeLines;
 			this.linesCacheKey = cacheKey;
 		} else {
 			this.linesCache = null;
 		}
-		return lines;
+		return widthSafeLines;
 	}
 }

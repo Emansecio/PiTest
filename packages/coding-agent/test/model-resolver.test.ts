@@ -1,6 +1,7 @@
 import { getModels, type KnownProvider, type Model } from "@pit/ai";
 import { describe, expect, test } from "vitest";
 import {
+	buildSelectableModelView,
 	defaultModelPerProvider,
 	findInitialModel,
 	parseModelPattern,
@@ -35,6 +36,21 @@ const mockModels: Model<"anthropic-messages">[] = [
 		maxTokens: 4096,
 	},
 ];
+
+describe("buildSelectableModelView", () => {
+	test("deduplicates by provider/id while preserving scoped and current objects", () => {
+		const registry = { ...mockModels[0], name: "registry" };
+		const scoped = { ...registry, name: "scoped" };
+		const current = { ...registry, name: "current" };
+		const sdkOnly = { ...mockModels[1], id: "sdk-only", name: "SDK only" };
+
+		const view = buildSelectableModelView([registry], [scoped, sdkOnly], current);
+
+		expect(view).toHaveLength(2);
+		expect(view[0]).toBe(current);
+		expect(view[1]).toBe(sdkOnly);
+	});
+});
 
 // Mock OpenRouter models with colons in IDs
 const mockOpenRouterModels: Model<"anthropic-messages">[] = [
@@ -307,6 +323,63 @@ describe("resolveCliModel", () => {
 		expect(result.model?.id).toBe("openai/ghost-model");
 	});
 
+	test("separates a valid thinking suffix from an explicit provider custom model id", () => {
+		const registry = {
+			getAll: () => allModels,
+			hasConfiguredAuth: () => false,
+		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+
+		const result = resolveCliModel({
+			cliModel: "openrouter/acme/ghost-model:high",
+			modelRegistry: registry,
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("acme/ghost-model");
+		expect(result.thinkingLevel).toBe("high");
+	});
+
+	test("rejects an ambiguous bare exact id and resolves its canonical provider/id", () => {
+		const duplicate = { ...mockModels[1], provider: "openrouter", name: "Gateway GPT-4o" };
+		const registry = {
+			getAll: () => [...allModels, duplicate],
+			hasConfiguredAuth: () => false,
+		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+
+		const ambiguous = resolveCliModel({ cliModel: "gpt-4o:high", modelRegistry: registry });
+		expect(ambiguous.model).toBeUndefined();
+		expect(ambiguous.error).toMatch(/ambiguous across providers/i);
+
+		const canonical = resolveCliModel({ cliModel: "openai/gpt-4o:high", modelRegistry: registry });
+		expect(canonical.error).toBeUndefined();
+		expect(canonical.model?.provider).toBe("openai");
+		expect(canonical.model?.id).toBe("gpt-4o");
+		expect(canonical.thinkingLevel).toBe("high");
+	});
+
+	test("rejects ambiguous bare literal ids that end in a valid thinking suffix", () => {
+		const literalId = "literal-model:high";
+		const registry = {
+			getAll: () => [
+				...allModels,
+				{ ...mockModels[1], id: literalId, provider: "openai" },
+				{ ...mockModels[1], id: literalId, provider: "openrouter" },
+			],
+			hasConfiguredAuth: () => false,
+		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+
+		const ambiguous = resolveCliModel({ cliModel: literalId, modelRegistry: registry });
+		expect(ambiguous.model).toBeUndefined();
+		expect(ambiguous.error).toMatch(/ambiguous across providers/i);
+
+		const canonical = resolveCliModel({ cliModel: `openai/${literalId}`, modelRegistry: registry });
+		expect(canonical.error).toBeUndefined();
+		expect(canonical.model?.provider).toBe("openai");
+		expect(canonical.model?.id).toBe(literalId);
+		expect(canonical.thinkingLevel).toBeUndefined();
+	});
+
 	test("returns a clear error when there are no models", () => {
 		const registry = {
 			getAll: () => [],
@@ -320,6 +393,24 @@ describe("resolveCliModel", () => {
 
 		expect(result.model).toBeUndefined();
 		expect(result.error).toContain("No models available");
+	});
+
+	test("suggests the canonical provider/id for a near model alias", () => {
+		const luna = {
+			...mockModels[1],
+			provider: "openai-codex",
+			id: "gpt-5.6-luna",
+			name: "GPT-5.6 Luna",
+		};
+		const registry = {
+			getAll: () => [...allModels, luna],
+			hasConfiguredAuth: () => false,
+		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+
+		const result = resolveCliModel({ cliModel: "gpt-luna", modelRegistry: registry });
+
+		expect(result.model).toBeUndefined();
+		expect(result.error).toContain('Did you mean "openai-codex/gpt-5.6-luna"?');
 	});
 
 	test("prefers provider/model split over gateway model with matching id", () => {

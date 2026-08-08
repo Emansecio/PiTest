@@ -149,14 +149,21 @@ describe("createWorktree failure cleanup via spawnSubagent (H20)", () => {
 
 		// A bad branch ref makes `git worktree add` fail deterministically. The
 		// ORIGINAL git error must survive the best-effort cleanup (not be masked).
-		await expect(
-			spawnSubagent(rig.deps, {
+		let thrown: unknown;
+		try {
+			await spawnSubagent(rig.deps, {
 				prompt: "work",
 				taskName: "wt-badref",
 				cwd: repo,
 				worktree: { branch: "this-ref-does-not-exist" },
-			}),
-		).rejects.toThrow(/worktree setup failed/i);
+			});
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeInstanceOf(Error);
+		expect((thrown as Error).message).toMatch(/worktree setup failed/i);
+		expect((thrown as Error & { cause?: unknown }).cause).toBeInstanceOf(Error);
+		expect((thrown as Error & { cause: Error }).cause.message).toMatch(/this-ref-does-not-exist/i);
 
 		// No partial dir left under .pit/worktrees, and no dangling git entry.
 		const worktreeDir = join(repo, ".pit", "worktrees");

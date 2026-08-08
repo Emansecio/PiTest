@@ -4,10 +4,12 @@ import type { Model } from "@pit/ai";
 import { getAgentDir } from "../config.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { bundleBuiltInExtensions } from "./built-ins/index.ts";
+import type { SubagentRequestPolicy } from "./coordinator/types.ts";
 import { retargetToolsForWorktree } from "./coordinator/worktree-tools.ts";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { composeMcpSettings, loadMcpConfigFiles } from "./mcp/config-files.ts";
 import { ModelRegistry } from "./model-registry.ts";
+import { buildSelectableModelView } from "./model-resolver.ts";
 import {
 	normalizePermissionMode,
 	PermissionChecker,
@@ -198,6 +200,10 @@ export async function createAgentSessionServices(
 	// construction goes stale and subagents would spawn with the boot-time
 	// model/catalog.
 	const parentModelRef: { current?: () => import("@pit/ai").Model<any> | undefined } = {};
+	const selectableModelsRef: { current?: () => readonly Model<any>[] } = {};
+	const subagentRequestPolicyRef: {
+		current?: (signal?: AbortSignal) => SubagentRequestPolicy | undefined;
+	} = {};
 	const availableToolsRef: { current?: () => import("@pit/agent-core").AgentTool[] } = {};
 	const retargetToolsRef: {
 		current?: (tools: import("@pit/agent-core").AgentTool[], cwd: string) => import("@pit/agent-core").AgentTool[];
@@ -224,7 +230,11 @@ export async function createAgentSessionServices(
 			meta?: { turns?: number; totalTokens?: number },
 		) => void;
 	} = {};
-	const abortDetachedRef: { current?: (abortFn: () => void) => void } = {};
+	const abortDetachedRef: { current?: (abortFn: () => void) => void; registered?: () => void } = {};
+	const disposeCoordinatorRef: {
+		current?: (dispose: () => Promise<void>) => void;
+		registered?: () => Promise<void>;
+	} = {};
 	const permissionModeChangeRef: { current?: (mode: import("./permissions/types.ts").PermissionMode) => void } = {};
 	const fusionNeedsSetupRef: { current?: () => void } = {};
 	// Resolved lazily, same reason as parentModelRef: the session (and its
@@ -255,6 +265,10 @@ export async function createAgentSessionServices(
 			hooks: settingsManager.getHooksSettings(),
 			mcp: composeMcpSettings(settingsManager.getMcpSettingsLayered(), loadMcpConfigFiles(cwd, agentDir)),
 			getParentModel: () => parentModelRef.current?.(),
+			getSelectableModels: () =>
+				selectableModelsRef.current?.() ??
+				buildSelectableModelView(modelRegistry.getAll(), [], parentModelRef.current?.()),
+			getSubagentRequestPolicy: (signal) => subagentRequestPolicyRef.current?.(signal),
 			getParentSessionId: () => parentSessionIdRef.current,
 			getAvailableTools: () => availableToolsRef.current?.() ?? [],
 			isChromeDevtoolsEnabled: () => settingsManager.getChromeDevtoolsSettings().enabled,
@@ -270,7 +284,14 @@ export async function createAgentSessionServices(
 			onSubagentStart: (handle) => subagentStartRef.current?.(handle),
 			onSubagentProgress: (handle, info) => subagentProgressRef.current?.(handle, info),
 			onSubagentComplete: (handle, status, meta) => subagentCompleteRef.current?.(handle, status, meta),
-			registerAbortDetached: (abortFn) => abortDetachedRef.current?.(abortFn),
+			registerAbortDetached: (abortFn) => {
+				abortDetachedRef.registered = abortFn;
+				abortDetachedRef.current?.(abortFn);
+			},
+			registerDisposeCoordinator: (dispose) => {
+				disposeCoordinatorRef.registered = dispose;
+				disposeCoordinatorRef.current?.(dispose);
+			},
 			isScopedHindsightEnabled: () => settingsManager.getHindsightSettings().scopedSubagents,
 			onPermissionModeChange: (mode) => permissionModeChangeRef.current?.(mode),
 			isFusionPanelReady: () => settingsManager.getFusionSettings().panel.length >= 2,
@@ -336,6 +357,7 @@ export async function createAgentSessionServices(
 					meta?: { turns?: number; totalTokens?: number },
 				) => void,
 				registerAbortDetached: (abortFn: () => void) => void,
+				registerDisposeCoordinator: (dispose: () => Promise<void>) => void,
 				getReadDedupeStore: () => ReadDedupeStore | undefined,
 				getWarmFileCache: () => WarmFileCache | undefined,
 				parentSessionId: string | undefined,
@@ -351,6 +373,7 @@ export async function createAgentSessionServices(
 		emitSubProgress,
 		emitSubComplete,
 		registerAbortDetached,
+		registerDisposeCoordinator,
 		getReadDedupeStore,
 		getWarmFileCache,
 		parentSessionId,
@@ -364,9 +387,23 @@ export async function createAgentSessionServices(
 		subagentProgressRef.current = emitSubProgress;
 		subagentCompleteRef.current = emitSubComplete;
 		abortDetachedRef.current = registerAbortDetached;
+		disposeCoordinatorRef.current = registerDisposeCoordinator;
+		if (abortDetachedRef.registered) registerAbortDetached(abortDetachedRef.registered);
+		if (disposeCoordinatorRef.registered) registerDisposeCoordinator(disposeCoordinatorRef.registered);
 		readDedupeStoreRef.current = getReadDedupeStore;
 		warmFileCacheRef.current = getWarmFileCache;
 		parentSessionIdRef.current = parentSessionId;
+	};
+	(
+		resourceLoader as DefaultResourceLoader & {
+			__bindCoordinatorRequestPolicy?: (
+				getSelectableModels: () => readonly Model<any>[],
+				getRequestPolicy: (signal?: AbortSignal) => SubagentRequestPolicy | undefined,
+			) => void;
+		}
+	).__bindCoordinatorRequestPolicy = (getSelectableModels, getRequestPolicy) => {
+		selectableModelsRef.current = getSelectableModels;
+		subagentRequestPolicyRef.current = getRequestPolicy;
 	};
 
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
@@ -482,6 +519,7 @@ export async function createAgentSessionFromServices(
 					meta?: { turns?: number; totalTokens?: number },
 				) => void,
 				registerAbortDetached: (abortFn: () => void) => void,
+				registerDisposeCoordinator: (dispose: () => Promise<void>) => void,
 				getReadDedupeStore: () => ReadDedupeStore | undefined,
 				getWarmFileCache: () => WarmFileCache | undefined,
 				parentSessionId: string | undefined,
@@ -501,12 +539,32 @@ export async function createAgentSessionFromServices(
 			(abortFn) => {
 				result.session._abortDetachedSubagents = abortFn;
 			},
+			(dispose) => {
+				result.session._disposeCoordinator = dispose;
+			},
 			() => result.session.readDedupeStore,
 			() => result.session.graphPrefetchCache,
 			// Parent session id → coordinator's subagent prompt_cache_key derivation.
 			options.sessionManager.getSessionId(),
 		);
 	}
+	const bindCoordinatorPolicy = (
+		options.services.resourceLoader as DefaultResourceLoader & {
+			__bindCoordinatorRequestPolicy?: (
+				getSelectableModels: () => readonly Model<any>[],
+				getRequestPolicy: (signal?: AbortSignal) => SubagentRequestPolicy | undefined,
+			) => void;
+		}
+	).__bindCoordinatorRequestPolicy;
+	bindCoordinatorPolicy?.(
+		() =>
+			buildSelectableModelView(
+				options.services.modelRegistry.getAll(),
+				result.session.scopedModels.map((entry) => entry.model),
+				result.session.model,
+			),
+		(signal) => result.session.getSubagentRequestPolicy(signal),
+	);
 
 	return result;
 }

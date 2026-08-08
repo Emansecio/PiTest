@@ -24,6 +24,7 @@ import {
 	fauxToolCall,
 	type Model,
 	registerFauxProvider,
+	streamSimple,
 } from "@pit/ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
@@ -35,6 +36,7 @@ import {
 	deriveSubagentCacheKey,
 	evaluateSubagentMutationPolicy,
 	evaluateSubagentToolPermission,
+	isSubagentAuthError,
 	isTransportRetryableError,
 	type SpawnSubagentDependencies,
 	spawnSubagent,
@@ -42,6 +44,7 @@ import {
 import { convertToLlm } from "../src/core/messages.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { PermissionChecker, type PermissionSettings } from "../src/core/permissions/index.js";
+import { PROVIDER_AUTH_ERROR_CODE, ProviderAuthError } from "../src/core/request-policy.js";
 import type { Skill } from "../src/core/skills.js";
 
 // Minimal Skill object — formatSkillsForPrompt only reads name/description/
@@ -317,17 +320,44 @@ describe("spawnSubagent (faux model)", () => {
 
 		const controller = new AbortController();
 		controller.abort();
+		let createdRecordId: string | undefined;
+		let createdStatus: string | undefined;
 
 		await expect(
 			spawnSubagent(rig.deps, {
 				prompt: "long task",
 				taskName: "cancel-pre",
 				signal: controller.signal,
+				onRecordCreated: (record) => {
+					createdRecordId = record.id;
+					createdStatus = rig.registry.get(record.id)?.status;
+				},
 			}),
 		).rejects.toThrow(/aborted/);
 
 		const record = rig.registry.list().find((r) => r.prompt === "long task");
+		expect(createdRecordId).toBe(record?.id);
+		expect(createdStatus).toBe("running");
 		expect(record?.status).toBe("cancelled");
+	});
+
+	it("settles a cancellation published before the run-slot queue starts", async () => {
+		const rig = newRig();
+		rig.faux.setResponses([fauxAssistantMessage("must not run")]);
+		const controller = new AbortController();
+
+		await expect(
+			spawnSubagent(rig.deps, {
+				prompt: "queued task",
+				taskName: "cancel-during-registration",
+				signal: controller.signal,
+				onRecordCreated: () => controller.abort(new Error("cancelled while registering")),
+			}),
+		).rejects.toThrow(/cancelled while registering/);
+
+		const record = rig.registry.list().find((r) => r.prompt === "queued task");
+		expect(record?.status).toBe("cancelled");
+		expect(rig.faux.state.callCount).toBe(0);
 	});
 
 	it("cancellation via signal aborted mid-flight: settles as cancelled", async () => {
@@ -353,6 +383,20 @@ describe("spawnSubagent (faux model)", () => {
 		const record = rig.registry.list().find((r) => r.prompt === "abortable");
 		expect(record?.status).toBe("cancelled");
 	});
+
+	it.each([0, -1, -10, 0.5, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+		"rejects invalid direct maxTurns %s before creating a registry record",
+		async (maxTurns) => {
+			const rig = newRig();
+			rig.faux.setResponses([fauxAssistantMessage("must not run")]);
+
+			await expect(spawnSubagent(rig.deps, { prompt: "invalid cap", maxTurns })).rejects.toThrow(
+				/maxTurns must be a finite positive integer/i,
+			);
+			expect(rig.registry.list()).toEqual([]);
+			expect(rig.faux.state.callCount).toBe(0);
+		},
+	);
 
 	it("turn cap: keeps the answer when the capped turn is the one that finished", async () => {
 		// Regression: the cap fired on EVERY turn_end, including the terminal one
@@ -554,6 +598,171 @@ describe("spawnSubagent (faux model)", () => {
 		const failed = records.find((r) => r.taskName === "wt-plan");
 		expect(failed?.status).toBe("failed");
 		expect(failed?.error).toMatch(/worktree is blocked in plan mode/);
+	});
+
+	it("recognizes OAuth organization-policy failures as auth errors", () => {
+		expect(
+			isSubagentAuthError(
+				"403 permission_error: OAuth authentication is currently not allowed for this organization",
+			),
+		).toBe(true);
+		expect(isSubagentAuthError("provider returned error: 503 service unavailable")).toBe(false);
+	});
+
+	it.each([
+		"No API key for provider anthropic",
+		"No API key found for openai-codex. Run /login.",
+		"OAuth token expired",
+		"OAuth access was revoked",
+		"Unauthorized",
+		"401 Unauthorized",
+		"403 Forbidden",
+	])("recognizes fallback-safe auth diagnostic: %s", (message) => {
+		expect(isSubagentAuthError(message)).toBe(true);
+	});
+
+	it("falls back to the parent model when an explicit model is rejected before tool use", async () => {
+		const rig = newRig();
+		const requested = { ...rig.deps.model, id: "oauth-blocked-child", name: "OAuth blocked child" };
+		rig.faux.setResponses([
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				errorMessage: "403 permission_error: OAuth authentication is currently not allowed for this organization",
+			}),
+			fauxAssistantMessage("completed on parent model"),
+		]);
+
+		const result = await spawnSubagent(rig.deps, { prompt: "finish", taskName: "auth-fallback", model: requested });
+		expect(result.output).toContain("completed on parent model");
+		expect(result.modelFallback).toMatchObject({
+			from: `${requested.provider}/${requested.id}`,
+			to: `${rig.deps.model.provider}/${rig.deps.model.id}`,
+		});
+		expect(result.record.modelFallback).toEqual(result.modelFallback);
+	});
+
+	it("does not fall back after the child produced useful text", async () => {
+		const rig = newRig();
+		const requested = { ...rig.deps.model, id: "expired-after-progress" };
+		rig.faux.setResponses([
+			fauxAssistantMessage("Useful partial analysis was produced.", {
+				stopReason: "error",
+				errorMessage: "401 Unauthorized",
+			}),
+			fauxAssistantMessage("must not run on parent"),
+		]);
+
+		await expect(spawnSubagent(rig.deps, { prompt: "finish", model: requested })).rejects.toThrow(/401 Unauthorized/);
+		expect(rig.faux.state.callCount).toBe(1);
+	});
+
+	it.each([
+		[
+			"assistant text",
+			[
+				{ role: "user", content: [{ type: "text", text: "start" }], timestamp: 1 },
+				fauxAssistantMessage("prior useful analysis"),
+			] as AgentMessage[],
+		],
+		[
+			"tool call",
+			[
+				{ role: "user", content: [{ type: "text", text: "start" }], timestamp: 1 } as AgentMessage,
+				fauxAssistantMessage([fauxToolCall("read", { path: "a.ts" }, { id: "prior-tool" })], {
+					stopReason: "toolUse",
+				}),
+				{
+					role: "toolResult",
+					toolCallId: "prior-tool",
+					toolName: "read",
+					content: [{ type: "text", text: "prior result" }],
+					isError: false,
+					timestamp: 3,
+				} as AgentMessage,
+			] as AgentMessage[],
+		],
+	])("does not fall back after prior transcript %s", async (_label, initialMessages) => {
+		const rig = newRig();
+		const requested = { ...rig.deps.model, id: "auth-failed-after-resume" };
+		rig.faux.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "401 Unauthorized" }),
+			fauxAssistantMessage("must not run on parent"),
+		]);
+
+		await expect(spawnSubagent(rig.deps, { prompt: "continue", model: requested, initialMessages })).rejects.toThrow(
+			/401 Unauthorized/,
+		);
+		expect(rig.faux.state.callCount).toBe(1);
+	});
+
+	it("falls back from a typed ProviderAuthError even when its text does not match heuristics", async () => {
+		const rig = newRig();
+		const requested = { ...rig.deps.model, id: "typed-auth-child" };
+		rig.deps.requestPolicy = {
+			streamFn: async (model, context, options) => {
+				if (model.id === requested.id) {
+					throw new ProviderAuthError(model.provider, "opaque account condition");
+				}
+				return streamSimple(model, context, options);
+			},
+		};
+		rig.faux.setResponses([fauxAssistantMessage("typed fallback reached parent")]);
+
+		const result = await spawnSubagent(rig.deps, { prompt: "finish", model: requested });
+
+		expect(result.output).toContain("typed fallback reached parent");
+		expect(result.modelFallback?.reason).toContain("opaque account condition");
+	});
+
+	it("falls back from a plain cross-realm provider-auth error without stringifying the object", async () => {
+		const rig = newRig();
+		const requested = { ...rig.deps.model, id: "cross-realm-auth-child" };
+		rig.deps.requestPolicy = {
+			streamFn: async (model, context, options) => {
+				if (model.id === requested.id) {
+					throw {
+						code: PROVIDER_AUTH_ERROR_CODE,
+						provider: model.provider,
+						message: "cross-realm account rejected",
+					};
+				}
+				return streamSimple(model, context, options);
+			},
+		};
+		rig.faux.setResponses([fauxAssistantMessage("cross-realm fallback reached parent")]);
+
+		const result = await spawnSubagent(rig.deps, { prompt: "finish", model: requested });
+
+		expect(result.output).toContain("cross-realm fallback reached parent");
+		expect(result.modelFallback?.reason).toContain("cross-realm account rejected");
+		expect(result.modelFallback?.reason).not.toContain("[object Object]");
+	});
+
+	it("does not fall back from a plain structured non-auth error", async () => {
+		const rig = newRig();
+		const requested = { ...rig.deps.model, id: "cross-realm-non-auth-child" };
+		rig.deps.requestPolicy = {
+			streamFn: async (model, context, options) => {
+				if (model.id === requested.id) {
+					throw {
+						code: "PIT_PROVIDER_OTHER",
+						provider: model.provider,
+						message: "opaque stream failure",
+					};
+				}
+				return streamSimple(model, context, options);
+			},
+		};
+		rig.faux.setResponses([fauxAssistantMessage("must not run on parent")]);
+
+		await expect(
+			spawnSubagent(rig.deps, { prompt: "finish", taskName: "non-auth-structured", model: requested }),
+		).rejects.toThrow(/opaque stream failure/);
+		expect(rig.faux.state.callCount).toBe(0);
+		const record = rig.registry.list().find((entry) => entry.taskName === "non-auth-structured");
+		expect(record?.status).toBe("failed");
+		expect(record?.error).toContain("opaque stream failure");
+		expect(record?.modelFallback).toBeUndefined();
 	});
 
 	it("retries once on a transport 503 before the first successful turn (ADR #6)", async () => {

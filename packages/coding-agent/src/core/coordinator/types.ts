@@ -12,7 +12,7 @@
  *   - Running the same prompt against multiple personas
  */
 
-import type { AgentMessage, ThinkingLevel } from "@pit/agent-core";
+import type { AgentMessage, AgentOptions, ThinkingLevel } from "@pit/agent-core";
 import type { Model } from "@pit/ai";
 import type { TSchema } from "typebox";
 
@@ -26,6 +26,21 @@ export interface SubagentUsage {
 	costUsd: number;
 }
 
+export interface SubagentModelFallback {
+	from: string;
+	to: string;
+	reason: string;
+}
+
+/** Provider/request settings inherited from an owning AgentSession. */
+export type SubagentRequestPolicy = Pick<
+	AgentOptions,
+	"streamFn" | "onPayload" | "onResponse" | "transport" | "maxRetryDelayMs" | "idleTimeoutMs" | "thinkingBudgets"
+>;
+
+/** Resolve inherited request behavior against the child run's active signal. */
+export type SubagentRequestPolicyFactory = (signal: AbortSignal) => SubagentRequestPolicy | undefined;
+
 /**
  * Lightweight progress signal emitted while a subagent runs, so the parent can
  * surface live status (turn N, last tool) instead of a black box until settle.
@@ -38,6 +53,13 @@ export interface SubagentProgressInfo {
 	lastTool?: string;
 	/** Cumulative token spend across the run so far (live cost feedback). */
 	totalTokens?: number;
+}
+
+/** Settled transcript snapshot emitted after one completed subagent turn. */
+export interface SubagentTurnCheckpoint {
+	turn: number;
+	messages: AgentMessage[];
+	model: Model<any>;
 }
 
 export interface SubagentExecutionManifest {
@@ -66,6 +88,8 @@ export interface SubagentRecord {
 	deniedToolCalls?: string[];
 	/** Aggregate token/cost usage, accumulated across the subagent's turns. */
 	usage?: SubagentUsage;
+	/** Explicit child model failed before doing work and the run continued on the parent model. */
+	modelFallback?: SubagentModelFallback;
 	/** True when cancellation/failure preserved work produced before the final answer. */
 	partial?: boolean;
 	manifest?: SubagentExecutionManifest;
@@ -110,6 +134,8 @@ export interface SpawnSubagentOptions {
 	 * parent/TUI instead of the subagent being a black box until it settles.
 	 */
 	onSubagentEvent?: (info: SubagentProgressInfo) => void;
+	/** Best-effort durable checkpoint hook. Calls are serialized and awaited before settlement. */
+	onTurnCheckpoint?: (checkpoint: SubagentTurnCheckpoint) => void | Promise<void>;
 	/** Cancellation signal. */
 	signal?: AbortSignal;
 	/**
@@ -164,6 +190,12 @@ export interface SpawnSubagentOptions {
 	 */
 	onWorktreeReady?: (path: string) => void;
 	/**
+	 * Called after the canonical registry record is created and the spawn is marked
+	 * running, but before queueing/setup. This lets callers publish cancellation
+	 * for a queued spawn without waiting for the Agent to be constructed.
+	 */
+	onRecordCreated?: (record: SubagentRecord) => void;
+	/**
 	 * Called once with the live `Agent` and its canonical registry record
 	 * immediately after construction and before its first turn. Existing one-arg
 	 * callbacks remain compatible. Used to attach the agent to the message bus and
@@ -194,4 +226,6 @@ export interface SpawnSubagentResult {
 	worktreePath?: string;
 	/** Aggregate token/cost usage for the run, when the provider reported it. */
 	usage?: SubagentUsage;
+	/** Visible provenance when an unavailable explicit model fell back to the parent model. */
+	modelFallback?: SubagentModelFallback;
 }

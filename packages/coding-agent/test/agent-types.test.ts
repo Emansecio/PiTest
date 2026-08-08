@@ -89,6 +89,7 @@ Plan things.`,
 		expect(names).toEqual(expect.arrayContaining(["explore", "plan", "review", "general"]));
 		const explore = loadAgentTypes(root, home).find((t) => t.name === "explore");
 		expect(explore?.source).toBe("builtin");
+		expect(explore?.model).toBeUndefined();
 	});
 
 	it("lets a project/user type override a built-in of the same name", () => {

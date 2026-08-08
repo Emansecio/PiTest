@@ -13,21 +13,55 @@ import { type Static, Type } from "typebox";
 import { getCurrentCoveringTests, getCurrentUnreviewedImpact } from "../built-ins/impact-extension.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentGoalManager } from "../goal/goal-manager.ts";
+import {
+	type GoalCompleteCriterionInput,
+	type GoalCompletionReceipt,
+	type GoalCompletionReceiptDraft,
+	validateGoalEvidence,
+} from "../goal/goal-receipt.ts";
 import { getCurrentSelfReviewFindings } from "../self-review.ts";
 import { summarizeCheckFailure } from "../verification/failure-summary.ts";
-import { detectGoalGateCommands, runGoalGates } from "../verification/goal-gates.ts";
-import { pendingVerificationJobs } from "../verification/pending-checks.ts";
-import { getCurrentVerificationProbe, getCurrentVerificationSettings } from "../verification/verification.ts";
+import {
+	detectGoalGateCommands,
+	type GoalGateRunResult,
+	goalGateFingerprint,
+	runGoalGates,
+} from "../verification/goal-gates.ts";
+import {
+	isVerificationJobCommand,
+	pendingVerificationJobs,
+	verificationJobVerdict,
+} from "../verification/pending-checks.ts";
+import {
+	type CheckResult,
+	getCurrentVerificationProbe,
+	getCurrentVerificationSettings,
+} from "../verification/verification.ts";
 import { listBashBackgroundJobs } from "./bash.ts";
 import { renderToolOutput } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const goalCompleteSchema = Type.Object(
 	{
-		summary: Type.Optional(
-			Type.String({
-				description: "Short summary of what was accomplished and how each requirement was verified.",
-			}),
+		summary: Type.Optional(Type.String({ maxLength: 1200, description: "Short completion summary." })),
+		contractRevision: Type.Optional(Type.Integer({ minimum: 1 })),
+		criteria: Type.Optional(
+			Type.Array(
+				Type.Object({
+					id: Type.String(),
+					outcome: Type.String({ maxLength: 600 }),
+					evidence: Type.Array(
+						Type.Union([
+							Type.Object({
+								kind: Type.Literal("path"),
+								path: Type.String(),
+								note: Type.Optional(Type.String({ maxLength: 400 })),
+							}),
+							Type.Object({ kind: Type.Literal("claim"), note: Type.String({ maxLength: 400 }) }),
+						]),
+					),
+				}),
+			),
 		),
 	},
 	{ additionalProperties: false },
@@ -38,9 +72,14 @@ export type GoalCompleteToolInput = Static<typeof goalCompleteSchema>;
 export interface GoalCompleteToolDetails {
 	completed: boolean;
 	objective?: string;
+	receipt?: GoalCompletionReceipt;
+	code?: string;
+	pendingCriteria?: string[];
 }
 
-export interface GoalCompleteToolOptions {}
+export interface GoalCompleteToolOptions {
+	getOwnerSessionId?: () => string | undefined;
+}
 
 /**
  * One refusal per goal, per gate — the bound that makes R9/R10 terminate.
@@ -111,7 +150,7 @@ function formatCoveringTestsLine(coveringTests: readonly string[]): string {
 
 export function createGoalCompleteToolDefinition(
 	cwd: string,
-	_options?: GoalCompleteToolOptions,
+	options?: GoalCompleteToolOptions,
 ): ToolDefinition<typeof goalCompleteSchema, GoalCompleteToolDetails> {
 	return {
 		name: "goal_complete",
@@ -144,9 +183,73 @@ export function createGoalCompleteToolDefinition(
 					details: { completed: false, objective: goal.objective },
 				};
 			}
-			// R8: a test/check the agent backgrounded is still running — its result is
+			const contractRevision = goal.contract?.revision;
+			const mutationRevision = goal.mutationRevision ?? 0;
+			const goalIsUnchanged = (): boolean => {
+				const current = mgr.get();
+				return (
+					current?.id === goal.id &&
+					current.status === "active" &&
+					current.contract?.revision === contractRevision &&
+					(current.mutationRevision ?? 0) === mutationRevision
+				);
+			};
+			const goalChangedResult = () => ({
+				content: [
+					{
+						type: "text" as const,
+						text: "Not completing the goal — the Goal changed while verification was running. Re-evaluate the current Goal contract and call goal_complete again.",
+					},
+				],
+				details: { completed: false, objective: goal.objective, code: "goal-changed" },
+			});
+			let validatedCriteria: ReturnType<typeof validateGoalEvidence>["criteria"] = [];
+			if (goal.contract) {
+				if (input.contractRevision !== goal.contract.revision || !input.criteria) {
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `Not completing the goal — provide contractRevision ${goal.contract.revision} and criteria for: ${goal.contract.criteria.map((criterion) => criterion.id).join(", ")}.`,
+							},
+						],
+						details: {
+							completed: false,
+							objective: goal.objective,
+							code: "contract-required",
+							pendingCriteria: goal.contract.criteria.map((criterion) => criterion.id),
+						},
+					};
+				}
+				const evidence = validateGoalEvidence(
+					goal.contract,
+					input.criteria as GoalCompleteCriterionInput[],
+					cwd,
+					goal.mutatedPaths ?? [],
+				);
+				if (!evidence.valid)
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `Not completing the goal — evidence coverage is invalid:\n${evidence.errors.map((error) => `- ${error}`).join("\n")}`,
+							},
+						],
+						details: { completed: false, objective: goal.objective, code: "invalid-evidence" },
+					};
+				validatedCriteria = evidence.criteria;
+			}
+			// R8: a test/check the agent backgrounded — its result is
 			// unknown, so the goal can't be declared done (and no commit suggested) yet.
-			const pending = pendingVerificationJobs(listBashBackgroundJobs());
+			const verificationJobs = listBashBackgroundJobs(options?.getOwnerSessionId?.()).filter((job) =>
+				isVerificationJobCommand(job.command),
+			);
+			const pending = pendingVerificationJobs(verificationJobs);
+			const failedVerification = verificationJobs.filter((job) => {
+				if (job.resultSeen) return false;
+				const verdict = verificationJobVerdict(job);
+				return verdict === "failed" || verdict === "timed-out";
+			});
 			if (pending.length > 0) {
 				const list = pending.map((j) => `  • id=${j.id}: ${j.command}`).join("\n");
 				return {
@@ -159,19 +262,33 @@ export function createGoalCompleteToolDefinition(
 					details: { completed: false, objective: goal.objective },
 				};
 			}
-			const mutationRevision = goal.mutationRevision ?? 0;
-			if (mutationRevision > 0) {
-				const verificationSettings = getCurrentVerificationSettings();
-				const gates = detectGoalGateCommands(
-					cwd,
-					verificationSettings?.command ?? undefined,
-					goal.mutatedPaths ?? [],
-				);
-				const gateRun = await runGoalGates(gates, cwd, {
+			if (failedVerification.length > 0) {
+				const list = failedVerification.map((job) => `  • id=${job.id}: ${job.command}`).join("\n");
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Not completing the goal — a verification job failed or timed out. Inspect its output before correcting or rerunning it:\n${list}`,
+						},
+					],
+					details: { completed: false, objective: goal.objective },
+				};
+			}
+			const verificationSettings = getCurrentVerificationSettings();
+			let gateRun: GoalGateRunResult | undefined;
+			let gates: ReturnType<typeof detectGoalGateCommands> = [];
+			let cachedGateIds = new Set<string>();
+			let gateFingerprints: Record<string, string> = {};
+			if (mutationRevision > 0 && verificationSettings?.enabled !== false) {
+				gates = detectGoalGateCommands(cwd, verificationSettings?.command ?? undefined, goal.mutatedPaths ?? []);
+				gateFingerprints = Object.fromEntries(gates.map((gate) => [gate.id, goalGateFingerprint(gate)]));
+				cachedGateIds = new Set(mgr.gateProgressFor(mutationRevision, gateFingerprints));
+				gateRun = await runGoalGates(gates, cwd, {
 					timeoutMs: verificationSettings?.timeoutMs,
-					passedGateIds: mgr.gateProgressFor(mutationRevision),
+					passedGateIds: [...cachedGateIds],
 					signal,
 				});
+				if (!goalIsUnchanged()) return goalChangedResult();
 				const failed = gateRun.results.find((result) => result.status === "failed");
 				if (gateRun.status === "cancelled") {
 					mgr.pause("gate_cancelled");
@@ -186,7 +303,7 @@ export function createGoalCompleteToolDefinition(
 					};
 				}
 				if (failed) {
-					mgr.setGateProgress(mutationRevision, gateRun.passedGateIds);
+					mgr.setGateProgress(mutationRevision, gateRun.passedGateIds, gateFingerprints);
 					const failure = mgr.recordGateFailure(mutationRevision, failed.gate.id, failed.fingerprint);
 					const repeated = failure.attempts >= 3;
 					if (repeated) mgr.pause("gate_retry_limit");
@@ -207,7 +324,7 @@ export function createGoalCompleteToolDefinition(
 						details: { completed: false, objective: goal.objective },
 					};
 				}
-				mgr.setGateProgress(mutationRevision, gateRun.passedGateIds);
+				mgr.setGateProgress(mutationRevision, gateRun.passedGateIds, gateFingerprints);
 			}
 			// R7: don't let the agent declare the goal done while the project check
 			// is red. Run the configured check once; refuse on failure with the output.
@@ -215,14 +332,16 @@ export function createGoalCompleteToolDefinition(
 			// would permanently block goal completion in any repo whose check outruns
 			// verification.timeoutMs (the agent can never make a slow check faster).
 			const probe = getCurrentVerificationProbe();
+			let probeResult: CheckResult | null | undefined;
 			if (probe && mutationRevision === 0) {
-				const result = await probe();
-				if (result && !result.ok && !result.timedOut) {
+				probeResult = await probe();
+				if (!goalIsUnchanged()) return goalChangedResult();
+				if (probeResult && !probeResult.ok && !probeResult.timedOut) {
 					// Summarize the dominant failure (tsc/biome/vitest/thrown) instead of a raw
 					// tail slice, so the model sees the root-cause error — same extraction the
 					// end-of-turn verification gate uses. Falls back to a tail when nothing matches.
-					const tail = summarizeCheckFailure(result.output, "");
-					const status = `exited ${result.exitCode}`;
+					const tail = summarizeCheckFailure(probeResult.output, "");
+					const status = `exited ${probeResult.exitCode}`;
 					return {
 						content: [
 							{
@@ -311,16 +430,119 @@ export function createGoalCompleteToolDefinition(
 				});
 			}
 			const summary = input.summary?.trim();
+			const contract = goal.contract;
+			const gateReceipts: GoalCompletionReceipt["verification"]["gates"] = [];
+			if (gateRun) {
+				for (const gate of gates) {
+					const result = gateRun.results.find((item) => item.gate.id === gate.id);
+					if (result?.status === "passed") {
+						gateReceipts.push({
+							id: gate.id,
+							label: gate.label,
+							source: gate.source,
+							status: "passed",
+							cached: false,
+							durationMs: result.durationMs,
+						});
+					} else if (cachedGateIds.has(gate.id) && gateRun.passedGateIds.includes(gate.id)) {
+						gateReceipts.push({
+							id: gate.id,
+							label: gate.label,
+							source: gate.source,
+							status: "passed",
+							cached: true,
+						});
+					}
+				}
+			}
+			const verification: GoalCompletionReceipt["verification"] =
+				mutationRevision > 0
+					? verificationSettings?.enabled === false
+						? {
+								mechanism: "none",
+								status: "inapplicable",
+								reason: "verification disabled",
+								gates: [],
+							}
+						: {
+								mechanism: "goal-gates",
+								status: gateRun?.status === "passed" ? "passed" : "inapplicable",
+								reason: gateRun?.status === "inapplicable" ? gateRun.reason : undefined,
+								gates: gateReceipts,
+							}
+					: probe
+						? {
+								mechanism: "legacy-probe",
+								status: probeResult?.ok ? "passed" : "inapplicable",
+								reason:
+									probeResult === null
+										? "verification probe returned no result"
+										: probeResult?.timedOut
+											? "verification probe timed out"
+											: undefined,
+								gates: [],
+							}
+						: {
+								mechanism: "none",
+								status: "inapplicable",
+								reason: "no applicable verification mechanism",
+								gates: [],
+							};
+			const receiptDraft: GoalCompletionReceiptDraft | undefined = contract
+				? {
+						version: 1,
+						goalId: goal.id,
+						objective: goal.objective,
+						contractRevision: contract.revision,
+						criteria: validatedCriteria,
+						mutations: {
+							revision: mutationRevision,
+							paths: goal.mutatedPaths ?? [],
+							attribution:
+								mutationRevision === 0 ? "not_applicable" : goal.mutatedPaths?.length ? "known" : "unknown",
+						},
+						verification,
+						safeguards: {
+							pendingVerificationChecks: "clear",
+							selfReview:
+								reviewFindings.length > 0
+									? "waived"
+									: selfReviewRefusedGoals.has(goal.id)
+										? "passed"
+										: "not_applicable",
+							impactReview:
+								unreviewedImpact.length > 0
+									? "waived"
+									: impactRefusedGoals.has(goal.id)
+										? "passed"
+										: "not_applicable",
+						},
+					}
+				: undefined;
+			if (!goalIsUnchanged()) return goalChangedResult();
+			const completion = mgr.complete(summary, receiptDraft);
+			if (!completion.completed && completion.receiptBytes !== undefined) {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: "Not completing the goal — the completion receipt exceeds the 24 KiB limit. Shorten criterion outcomes or evidence notes, then call goal_complete again.",
+						},
+					],
+					details: { completed: false, objective: goal.objective, code: "receipt-too-large" },
+				};
+			}
+			if (!completion.completed) return goalChangedResult();
+			const receipt = completion.receipt;
 			forgetGateRefusals(goal.id);
-			mgr.complete(summary);
 			return {
 				content: [
 					{
 						type: "text" as const,
-						text: `Goal complete: ${goal.objective}${summary ? `\n${summary}` : ""}`,
+						text: `Goal complete: ${goal.objective}\nContract: ${validatedCriteria.length}/${goal.contract?.criteria.length ?? validatedCriteria.length} covered · verification ${receipt?.verification.status ?? "inapplicable"} · ${goal.mutatedPaths?.length ?? 0} changed files${summary ? `\n${summary}` : ""}`,
 					},
 				],
-				details: { completed: true, objective: goal.objective },
+				details: { completed: true, objective: goal.objective, receipt },
 			};
 		},
 		renderCall(_args, theme, context) {

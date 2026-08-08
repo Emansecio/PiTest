@@ -107,6 +107,25 @@ describe("_startGoalSpinner (#B)", () => {
 		expect(nextBucket).toBe(2);
 	});
 
+	test("under reduced motion still repaints elapsed once per second", () => {
+		const previous = process.env.PIT_NO_MOTION;
+		process.env.PIT_NO_MOTION = "1";
+		try {
+			const { t, fakeThis, start } = goalSpinnerHarness();
+			start.call(fakeThis);
+			expect(t.active()).toBe(1);
+
+			t.tickAnimations(0);
+			const sameSecond = t.tickAnimations(500);
+			expect(sameSecond).toBe(1);
+			const nextSecond = t.tickAnimations(1000);
+			expect(nextSecond).toBe(2);
+		} finally {
+			if (previous === undefined) delete process.env.PIT_NO_MOTION;
+			else process.env.PIT_NO_MOTION = previous;
+		}
+	});
+
 	test("unsubscribes when goal is no longer active", () => {
 		const { t, fakeThis, snap, start } = goalSpinnerHarness();
 		start.call(fakeThis);

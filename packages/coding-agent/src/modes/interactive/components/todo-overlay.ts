@@ -12,6 +12,7 @@ import { isReducedMotion } from "../../../utils/env-flags.ts";
 import { getRgb, lerpRgb, rgbFg } from "../theme/color-interpolation.ts";
 import { theme } from "../theme/theme.ts";
 import { resolveGaugeGlyphs } from "./gauge-glyphs.ts";
+import { resolveTreeConnectors, toAsciiUiGlyphs } from "./glyph-resolver.ts";
 import { spinnerGlyphAt } from "./spinner-ticker.ts";
 
 /** Cap on overlay rows; completed todos are hidden first when exceeded. */
@@ -34,7 +35,7 @@ function fitWidth(text: string, width: number): string {
 }
 
 function strike(text: string): string {
-	return `\x1b[9m${text}\x1b[29m`;
+	return theme.getColorMode() === "none" ? text : `\x1b[9m${text}\x1b[29m`;
 }
 
 function sortTodosForDisplay(items: TodoItem[]): TodoItem[] {
@@ -157,7 +158,7 @@ function materializeTodoOverlayCache(
 	const lines = [...cache.header];
 	if (cache.progress) {
 		const bar = renderProgressBar(cache.progress.done, cache.progress.total, width, clockMs);
-		if (bar) lines.push(fitWidth(`${theme.fg("dim", "├─ ")}${bar}`, width));
+		if (bar) lines.push(fitWidth(`${theme.fg("dim", resolveTreeConnectors().branchPad)}${bar}`, width));
 	}
 	for (const row of cache.rows) {
 		if (row.kind === "static") {
@@ -202,7 +203,8 @@ function buildTodoOverlayCache(
 	const rows: TodoOverlayRow[] = [];
 	displayRows.forEach((item, idx) => {
 		const isLast = idx === displayRows.length - 1 && hiddenCompleted === 0;
-		const connector = theme.fg("dim", isLast ? "└─ " : "├─ ");
+		const connectors = resolveTreeConnectors();
+		const connector = theme.fg("dim", isLast ? connectors.lastPad : connectors.branchPad);
 		if (item.status === "in_progress") {
 			rows.push({ kind: "spinner", connector, item });
 			return;
@@ -210,7 +212,10 @@ function buildTodoOverlayCache(
 		rows.push({ kind: "static", line: fitWidth(connector + renderRow(item, "", width), width) });
 	});
 
-	const footer = hiddenCompleted > 0 ? theme.fg("dim", `└─ … ${hiddenCompleted} done hidden`) : undefined;
+	const footer =
+		hiddenCompleted > 0
+			? theme.fg("dim", `${resolveTreeConnectors().lastPad}… ${hiddenCompleted} done hidden`)
+			: undefined;
 	return {
 		dataKey,
 		width,
@@ -266,7 +271,9 @@ export function renderTodoOverlay(
 	}
 	const sorted = sortTodosForDisplay(data.items);
 	const dataKey = todoOverlayDataKey(data, sorted);
-	return materializeTodoOverlayCache(buildTodoOverlayCache(data, width, dataKey, sorted), spinner, width, clockMs);
+	return materializeTodoOverlayCache(buildTodoOverlayCache(data, width, dataKey, sorted), spinner, width, clockMs).map(
+		(line) => toAsciiUiGlyphs(line),
+	);
 }
 
 class TodoOverlayComponent implements Component {
@@ -314,7 +321,9 @@ class TodoOverlayComponent implements Component {
 		if (this.renderCache?.dataKey !== dataKey || this.renderCache.width !== width) {
 			this.renderCache = buildTodoOverlayCache(data, width, dataKey, sorted);
 		}
-		return ["", ...materializeTodoOverlayCache(this.renderCache, spinner, width, this.clock())];
+		return ["", ...materializeTodoOverlayCache(this.renderCache, spinner, width, this.clock())].map((line) =>
+			toAsciiUiGlyphs(line),
+		);
 	}
 }
 

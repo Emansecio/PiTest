@@ -179,6 +179,7 @@ export interface BashOperations {
 			onData: (data: Buffer) => void;
 			signal?: AbortSignal;
 			timeout?: number;
+			verification?: boolean;
 			env?: NodeJS.ProcessEnv;
 			/** Command label used for the background-job record on promotion. */
 			label?: string;
@@ -213,6 +214,7 @@ export interface BashOperations {
 // Override with PIT_BASH_AUTO_BACKGROUND_SECONDS; set to 0 / a non-positive
 // value to disable auto-backgrounding (commands without a timeout run forever).
 const BASH_AUTO_BACKGROUND_SECONDS = 60;
+const BASH_VERIFICATION_BACKGROUND_SECONDS = 10;
 
 // Startup window for an explicit `background: true` request. The command is given
 // this long to fail fast (bad flag, missing binary) in the foreground; if it is
@@ -264,6 +266,9 @@ export interface BashBackgroundJob {
 	id: string;
 	/** AgentSession that created this job; lifecycle messages never cross owners. */
 	ownerSessionId?: string;
+	cwd?: string;
+	deadlineAt?: number;
+	timedOut?: boolean;
 	pid: number | undefined;
 	command: string;
 	startedAt: number;
@@ -523,7 +528,8 @@ function clampJobCommand(command: string): string {
 }
 
 function describeJobState(job: BashBackgroundJob): string {
-	if (!job.exited) return "still running";
+	if (!job.exited) return job.timedOut ? "timed out; termination not confirmed" : "still running";
+	if (job.timedOut) return "timed out";
 	return job.exitCode === null
 		? "exited without an exit code (killed or signaled)"
 		: `exited with code ${job.exitCode}`;
@@ -581,6 +587,25 @@ function snapshotBackgroundJobOutput(job: BashBackgroundJob): { output: string; 
 }
 
 /** Actionable error for a job id that is not (or no longer) tracked. */
+function verificationKey(command: string, cwd: string): string {
+	return `${resolvePath(cwd)}\n${command
+		.trim()
+		.replace(/\r\n?/g, "\n")
+		.replace(/[ \t]+/g, " ")}`;
+}
+
+function findActiveVerificationJob(
+	command: string,
+	cwd: string,
+	ownerSessionId?: string,
+): BashBackgroundJob | undefined {
+	const key = verificationKey(command, cwd);
+	return listBashBackgroundJobs(ownerSessionId).find(
+		(job) =>
+			!job.exited && isVerificationJobCommand(job.command) && verificationKey(job.command, job.cwd ?? cwd) === key,
+	);
+}
+
 function formatUnknownBackgroundJob(jobId: string): string {
 	const jobs = listBashBackgroundJobs();
 	if (jobs.length === 0) {
@@ -884,7 +909,7 @@ export function createLocalBashOperations(options?: {
 		exec: (
 			command,
 			cwd,
-			{ onData, signal, timeout, env, label, ownerSessionId, autoBackground, backgroundImmediate },
+			{ onData, signal, timeout, verification, env, label, ownerSessionId, autoBackground, backgroundImmediate },
 		) => {
 			return new Promise((resolve, reject) => {
 				const { shell, args } = getShellConfig(options?.shellPath);
@@ -935,6 +960,7 @@ export function createLocalBashOperations(options?: {
 				if (timeout !== undefined && timeout > 0) {
 					timeoutHandle = setTimeout(() => {
 						timedOut = true;
+						if (promoted) promoted.timedOut = true;
 						recordDiagnostic({
 							category: "process.kill",
 							level: "warn",
@@ -942,7 +968,7 @@ export function createLocalBashOperations(options?: {
 							context: { pid: child.pid },
 						});
 						if (child.pid) killProcessTree(child.pid);
-						armKillGrace(`Command timed out after ${timeout}s`);
+						if (!promoted) armKillGrace(`Command timed out after ${timeout}s`);
 					}, timeout * 1000);
 				}
 
@@ -1029,6 +1055,8 @@ export function createLocalBashOperations(options?: {
 					const job: BashBackgroundJob = {
 						id,
 						ownerSessionId,
+						cwd,
+						deadlineAt: verification && timeout !== undefined ? startedAt + timeout * 1000 : undefined,
 						pid: child.pid,
 						command: label ?? command,
 						startedAt,
@@ -1097,7 +1125,7 @@ export function createLocalBashOperations(options?: {
 					// `background:true` + `timeout>0` combo would let timeoutHandle fire
 					// killProcessTree on the already-detached job, contradicting the
 					// "keeps running detached" contract surfaced to the caller.
-					if (timeoutHandle) clearTimeout(timeoutHandle);
+					if (timeoutHandle && !verification) clearTimeout(timeoutHandle);
 					if (signal) signal.removeEventListener("abort", onAbort);
 					resolve({ exitCode: null, promotedJobId: id });
 				};
@@ -1107,8 +1135,11 @@ export function createLocalBashOperations(options?: {
 					// immediate failure still surfaces in the foreground. A command that
 					// finishes within the window resolves normally (close handler clears this).
 					autoBgHandle = setTimeout(promoteToBackground, resolveBackgroundStartupMs());
-				} else if (autoBgSeconds > 0 && (timeout === undefined || timeout <= 0)) {
-					autoBgHandle = setTimeout(promoteToBackground, autoBgSeconds * 1000);
+				} else if (verification || (autoBgSeconds > 0 && (timeout === undefined || timeout <= 0))) {
+					autoBgHandle = setTimeout(
+						promoteToBackground,
+						(verification ? BASH_VERIFICATION_BACKGROUND_SECONDS : autoBgSeconds) * 1000,
+					);
 				}
 
 				// Stream stdout and stderr.
@@ -1745,6 +1776,20 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 			}
 			const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
 			const spawnContext = resolveSpawnContext(resolvedCommand, resolveBashCwd(cwd, cwdArg), spawnHook);
+			if (isVerificationJobCommand(command)) {
+				const existing = findActiveVerificationJob(command, spawnContext.cwd, ownerSessionId);
+				if (existing) {
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `Verification already running as ${existing.id}; use bash({jobId:"${existing.id}", action:"poll"}) or wait for its terminal result.`,
+							},
+						],
+						details: undefined,
+					};
+				}
+			}
 			const output = new OutputAccumulator({
 				tempFilePrefix: "pi-bash",
 				maxLines: BASH_MAX_LINES,
@@ -1866,7 +1911,8 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 						// path (bash-executor) does not read it and therefore leaves it OFF.
 						// Verification commands (test/check/lint) must run to completion so pass/
 						// fail is known before handoff — never silently detach them.
-						autoBackground: !isVerificationJobCommand(command),
+						autoBackground: true,
+						verification: isVerificationJobCommand(command),
 						// Explicit `background: true` detaches right after startup instead of
 						// waiting out the auto-background threshold.
 						backgroundImmediate: background === true,
@@ -1901,7 +1947,10 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 					const job = getBashBackgroundJob(promotedJobId);
 					const elapsedSeconds =
 						job !== undefined ? (job.promotedAt - job.startedAt) / 1000 : resolveAutoBackgroundSeconds();
-					const status = `Command promoted to background id=${promotedJobId} after ${elapsedSeconds.toFixed(1)}s (still running). Output shown is up to promotion; the process keeps running detached and is killed on shutdown. Poll later output and the exit code with bash({jobId:"${promotedJobId}"}); kill it with bash({jobId:"${promotedJobId}", action:"kill"}). A fresh shell cannot see it — \`jobs\`/\`ps\`/\`tail\` will not find this process.`;
+					const deadlineText = job?.deadlineAt
+						? ` Verification deadline: ${Math.max(0, Math.round((job.deadlineAt - job.startedAt) / 1000))}s from start.`
+						: "";
+					const status = `Command still running; promoted to background id=${promotedJobId} after ${elapsedSeconds.toFixed(1)}s.${deadlineText} Output shown is up to promotion; poll later output and the exit code with bash({jobId:"${promotedJobId}"}); kill it with bash({jobId:"${promotedJobId}", action:"kill"}).`;
 					return { content: [{ type: "text", text: appendStatus(outputText, status) }], details };
 				}
 				if (exitCode !== 0 && exitCode !== null) {

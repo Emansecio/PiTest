@@ -1,6 +1,8 @@
 import { type Api, getRuntimeDiagnostics, type Model, resetRuntimeDiagnostics } from "@pit/ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { GoalManager, setCurrentGoalManager } from "../src/core/goal/goal-manager.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AgentSession } from "../src/core/agent-session.ts";
+import type { SubagentRequestPolicy } from "../src/core/coordinator/types.ts";
+import { GoalManager, getCurrentGoalManager, setCurrentGoalManager } from "../src/core/goal/goal-manager.js";
 import {
 	buildSelfReviewPrompt,
 	clearCurrentSelfReviewFindings,
@@ -23,6 +25,13 @@ import {
 	createGoalCompleteToolDefinition,
 } from "../src/core/tools/goal-complete.js";
 import type { TurnRiskTotals } from "../src/core/turn-risk.ts";
+
+const { spawnSubagent } = vi.hoisted(() => ({ spawnSubagent: vi.fn() }));
+
+vi.mock("../src/core/coordinator/index.ts", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../src/core/coordinator/index.ts")>();
+	return { ...actual, spawnSubagent: (...args: unknown[]) => spawnSubagent(...args) };
+});
 
 function totals(over: Partial<TurnRiskTotals>): TurnRiskTotals {
 	return {
@@ -320,6 +329,40 @@ describe("resolveSelfReviewModel — small-class sibling routing", () => {
 	});
 });
 
+describe("AgentSession structured self-review request policy", () => {
+	beforeEach(() => spawnSubagent.mockReset());
+
+	it("passes the session request policy to its review subagent", async () => {
+		const reviewModel = {
+			id: "review-model",
+			provider: "review-provider",
+		} as Model<Api>;
+		const requestPolicy: SubagentRequestPolicy = { streamFn: vi.fn() as never, transport: "sse" };
+		const fakeSession = {
+			model: reviewModel,
+			_resolveSelfReviewModel: async () => ({ model: reviewModel, thinkingLevel: "medium" as const }),
+			modelRegistry: {},
+			agent: { state: { tools: [] } },
+			_cwd: process.cwd(),
+			getSubagentRequestPolicy: () => requestPolicy,
+		};
+		spawnSubagent.mockResolvedValue({ value: { findings: [] } });
+		const runner = (
+			AgentSession.prototype as unknown as {
+				_selfReviewRunner(this: unknown, abort: AbortController): SelfReviewRunner;
+			}
+		)._selfReviewRunner.call(fakeSession, new AbortController());
+
+		await runner({ prompt: "review", systemPrompt: "review system", totals: totals({}) });
+
+		const requestPolicyFactory = spawnSubagent.mock.calls[0]?.[0]?.requestPolicy as
+			| ((signal: AbortSignal) => SubagentRequestPolicy | undefined)
+			| undefined;
+		const signal = new AbortController().signal;
+		expect(requestPolicyFactory?.(signal)).toBe(requestPolicy);
+	});
+});
+
 describe("self-review prompts", () => {
 	it("allows explicitly listed impacted files without widening the review scope", () => {
 		expect(SELF_REVIEW_SYSTEM_PROMPT).toContain("explicitly listed impacted files");
@@ -382,7 +425,23 @@ describe("self-review prompt — Fase 3 impactedFiles (graph escopo expandido)",
 describe("goal_complete R9 (unresolved high self-review findings)", () => {
 	const tool = createGoalCompleteToolDefinition(process.cwd());
 	function complete(id: string, summary: string) {
-		return tool.execute(id, { summary }, undefined, undefined, undefined as never);
+		const contract = getCurrentGoalManager()?.get()?.contract;
+		if (!contract) throw new Error("active Goal contract required by test helper");
+		return tool.execute(
+			id,
+			{
+				summary,
+				contractRevision: contract.revision,
+				criteria: contract.criteria.map((criterion) => ({
+					id: criterion.id,
+					outcome: `${criterion.text} completed`,
+					evidence: [{ kind: "claim" as const, note: "verified by the focused test fixture" }],
+				})),
+			},
+			undefined,
+			undefined,
+			undefined as never,
+		);
 	}
 	function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
 		return result.content
@@ -411,6 +470,7 @@ describe("goal_complete R9 (unresolved high self-review findings)", () => {
 		// goal terminates instead of looping on the same wall.
 		const ok = await complete("c2", "done");
 		expect(ok.details?.completed).toBe(true);
+		expect(ok.details?.receipt?.safeguards.selfReview).toBe("waived");
 		expect(mgr.get()?.status).toBe("complete");
 
 		const waived = getRuntimeDiagnostics().recent.find((e) => e.context?.ruleId === "review-gate-waived");
@@ -435,6 +495,7 @@ describe("goal_complete R9 (unresolved high self-review findings)", () => {
 		clearCurrentSelfReviewFindings();
 		const ok = await complete("c2", "done");
 		expect(ok.details?.completed).toBe(true);
+		expect(ok.details?.receipt?.safeguards.selfReview).toBe("passed");
 		expect(mgr.get()?.status).toBe("complete");
 	});
 });

@@ -244,7 +244,9 @@ describe("GoalManager lifecycle", () => {
 		mgr.start("Make tests pass", {});
 		// Dynamic suffix — billed on EVERY request of the turn, so it carries only
 		// what actually mutates.
-		expect(mgr.systemPromptSection()).toBe("<goal>Goal (active): Make tests pass</goal>");
+		expect(mgr.systemPromptSection()).toBe(
+			'<goal status="active" contract_revision="1">\nObjetivo: Make tests pass\n[c1] Complete the objective above.\n</goal>',
+		);
 		// Cacheable prefix — the immutable rules, paid once per goal lifecycle.
 		const rules = mgr.systemPromptPrefixSection();
 		expect(rules).toContain("goal_complete");
@@ -266,7 +268,9 @@ describe("GoalManager lifecycle", () => {
 		mgr.pause();
 		expect(mgr.hasPromptRules()).toBe(true);
 		expect(mgr.systemPromptPrefixSection()).toBe(active);
-		expect(mgr.systemPromptSection()).toBe("<goal>Goal (paused): Make tests pass</goal>");
+		expect(mgr.systemPromptSection()).toBe(
+			'<goal status="paused" contract_revision="1">\nObjetivo: Make tests pass\n[c1] Complete the objective above.\n</goal>',
+		);
 		mgr.resume();
 		expect(mgr.systemPromptPrefixSection()).toBe(active);
 
@@ -274,10 +278,14 @@ describe("GoalManager lifecycle", () => {
 		mgr.recordTurn(1100);
 		expect(mgr.get()?.status).toBe("budget_limited");
 		expect(mgr.systemPromptPrefixSection()).toBe(active);
-		expect(mgr.systemPromptSection()).toBe("<goal>Goal (budget_limited): Make tests pass</goal>");
+		expect(mgr.systemPromptSection()).toBe(
+			'<goal status="budget_limited" contract_revision="1">\nObjetivo: Make tests pass\n[c1] Complete the objective above.\n</goal>',
+		);
 		mgr.setTokenBudget(2000);
 		expect(mgr.systemPromptPrefixSection()).toBe(active);
-		expect(mgr.systemPromptSection()).toBe("<goal>Goal (active): Make tests pass</goal>");
+		expect(mgr.systemPromptSection()).toBe(
+			'<goal status="active" contract_revision="1">\nObjetivo: Make tests pass\n[c1] Complete the objective above.\n</goal>',
+		);
 
 		// Completion is the terminal event that DOES drop both blocks (one rebuild).
 		mgr.complete("done");
@@ -304,7 +312,7 @@ describe("GoalManager lifecycle", () => {
 		expect(mgr2.get()?.tokenBudget).toBe(5000);
 	});
 
-	it("restores snapshots while preserving forward-compatible gate fields", () => {
+	it("restores legacy gate progress but treats missing fingerprints as a cache miss", () => {
 		const { mgr } = makeManager();
 		mgr.restore(
 			JSON.parse(
@@ -322,7 +330,8 @@ describe("GoalManager lifecycle", () => {
 		);
 		expect(mgr.get()?.objective).toBe("legacy");
 		expect(mgr.get()?.tokenBudget).toBe(DEFAULT_GOAL_TOKEN_BUDGET);
-		expect(mgr.gateProgressFor(4)).toEqual(["check"]);
+		expect(mgr.get()?.gateProgress?.passedGateIds).toEqual(["check"]);
+		expect(mgr.gateProgressFor(4, { check: "current-definition" })).toEqual([]);
 	});
 
 	it("only completes/edits when a goal exists", () => {

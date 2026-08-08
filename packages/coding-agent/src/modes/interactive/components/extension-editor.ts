@@ -3,7 +3,7 @@
  * Supports Ctrl+G for external editor.
  */
 
-import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -19,44 +19,85 @@ import {
 } from "@pit/tui";
 import { APP_NAME } from "../../../config.ts";
 import type { KeybindingsManager } from "../../../core/keybindings.ts";
+import { spawnProcess } from "../../../utils/child-process.ts";
 import { getEditorTheme, theme } from "../theme/theme.ts";
 import { keyHint } from "./keybinding-hints.ts";
 import { SelectorCard } from "./selector-card.ts";
 
-type EditorSpawnPlan = {
+export type EditorSpawnPlan = {
 	command: string;
 	args: string[];
-	shell: boolean;
+	shell: false;
 };
 
 /**
- * Build a spawn plan for the external editor without naively space-splitting the
- * command string. A bare value with no spaces is the binary itself (the common case,
- * e.g. "vim", "nano", "code"); on win32 we keep shell:true so .cmd/.bat launchers
- * resolve. A value that contains spaces is ambiguous (it may be a single quoted path,
- * a path with flags, or a path containing spaces), so we hand the raw string to the
- * shell and append the quoted tmpFile — letting the shell tokenize exactly as the
- * user intended their $VISUAL/$EDITOR value to be parsed, rather than guessing here.
+ * Tokenize $VISUAL/$EDITOR without invoking a shell. Quoted executable paths and
+ * fixed editor arguments are supported, while shell metacharacters remain ordinary
+ * argv data. Backslashes are preserved for Windows paths unless they escape a quote,
+ * whitespace, or another backslash.
  */
-function resolveEditorSpawn(editorCmd: string, tmpFile: string): EditorSpawnPlan {
-	const trimmed = editorCmd.trim();
-	if (!trimmed.includes(" ")) {
-		// Single token: it is the binary. Do not split; pass tmpFile as the only arg.
-		return {
-			command: trimmed,
-			args: [tmpFile],
-			shell: process.platform === "win32",
-		};
+function parseEditorCommand(command: string): string[] {
+	const args: string[] = [];
+	let current = "";
+	let quote: "'" | '"' | undefined;
+	let tokenStarted = false;
+
+	for (let i = 0; i < command.length; i++) {
+		const char = command[i]!;
+		if (quote) {
+			if (char === quote) {
+				quote = undefined;
+				tokenStarted = true;
+			} else if (char === "\\" && quote === '"' && /["\\]/.test(command[i + 1] ?? "")) {
+				current += command[++i]!;
+				tokenStarted = true;
+			} else {
+				current += char;
+				tokenStarted = true;
+			}
+			continue;
+		}
+		if (char === "'" || char === '"') {
+			quote = char;
+			tokenStarted = true;
+		} else if (/\s/.test(char)) {
+			if (tokenStarted) {
+				args.push(current);
+				current = "";
+				tokenStarted = false;
+			}
+		} else if (char === "\\" && /[\s'"\\]/.test(command[i + 1] ?? "")) {
+			current += command[++i]!;
+			tokenStarted = true;
+		} else {
+			current += char;
+			tokenStarted = true;
+		}
 	}
-	// Contains spaces: run through the shell so the user's command string is tokenized
-	// by the shell (preserving quoted/spaced paths). Quote the tmpFile we append; the
-	// generated tmp path is a Date.now()-suffixed name under os.tmpdir() with no quotes.
-	const quotedTmp = process.platform === "win32" ? `"${tmpFile}"` : `'${tmpFile}'`;
-	return {
-		command: `${trimmed} ${quotedTmp}`,
-		args: [],
-		shell: true,
-	};
+	if (quote) throw new Error("Unterminated quote in $VISUAL/$EDITOR");
+	if (tokenStarted) args.push(current);
+	if (!args[0]) throw new Error("$VISUAL/$EDITOR does not name an executable");
+	return args;
+}
+
+/** Build a direct-spawn plan. cross-spawn handles Windows .cmd/.bat resolution. */
+export function resolveEditorSpawn(editorCmd: string, tmpFile: string): EditorSpawnPlan {
+	const [command, ...editorArgs] = parseEditorCommand(editorCmd.trim());
+	return { command: command!, args: [...editorArgs, tmpFile], shell: false };
+}
+
+export function externalEditorExitMessage(status: number | null): string | undefined {
+	if (status === 0) return undefined;
+	return status === null
+		? "External editor terminated without an exit status"
+		: `External editor exited with status ${status}`;
+}
+
+export const EXTERNAL_EDITOR_TEMP_FILE_MODE = 0o600;
+
+/** Create a prompt file private to the current user. The mode option is safely ignored on Windows. */
+export function writeExternalEditorTempFile(filePath: string, content: string): void {
+	fs.writeFileSync(filePath, content, { encoding: "utf-8", mode: EXTERNAL_EDITOR_TEMP_FILE_MODE });
 }
 
 export class ExtensionEditorComponent extends Container implements Focusable {
@@ -65,6 +106,7 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 	private onCancelCallback: () => void;
 	private tui: TUI;
 	private keybindings: KeybindingsManager;
+	private onErrorCallback?: (message: string) => void;
 
 	private _focused = false;
 	get focused(): boolean {
@@ -83,6 +125,7 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 		onSubmit: (value: string) => void,
 		onCancel: () => void,
 		options?: EditorOptions,
+		onError?: (message: string) => void,
 	) {
 		super();
 
@@ -90,6 +133,7 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 		this.keybindings = keybindings;
 		this.onSubmitCallback = onSubmit;
 		this.onCancelCallback = onCancel;
+		this.onErrorCallback = onError;
 
 		const card = new SelectorCard();
 		card.addChild(new Spacer(1));
@@ -151,11 +195,11 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 		}
 
 		const currentText = this.editor.getText();
-		const tmpFile = path.join(os.tmpdir(), `pi-extension-editor-${Date.now()}.md`);
+		const tmpFile = path.join(os.tmpdir(), `pi-extension-editor-${randomUUID()}.md`);
 
 		let stopped = false;
 		try {
-			fs.writeFileSync(tmpFile, currentText, "utf-8");
+			writeExternalEditorTempFile(tmpFile, currentText);
 			this.tui.stop();
 			stopped = true;
 
@@ -172,19 +216,29 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 			// Do not use spawnSync here. On Windows, synchronous child_process calls can keep
 			// Node/libuv's console input read active after tui.stop() pauses stdin, racing
 			// vim/nvim for the console input buffer until Ctrl+C cancels the pending read.
+			let spawnError: Error | undefined;
 			const status = await new Promise<number | null>((resolve) => {
-				const child = spawn(spawnPlan.command, spawnPlan.args, {
+				const child = spawnProcess(spawnPlan.command, spawnPlan.args, {
 					stdio: "inherit",
 					shell: spawnPlan.shell,
 				});
-				child.on("error", () => resolve(null));
+				child.on("error", (error) => {
+					spawnError = error;
+					resolve(null);
+				});
 				child.on("close", (code) => resolve(code));
 			});
 
 			if (status === 0) {
 				const newContent = fs.readFileSync(tmpFile, "utf-8").replace(/\n$/, "");
 				this.editor.setText(newContent);
+			} else {
+				this.onErrorCallback?.(
+					spawnError ? `External editor failed: ${spawnError.message}` : externalEditorExitMessage(status)!,
+				);
 			}
+		} catch (error) {
+			this.onErrorCallback?.(`External editor failed: ${(error as Error).message}`);
 		} finally {
 			try {
 				fs.unlinkSync(tmpFile);

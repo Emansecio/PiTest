@@ -8,8 +8,8 @@ import type { Model } from "@pit/ai";
 import type { TSchema } from "typebox";
 import { mapWithConcurrency } from "../../utils/map-with-concurrency.ts";
 import { type AcceptanceConfig, type AcceptanceDependencies, runWithAcceptance } from "./acceptance.ts";
-import { getSubagentErrorUsage, spawnSubagent } from "./spawn.ts";
-import type { SpawnSubagentOptions, SubagentProgressInfo, SubagentUsage } from "./types.ts";
+import { getSubagentErrorModelFallback, getSubagentErrorUsage, spawnSubagent } from "./spawn.ts";
+import type { SpawnSubagentOptions, SubagentModelFallback, SubagentProgressInfo, SubagentUsage } from "./types.ts";
 
 const DEFAULT_MAX_SUBAGENT_CONCURRENCY = 4;
 
@@ -64,6 +64,8 @@ export interface ParallelTaskResult {
 	usage?: SubagentUsage;
 	/** Turns the task's (final) worker run took. */
 	turns?: number;
+	/** Visible diagnostic when an unusable requested model fell back to the parent. */
+	modelFallback?: SubagentModelFallback;
 }
 
 export interface SpawnAllOptions {
@@ -171,6 +173,7 @@ export async function spawnAll(
 					gate: gated.gate,
 					usage: gated.usage,
 					turns: gated.result.record.turnCount,
+					modelFallback: gated.result.modelFallback,
 				};
 			}
 			const result = await spawnSubagent(taskDeps, spawnOpts);
@@ -188,16 +191,19 @@ export async function spawnAll(
 				value: result.value,
 				usage: result.usage,
 				turns: result.record.turnCount,
+				modelFallback: result.modelFallback,
 			};
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			settledUsage = getSubagentErrorUsage(err);
+			const modelFallback = getSubagentErrorModelFallback(err);
 			safeNotify(() => options.onTaskComplete?.(handle, base.signal?.aborted ? "cancelled" : "error"));
 			return {
 				taskName: task.name ?? handle,
 				ok: false,
 				error: message,
 				usage: settledUsage,
+				modelFallback,
 			};
 		} finally {
 			reservation?.record?.(settledUsage);

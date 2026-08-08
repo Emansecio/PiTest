@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { detectGoalGateCommands, runGoalGates } from "../src/core/verification/goal-gates.js";
+import { detectGoalGateCommands, goalGateFingerprint, runGoalGates } from "../src/core/verification/goal-gates.js";
 
 const dirs: string[] = [];
 function project(scripts: Record<string, string>): string {
@@ -25,6 +25,17 @@ describe("detectGoalGateCommands", () => {
 	it("uses check as an exclusive aggregator", () => {
 		const gates = detectGoalGateCommands(project({ check: "echo check", lint: "echo lint", test: "echo test" }));
 		expect(gates.map((gate) => gate.id)).toEqual(["script:check"]);
+	});
+	it("changes the gate fingerprint when a package script changes but its command stays the same", () => {
+		const cwd = project({ check: "node first-check.js" });
+		const first = detectGoalGateCommands(cwd)[0];
+		writeFileSync(join(cwd, "package.json"), JSON.stringify({ scripts: { check: "node second-check.js" } }));
+		const second = detectGoalGateCommands(cwd)[0];
+		if (!first || !second) throw new Error("expected detected check gates");
+
+		expect(first.command).toBe("npm run check");
+		expect(second.command).toBe(first.command);
+		expect(goalGateFingerprint(second)).not.toBe(goalGateFingerprint(first));
 	});
 	it("orders typecheck, lint and test when no aggregator exists", () => {
 		const gates = detectGoalGateCommands(

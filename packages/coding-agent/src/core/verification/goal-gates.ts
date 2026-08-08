@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -14,6 +15,8 @@ export interface GoalGateCommand {
 	label: string;
 	command: string;
 	source: GoalGateSource;
+	/** Source configuration that produced the command when the command alone is not the full definition. */
+	definition?: string;
 }
 
 export type GoalGateStatus = "passed" | "failed" | "cancelled" | "inapplicable";
@@ -53,12 +56,18 @@ function scriptsAt(cwd: string): Record<string, unknown> {
 	}
 }
 
-function scriptGate(cwd: string, name: string, source: GoalGateSource = "script"): GoalGateCommand {
-	return { id: `script:${name}`, label: name, command: `${packageManager(cwd)} run ${name}`, source };
+function scriptGate(cwd: string, name: string, definition: string, source: GoalGateSource = "script"): GoalGateCommand {
+	return { id: `script:${name}`, label: name, command: `${packageManager(cwd)} run ${name}`, source, definition };
 }
 
 function normalizedCommand(command: string): string {
 	return command.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+export function goalGateFingerprint(gate: GoalGateCommand): string {
+	return createHash("sha256")
+		.update(JSON.stringify([gate.id, gate.label, gate.source, gate.command, gate.definition ?? null]))
+		.digest("hex");
 }
 
 export function detectGoalGateCommands(
@@ -70,15 +79,16 @@ export function detectGoalGateCommands(
 	if (explicit)
 		return [{ id: "configured", label: "configured verification", command: explicit, source: "configured" }];
 	const scripts = scriptsAt(cwd);
+	const scriptsDefinition = JSON.stringify(scripts);
 	const hasScript = (name: string): boolean =>
 		typeof scripts[name] === "string" && String(scripts[name]).trim().length > 0;
-	if (hasScript("check")) return [scriptGate(cwd, "check", "aggregator")];
+	if (hasScript("check")) return [scriptGate(cwd, "check", scriptsDefinition, "aggregator")];
 
 	const gates: GoalGateCommand[] = [];
 	const typecheck = hasScript("typecheck") ? "typecheck" : hasScript("type-check") ? "type-check" : undefined;
-	if (typecheck) gates.push(scriptGate(cwd, typecheck));
-	if (hasScript("lint")) gates.push(scriptGate(cwd, "lint"));
-	if (hasScript("test")) gates.push(scriptGate(cwd, "test"));
+	if (typecheck) gates.push(scriptGate(cwd, typecheck, scriptsDefinition));
+	if (hasScript("lint")) gates.push(scriptGate(cwd, "lint", scriptsDefinition));
+	if (hasScript("test")) gates.push(scriptGate(cwd, "test", scriptsDefinition));
 	if (gates.length > 0) return gates;
 
 	const localTypecheck = detectLocalTypecheckCommand(cwd);

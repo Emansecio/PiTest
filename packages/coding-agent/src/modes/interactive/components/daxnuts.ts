@@ -5,6 +5,7 @@
  */
 
 import type { Component, TUI } from "@pit/tui";
+import { isReducedMotion } from "../../../utils/env-flags.ts";
 import { theme } from "../theme/theme.ts";
 
 // 32x32 RGB image of dax, hex encoded (3 bytes per pixel)
@@ -68,6 +69,10 @@ export class DaxnutsComponent implements Component {
 	constructor(ui: TUI) {
 		this.ui = ui;
 		this.image = buildImage();
+		if (isReducedMotion()) {
+			this.tick = this.maxTicks;
+			return;
+		}
 		this.startAnimation();
 	}
 

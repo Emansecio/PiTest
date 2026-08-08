@@ -13,6 +13,13 @@ import {
 	formatTokens as formatTokensCanonical,
 } from "../../utils/format-display.ts";
 import { sliceSafe } from "../../utils/surrogate.ts";
+import { deriveGoalContract, type GoalContract, renderGoalContract } from "./goal-contract.ts";
+import {
+	type GoalCompletionReceipt,
+	type GoalCompletionReceiptDraft,
+	MAX_GOAL_RECEIPT_BYTES,
+	receiptPayloadSize,
+} from "./goal-receipt.ts";
 
 export type GoalStatus = "active" | "paused" | "budget_limited" | "iteration_limited" | "time_limited" | "complete";
 export type GoalLimitType = "tokens" | "iterations" | "time";
@@ -27,6 +34,8 @@ export interface GoalLimitReason {
 export interface GoalGateProgress {
 	revision: number;
 	passedGateIds: string[];
+	/** Definition fingerprints for cache-safe reuse; absent on legacy snapshots, which intentionally miss cache. */
+	passedGateFingerprints?: Record<string, string>;
 }
 
 export interface GoalGateFailure {
@@ -83,6 +92,8 @@ export interface GoalState {
 	completedAtIteration?: number;
 	/** Short summary recorded when goal_complete is called. */
 	summary?: string;
+	contract?: GoalContract;
+	receipt?: GoalCompletionReceipt;
 }
 
 export interface GoalSnapshot extends GoalState {
@@ -92,6 +103,12 @@ export interface GoalSnapshot extends GoalState {
 export interface GoalManagerOptions {
 	now?: () => number;
 	genId?: () => string;
+}
+
+export interface GoalCompleteResult {
+	completed: boolean;
+	receipt?: GoalCompletionReceipt;
+	receiptBytes?: number;
 }
 
 export const MAX_OBJECTIVE_CHARS = 4000;
@@ -172,9 +189,19 @@ export class GoalManager {
 			limitReason: this.state.limitReason ? { ...this.state.limitReason } : undefined,
 			mutatedPaths: this.state.mutatedPaths ? [...this.state.mutatedPaths] : undefined,
 			gateProgress: this.state.gateProgress
-				? { ...this.state.gateProgress, passedGateIds: [...this.state.gateProgress.passedGateIds] }
+				? {
+						...this.state.gateProgress,
+						passedGateIds: [...this.state.gateProgress.passedGateIds],
+						passedGateFingerprints: this.state.gateProgress.passedGateFingerprints
+							? { ...this.state.gateProgress.passedGateFingerprints }
+							: undefined,
+					}
 				: undefined,
 			gateFailure: this.state.gateFailure ? { ...this.state.gateFailure } : undefined,
+			contract: this.state.contract
+				? { ...this.state.contract, criteria: this.state.contract.criteria.map((criterion) => ({ ...criterion })) }
+				: undefined,
+			receipt: this.state.receipt ? structuredClone(this.state.receipt) : undefined,
 		};
 	}
 
@@ -245,6 +272,7 @@ export class GoalManager {
 			activeElapsedMs: 0,
 			activeSince: now,
 			startedAt: now,
+			contract: deriveGoalContract(trimmed, 1),
 		};
 		return this.snapshot() as GoalSnapshot;
 	}
@@ -252,6 +280,7 @@ export class GoalManager {
 	edit(objective: string): void {
 		if (!this.state) return;
 		this.state.objective = sliceSafe(objective.trim(), 0, MAX_OBJECTIVE_CHARS);
+		this.state.contract = deriveGoalContract(this.state.objective, (this.state.contract?.revision ?? 0) + 1);
 	}
 
 	recordMutation(path?: string, eventKey?: string): void {
@@ -298,14 +327,31 @@ export class GoalManager {
 	 * goal when the new ceiling clears the tokens already spent — the only path to
 	 * unwedge a goal that hit its budget (resume() alone can't, by design above).
 	 */
-	gateProgressFor(revision: number): string[] {
+	gateProgressFor(revision: number, gateFingerprints: Readonly<Record<string, string>> = {}): string[] {
 		if (!this.state || this.state.gateProgress?.revision !== revision) return [];
-		return [...this.state.gateProgress.passedGateIds];
+		const progress = this.state.gateProgress;
+		return progress.passedGateIds.filter(
+			(id) =>
+				progress.passedGateFingerprints?.[id] !== undefined &&
+				progress.passedGateFingerprints[id] === gateFingerprints[id],
+		);
 	}
 
-	setGateProgress(revision: number, passedGateIds: readonly string[]): void {
+	setGateProgress(
+		revision: number,
+		passedGateIds: readonly string[],
+		gateFingerprints: Readonly<Record<string, string>> = {},
+	): void {
 		if (!this.state || this.state.status === "complete") return;
-		this.state.gateProgress = { revision, passedGateIds: [...new Set(passedGateIds)] };
+		const uniqueIds = [...new Set(passedGateIds)];
+		const passedGateFingerprints = Object.fromEntries(
+			uniqueIds.flatMap((id) => (gateFingerprints[id] ? [[id, gateFingerprints[id]]] : [])),
+		);
+		this.state.gateProgress = {
+			revision,
+			passedGateIds: uniqueIds,
+			...(Object.keys(passedGateFingerprints).length > 0 ? { passedGateFingerprints } : {}),
+		};
 	}
 
 	recordGateFailure(revision: number, gateId: string, fingerprint: string): GoalGateFailure {
@@ -365,14 +411,44 @@ export class GoalManager {
 		this.state = undefined;
 	}
 
-	complete(summary?: string): void {
-		if (!this.state) return;
-		this.accrueActiveTime(this.now());
+	complete(summary?: string, receipt?: GoalCompletionReceiptDraft): GoalCompleteResult {
+		if (!this.state) return { completed: false };
+		const completedAt = this.now();
+		this.accrueActiveTime(completedAt);
+		const finalizedReceipt: GoalCompletionReceipt | undefined = receipt
+			? {
+					...receipt,
+					usage: {
+						tokens: this.state.tokensUsed,
+						iterations: this.state.iterations,
+						activeMs: this.state.activeElapsedMs ?? 0,
+					},
+					completedAt,
+				}
+			: undefined;
+		const receiptBytes = finalizedReceipt ? receiptPayloadSize(finalizedReceipt) : undefined;
+		if (receiptBytes !== undefined && receiptBytes > MAX_GOAL_RECEIPT_BYTES) {
+			return { completed: false, receiptBytes };
+		}
 		this.state.activeSince = undefined;
 		this.state.status = "complete";
-		this.state.completedAt = this.now();
+		this.state.completedAt = completedAt;
 		this.state.completedAtIteration = this.state.iterations;
-		if (summary) this.state.summary = summary.trim();
+		if (summary) this.state.summary = sliceSafe(summary.trim(), 0, 1200);
+		if (finalizedReceipt) this.state.receipt = finalizedReceipt;
+		return { completed: true, receipt: finalizedReceipt };
+	}
+
+	reconcileCompletedReceiptUsage(): void {
+		if (!this.state?.receipt || this.state.status !== "complete") return;
+		this.state.receipt = {
+			...this.state.receipt,
+			usage: {
+				tokens: this.state.tokensUsed,
+				iterations: this.state.iterations,
+				activeMs: this.state.activeElapsedMs ?? 0,
+			},
+		};
 	}
 
 	/** Bump iteration count without changing token spend (unified governor sets tokens). */
@@ -453,6 +529,16 @@ export class GoalManager {
 		}
 	}
 
+	/** Compact, read-only rendering of the persisted completion receipt. */
+	receiptText(): string {
+		const receipt = this.state?.receipt;
+		if (!receipt) return "Receipt unavailable for legacy goal.";
+		return [
+			`Receipt: ${receipt.criteria.length}/${receipt.criteria.length} criteria · verification ${receipt.verification.status}`,
+			...receipt.criteria.map((criterion) => `  [${criterion.id}] ${criterion.outcome} · ${criterion.grounding}`),
+		].join("\n");
+	}
+
 	/** Human-readable multi-line summary for `/goal` status. */
 	summaryText(): string {
 		const g = this.snapshot();
@@ -522,7 +608,7 @@ export class GoalManager {
 	systemPromptSection(): string {
 		const g = this.state;
 		if (!g || g.status === "complete") return "";
-		return `<goal>Goal (${g.status}): ${g.objective}</goal>`;
+		return renderGoalContract(g.contract ?? deriveGoalContract(g.objective, 1), g.status, g.objective);
 	}
 
 	/** Prompt enqueued to drive the next autonomous turn. */
@@ -543,6 +629,7 @@ export class GoalManager {
 		this.mutationEventKeys.clear();
 		this.state = {
 			...data,
+			contract: data.contract ?? deriveGoalContract(data.objective, 1, "legacy-restore"),
 			tokenBudget: data.tokenBudget ?? DEFAULT_GOAL_TOKEN_BUDGET,
 			maxIterations: data.maxIterations ?? DEFAULT_GOAL_MAX_ITERATIONS,
 			maxActiveMs: data.maxActiveMs ?? DEFAULT_GOAL_MAX_ACTIVE_MS,

@@ -36,6 +36,8 @@ function makeState(cwd: string, overrides: Partial<ResumeState> = {}): ResumeSta
 	return {
 		handle: "h1",
 		messages,
+		modelProvider: "test-provider",
+		modelId: "test-model",
 		cwd,
 		depth: 1,
 		savedAt: Date.now(),
@@ -67,6 +69,7 @@ describe("resume-store disk hygiene", () => {
 		// Redaction markers contain no JSON metacharacters — the state round-trips.
 		const loaded = await loadResumeState(cwd, "h1");
 		expect(loaded).toBeDefined();
+		expect(loaded).toMatchObject({ modelProvider: "test-provider", modelId: "test-model" });
 		const text = JSON.stringify(loaded?.messages);
 		expect(text).not.toContain(FAKE_KEY);
 		expect(text).toContain("[REDACTED:");

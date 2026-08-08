@@ -10,6 +10,7 @@ import {
 	deleteKittyImage,
 	detectCapabilities,
 	encodeKitty,
+	getJpegDimensions,
 	hyperlink,
 	isImageLine,
 	renderImage,
@@ -194,6 +195,18 @@ describe("isImageLine", () => {
 			const filePathLine = "/path/to/File_1337_backup/image.jpg";
 			assert.strictEqual(isImageLine(filePathLine), false);
 		});
+	});
+});
+
+describe("getJpegDimensions", () => {
+	it("reads progressive SOF2 dimensions", () => {
+		const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xc2, 0x00, 0x11, 0x08, 0x00, 0x20, 0x00, 0x30, 0, 0]);
+		assert.deepEqual(getJpegDimensions(jpeg.toString("base64")), { widthPx: 48, heightPx: 32 });
+	});
+
+	it("skips legal repeated FF fill bytes before a marker", () => {
+		const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xff, 0xff, 0xc2, 0x00, 0x11, 0x08, 0x00, 0x20, 0x00, 0x30, 0, 0]);
+		assert.deepEqual(getJpegDimensions(jpeg.toString("base64")), { widthPx: 48, heightPx: 32 });
 	});
 });
 

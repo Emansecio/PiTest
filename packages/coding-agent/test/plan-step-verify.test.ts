@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BashResult } from "../src/core/bash-executor.js";
 import { PlanManager, setCurrentPlanManager } from "../src/core/plan/plan-manager.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
 import { createPlanToolDefinition, type PlanToolDetails, type PlanToolOptions } from "../src/core/tools/plan.js";
 
 type StepArg = {
@@ -78,7 +79,7 @@ describe("plan tool — step verify (P8a)", () => {
 		expect(res.content[0].text).toMatch(/step_done.*again|revise/i);
 	});
 
-	it("verify times out: step stays NOT done and the message names the fixed 60s budget", async () => {
+	it("verify times out: step stays NOT done and the message names the default 60s budget", async () => {
 		const runStepVerify = vi.fn(async () => timeoutResult("still running..."));
 		await runPlan({ op: "propose", steps: [{ id: "s1", intent: "build", verify: "sleep 999" }] }, { runStepVerify });
 		const res = await runPlan({ op: "step_done", step_id: "s1" }, { runStepVerify });
@@ -86,6 +87,45 @@ describe("plan tool — step verify (P8a)", () => {
 		expect(res.isError).toBe(true);
 		expect(res.details.steps.find((s) => s.id === "s1")?.status).not.toBe("done");
 		expect(res.content[0].text).toMatch(/timed out after 60000ms/);
+	});
+
+	it("uses the configured plan-step verify timeout", async () => {
+		const runStepVerify = vi.fn(async () => timeoutResult("still running..."));
+		const options = { runStepVerify, verifyTimeoutMs: 125 } as PlanToolOptions;
+		await runPlan({ op: "propose", steps: [{ id: "s1", intent: "build", verify: "sleep 999" }] }, options);
+		const res = await runPlan({ op: "step_done", step_id: "s1" }, options);
+
+		expect(res.isError).toBe(true);
+		expect(res.content[0].text).toMatch(/timed out after 125ms/);
+	});
+
+	it("refuses executable verification when the host disallows it", async () => {
+		const runStepVerify = vi.fn(async () => okResult());
+		const options = { runStepVerify, canExecuteVerify: () => false } as PlanToolOptions;
+		const proposed = await runPlan(
+			{ op: "propose", steps: [{ id: "s1", intent: "build", verify: "npm test" }] },
+			options,
+		);
+		const result = await runPlan({ op: "step_done", step_id: "s1" }, options);
+		const shown = await runPlan({ op: "show" }, options);
+
+		expect(proposed.isError).not.toBe(true);
+		expect(result.isError).toBe(true);
+		expect(result.content[0].text).toMatch(/read-only permission mode/i);
+		expect(shown.isError).not.toBe(true);
+		expect(runStepVerify).not.toHaveBeenCalled();
+	});
+
+	it("resolves a safe default and bounded positive plan-step timeout from verification settings", () => {
+		const resolved = (settings: unknown) =>
+			SettingsManager.inMemory(settings as never).getVerificationSettings().planStepTimeoutMs;
+
+		expect(resolved({})).toBe(60_000);
+		expect(resolved({ verification: { planStepTimeoutMs: 125 } })).toBe(125);
+		expect(resolved({ verification: { planStepTimeoutMs: 0 } })).toBe(60_000);
+		expect(resolved({ verification: { planStepTimeoutMs: 0.5 } })).toBe(60_000);
+		expect(resolved({ verification: { planStepTimeoutMs: -1 } })).toBe(60_000);
+		expect(resolved({ verification: { planStepTimeoutMs: 9_999_999 } })).toBe(600_000);
 	});
 
 	it("verify spawn failure: step stays NOT done, error is readable, execute() never throws", async () => {

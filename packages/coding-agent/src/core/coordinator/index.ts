@@ -26,8 +26,10 @@ export {
 } from "./resume-store.ts";
 export { slotStats, withoutLease, withRunSlot, yieldRunSlotWhile } from "./slots.ts";
 export {
+	attachSubagentModelFallbackToError,
 	attachSubagentUsageToError,
 	extractAssistantText,
+	getSubagentErrorModelFallback,
 	getSubagentErrorUsage,
 	isTransportRetryableError,
 	resolveSubagentThinking,

@@ -65,6 +65,35 @@ function withImageTerminal<T>(fn: () => T): T {
 }
 
 describe("TUI cell size responses", () => {
+	it("skips terminal probes for case-insensitive TERM=dumb", () => {
+		const prevTerm = process.env.TERM;
+		const prevTermProgram = process.env.TERM_PROGRAM;
+		process.env.TERM = "DuMb";
+		process.env.TERM_PROGRAM = "ghostty";
+		resetCapabilitiesCache();
+		const terminal = new VirtualTerminal(80, 24);
+		const writes: string[] = [];
+		const originalWrite = terminal.write.bind(terminal);
+		terminal.write = (data: string) => {
+			writes.push(data);
+			originalWrite(data);
+		};
+		const tui = new TUI(terminal);
+		try {
+			tui.start();
+			assert.ok(!writes.includes("\x1b[16t"));
+			assert.ok(!writes.includes("\x1b[14t"));
+			assert.ok(!writes.includes("\x1b[c"));
+		} finally {
+			tui.stop();
+			if (prevTerm === undefined) delete process.env.TERM;
+			else process.env.TERM = prevTerm;
+			if (prevTermProgram === undefined) delete process.env.TERM_PROGRAM;
+			else process.env.TERM_PROGRAM = prevTermProgram;
+			resetCapabilitiesCache();
+		}
+	});
+
 	it("forwards bare escape even when a cell size query was sent at startup", () => {
 		withImageTerminal(() => {
 			const terminal = new VirtualTerminal(80, 24);

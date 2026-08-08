@@ -364,7 +364,7 @@ Where verification happens is governed by `verification.mode`:
 - **`post-turn`** — the legacy harness gate: after a code-modifying turn the harness runs the check, re-injects failures as fix turns (bounded by `maxAttempts`), runs the visual/functional-web DoD and the P4 self-review, and drains backgrounded checks.
 - **`off`** — neither.
 
-Back-compat: explicit `enabled: false` resolves to `off`; explicit `enabled: true` resolves to `post-turn`.
+Back-compat applies only when `mode` is absent and `enabled` is explicitly supplied: `enabled: false` resolves to `off`, and `enabled: true` resolves to `post-turn`. With neither legacy override nor an explicit mode, the default remains `in-turn`.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
@@ -373,6 +373,7 @@ Back-compat: explicit `enabled: false` resolves to `off`; explicit `enabled: tru
 | `verification.command` | string | `null` | Check command; `null` auto-detects from `package.json` scripts (check/typecheck/lint/test) |
 | `verification.maxAttempts` | number | `2` | Fix attempts before giving up and reporting the failure (min 1) |
 | `verification.timeoutMs` | number | `180000` | Timeout for the check command. Floor 50ms so an explicitly configured short timeout is honored |
+| `verification.planStepTimeoutMs` | number | `60000` | Timeout for each `plan step_done` verify command; positive integer clamped to at most `600000` ms |
 | `verification.visual` | boolean | `true` | Nudge to `preview` when a rendered artifact changed but was never viewed |
 | `verification.functionalWeb` | boolean | `true` | Native functional web DoD (navigate/a11y/click/fill/console); fail-open without Chrome |
 | `verification.functionalWebTimeoutMs` | number | `45000` | Timeout for one functional web check pass |
@@ -546,7 +547,7 @@ The `search_tool_bm25` tool is always registered; these settings gate auto-seedi
 | `toolFeedback.errorReflection.enabled` | boolean | `false` | Inject a reflection prompt as a follow-up turn after a tool error (opt-in; inline error results and hint rules already cover this) |
 | `toolFeedback.doomLoopReminder.enabled` | boolean | `true` | Inject a reminder when consecutive identical tool calls reach the threshold |
 | `toolFeedback.doomLoopReminder.threshold` | number | `2` | Consecutive identical tool calls that trigger a reminder |
-| `toolFeedback.doomLoopReminder.cooldownMs` | number | `30000` | Minimum gap between reminders |
+| `toolFeedback.doomLoopReminder.cooldownMs` | number | `30000` | Minimum gap between every Tier 1 reminder, Tier 2 pause, and Tier 3 recovery |
 | `toolFeedback.stagnationReminder.enabled` | boolean | `true` | Remind/pause when the agent stops making progress |
 | `toolFeedback.stagnationReminder.softThreshold` | number | `12` | Non-productive turns that trigger a reminder |
 | `toolFeedback.stagnationReminder.hardThreshold` | number | `25` | Non-productive turns that pause for user guidance (clamped to at least `softThreshold`) |

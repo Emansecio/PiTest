@@ -20,7 +20,15 @@ const tuiSrcCore = fileURLToPath(new URL("../tui/src/core.ts", import.meta.url))
 // Keep worker creation bounded on large hosts: Vitest workers compete with git,
 // taskkill, LSP, eval kernels and E2E child processes. The explicit override is
 // useful for CI/benchmark hosts; the default considers CPU, platform and RAM.
+//
+// Coding-agent workers transform a large monorepo graph (agent-loop / session /
+// coordinator). Budgeting only 2 GiB/worker allowed 12 Windows forks that each
+// hit V8's default ~4 GiB heap mid-suite (OOM + tinypool "Channel closed").
+// Prefer fewer, larger-heap workers over many small ones.
 const GIB = 1024 ** 3;
+/** Assumed peak RSS per Vitest fork when collecting the coding-agent graph. */
+const BYTES_PER_VITEST_WORKER = 4 * GIB;
+const DEFAULT_WORKER_HEAP_MB = 8192;
 
 export function resolveMaxVitestForks(options: {
 	cpuCount?: number;
@@ -32,13 +40,25 @@ export function resolveMaxVitestForks(options: {
 	const override = Number.parseInt(env.PIT_VITEST_MAX_WORKERS ?? "", 10);
 	if (Number.isFinite(override) && override >= 1) return override;
 	const cpuBudget = Math.max(2, (options.cpuCount ?? cpus().length) - 4);
-	const platformCap = (options.platform ?? process.platform) === "win32" ? 12 : 16;
-	const ramBudget = Math.max(2, Math.floor((options.totalMemoryBytes ?? totalmem()) / (2 * GIB)));
+	// Windows also pays taskkill/spawn overhead; keep the concurrent fork cap low.
+	const platformCap = (options.platform ?? process.platform) === "win32" ? 6 : 12;
+	const ramBudget = Math.max(
+		2,
+		Math.floor((options.totalMemoryBytes ?? totalmem()) / BYTES_PER_VITEST_WORKER),
+	);
 	const ciCap = env.CI ? 3 : Number.POSITIVE_INFINITY;
 	return Math.max(2, Math.min(cpuBudget, platformCap, ramBudget, ciCap));
 }
 
+/** Per-fork V8 old-space ceiling (MB). Override with PIT_VITEST_WORKER_HEAP_MB. */
+export function resolveVitestWorkerHeapMb(env: NodeJS.ProcessEnv = process.env): number {
+	const override = Number.parseInt(env.PIT_VITEST_WORKER_HEAP_MB ?? "", 10);
+	if (Number.isFinite(override) && override >= 512) return override;
+	return DEFAULT_WORKER_HEAP_MB;
+}
+
 const maxVitestForks = resolveMaxVitestForks();
+const workerHeapMb = resolveVitestWorkerHeapMb();
 
 export default defineConfig({
 	test: {
@@ -58,6 +78,9 @@ export default defineConfig({
 		poolOptions: {
 			forks: {
 				maxForks: maxVitestForks,
+				// Parent NODE_OPTIONS does not always apply to tinypool forks; set the
+				// heap ceiling explicitly so a single heavy collect does not die at 4 GiB.
+				execArgv: [`--max-old-space-size=${workerHeapMb}`],
 			},
 		},
 		// Test isolation: skip the developer's `~/.claude/skills/` so test

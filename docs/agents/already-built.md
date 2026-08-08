@@ -73,8 +73,9 @@ without reading the anchors below first.
   counter with pause while awaiting user input.
 - **Settle motion** — `ColorEase` (180ms smoothstep) + spinner→✓ crossfade on activity
   lines, nav groups, tool gutters; streaming reveal + thinking breath on assistant messages.
-- **Reduced motion** — `PIT_NO_MOTION` / `PIT_REDUCED_MOTION` / `TERM=dumb` via
+- **Reduced motion** — `PIT_NO_MOTION` / `PIT_REDUCED_MOTION` via
   `isReducedMotion()` (`env-flags.ts`): cosmetic motion + spinner glyph snap to frame 0; elapsed still ticks.
+- `TERM=dumb` remains an ASCII-glyph capability hint only; it does not freeze an interactive TUI.
 - **Leak guards** — `dispose()` on animated chat rows; `activity-ticker-leak.test.ts`.
 
 ## Runtime robustness
@@ -105,7 +106,8 @@ without reading the anchors below first.
 - Multi-provider: anthropic / openai (responses & completions) / google / openai-codex / opencode / openrouter / zai.
 
 ## Subagents / orchestration
-- **coordinator** (`task` tool): spawn / `continue` / `resume` (survives restart via `.pit/subagents/`), curated agent types (`.pit/agents/*.md`), concurrency cap, per-turn observability, token accounting.
+- **coordinator** (`task` tool): spawn / `continue` / `resume` (survives restart via `.pit/subagents/`), curated agent types (`.pit/agents/*.md`), concurrency cap, per-turn observability, token accounting. Parallel / fanout, worktrees, digests + `op:read`, acceptance gates, process-wide slots with nested yield, and subagent guard propagation already ship — do not re-propose those basics.
+- **Improvement frontier (subagents):** read-only audit and ranked suggestions live in [`subagent-layer-review-2026-08-07.md`](subagent-layer-review-2026-08-07.md). Prefer that map over inventing a second coordinator.
 
 ---
 
@@ -127,5 +129,6 @@ here, not from the checklist above:
 3. **Real capability gaps vs CC/Codex**, not late parity: what the Pit genuinely can't do that matters.
 4. **Weak-model uplift**: the universal rail exists; specific axes are still open.
 5. **Behavior under failure / UX**, not new features: where the loop *feels* stuck, ambiguous, or wasteful.
+6. **Subagent layer residual** (timeout, budget on resume/continue, `op:read` paging, fanout empty-review policy, observability, secondary-doc sync) — full prioritized map in [`subagent-layer-review-2026-08-07.md`](subagent-layer-review-2026-08-07.md). The coordinator itself is mature; do not re-propose spawn/slots/resume/digests as greenfield work.
 
 **Litmus test for a suggestion:** if it's "add «basic mechanism» X" → check above, it's likely there. The valuable suggestions today are **measure**, **generalize**, or **resolve a trade-off** — not add the basics.

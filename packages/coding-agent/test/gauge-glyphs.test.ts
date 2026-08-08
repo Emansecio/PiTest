@@ -16,17 +16,17 @@ describe("resolveGaugeGlyphs (A03)", () => {
 		expect(g.empty).toBe(GAUGE_EMPTY);
 	});
 
-	it("uses ●/○ when PIT_ASCII_GAUGE=1", () => {
+	it("uses #/. when PIT_ASCII_GAUGE=1", () => {
 		process.env.PIT_ASCII_GAUGE = "1";
 		const g = resolveGaugeGlyphs();
-		expect(g.filled).toBe("●");
-		expect(g.empty).toBe("○");
+		expect(g.filled).toBe("#");
+		expect(g.empty).toBe(".");
 	});
 
-	it("uses ●/○ when PIT_ASCII=1 (generic alias)", () => {
+	it("uses #/. when PIT_ASCII=1 (generic alias)", () => {
 		process.env.PIT_ASCII = "1";
 		const g = resolveGaugeGlyphs();
-		expect(g.filled).toBe("●");
-		expect(g.empty).toBe("○");
+		expect(g.filled).toBe("#");
+		expect(g.empty).toBe(".");
 	});
 });

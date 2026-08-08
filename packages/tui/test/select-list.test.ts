@@ -34,6 +34,47 @@ const indexOf = (list: SelectList): number => {
 };
 
 describe("SelectList", () => {
+	it("uses selectedPrefix independently from selectedText", () => {
+		const list = new SelectList([{ value: "one", label: "one" }], 5, {
+			...testTheme,
+			selectedPrefix: (text) => `<prefix>${text}</prefix>`,
+			selectedText: (text) => `<text>${text}</text>`,
+		});
+		assert.match(list.render(40)[0]!, /^<prefix>→ <\/prefix><text>one<\/text>/);
+	});
+
+	it("keeps the selected prefix width-safe at widths zero and one", () => {
+		const list = new SelectList([{ value: "one", label: "one" }], 5, {
+			...testTheme,
+			selectedPrefix: (text) => `\x1b[31m${text}\x1b[39m`,
+		});
+		for (const width of [0, 1]) {
+			const selected = list.render(width)[0]!;
+			assert.ok(visibleWidth(selected) <= width, `selected row exceeds width ${width}: ${JSON.stringify(selected)}`);
+		}
+		assert.equal(visibleWidth(list.render(1)[0]!), 1, "the one-column viewport still shows the arrow prefix");
+	});
+
+	it("keeps empty-state and section rows width-safe at every width", () => {
+		const styledTheme = {
+			...testTheme,
+			noMatch: (text: string) => `\x1b[31m${text}\x1b[39m`,
+			section: (text: string) => `\x1b[1m${text}\x1b[22m`,
+		};
+		const empty = new SelectList([], 5, styledTheme, { emptyText: "Nothing available" });
+		const sectioned = new SelectList(
+			[{ value: "one", label: "one", section: "A section heading that is intentionally long" }],
+			5,
+			styledTheme,
+		);
+
+		for (let width = 0; width <= 40; width++) {
+			for (const line of [...empty.render(width), ...sectioned.render(width)]) {
+				assert.ok(visibleWidth(line) <= width, `row exceeds width ${width}: ${JSON.stringify(line)}`);
+			}
+		}
+	});
+
 	it("normalizes multiline descriptions to single line", () => {
 		const items = [
 			{

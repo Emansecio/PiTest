@@ -96,11 +96,12 @@ export { HANDLER_SIDE_EFFECT_TAG };
 /** Tag for before_agent_start handlers that only inject messages (parallel-safe). */
 export const HANDLER_MESSAGE_INJECTOR_TAG = "__piMessageInjector" as const;
 
-// Max time a before_agent_start handler may block TTFT before being skipped.
+// Max time a latency-sensitive extension hook may block before being skipped.
 // Lowered from 5s → 1s so hung extension hooks fail-open faster; override via
 // PIT_EXTENSION_HOOK_TIMEOUT_MS. MCP @-mention expansion aligns its internal
 // AbortSignal to this budget.
 const DEFAULT_BEFORE_AGENT_START_TIMEOUT_MS = 1_000;
+const DEFAULT_SESSION_BEFORE_HOOK_TIMEOUT_MS = 30_000;
 
 function resolveBeforeAgentStartTimeoutMs(): number {
 	const raw = process.env.PIT_EXTENSION_HOOK_TIMEOUT_MS;
@@ -112,6 +113,55 @@ function resolveBeforeAgentStartTimeoutMs(): number {
 		return DEFAULT_BEFORE_AGENT_START_TIMEOUT_MS;
 	}
 	return parsed;
+}
+
+function resolveSessionBeforeHookTimeoutMs(): number {
+	const raw = process.env.PIT_SESSION_BEFORE_HOOK_TIMEOUT_MS;
+	if (!raw) {
+		return DEFAULT_SESSION_BEFORE_HOOK_TIMEOUT_MS;
+	}
+	const parsed = Number.parseInt(raw, 10);
+	if (!Number.isFinite(parsed) || parsed <= 0) {
+		return DEFAULT_SESSION_BEFORE_HOOK_TIMEOUT_MS;
+	}
+	return parsed;
+}
+
+function settleSessionBeforeHandler<T>(
+	pending: Promise<T>,
+	eventType: SessionBeforeEvent["type"],
+	signal: AbortSignal | undefined,
+	timeoutMs: number,
+): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		let settled = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const cleanup = () => {
+			if (timer !== undefined) clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
+		};
+		const finish = (settle: (value: any) => void, value: unknown) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			settle(value);
+		};
+		const onAbort = () => finish(reject, new Error(`${eventType} handler aborted`));
+
+		pending.then(
+			(value) => finish(resolve, value),
+			(error) => finish(reject, error),
+		);
+		if (signal?.aborted) {
+			onAbort();
+			return;
+		}
+		signal?.addEventListener("abort", onAbort, { once: true });
+		timer = setTimeout(() => {
+			finish(reject, new Error(`${eventType} handler timed out after ${timeoutMs}ms`));
+		}, timeoutMs);
+		(timer as { unref?: () => void }).unref?.();
+	});
 }
 
 /** Short label for per-extension timing logs (built-in/inline vs file path). */
@@ -195,11 +245,16 @@ export type NewSessionHandler = (options?: {
 	parentSession?: string;
 	setup?: (sessionManager: SessionManager) => Promise<void>;
 	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+	signal?: AbortSignal;
 }) => Promise<{ cancelled: boolean }>;
 
 export type ForkHandler = (
 	entryId: string,
-	options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
+	options?: {
+		position?: "before" | "at";
+		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+		signal?: AbortSignal;
+	},
 ) => Promise<{ cancelled: boolean }>;
 
 export type NavigateTreeHandler = (
@@ -209,7 +264,7 @@ export type NavigateTreeHandler = (
 
 export type SwitchSessionHandler = (
 	sessionPath: string,
-	options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
+	options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void>; signal?: AbortSignal },
 ) => Promise<{ cancelled: boolean }>;
 
 export type ReloadHandler = () => Promise<void>;
@@ -909,13 +964,24 @@ export class ExtensionRunner {
 
 		if (this.isSessionBeforeEvent(event)) {
 			let result: SessionBeforeEventResult | undefined;
+			const timeoutMs = resolveSessionBeforeHookTimeoutMs();
+			const signal = "signal" in event ? event.signal : undefined;
+			const cancelled = { cancel: true } as SessionBeforeEventResult;
 			for (const ext of this.extensions) {
 				const handlers = ext.handlers.get(event.type);
 				if (!handlers || handlers.length === 0) continue;
 
 				for (const handler of handlers) {
+					if (signal?.aborted) {
+						return cancelled as RunnerEmitResult<TEvent>;
+					}
 					try {
-						const handlerResult = await handler(event, ctx);
+						const handlerResult = await settleSessionBeforeHandler(
+							Promise.resolve(handler(event, ctx)),
+							event.type,
+							signal,
+							timeoutMs,
+						);
 						if (handlerResult) {
 							result = handlerResult as SessionBeforeEventResult;
 							if (result.cancel) {
@@ -923,6 +989,9 @@ export class ExtensionRunner {
 							}
 						}
 					} catch (err) {
+						if (signal?.aborted) {
+							return cancelled as RunnerEmitResult<TEvent>;
+						}
 						this.emitError({
 							extensionPath: ext.path,
 							event: event.type,

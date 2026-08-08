@@ -635,3 +635,15 @@ it("fillEaseTick coalesces frames when the quantized bar fingerprint is unchange
 	expect(dirty).toBeLessThan(15);
 	expect(anim.tick === null).toBe(true); // ease completed
 });
+
+it("TERM=dumb renders footer gauges and decorative chrome as true ASCII", () => {
+	process.env.TERM = "dumb";
+	const footer = makeFooter({
+		contextUsage: { tokens: 20_000, percent: 10, contextWindow: 200_000 },
+		permissions: "no-rails",
+		modelId: "test-model",
+	});
+	const output = stripAnsi(footer.render(100).join("\n"));
+	expect(output).toContain("#");
+	expect(output).not.toMatch(/[^\x00-\x7f]/);
+});

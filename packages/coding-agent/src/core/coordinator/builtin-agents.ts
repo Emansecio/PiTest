@@ -15,7 +15,6 @@ export const BUILT_IN_AGENT_TYPES: AgentTypeDef[] = [
 		systemPrompt:
 			"You are an exploration agent. Search the codebase broadly to locate the relevant code, symbols, and call sites for the task. Report concise, grounded conclusions with file:line references and a short summary of how the pieces connect. You are read-only: never edit, write, or run mutating commands.",
 		tools: ["read", "grep", "find", "ls", "bash"],
-		model: "haiku",
 		thinkingLevel: "low",
 		memory: true,
 		source: "builtin",

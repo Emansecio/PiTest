@@ -75,6 +75,20 @@ function confirmChecker(settings: Record<string, unknown> = {}) {
 	return new PermissionChecker({ cwd, mode: "confirm", settings });
 }
 
+/**
+ * The permissions `tool_call` handler awaits `resolveMetadata` before raising
+ * the confirm picker, so the first microtask yields. Wait until the composer
+ * slot shows the expected prompt chrome before asserting or sending keys.
+ */
+async function waitForPicker(h: InteractiveHarness, needle: string): Promise<string> {
+	for (let attempt = 0; attempt < 40; attempt++) {
+		const screen = h.editorText();
+		if (screen.includes(needle)) return screen;
+		await new Promise((resolve) => setTimeout(resolve, 0));
+	}
+	throw new Error(`confirm picker never showed "${needle}"; editor=${JSON.stringify(h.editorText().slice(0, 240))}`);
+}
+
 describe("confirm mode picker (real TUI)", () => {
 	it("a write raises the picker with Deny / Allow once / Allow for session", async () => {
 		const h = boot();
@@ -83,8 +97,7 @@ describe("confirm mode picker (real TUI)", () => {
 
 		const pending = gate.call("write", { path: "src/x.ts", content: "y" });
 
-		const screen = h.editorText();
-		expect(screen).toContain("confirm mode");
+		const screen = await waitForPicker(h, "confirm mode");
 		expect(screen).toContain("src/x.ts");
 		expect(screen).toContain(CONFIRM_DENY_LABEL);
 		expect(screen).toContain(CONFIRM_ALLOW_ONCE_LABEL);
@@ -102,6 +115,7 @@ describe("confirm mode picker (real TUI)", () => {
 		const gate = makeGate(checker);
 
 		const pending = gate.call("write", { path: "src/x.ts", content: "y" });
+		await waitForPicker(h, CONFIRM_DENY_LABEL);
 		h.sendKey(ENTER); // Deny is row 0
 		const verdict = await pending;
 
@@ -118,6 +132,7 @@ describe("confirm mode picker (real TUI)", () => {
 		const gate = makeGate(checker);
 
 		const first = gate.call("write", { path: "src/x.ts", content: "y" });
+		await waitForPicker(h, CONFIRM_ALLOW_ONCE_LABEL);
 		h.sendKey(DOWN); // → Allow once
 		h.sendKey(ENTER);
 		expect(await first).toBeUndefined(); // not blocked → the tool runs
@@ -125,7 +140,7 @@ describe("confirm mode picker (real TUI)", () => {
 
 		// Same path again: still a prompt.
 		const second = gate.call("write", { path: "src/x.ts", content: "z" });
-		expect(h.editorText()).toContain(CONFIRM_ALLOW_ONCE_LABEL);
+		await waitForPicker(h, CONFIRM_ALLOW_ONCE_LABEL);
 		h.sendKey(ENTER); // Deny it, just to settle
 		expect(await second).toMatchObject({ block: true });
 	});
@@ -136,6 +151,7 @@ describe("confirm mode picker (real TUI)", () => {
 		const gate = makeGate(checker);
 
 		const first = gate.call("write", { path: "src/x.ts", content: "y" });
+		await waitForPicker(h, CONFIRM_ALLOW_SESSION_LABEL);
 		// Focusing the row reveals the rule the grant would record (only the
 		// focused option renders its description).
 		h.sendKey(DOWN);
@@ -146,6 +162,9 @@ describe("confirm mode picker (real TUI)", () => {
 		expect(checker.settings.allowPaths?.map((r) => r.glob)).toEqual([`${cwd}/src/x.ts`]);
 
 		const second = gate.call("write", { path: "src/x.ts", content: "z" });
+		// Session rule should allow without a picker; give the async gate a tick.
+		await Promise.resolve();
+		await Promise.resolve();
 		// No picker was raised at all — the composer slot is untouched.
 		expect(h.editorText()).not.toContain(CONFIRM_ALLOW_SESSION_LABEL);
 		expect(h.internals().pendingAskRequest).toBeUndefined();
@@ -157,7 +176,7 @@ describe("confirm mode picker (real TUI)", () => {
 		const gate = makeGate(confirmChecker());
 
 		const pending = gate.call("bash", { command: "git push origin main" });
-		expect(h.editorText()).toContain("git push origin main");
+		await waitForPicker(h, "git push origin main");
 		h.sendKey("\x1b");
 		const verdict = await pending;
 		expect(verdict).toMatchObject({ block: true });
@@ -174,7 +193,7 @@ describe("confirm mode picker (real TUI)", () => {
 		const first = gate.call("write", { path: "src/a.ts", content: "1" });
 		const second = gate.call("write", { path: "src/b.ts", content: "2" });
 
-		expect(h.editorText()).toContain("src/a.ts");
+		await waitForPicker(h, "src/a.ts");
 		expect(h.editorText()).toContain("+1 queued");
 		expect(h.editorText()).not.toContain("src/b.ts");
 
@@ -182,7 +201,7 @@ describe("confirm mode picker (real TUI)", () => {
 		expect(await first).toBeUndefined();
 
 		// The second is NOT auto-denied by the collision any more.
-		expect(h.editorText()).toContain("src/b.ts");
+		await waitForPicker(h, "src/b.ts");
 		expect(h.editorText()).not.toContain("queued");
 		h.sendKey(ENTER); // Deny this one
 		expect(await second).toMatchObject({ block: true });

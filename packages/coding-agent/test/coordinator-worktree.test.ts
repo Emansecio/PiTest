@@ -13,7 +13,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -24,6 +24,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { runWithAcceptance } from "../src/core/coordinator/acceptance.js";
 import { SubagentRegistry } from "../src/core/coordinator/registry.js";
+import { slotStats } from "../src/core/coordinator/slots.js";
 import { type SpawnSubagentDependencies, spawnSubagent } from "../src/core/coordinator/spawn.js";
 import { retargetToolsForWorktree } from "../src/core/coordinator/worktree-tools.js";
 import { convertToLlm } from "../src/core/messages.js";
@@ -33,6 +34,40 @@ const execFileP = promisify(execFile);
 
 async function git(cwd: string, ...args: string[]): Promise<void> {
 	await execFileP("git", args, { cwd });
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!predicate()) {
+		if (Date.now() >= deadline) throw new Error("timed out waiting for condition");
+		await new Promise((resolve) => setTimeout(resolve, 20));
+	}
+}
+
+function processIsAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function killTestProcess(pid: number): Promise<void> {
+	if (!processIsAlive(pid)) return;
+	if (process.platform === "win32") {
+		await execFileP("taskkill", ["/pid", String(pid), "/T", "/F"]).catch(() => {});
+		return;
+	}
+	try {
+		process.kill(pid, "SIGKILL");
+	} catch {
+		// The process may have exited between the liveness check and kill.
+	}
+}
+
+function shellQuote(path: string): string {
+	return `'${path.replace(/\\/g, "/").replace(/'/g, `'"'"'`)}'`;
 }
 
 /**
@@ -171,6 +206,146 @@ describe("worktree isolation (spawn-level)", () => {
 		expect(systemPrompt).toContain(retargetCwd as string);
 		expect(result.record.status).toBe("completed");
 	}, 30_000);
+
+	it("aborts worktree creation promptly, reaps the git process tree, and preserves the abort reason", async () => {
+		const repo = await initRepo();
+		repos.push(repo);
+		const rig = createRig([]);
+		rigs.push(rig);
+		const marker = join(repo, "hook-child.pid");
+		const hanger = join(repo, "hang-hook.cjs");
+		writeFileSync(
+			hanger,
+			'const fs = require("node:fs"); fs.writeFileSync(process.argv[2], String(process.pid)); setInterval(() => {}, 1000);\n',
+		);
+		const hook = join(repo, ".git", "hooks", "post-checkout");
+		writeFileSync(hook, `#!/bin/sh\n${shellQuote(process.execPath)} ${shellQuote(hanger)} ${shellQuote(marker)}\n`);
+		chmodSync(hook, 0o755);
+		const previousTimeout = process.env.PIT_WORKTREE_GIT_TIMEOUT_MS;
+		process.env.PIT_WORKTREE_GIT_TIMEOUT_MS = "5000";
+		const controller = new AbortController();
+		const reason = new Error("aborted: stop worktree setup now");
+		const spawning = spawnSubagent(rig.deps, {
+			prompt: "work",
+			taskName: "wt-abort-setup",
+			cwd: repo,
+			worktree: { cleanup: "keep" },
+			signal: controller.signal,
+		});
+		let hookPid = 0;
+		try {
+			await waitFor(() => existsSync(marker));
+			hookPid = Number(readFileSync(marker, "utf8"));
+			expect(hookPid).toBeGreaterThan(0);
+			controller.abort(reason);
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const outcome = await Promise.race([
+				spawning.then(
+					() => ({ error: undefined }),
+					(error: unknown) => ({ error }),
+				),
+				new Promise<undefined>((resolve) => {
+					timer = setTimeout(() => resolve(undefined), 1500);
+				}),
+			]);
+			if (timer) clearTimeout(timer);
+			expect(outcome).toBeDefined();
+			expect(outcome?.error).toBe(reason);
+			await waitFor(() => !processIsAlive(hookPid), 1000);
+			const worktreeRoot = join(repo, ".pit", "worktrees");
+			if (existsSync(worktreeRoot)) expect(readdirSync(worktreeRoot)).toEqual([]);
+			const list = (await execFileP("git", ["worktree", "list"], { cwd: repo })).stdout;
+			expect(list).not.toContain("wt-abort-setup");
+		} finally {
+			controller.abort(reason);
+			if (hookPid > 0) await killTestProcess(hookPid);
+			await Promise.race([spawning.catch(() => {}), new Promise((resolve) => setTimeout(resolve, 2000))]);
+			if (previousTimeout === undefined) delete process.env.PIT_WORKTREE_GIT_TIMEOUT_MS;
+			else process.env.PIT_WORKTREE_GIT_TIMEOUT_MS = previousTimeout;
+		}
+	}, 15_000);
+
+	it.each([
+		["explicit Error", () => new Error("aborted: retain unsafe worktree")],
+		["default DOMException", undefined],
+	] as const)(
+		"retains an auto-cleanup worktree without mutating the %s abort reason",
+		async (_label, makeReason) => {
+			const repo = await initRepo();
+			repos.push(repo);
+			const rig = createRig([]);
+			rigs.push(rig);
+			let markStarted: (() => void) | undefined;
+			const started = new Promise<void>((resolve) => {
+				markStarted = resolve;
+			});
+			let releaseProvider: (() => void) | undefined;
+			rig.faux.setResponses([
+				async () => {
+					markStarted?.();
+					return await new Promise((resolve) => {
+						releaseProvider = () => resolve(fauxAssistantMessage("late output"));
+					});
+				},
+			]);
+			const controller = new AbortController();
+			let worktreePath: string | undefined;
+			const spawning = spawnSubagent(rig.deps, {
+				prompt: "never settles cooperatively",
+				taskName: "wt-noncooperative-abort",
+				cwd: repo,
+				worktree: true,
+				signal: controller.signal,
+				onWorktreeReady: (path) => {
+					worktreePath = path;
+				},
+			});
+			await started;
+			const explicitReason = makeReason?.();
+			controller.abort(explicitReason);
+			const originalReason = controller.signal.reason;
+			const originalMessage = originalReason instanceof Error ? originalReason.message : undefined;
+			try {
+				const outcome = await Promise.race([
+					spawning.then(
+						() => ({ error: undefined }),
+						(error: unknown) => ({ error }),
+					),
+					new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 2000)),
+				]);
+				expect(outcome).toBeDefined();
+				expect(worktreePath).toBeDefined();
+				expect(existsSync(worktreePath as string)).toBe(true);
+				expect(outcome?.error).toBeInstanceOf(Error);
+				const wrapped = outcome?.error as Error & { cause?: unknown };
+				expect(wrapped).not.toBe(originalReason);
+				expect(wrapped.cause).toBe(originalReason);
+				expect(wrapped.message).toContain(worktreePath as string);
+				expect(wrapped.message).toMatch(/retained|residual|not quiescent/i);
+				if (originalReason instanceof Error) {
+					expect(originalReason.message).toBe(originalMessage);
+					expect(wrapped.message).toContain(originalMessage);
+				}
+				const record = rig.deps.registry.list().find((entry) => entry.taskName === "wt-noncooperative-abort");
+				expect(record?.status).toBe("cancelled");
+				expect(record?.error).toMatch(/retained|residual|not quiescent/i);
+				expect(slotStats().active).toBeGreaterThan(0);
+			} finally {
+				releaseProvider?.();
+				const deadline = Date.now() + 3000;
+				while (slotStats().active > 0 && Date.now() < deadline) {
+					await new Promise((resolve) => setTimeout(resolve, 10));
+				}
+				if (worktreePath) {
+					await waitFor(() => !existsSync(worktreePath as string), 3000);
+					const list = (await execFileP("git", ["worktree", "list"], { cwd: repo })).stdout;
+					expect(list).not.toContain(worktreePath);
+				}
+			}
+			expect(slotStats().active).toBe(0);
+		},
+		15_000,
+	);
 
 	it("uses the native retargeter for direct API callers that provide no callback", async () => {
 		const repo = await initRepo();

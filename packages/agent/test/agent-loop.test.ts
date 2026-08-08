@@ -2288,6 +2288,72 @@ describe("agent loop rejection guard", () => {
 		expect(sawAbort).toBe(true);
 	});
 
+	it("passes run and per-tool cancellation signals separately to tool execution", async () => {
+		const toolAbortControllers = new Map<string, AbortController>();
+		const runAbort = new AbortController();
+		const toolSchema = Type.Object({});
+		let capturedRunSignal: AbortSignal | undefined;
+		let capturedCancelSignal: AbortSignal | undefined;
+		const hangTool: AgentTool<typeof toolSchema, undefined> = {
+			name: "hang",
+			label: "Hang",
+			description: "Captures the distinct abort sources",
+			parameters: toolSchema,
+			executionMode: "sequential",
+			async execute(_toolCallId, _params, signal, _onUpdate, executeContext) {
+				capturedRunSignal = executeContext?.runSignal;
+				capturedCancelSignal = executeContext?.cancelSignal;
+				await new Promise<void>((_resolve, reject) => {
+					signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+				});
+				return { content: [{ type: "text", text: "done" }], details: undefined };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [hangTool] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			toolAbortControllers,
+		};
+		let streamCalls = 0;
+		const stream = agentLoop([createUserMessage("hang")], context, config, runAbort.signal, () => {
+			const mockStream = new MockAssistantStream();
+			const call = ++streamCalls;
+			queueMicrotask(() => {
+				mockStream.push(
+					call === 1
+						? {
+								type: "done",
+								reason: "toolUse",
+								message: createAssistantMessage(
+									[{ type: "toolCall", id: "tool-hang-context", name: "hang", arguments: {} }],
+									"toolUse",
+								),
+							}
+						: {
+								type: "done",
+								reason: "stop",
+								message: createAssistantMessage([{ type: "text", text: "stopped" }]),
+							},
+				);
+			});
+			return mockStream;
+		});
+
+		const consume = (async () => {
+			for await (const _event of stream) {
+				// drain
+			}
+		})();
+		await vi.waitFor(() => expect(toolAbortControllers.has("tool-hang-context")).toBe(true));
+		expect(capturedRunSignal).toBe(runAbort.signal);
+		expect(capturedCancelSignal).toBeDefined();
+		expect(capturedCancelSignal).not.toBe(runAbort.signal);
+		toolAbortControllers.get("tool-hang-context")!.abort();
+		await consume;
+	});
+
 	it("per-tool abort waits for an opted-in tool's partial cancellation result", async () => {
 		const toolAbortControllers = new Map<string, AbortController>();
 		const toolSchema = Type.Object({});
@@ -2853,6 +2919,103 @@ describe("P04 message_update fire-and-forget", () => {
 });
 
 describe("round wall-clock watchdog", () => {
+	it("does not invoke the stream factory when the outer signal is already aborted", async () => {
+		const context: AgentContext = { systemPrompt: "s", messages: [], tools: [] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+		};
+		const outerAbort = new AbortController();
+		outerAbort.abort(new Error("cancelled before construction"));
+		let streamCalls = 0;
+		const streamFn = () => {
+			streamCalls++;
+			return new Promise<MockAssistantStream>(() => {});
+		};
+
+		const loop = agentLoop([createUserMessage("go")], context, config, outerAbort.signal, streamFn);
+		for await (const _event of loop) {
+			/* drain */
+		}
+		const messages = await loop.result();
+
+		expect(streamCalls).toBe(0);
+		const last = messages[messages.length - 1] as AssistantMessage;
+		expect(last.errorMessage).toMatch(/request was aborted/i);
+	});
+
+	it("settles promptly when the outer signal aborts during stream construction", async () => {
+		const context: AgentContext = { systemPrompt: "s", messages: [], tools: [] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			roundWallClockMs: 5000,
+		};
+		const outerAbort = new AbortController();
+		let streamSignal: AbortSignal | undefined;
+		const streamFn = (_model: unknown, _ctx: unknown, options?: { signal?: AbortSignal }) => {
+			streamSignal = options?.signal;
+			return new Promise<MockAssistantStream>(() => {});
+		};
+
+		const start = Date.now();
+		const loop = agentLoop([createUserMessage("go")], context, config, outerAbort.signal, streamFn as any);
+		setTimeout(() => outerAbort.abort(), 30);
+		const messages = await Promise.race([
+			(async () => {
+				for await (const _event of loop) {
+					/* drain */
+				}
+				return loop.result();
+			})(),
+			new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 500)),
+		]);
+
+		expect(messages).toBeDefined();
+		if (!messages) return;
+		expect(Date.now() - start).toBeLessThan(2000);
+		expect(streamSignal?.aborted).toBe(true);
+		const last = messages[messages.length - 1] as AssistantMessage;
+		expect(last.stopReason).toBe("error");
+		expect(last.errorMessage).toMatch(/request was aborted/i);
+	});
+
+	it("times out stream construction with retryable watchdog semantics without aborting the outer signal", async () => {
+		const context: AgentContext = { systemPrompt: "s", messages: [], tools: [] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			roundWallClockMs: 80,
+		};
+		const outerAbort = new AbortController();
+		let streamSignal: AbortSignal | undefined;
+		const streamFn = (_model: unknown, _ctx: unknown, options?: { signal?: AbortSignal }) => {
+			streamSignal = options?.signal;
+			return new Promise<MockAssistantStream>(() => {});
+		};
+
+		const start = Date.now();
+		const loop = agentLoop([createUserMessage("go")], context, config, outerAbort.signal, streamFn as any);
+		const messages = await Promise.race([
+			(async () => {
+				for await (const _event of loop) {
+					/* drain */
+				}
+				return loop.result();
+			})(),
+			new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 500)),
+		]);
+
+		expect(messages).toBeDefined();
+		if (!messages) return;
+		expect(Date.now() - start).toBeLessThan(2000);
+		expect(streamSignal?.aborted).toBe(true);
+		expect(outerAbort.signal.aborted).toBe(false);
+		const last = messages[messages.length - 1] as AssistantMessage;
+		expect(last.stopReason).toBe("error");
+		expect(last.errorMessage).toMatch(/wall-clock timeout.*timed out/i);
+	});
+
 	it("converts a keepalive-forever stream into a retryable error turn at the cap", async () => {
 		const context: AgentContext = { systemPrompt: "s", messages: [], tools: [] };
 		const config: AgentLoopConfig = {

@@ -49,6 +49,20 @@ function bgJob(over: Partial<BashBackgroundJob>): BashBackgroundJob {
 	};
 }
 
+function goalCompleteInput(mgr: GoalManager, summary: string) {
+	const contract = mgr.get()?.contract;
+	if (!contract) throw new Error("active Goal contract required by test helper");
+	return {
+		summary,
+		contractRevision: contract.revision,
+		criteria: contract.criteria.map((criterion) => ({
+			id: criterion.id,
+			outcome: `${criterion.text} completed`,
+			evidence: [{ kind: "claim" as const, note: "verified by the focused test fixture" }],
+		})),
+	};
+}
+
 describe("late-check regressions", () => {
 	const harnesses: Harness[] = [];
 	afterEach(async () => {
@@ -120,7 +134,13 @@ describe("late-check regressions", () => {
 		}));
 
 		const tool = createGoalCompleteToolDefinition(process.cwd());
-		const r = (await tool.execute("c1", { summary: "done" }, undefined, undefined, undefined as never)) as {
+		const r = (await tool.execute(
+			"c1",
+			goalCompleteInput(mgr, "done"),
+			undefined,
+			undefined,
+			undefined as never,
+		)) as {
 			content: Array<{ type: string; text?: string }>;
 			details?: { completed: boolean };
 		};

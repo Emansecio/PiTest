@@ -14,7 +14,7 @@ import { interpolateFg } from "../theme/color-interpolation.ts";
 import { CONTEXT_USAGE_CRITICAL_PERCENT, theme } from "../theme/theme.ts";
 import { COLOR_EASE_MS } from "./color-ease.ts";
 import { resolveGaugeGlyphs } from "./gauge-glyphs.ts";
-import { resolveSpinnerFrames } from "./glyph-resolver.ts";
+import { isAsciiGlyphMode, resolveSpinnerFrames, toAsciiUiGlyphs } from "./glyph-resolver.ts";
 import { spinnerGlyphAt } from "./spinner-ticker.ts";
 
 /** Minimum terminal width for single-line identity (pwd + model). */
@@ -109,7 +109,7 @@ function footerFillFingerprint(fill: number): number {
 
 function renderFooterContextBar(displayedFill: number, colorize: (text: string) => string): string {
 	// resolveGaugeGlyphs (not the raw constants) so PIT_ASCII_GAUGE/TERM=dumb
-	// fall back to ●/○ here too — the footer is the most permanent chrome, it
+	// fall back to true ASCII here too — the footer is the most permanent chrome, it
 	// must honor the same kill-switch as the todo overlay. Env-only, so
 	// resolving per call is cheap and render caching is unaffected.
 	const { filled: gaugeFilled, empty: gaugeEmpty } = resolveGaugeGlyphs();
@@ -164,6 +164,7 @@ export class FooterComponent implements Component {
 	private fusionLiveActive = false;
 	/** Non-null while the model gearbox (P8b) holds a downshifted role (e.g. "smol"). */
 	private gearboxRole: string | null = null;
+	private backgroundJobsFocused = false;
 	private density: FooterDensity = "calm";
 	private renderCacheKey = "";
 	private renderCacheLines: string[] | null = null;
@@ -214,6 +215,12 @@ export class FooterComponent implements Component {
 	setFusionLiveActive(active: boolean): void {
 		if (this.fusionLiveActive === active) return;
 		this.fusionLiveActive = active;
+		this.renderCacheLines = null;
+	}
+
+	setBackgroundJobsFocused(focused: boolean): void {
+		if (this.backgroundJobsFocused === focused) return;
+		this.backgroundJobsFocused = focused;
 		this.renderCacheLines = null;
 	}
 
@@ -354,7 +361,7 @@ export class FooterComponent implements Component {
 	 * its result having been surfaced yet; the panel (alt+j) has the detail.
 	 */
 	private getJobsSegment(): { text: string; warn: boolean } | null {
-		const jobs = listBashBackgroundJobs();
+		const jobs = listBashBackgroundJobs(this.session.sessionId);
 		if (jobs.length === 0) return null;
 		const warn = jobs.some(
 			(job) =>
@@ -366,7 +373,7 @@ export class FooterComponent implements Component {
 
 	/** Job-state fingerprint for the render cache key (id/state/seen/stall per job). */
 	private getJobsCacheKey(): string {
-		return listBashBackgroundJobs()
+		return listBashBackgroundJobs(this.session.sessionId)
 			.map(
 				(job) =>
 					`${job.id}:${job.exited ? 1 : 0}:${job.exitCode ?? "n"}:${job.resultSeen ? 1 : 0}:${isBashBackgroundJobStalled(job) ? 1 : 0}`,
@@ -513,15 +520,17 @@ export class FooterComponent implements Component {
 			recoveryLevel,
 			pinCount,
 			gearboxRole,
+			this.backgroundJobsFocused ? 1 : 0,
 			jobsKey,
 			this.hasUserTurn() ? 1 : 0,
+			isAsciiGlyphMode() ? 1 : 0,
 		].join("|");
 	}
 
 	render(width: number): string[] {
 		const cacheKey = this.buildRenderCacheKey(width);
 		if (!this.fillEaseActive() && this.renderCacheLines !== null && cacheKey === this.renderCacheKey) {
-			return this.withGoalSpinner(this.renderCacheLines);
+			return this.finalizeLines(this.withGoalSpinner(this.renderCacheLines));
 		}
 
 		const state = this.session.state;
@@ -676,7 +685,7 @@ export class FooterComponent implements Component {
 			}
 			this.renderCacheKey = cacheKey;
 			this.renderCacheLines = lines;
-			return lines;
+			return this.finalizeLines(lines);
 		}
 
 		const wireDiverges =
@@ -737,7 +746,8 @@ export class FooterComponent implements Component {
 		}
 		const jobsSegment = this.getJobsSegment();
 		if (jobsSegment) {
-			modeBits.push(theme.fg(jobsSegment.warn ? "warning" : "accent", jobsSegment.text));
+			const jobsText = this.backgroundJobsFocused ? `▶ ${jobsSegment.text}` : jobsSegment.text;
+			modeBits.push(theme.bold(theme.fg(jobsSegment.warn ? "warning" : "accent", jobsText)));
 		}
 
 		// Assemble groups. Every join is the same dense ` · ` — intra-group items
@@ -784,7 +794,7 @@ export class FooterComponent implements Component {
 		// own line. Fires whenever the built-in floor is off (any mode with
 		// disableBuiltinDefaults — surfaced as "no-rails" in the status).
 		if (mode === "no-rails") {
-			lines.push(theme.bold(theme.fg("error", "⚠ NO-RAILS — built-in guard-rails off")));
+			lines.push(truncateToWidth(theme.bold(theme.fg("error", "⚠ NO-RAILS — built-in guard-rails off")), width));
 		}
 
 		// --- Extension statuses (line 3, optional) ---------------------------
@@ -805,7 +815,11 @@ export class FooterComponent implements Component {
 
 		this.renderCacheKey = cacheKey;
 		this.renderCacheLines = lines;
-		return this.withGoalSpinner(lines);
+		return this.finalizeLines(this.withGoalSpinner(lines));
+	}
+
+	private finalizeLines(lines: string[]): string[] {
+		return isAsciiGlyphMode() ? lines.map((line) => toAsciiUiGlyphs(line)) : lines;
 	}
 
 	/** Append the driving spinner without busting the footer render cache. */

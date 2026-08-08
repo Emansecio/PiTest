@@ -18,6 +18,23 @@ describe("Input component", () => {
 			assert.ok(line?.includes("<PH>"), "placeholder should be colorized");
 		});
 
+		it("emits no inverse SGR for the placeholder cursor under NO_COLOR", () => {
+			const previousNoColor = process.env.NO_COLOR;
+			const previousForceColor = process.env.FORCE_COLOR;
+			process.env.NO_COLOR = "";
+			delete process.env.FORCE_COLOR;
+			try {
+				const input = new Input({ placeholder: "hint" });
+				input.focused = true;
+				assert.ok(!input.render(20).join("\n").includes("\x1b[7m"));
+			} finally {
+				if (previousNoColor === undefined) delete process.env.NO_COLOR;
+				else process.env.NO_COLOR = previousNoColor;
+				if (previousForceColor === undefined) delete process.env.FORCE_COLOR;
+				else process.env.FORCE_COLOR = previousForceColor;
+			}
+		});
+
 		it("clears the placeholder when the user types", () => {
 			const input = new Input({ placeholder: "e.g., sk-…" });
 			input.handleInput("a");
@@ -643,16 +660,41 @@ describe("Input component", () => {
 			assert.ok(elapsed < 4000, `paste handling took ${elapsed}ms`);
 		});
 
-		it("fires onPasteTruncated with original/kept bytes when a paste is truncated", () => {
+		it("pre-caps complete raw payloads before normalization and reports raw/kept bytes", () => {
 			const calls: Array<{ originalBytes: number; keptBytes: number }> = [];
 			const input = new Input({ onPasteTruncated: (info) => calls.push(info) });
-			const originalLen = 12 * 1024 * 1024;
-			input.handleInput(`\x1b[200~${"a".repeat(originalLen)}\x1b[201~`);
+			// The tab falls just beyond the raw cap. If normalization ran first it would
+			// expand and report four bytes rather than the one raw byte reported here.
+			const originalLen = MAX_PASTE_BYTES + 1;
+			input.handleInput(`\x1b[200~${"a".repeat(MAX_PASTE_BYTES)}\t\x1b[201~`);
 
 			assert.strictEqual(calls.length, 1, "callback should fire exactly once");
-			assert.strictEqual(calls[0]!.originalBytes, originalLen, "originalBytes is the pre-truncation length");
+			assert.strictEqual(calls[0]!.originalBytes, originalLen, "originalBytes is the complete raw payload");
 			assert.strictEqual(calls[0]!.keptBytes, MAX_PASTE_BYTES, "keptBytes is the cap");
 			assert.strictEqual(input.getValue().length, MAX_PASTE_BYTES, "value truncated to the cap");
+		});
+
+		it("applies the byte cap after tab expansion", () => {
+			const calls: Array<{ originalBytes: number; keptBytes: number }> = [];
+			const input = new Input({ onPasteTruncated: (info) => calls.push(info) });
+			const tabs = "\t".repeat(Math.floor(MAX_PASTE_BYTES / 4) + 1);
+			input.handleInput(`\x1b[200~${tabs}\x1b[201~`);
+
+			assert.strictEqual(Buffer.byteLength(input.getValue(), "utf8"), MAX_PASTE_BYTES);
+			assert.deepStrictEqual(calls, [{ originalBytes: tabs.length * 4, keptBytes: MAX_PASTE_BYTES }]);
+		});
+
+		it("uses UTF-8 bytes for the unterminated-paste guard", () => {
+			const input = new Input();
+			const wide = "你".repeat(Math.floor(MAX_PASTE_BYTES / 3) + 1);
+			input.handleInput(`\x1b[200~${wide}`); // intentionally no end marker
+			assert.strictEqual(
+				Buffer.byteLength(input.getValue(), "utf8"),
+				Math.floor(MAX_PASTE_BYTES / 3) * 3,
+				"UTF-8 truncation keeps only complete wide code points",
+			);
+			input.handleInput("z");
+			assert.ok(input.getValue().endsWith("z"), "guard exited paste mode instead of swallowing later input");
 		});
 
 		it("does not fire onPasteTruncated for a normal (sub-cap) paste", () => {

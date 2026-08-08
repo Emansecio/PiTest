@@ -52,6 +52,15 @@ describe("ActivityLineComponent", () => {
 		expect(out[0]).toMatch(/✓$/);
 		for (const l of out) expect(l).not.toContain("│");
 	});
+	it("preserves the trailing outcome glyph when a long target is truncated", () => {
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(execStub({ getArgs: () => ({ path: `server/${"very-long-".repeat(20)}file.ts` }) }));
+		const header = stripAnsi(c.render(20)[0]!);
+		expect(header.length).toBeLessThanOrEqual(20);
+		expect(header).toMatch(/✓$/);
+		expect(header).toContain("…");
+	});
+
 	it("auto-shows the result body on a genuine error without any expand", () => {
 		let resultExpanded = false;
 		const c = new ActivityLineComponent(fakeTui());

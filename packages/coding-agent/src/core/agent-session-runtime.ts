@@ -126,7 +126,11 @@ export class AgentSessionRuntime {
 	private async emitBeforeSwitch(
 		reason: "new" | "resume",
 		targetSessionFile?: string,
+		signal?: AbortSignal,
 	): Promise<{ cancelled: boolean }> {
+		if (signal?.aborted) {
+			return { cancelled: true };
+		}
 		const runner = this.session.extensionRunner;
 		if (!runner.hasHandlers("session_before_switch")) {
 			return { cancelled: false };
@@ -136,14 +140,19 @@ export class AgentSessionRuntime {
 			type: "session_before_switch",
 			reason,
 			targetSessionFile,
+			signal,
 		});
-		return { cancelled: result?.cancel === true };
+		return { cancelled: signal?.aborted === true || result?.cancel === true };
 	}
 
 	private async emitBeforeFork(
 		entryId: string,
 		options: { position: "before" | "at" },
+		signal?: AbortSignal,
 	): Promise<{ cancelled: boolean }> {
+		if (signal?.aborted) {
+			return { cancelled: true };
+		}
 		const runner = this.session.extensionRunner;
 		if (!runner.hasHandlers("session_before_fork")) {
 			return { cancelled: false };
@@ -153,8 +162,9 @@ export class AgentSessionRuntime {
 			type: "session_before_fork",
 			entryId,
 			...options,
+			signal,
 		});
-		return { cancelled: result?.cancel === true };
+		return { cancelled: signal?.aborted === true || result?.cancel === true };
 	}
 
 	private async teardownCurrent(reason: SessionShutdownEvent["reason"], targetSessionFile?: string): Promise<void> {
@@ -214,9 +224,13 @@ export class AgentSessionRuntime {
 
 	async switchSession(
 		sessionPath: string,
-		options?: { cwdOverride?: string; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
+		options?: {
+			cwdOverride?: string;
+			withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+			signal?: AbortSignal;
+		},
 	): Promise<{ cancelled: boolean }> {
-		const beforeResult = await this.emitBeforeSwitch("resume", sessionPath);
+		const beforeResult = await this.emitBeforeSwitch("resume", sessionPath, options?.signal);
 		if (beforeResult.cancelled) {
 			return beforeResult;
 		}
@@ -238,8 +252,9 @@ export class AgentSessionRuntime {
 		parentSession?: string;
 		setup?: (sessionManager: SessionManager) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+		signal?: AbortSignal;
 	}): Promise<{ cancelled: boolean }> {
-		const beforeResult = await this.emitBeforeSwitch("new");
+		const beforeResult = await this.emitBeforeSwitch("new", undefined, options?.signal);
 		if (beforeResult.cancelled) {
 			return beforeResult;
 		}
@@ -267,10 +282,14 @@ export class AgentSessionRuntime {
 
 	async fork(
 		entryId: string,
-		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
+		options?: {
+			position?: "before" | "at";
+			withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+			signal?: AbortSignal;
+		},
 	): Promise<{ cancelled: boolean; selectedText?: string }> {
 		const position = options?.position ?? "before";
-		const beforeResult = await this.emitBeforeFork(entryId, { position });
+		const beforeResult = await this.emitBeforeFork(entryId, { position }, options?.signal);
 		if (beforeResult.cancelled) {
 			return { cancelled: true };
 		}

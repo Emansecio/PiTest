@@ -20,7 +20,7 @@
  *   })
  */
 
-import type { Agent, AgentMessage, AgentTool, ThinkingLevel } from "@pit/agent-core";
+import type { Agent, AgentMessage, AgentTool, AgentToolExecuteContext, ThinkingLevel } from "@pit/agent-core";
 import type { Model } from "@pit/ai";
 import { type Static, type TSchema, Type } from "typebox";
 import { isValidThinkingLevel } from "../../cli/args.ts";
@@ -37,6 +37,7 @@ import {
 	deleteResumeState,
 	extractAssistantText,
 	type GateDetails,
+	getSubagentErrorModelFallback,
 	getSubagentErrorUsage,
 	listResumeHandlesSync,
 	loadAgentTypes,
@@ -56,17 +57,54 @@ import {
 	withRunSlot,
 	yieldRunSlotWhile,
 } from "../coordinator/index.ts";
-import type { SpawnSubagentResult, SubagentStatus, SubagentUsage } from "../coordinator/types.ts";
+import { holdCurrentSlotUntil } from "../coordinator/slots.ts";
+import type {
+	SpawnSubagentResult,
+	SubagentModelFallback,
+	SubagentRequestPolicy,
+	SubagentStatus,
+	SubagentTurnCheckpoint,
+	SubagentUsage,
+} from "../coordinator/types.ts";
 import type { ExtensionAPI, ToolDefinition } from "../extensions/types.ts";
 import { agentMessageBus, makeAgentDelivery, makeAgentResponder } from "../messaging/index.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import { parseModelPattern } from "../model-resolver.ts";
+import { buildSelectableModelView, resolveCliModel } from "../model-resolver.ts";
 import type { Skill } from "../skills.ts";
 import type { SubagentTokenReservation, TokenBudgetGovernor } from "../token-governor.ts";
 import { aggregateAssistantUsage, mergeSubagentUsage } from "../token-usage.ts";
 import { withAgentScope } from "../tools/hindsight-scope.ts";
 import { createMessageTool } from "../tools/message.ts";
 import { formatSize, RECALL_OUTPUT_CAP_BYTES, truncateHeadTail } from "../tools/truncate.ts";
+
+function coordinatorChildSignal(
+	signal: AbortSignal | undefined,
+	context?: AgentToolExecuteContext,
+): AbortSignal | undefined {
+	const runSignal = context?.runSignal ?? signal;
+	const cancelSignal = context?.cancelSignal;
+	if (!cancelSignal || !runSignal) return runSignal;
+
+	// Keep a coordinator child linked to the parent run, but decide at the moment
+	// of cancellation whether this was Send now (preserve children) or a normal
+	// per-tool cancellation (Esc picker, which must still stop them).
+	const childController = new AbortController();
+	const abortFromRun = () => childController.abort(runSignal.reason);
+	const abortFromCancel = () => {
+		const reason = cancelSignal.reason;
+		const preserve =
+			typeof reason === "object" &&
+			reason !== null &&
+			"preserveCoordinatorChildren" in reason &&
+			(reason as { preserveCoordinatorChildren?: unknown }).preserveCoordinatorChildren === true;
+		if (!preserve) childController.abort(reason);
+	};
+	if (runSignal.aborted) abortFromRun();
+	else runSignal.addEventListener("abort", abortFromRun, { once: true });
+	if (cancelSignal.aborted) abortFromCancel();
+	else cancelSignal.addEventListener("abort", abortFromCancel, { once: true });
+	return childController.signal;
+}
 
 /**
  * Cross-harness aliases for the built-in agent types. Frontier models trained on
@@ -106,17 +144,23 @@ function resolveAgentType(map: Map<string, AgentTypeDef>, rawType: string | unde
 /** A subagent launched via `task({op:"spawn"})` — runs detached, collected later via poll/join. */
 interface PendingTask {
 	handle: string;
+	generation: symbol;
 	status: "running" | "done" | "error" | "cancelled";
 	promise: Promise<void>;
 	/** Abort controller for the detached run, so session teardown / Esc can stop it. */
 	controller: AbortController;
+	/** Canonical registry id once the child Agent has been constructed. */
+	registryRecordId?: string;
 	result?: string;
 	error?: string;
 	/** True once the result was re-injected into the chat, so poll/join don't repeat the payload. */
 	delivered?: boolean;
+	/** True once the detached lifecycle callback has been emitted. */
+	completionNotified?: boolean;
 	turns?: number;
 	totalTokens?: number;
 	costUsd?: number;
+	modelFallback?: SubagentModelFallback;
 }
 
 function formatCancelledPending(handle: string, entry: PendingTask): string {
@@ -127,9 +171,11 @@ function formatCancelledPending(handle: string, entry: PendingTask): string {
 /** Compact marker for a settled detached task evicted from the in-memory result cache. */
 interface EvictedPendingTask {
 	handle: string;
+	generation: symbol;
 	status: "done" | "error" | "cancelled";
 	error?: string;
 	delivered?: boolean;
+	modelFallback?: SubagentModelFallback;
 }
 
 /** Shared result shape for every `task` op so the inferred tool `details` type unifies. */
@@ -145,6 +191,68 @@ function safeCallback<T>(fn: () => T, fallback: T): T {
 		return fn();
 	} catch {
 		return fallback;
+	}
+}
+
+function abortError(reason: unknown): Error {
+	if (reason instanceof Error) return reason;
+	if (typeof reason === "string" && reason.length > 0) return new Error(reason);
+	return new Error("aborted");
+}
+
+function linkedAbortController(parent: AbortSignal | undefined): {
+	controller: AbortController;
+	unlink: () => void;
+} {
+	const controller = new AbortController();
+	if (!parent) return { controller, unlink: () => {} };
+	const onAbort = () => controller.abort(parent.reason ?? new Error("aborted: parent signal"));
+	if (parent.aborted) onAbort();
+	else parent.addEventListener("abort", onAbort, { once: true });
+	return {
+		controller,
+		unlink: () => parent.removeEventListener("abort", onAbort),
+	};
+}
+
+function raceSettlementWithAbort<T>(settlement: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+	if (!signal) return settlement;
+	if (signal.aborted) return Promise.reject(abortError(signal.reason));
+	return new Promise<T>((resolve, reject) => {
+		const cleanup = () => signal.removeEventListener("abort", onAbort);
+		const onAbort = () => {
+			cleanup();
+			reject(abortError(signal.reason));
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+		settlement.then(
+			(value) => {
+				cleanup();
+				resolve(value);
+			},
+			(error) => {
+				cleanup();
+				reject(error);
+			},
+		);
+	});
+}
+
+const RESUME_IDLE_GRACE_MS = 1000;
+
+async function waitForResumeIdle(settlement: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const deadline = new Promise<never>((_, reject) => {
+		timer = setTimeout(
+			() => reject(new Error(`previous subagent run did not become idle within ${RESUME_IDLE_GRACE_MS}ms`)),
+			RESUME_IDLE_GRACE_MS,
+		);
+		(timer as { unref?: () => void }).unref?.();
+	});
+	try {
+		await raceSettlementWithAbort(Promise.race([settlement, deadline]), signal);
+	} finally {
+		if (timer) clearTimeout(timer);
 	}
 }
 
@@ -208,12 +316,10 @@ const taskSchema = Type.Object({
 		Type.String({
 			description:
 				"Model for the subagent. If the user explicitly asked for a specific model or effort for the subagents, HONOR THAT FIRST. " +
-				"Otherwise CHOOSE BY THE SUB-TASK'S COMPLEXITY, picking the smallest model that can do the job well. " +
-				"Trivial/mechanical (search, read, list, extract, classify, summarize, repetitive same-shape probes) → 'haiku'. " +
-				"Focused analysis or simple, low-risk code → 'sonnet'. " +
-				"Hard reasoning, intricate or critical code, architecture/design decisions, tricky debugging, multi-source synthesis → OMIT this to inherit the parent's model (or 'opus'). " +
-				"When unsure, OMIT it — never trade quality for cost on a hard sub-task. " +
-				"Pattern: 'haiku' | 'sonnet' | 'opus' | 'provider/id' (optionally ':level', e.g. 'opus:high').",
+				"Otherwise OMIT it to inherit the working parent model. Set it only to an available model from the session's selectable model view. " +
+				"Pattern: an unambiguous model id or canonical 'provider/id' (optionally ':level'). " +
+				"A requested model is resolved against registry models, SDK-scoped models, and the exact current parent; unknown requests fail loudly instead of silently using the parent. " +
+				"For a known provider, provider/id may name a custom model id.",
 		}),
 	),
 	thinking_level: Type.Optional(
@@ -242,7 +348,7 @@ const taskSchema = Type.Object({
 				"Always pass a minimal subset scoped to the task — e.g. ['read','grep','find','ls'] for exploration.",
 		}),
 	),
-	max_turns: Type.Optional(Type.Number({ description: "Hard limit on subagent turns. Default: 50." })),
+	max_turns: Type.Optional(Type.Integer({ minimum: 1, description: "Hard limit on subagent turns. Default: 50." })),
 	inherit_skills: Type.Optional(
 		Type.Boolean({
 			description:
@@ -310,6 +416,11 @@ function agentEndedWithError(agent: Agent): boolean {
 	const messages = agent.state.messages;
 	const last = messages[messages.length - 1] as AgentMessage | undefined;
 	return !!last && last.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted");
+}
+
+/** Turn-budget exhaustion is unfinished work even when the last assistant turn ended in toolUse. */
+function isTurnCapFailure(message: string | undefined): boolean {
+	return !!message && /aborted: turn cap \(\d+\) reached/i.test(message);
 }
 
 /**
@@ -415,6 +526,10 @@ export interface CoordinatorExtensionOptions {
 	permissionChecker?: import("../permissions/index.ts").PermissionChecker;
 	/** Provider that returns the parent's currently active model. */
 	getParentModel: () => import("@pit/ai").Model<any> | undefined;
+	/** Unified registry + SDK-scoped + exact-current model surface. */
+	getSelectableModels?: () => readonly Model<any>[];
+	/** Owning AgentSession request policy. */
+	getRequestPolicy?: (signal?: AbortSignal) => SubagentRequestPolicy | undefined;
 	/**
 	 * Returns the parent session's id, used to derive each subagent's
 	 * `prompt_cache_key` (`${parentSessionId}:sub:${type}`) for fan-out cache-shard
@@ -467,6 +582,8 @@ export interface CoordinatorExtensionOptions {
 	) => void;
 	/** Called once with a function that aborts all detached op:"spawn" controllers (Esc). */
 	registerAbortDetached?: (abortFn: () => void) => void;
+	/** Called once with the idempotent async cleanup for all session-scoped coordinator state. */
+	registerDisposeCoordinator?: (dispose: () => Promise<void>) => void;
 	/** True when subagent memory should be scoped by agent type (default-on setting). */
 	isScopedHindsightEnabled?: () => boolean;
 	/** Unified token budget governor — gates spawn and records subagent spend. */
@@ -502,6 +619,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	// Detached subagents launched via op:"spawn", keyed by handle. Collected via
 	// op:"poll"/"join"; a joined handle is freed once settled.
 	const pending = new Map<string, PendingTask>();
+	const checkpointWrites = new Map<string, Promise<void>>();
 	// When a settled pending entry is evicted, retain only enough state to make
 	// poll/join explicit and keep its name reserved until the caller acknowledges
 	// it with join. The integral output remains in outputStore for op:"read".
@@ -509,7 +627,10 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	// Identity reservations outlive the compact tombstone display cache, up to a
 	// bounded cap. Preserve the last status too, so poll does not turn an evicted
 	// error/cancellation into a successful `done` result.
-	const reservedAsyncHandles = new Map<string, PendingTask["status"]>();
+	const reservedAsyncHandles = new Map<
+		string,
+		{ generation: PendingTask["generation"]; status: PendingTask["status"] }
+	>();
 	let asyncTaskCounter = 0;
 	let runTaskCounter = 0;
 
@@ -529,9 +650,11 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		evictedPending.delete(entry.handle);
 		evictedPending.set(entry.handle, {
 			handle: entry.handle,
+			generation: entry.generation,
 			status: entry.status,
 			error: entry.error,
 			delivered: entry.delivered,
+			modelFallback: entry.modelFallback,
 		});
 		while (evictedPending.size > EVICTED_PENDING_MAX) {
 			const oldest = evictedPending.keys().next().value;
@@ -566,6 +689,16 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		pruneReservedHandles();
 	}
 
+	function queueCheckpointWrite(handle: string, write: () => Promise<void>): Promise<void> {
+		const previous = checkpointWrites.get(handle) ?? Promise.resolve();
+		const next = previous.then(write, write).catch(() => {});
+		checkpointWrites.set(handle, next);
+		void next.finally(() => {
+			if (checkpointWrites.get(handle) === next) checkpointWrites.delete(handle);
+		});
+		return next;
+	}
+
 	type ResumeMetadata = Omit<ResumeState, "messages" | "savedAt">;
 
 	interface LiveAgentRecord {
@@ -588,7 +721,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	const CONTINUABLE_MAX = 8;
 	const lifecycleInFlight = new Set<string>();
 	const resumeInFlight = new Map<string, Promise<TaskOpResult>>();
-	const resumeControllers = new Map<string, AbortController>();
+	const continueInFlight = new Map<string, Promise<TaskOpResult>>();
+	const lifecycleControllers = new Map<string, AbortController>();
 
 	/** Record a successfully-finished Agent as continuable, evicting the oldest past the cap. */
 	async function rememberContinuable(
@@ -626,14 +760,100 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		safeCallback(() => options.onSubagentComplete?.(handle, status, completeMetaFromUsage(turns, usage)), undefined);
 	}
 
+	function notifyAsyncComplete(
+		entry: PendingTask,
+		text: string,
+		status: "done" | "error" | "cancelled",
+		meta?: { turns?: number; totalTokens?: number; costUsd?: number },
+	): void {
+		if (entry.completionNotified) return;
+		entry.completionNotified = true;
+		if (safeCallback(() => options.onAsyncComplete?.(entry.handle, text, status, meta) ?? false, false)) {
+			entry.delivered = true;
+			markEvictedDelivered(entry.handle);
+		}
+	}
+
+	function markPendingCancelled(entry: PendingTask, reason: string): void {
+		if (entry.status !== "running") return;
+		entry.error ??= reason;
+		entry.status = "cancelled";
+		if (entry.registryRecordId) {
+			registry.update(entry.registryRecordId, {
+				status: "cancelled",
+				error: entry.error,
+				partial: true,
+				endedAt: Date.now(),
+			});
+		}
+		reservedAsyncHandles.set(entry.handle, { generation: entry.generation, status: "cancelled" });
+		notifyAsyncComplete(entry, formatCancelledPending(entry.handle, entry), "cancelled", {
+			turns: entry.turns,
+			totalTokens: entry.totalTokens,
+			costUsd: entry.costUsd,
+		});
+		prunePending();
+	}
+
 	function abortAllPending(reason = "aborted: parent interrupt"): void {
 		for (const e of pending.values()) {
 			if (e.status === "running") {
 				e.controller.abort(new Error(reason));
+				markPendingCancelled(e, reason);
 			}
+		}
+		for (const controller of lifecycleControllers.values()) {
+			controller.abort(new Error(reason));
 		}
 	}
 	options.registerAbortDetached?.(() => abortAllPending());
+
+	let disposeCoordinatorPromise: Promise<void> | undefined;
+	function disposeCoordinator(): Promise<void> {
+		if (disposeCoordinatorPromise) return disposeCoordinatorPromise;
+
+		const inflight: Promise<unknown>[] = [];
+		for (const entry of pending.values()) {
+			if (entry.status !== "running") continue;
+			entry.controller.abort(new Error("aborted: session teardown"));
+			markPendingCancelled(entry, "aborted: session teardown");
+			inflight.push(entry.promise);
+		}
+		for (const controller of lifecycleControllers.values()) {
+			controller.abort(new Error("aborted: session teardown"));
+		}
+		inflight.push(...resumeInFlight.values());
+		inflight.push(...continueInFlight.values());
+
+		disposeCoordinatorPromise = (async () => {
+			if (inflight.length > 0) {
+				let graceTimer: ReturnType<typeof setTimeout> | undefined;
+				const grace = new Promise<void>((resolve) => {
+					graceTimer = setTimeout(resolve, 1500);
+					(graceTimer as { unref?: () => void }).unref?.();
+				});
+				try {
+					await Promise.race([Promise.allSettled(inflight), grace]);
+				} finally {
+					if (graceTimer !== undefined) clearTimeout(graceTimer);
+				}
+			}
+
+			pending.clear();
+			evictedPending.clear();
+			reservedAsyncHandles.clear();
+			lifecycleControllers.clear();
+			resumeInFlight.clear();
+			continueInFlight.clear();
+			lifecycleInFlight.clear();
+			resumable.clear();
+			continuable.clear();
+			registry.clear();
+			await outputStore.dispose();
+		})();
+		return disposeCoordinatorPromise;
+	}
+	options.registerDisposeCoordinator?.(disposeCoordinator);
 
 	// Mirror continuable's cap so an interrupted-run map can't grow unbounded over a
 	// long session: each entry pins a live Agent + its full transcript. Disk-based
@@ -653,6 +873,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	function metadataFromResumeState(state: ResumeState): ResumeMetadata {
 		return {
 			handle: state.handle,
+			modelProvider: state.modelProvider,
 			modelId: state.modelId,
 			thinkingLevel: state.thinkingLevel,
 			systemPrompt: state.systemPrompt,
@@ -681,6 +902,23 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		});
 	}
 
+	function persistTurnCheckpoint(
+		storageCwd: string,
+		handle: string,
+		checkpoint: SubagentTurnCheckpoint,
+		metadata: ResumeMetadata,
+	): Promise<void> {
+		return queueCheckpointWrite(handle, () =>
+			saveResumeState(storageCwd, {
+				...metadata,
+				modelProvider: checkpoint.model.provider,
+				modelId: checkpoint.model.id,
+				messages: checkpoint.messages,
+				savedAt: Date.now(),
+			}),
+		);
+	}
+
 	// Reusable agent types from .pit/agents/*.md, loaded once. Spawn via task({type}).
 	const agentTypeMap = new Map<string, AgentTypeDef>();
 	try {
@@ -693,29 +931,83 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			? [...agentTypeMap.values()].map((t) => (t.description ? `${t.name} (${t.description})` : t.name)).join("; ")
 			: "";
 
+	interface ChildToolSelection {
+		agentType: AgentTypeDef | undefined;
+		allowedTools: string[] | undefined;
+		tools: AgentTool[];
+	}
+
+	function selectChildTools(
+		raw: { type?: string; allowed_tools?: string[] },
+		childTools: AgentTool[],
+		cwd: string,
+	): ChildToolSelection | { error: string } {
+		const agentType = resolveAgentType(agentTypeMap, raw.type);
+		if (raw.type?.trim() && !agentType) return { error: `unknown agent type "${raw.type.trim()}"` };
+		const scope = scopedHindsightEnabled() ? agentType?.name : undefined;
+		const autoAddMemory = scopedHindsightEnabled() && agentType?.memory === true;
+		const baseAllowed = raw.allowed_tools ?? agentType?.tools;
+		const allowedTools =
+			autoAddMemory && baseAllowed
+				? Array.from(new Set([...baseAllowed, "recall", "retain", "reflect"]))
+				: baseAllowed;
+		return {
+			agentType,
+			allowedTools,
+			tools: withAgentScope([...childTools], scope, cwd, autoAddMemory),
+		};
+	}
+
+	function isSideEffectFreeCatalog(tools: readonly AgentTool[], allowedTools: readonly string[] | undefined): boolean {
+		const byName = new Map(tools.map((tool) => [tool.name, tool]));
+		if (allowedTools?.some((name) => !byName.has(name))) return false;
+		const effective = allowedTools ? allowedTools.map((name) => byName.get(name)!) : [...tools];
+		return effective.every((tool) => {
+			if (tool.name === "plan" || COORDINATOR_TOOL_NAMES.has(tool.name) || tool.name.startsWith("mcp__"))
+				return false;
+			return options.permissionChecker?.resolveSideEffect(tool.name) === "none";
+		});
+	}
+
 	/**
-	 * Resolves the subagent's model + thinking level from the task params. A bare
-	 * pattern ("haiku", "opus:high", "provider/id") is matched against the
-	 * registry; on no match the parent's model is kept. Thinking defaults to
-	 * "medium" and is never "off" — the rule is that subagents always think.
+	 * Resolve an explicitly requested subagent model through the same registry path
+	 * used by --model. Unknown requests must fail loudly instead of silently running
+	 * on the parent model; otherwise a requested model override is not trustworthy.
 	 */
 	async function resolveSubModel(
 		modelPattern: string | undefined,
 		thinkingPattern: string | undefined,
-	): Promise<{ model: Model<any> | undefined; thinkingLevel: ThinkingLevel | undefined }> {
+	): Promise<
+		| { model: Model<any> | undefined; thinkingLevel: ThinkingLevel | undefined; error?: undefined }
+		| { model: Model<any> | undefined; thinkingLevel: ThinkingLevel | undefined; error: string }
+	> {
 		let model = options.getParentModel();
 		let thinkingLevel: ThinkingLevel | undefined;
 		const trimmed = modelPattern?.trim();
 		if (trimmed) {
-			try {
-				const available = await options.modelRegistry.getAvailable();
-				const parsed = parseModelPattern(trimmed, available);
-				if (parsed.model) {
-					model = parsed.model;
-					if (parsed.thinkingLevel) thinkingLevel = parsed.thinkingLevel;
+			const selectableModels =
+				options.getSelectableModels?.() ?? buildSelectableModelView(options.modelRegistry.getAll(), [], model);
+			const suffixIndex = trimmed.lastIndexOf(":");
+			const suffix = suffixIndex === -1 ? undefined : trimmed.slice(suffixIndex + 1);
+			const reference = suffix && isValidThinkingLevel(suffix) ? trimmed.slice(0, suffixIndex) : trimmed;
+			const isCurrentModel = !!model && reference.toLowerCase() === `${model.provider}/${model.id}`.toLowerCase();
+			if (isCurrentModel) {
+				if (suffix && isValidThinkingLevel(suffix)) thinkingLevel = suffix as ThinkingLevel;
+			} else {
+				const resolved = resolveCliModel({
+					cliModel: trimmed,
+					modelRegistry: options.modelRegistry,
+					availableModels: selectableModels,
+				});
+				if (resolved.error || !resolved.model) {
+					return {
+						model,
+						thinkingLevel,
+						error: resolved.error ?? `Model "${trimmed}" could not be resolved.`,
+					};
 				}
-			} catch {
-				// Keep the parent model on any resolution failure.
+				model = resolved.model;
+				thinkingLevel = resolved.thinkingLevel;
 			}
 		}
 		if (thinkingPattern && isValidThinkingLevel(thinkingPattern)) thinkingLevel = thinkingPattern as ThinkingLevel;
@@ -745,7 +1037,13 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	): string {
 		const rawText =
 			resultSchema && result.value !== undefined ? JSON.stringify(result.value, null, 2) : result.output;
-		return digestWithPointer(rawText, readHandle);
+		const digest = digestWithPointer(rawText, readHandle);
+		return withModelFallbackDiagnostic(digest, result.modelFallback);
+	}
+
+	function withModelFallbackDiagnostic(body: string, fallback: SubagentModelFallback | undefined): string {
+		if (!fallback) return body;
+		return `[model fallback: ${fallback.from} -> ${fallback.to} (${fallback.reason})]\n\n${body}`;
 	}
 
 	/**
@@ -828,10 +1126,10 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	async function resumeHandle(
 		handle: string | undefined,
 		continuation: string | undefined,
-		_signal: AbortSignal | undefined,
+		signal: AbortSignal | undefined,
 	): Promise<TaskOpResult> {
 		const key = handle?.trim();
-		if (!key) return await resumeHandleUnlocked(handle, continuation, undefined);
+		if (!key) return await resumeHandleUnlocked(handle, continuation, signal);
 		const existing = resumeInFlight.get(key);
 		if (existing) return await existing;
 		if (lifecycleInFlight.has(key)) {
@@ -844,15 +1142,16 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			};
 		}
 		lifecycleInFlight.add(key);
-		const controller = new AbortController();
-		resumeControllers.set(key, controller);
+		const { controller, unlink } = linkedAbortController(signal);
+		lifecycleControllers.set(key, controller);
 		const promise = resumeHandleUnlocked(handle, continuation, controller.signal);
 		resumeInFlight.set(key, promise);
 		try {
 			return await promise;
 		} finally {
 			if (resumeInFlight.get(key) === promise) resumeInFlight.delete(key);
-			if (resumeControllers.get(key) === controller) resumeControllers.delete(key);
+			if (lifecycleControllers.get(key) === controller) lifecycleControllers.delete(key);
+			unlink();
 			lifecycleInFlight.delete(key);
 		}
 	}
@@ -929,6 +1228,16 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		return () => signal.removeEventListener("abort", onAbort);
 	}
 
+	async function promptDirectAgent(agent: Agent, text: string, signal: AbortSignal | undefined): Promise<void> {
+		await withRunSlot(signal, async () => {
+			const settlement = agent.prompt(text);
+			// If cancellation wins the race, retain this physical slot until the Agent
+			// itself settles so a non-cooperative provider cannot overlap a later run.
+			holdCurrentSlotUntil(settlement);
+			await raceSettlementWithAbort(settlement, signal);
+		});
+	}
+
 	/**
 	 * The dependency object handed to every `spawnSubagent` call — identical across
 	 * ops except for the tool catalog (`tools`) and the op-scoped `model`.
@@ -951,6 +1260,9 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			// configured shell/search/LSP options); the native fallback remains
 			// fail-closed for SDK/direct callers.
 			retargetToolsForCwd: options.retargetToolsForCwd ?? retargetToolsForWorktree,
+			requestPolicy: options.getRequestPolicy
+				? (signal: AbortSignal) => options.getRequestPolicy?.(signal)
+				: undefined,
 		};
 	}
 
@@ -970,19 +1282,13 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				agentTypeLabel: string | undefined;
 		  }
 	> {
-		const agentType = resolveAgentType(agentTypeMap, raw.type);
-		if (raw.type?.trim() && !agentType) {
+		const selected = selectChildTools(raw, childTools, cwd);
+		if ("error" in selected) {
 			return {
-				error: `unknown agent type "${raw.type.trim()}". Available: ${agentTypeSummary || "(none — define one in .pit/agents/<name>.md)"}.`,
+				error: `${selected.error}. Available: ${agentTypeSummary || "(none — define one in .pit/agents/<name>.md)"}.`,
 			};
 		}
-		const scope = scopedHindsightEnabled() ? agentType?.name : undefined;
-		const autoAddMemory = scopedHindsightEnabled() && agentType?.memory === true;
-		const baseAllowed = raw.allowed_tools ?? agentType?.tools;
-		const allowedTools =
-			autoAddMemory && baseAllowed
-				? Array.from(new Set([...baseAllowed, "recall", "retain", "reflect"]))
-				: baseAllowed;
+		const { agentType, allowedTools, tools } = selected;
 		const resolved = await resolveSubModel(
 			raw.model ?? agentType?.model,
 			raw.thinking_level ?? agentType?.thinkingLevel,
@@ -991,7 +1297,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			...resolved,
 			systemPrompt: agentType?.systemPrompt,
 			allowedTools,
-			tools: withAgentScope([...childTools], scope, cwd, autoAddMemory),
+			tools,
 			// Type name (if any) drives the child's prompt_cache_key label; untyped
 			// children fall back to the "task" default at derivation time.
 			agentTypeLabel: agentType?.name,
@@ -1071,8 +1377,9 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			};
 		}
 		const handles = [...new Set(rawHandles)];
+		let cancelledCount = 0;
 		const lines = handles.map((handle) => {
-			const resumeController = resumeControllers.get(handle);
+			const resumeController = lifecycleControllers.get(handle);
 			if (resumeController) {
 				resumeController.abort(new Error("aborted: cancelled by parent agent"));
 				return `${handle}: resume cancellation requested`;
@@ -1085,13 +1392,16 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					: `${handle}: unknown handle`;
 			}
 			if (entry.status !== "running") return `${handle}: already ${entry.status}`;
-			entry.controller.abort(new Error("aborted: cancelled by parent agent"));
+			const reason = "aborted: cancelled by parent agent";
+			entry.controller.abort(new Error(reason));
+			markPendingCancelled(entry, reason);
+			cancelledCount++;
 			return `${handle}: cancellation requested`;
 		});
 		return {
 			content: [{ type: "text" as const, text: lines.join("\n") }],
 			isError: false,
-			details: { cancelled: handles.filter((handle) => pending.get(handle)?.status === "running").length },
+			details: { cancelled: cancelledCount },
 		};
 	}
 
@@ -1124,7 +1434,9 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		const statusForHandle = (handle: string) =>
 			resumeInFlight.has(handle)
 				? "running"
-				: (pending.get(handle)?.status ?? evictedPending.get(handle)?.status ?? reservedAsyncHandles.get(handle));
+				: (pending.get(handle)?.status ??
+					evictedPending.get(handle)?.status ??
+					reservedAsyncHandles.get(handle)?.status);
 		const anyDone = handles.some((h) => statusForHandle(h) === "done");
 		const allSettled = handles.every((h) => {
 			const s = statusForHandle(h);
@@ -1158,6 +1470,12 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				.filter((e): e is EvictedPendingTask => e !== undefined)
 				.map((e) => [e.handle, e]),
 		);
+		const reservationSnapshot = new Map(
+			handles.flatMap((h) => {
+				const reservation = reservedAsyncHandles.get(h);
+				return reservation ? [[h, reservation] as const] : [];
+			}),
+		);
 		// Snapshot the resolved entries (keyed by handle) BEFORE awaiting. A concurrent
 		// op:spawn can call prunePending() while we're suspended on the await, which evicts
 		// the oldest SETTLED entries — including a just-joined one — from `pending`. Reading
@@ -1166,10 +1484,9 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		// entry objects, whose status/result/error mutate in place, so it reflects the final
 		// settled state once the await resolves.
 		const snapshot = new Map(entries.map((e) => [e.handle, e]));
+		const settlement = Promise.allSettled([...entries.map((e) => e.promise), ...resumeSnapshot.values()]);
 		try {
-			await yieldRunSlotWhile(signal, () =>
-				Promise.allSettled([...entries.map((e) => e.promise), ...resumeSnapshot.values()]),
-			);
+			await yieldRunSlotWhile(signal, () => raceSettlementWithAbort(settlement, signal));
 		} catch (err) {
 			if (signal?.aborted) {
 				return {
@@ -1190,33 +1507,51 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		const parts = handles.map((h) => {
 			const resumed = resumeResults.get(h);
 			if (resumed) return `### ${h}\n${resumed.content.map((block) => block.text).join("\n")}`;
-			const e = snapshot.get(h) ?? pending.get(h);
+			const e = snapshot.get(h);
 			if (!e) {
-				const evicted = evictedSnapshot.get(h) ?? evictedPending.get(h);
-				if (!evicted && reservedAsyncHandles.has(h)) {
+				const evicted = evictedSnapshot.get(h);
+				const reservation = reservationSnapshot.get(h);
+				if (!evicted && reservation) {
 					return `### ${h}\n[settled details were evicted from the detached-result cache. Use task({op:"${SUBAGENT_READ_OP}", name:"${h}"}) to recover any stored integral output.]`;
 				}
 				if (!evicted) return `### ${h}\n(unknown handle)`;
 				const state = evicted.delivered ? "already delivered to chat" : `${evicted.status} result`;
-				return `### ${h}\n[${state} was evicted from the detached-result cache. Use task({op:"${SUBAGENT_READ_OP}", name:"${h}"}) to recover any stored integral output.]`;
+				return `### ${h}\n${withModelFallbackDiagnostic(
+					`[${state} was evicted from the detached-result cache. Use task({op:"${SUBAGENT_READ_OP}", name:"${h}"}) to recover any stored integral output.]`,
+					evicted.modelFallback,
+				)}`;
 			}
-			if (e.status === "error") return `### ${h}\n[failed: ${e.error ?? "error"}]`;
+			if (e.status === "error") {
+				const failure = `[failed: ${e.error ?? "error"}]${e.result ? `\n\n${e.result}` : ""}`;
+				return `### ${h}\n${withModelFallbackDiagnostic(failure, e.modelFallback)}`;
+			}
 			if (e.status === "cancelled") return formatCancelledPending(h, e);
 			if (e.delivered)
 				return `### ${h}\n(already delivered to the chat automatically when it finished — not repeated)`;
 			return `### ${h}\n${e.result ?? "(no output)"}`;
 		});
 		for (const h of handles) {
-			const e = pending.get(h);
-			if (e && e.status !== "running") pending.delete(h);
-			evictedPending.delete(h);
-			if (e?.status !== "running") reservedAsyncHandles.delete(h);
-			else if (!e) reservedAsyncHandles.delete(h);
+			const joinedGeneration =
+				snapshot.get(h)?.generation ?? evictedSnapshot.get(h)?.generation ?? reservationSnapshot.get(h)?.generation;
+			if (!joinedGeneration) continue;
+			const current = pending.get(h);
+			if (current?.generation === joinedGeneration && current.status !== "running") pending.delete(h);
+			if (evictedPending.get(h)?.generation === joinedGeneration) evictedPending.delete(h);
+			if (reservedAsyncHandles.get(h)?.generation === joinedGeneration) reservedAsyncHandles.delete(h);
 		}
 		return {
 			content: [{ type: "text" as const, text: parts.join("\n\n") }],
 			isError: false,
-			details: { joined: entries.length + resumeSnapshot.size, evicted: evictedSnapshot.size },
+			details: {
+				joined: entries.length + resumeSnapshot.size,
+				evicted: evictedSnapshot.size,
+				results: handles.flatMap((handle) => {
+					const entry = snapshot.get(handle);
+					const evicted = evictedSnapshot.get(handle);
+					const modelFallback = entry?.modelFallback ?? evicted?.modelFallback;
+					return entry || evicted ? [{ handle, ...(modelFallback ? { modelFallback } : {}) }] : [];
+				}),
+			},
 		};
 	}
 
@@ -1250,7 +1585,22 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		// The interrupted run may still be settling (an aborted stream resolves
 		// async). Stop it and wait for idle before re-driving the same Agent.
 		agent.abort();
-		await agent.waitForIdle();
+		try {
+			await waitForResumeIdle(agent.waitForIdle(), signal);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			safeCallback(() => options.onSubagentComplete?.(key, signal?.aborted ? "cancelled" : "error"), undefined);
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: `Cannot resume "${key}": ${message}. No new prompt was started; it remains resumable.`,
+					},
+				],
+				isError: true,
+				details: { handle: key, resumed: false, stillResumable: true },
+			};
+		}
 		// Drop a trailing failed/aborted assistant turn so the model resumes from the
 		// last real work instead of from a dead-end error message.
 		const messages = agent.state.messages;
@@ -1275,7 +1625,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		let promptError: unknown;
 		let settlementStatus: SubagentStatus = "running";
 		try {
-			await withRunSlot(signal, () => agent.prompt(text));
+			await promptDirectAgent(agent, text, signal);
 		} catch (err) {
 			promptFailed = true;
 			promptError = err;
@@ -1392,7 +1742,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		let promptError: unknown;
 		let settlementStatus: SubagentStatus = "running";
 		try {
-			await withRunSlot(signal, () => agent.prompt(text));
+			await promptDirectAgent(agent, text, signal);
 		} catch (err) {
 			promptFailed = true;
 			promptError = err;
@@ -1473,10 +1823,19 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			};
 		}
 		if (key) lifecycleInFlight.add(key);
+		const linked = linkedAbortController(signal);
+		if (key) lifecycleControllers.set(key, linked.controller);
+		const promise = continueHandleUnlocked(handle, continuation, linked.controller.signal);
+		if (key) continueInFlight.set(key, promise);
 		try {
-			return await continueHandleUnlocked(handle, continuation, signal);
+			return await promise;
 		} finally {
-			if (key) lifecycleInFlight.delete(key);
+			if (key) {
+				if (continueInFlight.get(key) === promise) continueInFlight.delete(key);
+				if (lifecycleControllers.get(key) === linked.controller) lifecycleControllers.delete(key);
+				lifecycleInFlight.delete(key);
+			}
+			linked.unlink();
 		}
 	}
 
@@ -1510,18 +1869,25 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			// `params` is typed `unknown`, not `TaskInput`: this tool flows through the
 			// shared `(depth) => AgentTool` factory, whose `execute` is contravariantly
 			// typed against the erased base schema. A narrower param breaks assignability.
-			async execute(_id: string, params: unknown, signal?: AbortSignal): Promise<TaskOpResult> {
+			async execute(
+				_id: string,
+				params: unknown,
+				signal?: AbortSignal,
+				_onUpdate?: unknown,
+				executeContext?: AgentToolExecuteContext,
+			): Promise<TaskOpResult> {
 				const p = params as TaskInput;
 				const op = p.op ?? "run";
+				const childSignal = coordinatorChildSignal(signal, executeContext);
 
 				if (op === "list") return listSubagents();
 				if (op === "agents") return listAgentTypes();
 				if (op === SUBAGENT_READ_OP) return await readOutput(p.name ?? p.handles?.[0]);
 				if (op === "poll") return pollHandles(p.handles ?? []);
-				if (op === "join") return await joinHandles(p.handles ?? [], signal);
+				if (op === "join") return await joinHandles(p.handles ?? [], childSignal);
 				if (op === "cancel") return cancelHandles(p.handles ?? (p.name ? [p.name] : []));
-				if (op === "resume") return await resumeHandle(p.name ?? p.handles?.[0], p.prompt, signal);
-				if (op === "continue") return await continueHandle(p.name ?? p.handles?.[0], p.prompt, signal);
+				if (op === "resume") return await resumeHandle(p.name ?? p.handles?.[0], p.prompt, childSignal);
+				if (op === "continue") return await continueHandle(p.name ?? p.handles?.[0], p.prompt, childSignal);
 
 				// op === "run" | "spawn": both need a prompt and a model.
 				const {
@@ -1572,10 +1938,18 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					autoAddMemory && effAllowedTools
 						? Array.from(new Set([...effAllowedTools, "recall", "retain", "reflect"]))
 						: effAllowedTools;
-				const { model: subModel, thinkingLevel: subThinking } = await resolveSubModel(
+				const resolvedSubModel = await resolveSubModel(
 					p.model ?? agentType?.model,
 					p.thinking_level ?? agentType?.thinkingLevel,
 				);
+				if (resolvedSubModel.error) {
+					return {
+						content: [{ type: "text" as const, text: `task: ${resolvedSubModel.error}` }],
+						isError: true,
+						details: undefined,
+					};
+				}
+				const { model: subModel, thinkingLevel: subThinking } = resolvedSubModel;
 				const resultSchema = coerceResultSchema(result_schema);
 				const cwd = options.getCwd ? options.getCwd() : process.cwd();
 				// The child runs one level deeper than the tool that spawned it. Strip
@@ -1590,9 +1964,10 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				// (Tier 1) AND persist its transcript to disk so it survives a Pit
 				// restart (Tier 2). Callers await the disk write so an interrupted run is
 				// durably persisted before its result returns; saveResumeState never throws.
-				const resumeMetadata = (handle: string): ResumeMetadata => ({
+				const resumeMetadata = (handle: string, effectiveModel = subModel ?? model): ResumeMetadata => ({
 					handle,
-					modelId: subModel?.id ?? model.id,
+					modelProvider: effectiveModel.provider,
+					modelId: effectiveModel.id,
 					thinkingLevel: subThinking,
 					systemPrompt: effSystemPrompt,
 					allowedTools: effAllowedToolsScoped,
@@ -1601,19 +1976,25 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					depth: childDepth,
 				});
 				const markResumable = (handle: string, agent: Agent, recordId: string): Promise<void> => {
-					rememberResumable(handle, agent, recordId, resumeMetadata(handle));
+					const metadata = resumeMetadata(handle, agent.state.model ?? subModel ?? model);
+					rememberResumable(handle, agent, recordId, metadata);
 					return saveResumeState(cwd, {
-						...resumeMetadata(handle),
+						...metadata,
 						messages: agent.state.messages,
 						savedAt: Date.now(),
 					});
 				};
-				const baseChildTools = withAgentScope(
-					buildSubagentToolCatalog(options.getAvailableTools(), childDepth, maxDepth, makeCoordinatorTools),
-					hindsightScope,
-					cwd,
-					autoAddMemory,
+				const rawChildTools = buildSubagentToolCatalog(
+					options.getAvailableTools(),
+					childDepth,
+					maxDepth,
+					makeCoordinatorTools,
 				);
+				const baseChildTools = withAgentScope(rawChildTools, hindsightScope, cwd, autoAddMemory);
+				const permissionMode = options.permissionChecker?.mode;
+				const readOnlyDelegation =
+					(permissionMode === "plan" || permissionMode === "ask") &&
+					taskDelegationIsReadOnly(p, rawChildTools, cwd);
 
 				// A subagent whose auto-cleanup worktree is removed on settle can't be
 				// resumed (its on-disk state is gone); without a worktree, or with
@@ -1700,6 +2081,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					const controller = new AbortController();
 					const entry: PendingTask = {
 						handle,
+						generation: Symbol(handle),
 						status: "running",
 						promise: Promise.resolve(),
 						controller,
@@ -1708,7 +2090,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					// leaves a collision-safe resumable transcript.
 					let capturedAgent: Agent | undefined;
 					let capturedRecordId: string | undefined;
-					const messagingOn = options.isMessagingEnabled?.() ?? false;
+					const messagingOn = (options.isMessagingEnabled?.() ?? false) && !readOnlyDelegation;
 					let spawnMessagingId: string | undefined;
 					let spawnChildTools = baseChildTools;
 					let spawnSystemPromptSuffix: string | undefined;
@@ -1757,6 +2139,17 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 								onWorktreeReady: (path: string) => {
 									effectiveChildCwd = path;
 								},
+								onRecordCreated: (record: { id: string }) => {
+									entry.registryRecordId = record.id;
+									if (entry.status === "cancelled" || controller.signal.aborted) {
+										registry.update(record.id, {
+											status: "cancelled",
+											error: entry.error ?? abortError(controller.signal.reason).message,
+											partial: true,
+											endedAt: Date.now(),
+										});
+									}
+								},
 								onSubagentEvent: hasGate
 									? undefined
 									: (info: { turn: number; lastTool?: string; totalTokens?: number }) =>
@@ -1764,8 +2157,26 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 								onAgentReady: (agent: Agent, record: { id: string }) => {
 									capturedAgent = agent;
 									capturedRecordId = record.id;
+									entry.registryRecordId = record.id;
+									if (entry.status === "cancelled" || controller.signal.aborted) {
+										registry.update(record.id, {
+											status: "cancelled",
+											error: entry.error ?? abortError(controller.signal.reason).message,
+											partial: true,
+											endedAt: Date.now(),
+										});
+									}
 									spawnMessagingReady?.(agent);
 								},
+								onTurnCheckpoint: usedAutoWorktree
+									? undefined
+									: (checkpoint: SubagentTurnCheckpoint) =>
+											persistTurnCheckpoint(
+												cwd,
+												handle,
+												checkpoint,
+												resumeMetadata(handle, checkpoint.model),
+											),
 							};
 							const gated = await runWithAcceptance(
 								{
@@ -1788,11 +2199,26 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							entry.turns = meta.turns;
 							entry.totalTokens = meta.totalTokens;
 							entry.costUsd = meta.costUsd;
+							entry.modelFallback = result.modelFallback;
+							const cancellationWon = entry.status === "cancelled" || controller.signal.aborted;
 							// A drop that ended the turn on an error (without throwing) still
 							// leaves a resumable transcript — surface it as such, not "done".
 							const interrupted = !!capturedAgent && agentEndedWithError(capturedAgent);
-							let completionStatus: "done" | "error" | "cancelled" = gated.isError ? "error" : "done";
-							if (interrupted) {
+							let completionStatus: "done" | "error" | "cancelled" = cancellationWon
+								? "cancelled"
+								: gated.isError
+									? "error"
+									: "done";
+							if (cancellationWon) {
+								entry.error ??= abortError(controller.signal.reason).message;
+								registry.update(result.record.id, {
+									status: "cancelled",
+									error: entry.error,
+									partial: true,
+									endedAt: Date.now(),
+								});
+								await deleteResumeState(cwd, handle);
+							} else if (interrupted) {
 								if (capturedAgent && capturedRecordId && !usedAutoWorktree) {
 									await markResumable(handle, capturedAgent, capturedRecordId);
 								} else {
@@ -1803,7 +2229,12 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							} else if (!gated.isError) {
 								await deleteResumeState(cwd, handle);
 								if (capturedAgent && capturedRecordId && !usedAutoWorktree) {
-									await rememberContinuable(handle, capturedAgent, capturedRecordId, resumeMetadata(handle));
+									await rememberContinuable(
+										handle,
+										capturedAgent,
+										capturedRecordId,
+										resumeMetadata(handle, capturedAgent.state.model ?? subModel ?? model),
+									);
 								}
 							} else {
 								await deleteResumeState(cwd, handle);
@@ -1812,62 +2243,51 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							// Persist the integral output for op:"read" recovery, then keep only a digest inline.
 							await outputStore.put(handle, result.output);
 							const resultText = gated.gate
-								? digestWithPointer(gated.text, handle)
+								? withModelFallbackDiagnostic(digestWithPointer(gated.text, handle), result.modelFallback)
 								: formatSpawnResult(result, resultSchema, handle);
 							entry.result = resultText;
 							entry.status = completionStatus;
-							reservedAsyncHandles.set(handle, completionStatus);
+							reservedAsyncHandles.set(handle, { generation: entry.generation, status: completionStatus });
 							const completionText =
 								completionStatus === "done" ? resultText : `${entry.error ?? "subagent failed"}\n${resultText}`;
 							prunePending();
-							if (
-								safeCallback(
-									() => options.onAsyncComplete?.(handle, completionText, completionStatus, meta) ?? false,
-									false,
-								)
-							) {
-								entry.delivered = true;
-								markEvictedDelivered(handle);
-							}
+							notifyAsyncComplete(entry, completionText, completionStatus, meta);
 						} catch (err) {
 							const failedUsage = getSubagentErrorUsage(err);
 							budgetReservation.record(failedUsage);
 							entry.totalTokens = failedUsage?.totalTokens ?? entry.totalTokens;
 							entry.costUsd = failedUsage?.costUsd ?? entry.costUsd;
-							entry.error = err instanceof Error ? err.message : String(err);
-							entry.status = controller.signal.aborted ? "cancelled" : "error";
-							reservedAsyncHandles.set(handle, entry.status);
+							const failureMessage = err instanceof Error ? err.message : String(err);
+							entry.error ??= failureMessage;
+							entry.status = entry.status === "cancelled" || controller.signal.aborted ? "cancelled" : "error";
+							reservedAsyncHandles.set(handle, { generation: entry.generation, status: entry.status });
 							const partialRecord = capturedRecordId ? registry.get(capturedRecordId) : undefined;
+							entry.modelFallback = getSubagentErrorModelFallback(err) ?? partialRecord?.modelFallback;
 							if (partialRecord?.output) await outputStore.put(handle, partialRecord.output);
 							entry.result = partialRecord?.output ? digestWithPointer(partialRecord.output, handle) : undefined;
 							const workerInterrupted = !!capturedAgent && agentEndedWithError(capturedAgent);
-							if (capturedAgent && capturedRecordId && !usedAutoWorktree && (!hasGate || workerInterrupted)) {
+							const resumableFailure = !hasGate || workerInterrupted || isTurnCapFailure(entry.error);
+							if (capturedAgent && capturedRecordId && !usedAutoWorktree && resumableFailure) {
 								await markResumable(handle, capturedAgent, capturedRecordId);
 							}
 							const suffix =
-								capturedAgent && !usedAutoWorktree && (!hasGate || workerInterrupted)
+								capturedAgent && !usedAutoWorktree && resumableFailure
 									? ` Resume with task({op:"resume", name:"${handle}"}).`
 									: "";
 							prunePending();
-							if (
-								safeCallback(
-									() =>
-										options.onAsyncComplete?.(
-											handle,
-											`${entry.error}${suffix}${entry.result ? `\n\n${entry.result}` : ""}`,
-											entry.status === "cancelled" ? "cancelled" : "error",
-											{
-												turns: entry.turns,
-												totalTokens: entry.totalTokens,
-												costUsd: entry.costUsd,
-											},
-										) ?? false,
-									false,
-								)
-							) {
-								entry.delivered = true;
-								markEvictedDelivered(handle);
-							}
+							notifyAsyncComplete(
+								entry,
+								withModelFallbackDiagnostic(
+									`${entry.error}${suffix}${entry.result ? `\n\n${entry.result}` : ""}`,
+									entry.modelFallback,
+								),
+								entry.status === "cancelled" ? "cancelled" : "error",
+								{
+									turns: entry.turns,
+									totalTokens: entry.totalTokens,
+									costUsd: entry.costUsd,
+								},
+							);
 						} finally {
 							if (spawnMessagingId) agentMessageBus.unregister(spawnMessagingId);
 							if (entry.delivered) reservedAsyncHandles.delete(handle);
@@ -1876,7 +2296,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						}
 					});
 					pending.set(handle, entry);
-					reservedAsyncHandles.set(handle, "running");
+					reservedAsyncHandles.set(handle, { generation: entry.generation, status: "running" });
 					prunePending();
 					const worktreeNote = usedAutoWorktree
 						? " Note: worktree cleanup:auto — this spawn is not resumable/continuable after settle."
@@ -1898,7 +2318,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				// once the Agent exists. The id is unregistered in the `finally`
 				// below — guaranteed even if spawnSubagent throws before its own
 				// teardown runs (e.g. a worktree-setup failure).
-				const messagingOn = options.isMessagingEnabled?.() ?? false;
+				const messagingOn = (options.isMessagingEnabled?.() ?? false) && !readOnlyDelegation;
 				const runHandle = name?.trim() ? name.trim() : `run-${++runTaskCounter}`;
 				// Capture the live Agent and canonical registry identity so interrupted
 				// runs remain collision-safe when resumed by their public handle.
@@ -1943,7 +2363,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						// default to "task" at derivation time. See deriveSubagentCacheKey.
 						agentTypeLabel: agentType?.name,
 						maxTurns: max_turns,
-						signal,
+						signal: childSignal,
 						resultSchema,
 						mutationPolicy: policy,
 						worktree: worktree as boolean | { branch?: string; cleanup?: "auto" | "keep" } | undefined,
@@ -1966,6 +2386,15 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							capturedRecordId = record.id;
 							messagingReady?.(agent);
 						},
+						onTurnCheckpoint: usedAutoWorktree
+							? undefined
+							: (checkpoint: SubagentTurnCheckpoint) =>
+									persistTurnCheckpoint(
+										cwd,
+										runHandle,
+										checkpoint,
+										resumeMetadata(runHandle, checkpoint.model),
+									),
 					};
 					const gated = hasGate
 						? await runWithAcceptance(
@@ -1994,7 +2423,12 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						await deleteResumeState(cwd, runHandle);
 						resumable.delete(runHandle);
 						if (!interrupted && capturedAgent && capturedRecordId && !usedAutoWorktree) {
-							await rememberContinuable(runHandle, capturedAgent, capturedRecordId, resumeMetadata(runHandle));
+							await rememberContinuable(
+								runHandle,
+								capturedAgent,
+								capturedRecordId,
+								resumeMetadata(runHandle, capturedAgent.state.model ?? subModel ?? model),
+							);
 						}
 					} else {
 						await deleteResumeState(cwd, runHandle);
@@ -2010,7 +2444,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					// here dumped it whole into the parent's context, and only on the tasks
 					// expensive enough to deserve a judge in the first place.
 					let text = gated
-						? digestWithPointer(gated.text, readHandle)
+						? withModelFallbackDiagnostic(digestWithPointer(gated.text, readHandle), result.modelFallback)
 						: formatSpawnResult(result, resultSchema, readHandle);
 					const gateDetails: GateDetails | undefined = gated?.gate;
 					if (interrupted) {
@@ -2034,6 +2468,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							deniedToolCalls: result.record.deniedToolCalls,
 							usedAutoWorktree,
 							costUsd: effectiveUsage?.costUsd,
+							...(result.modelFallback ? { modelFallback: result.modelFallback } : {}),
 							...(gateDetails ? { gate: gateDetails } : {}),
 						},
 					};
@@ -2042,25 +2477,31 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					const failedUsage = getSubagentErrorUsage(err);
 					budgetReservation.record(failedUsage);
 					const workerInterrupted = !!capturedAgent && agentEndedWithError(capturedAgent);
+					const resumableFailure = !hasGate || workerInterrupted || isTurnCapFailure(message);
 					const partialRecord = capturedRecordId ? registry.get(capturedRecordId) : undefined;
+					const failureFallback = getSubagentErrorModelFallback(err) ?? partialRecord?.modelFallback;
 					if (partialRecord?.output) await outputStore.put(runHandle, partialRecord.output);
-					if (capturedAgent && capturedRecordId && !usedAutoWorktree && (!hasGate || workerInterrupted)) {
+					if (capturedAgent && capturedRecordId && !usedAutoWorktree && resumableFailure) {
 						await markResumable(runHandle, capturedAgent, capturedRecordId);
 					}
 					const hint =
-						capturedAgent && !usedAutoWorktree && (!hasGate || workerInterrupted)
+						capturedAgent && !usedAutoWorktree && resumableFailure
 							? ` Resume with task({op:"resume", name:"${runHandle}"}).`
 							: "";
-					emitBlockingComplete(runHandle, signal?.aborted ? "cancelled" : "error", undefined, failedUsage);
+					emitBlockingComplete(runHandle, childSignal?.aborted ? "cancelled" : "error", undefined, failedUsage);
+					const failureText = withModelFallbackDiagnostic(
+						`Subagent failed: ${message}${hint}${partialRecord?.output ? `\n\n${partialRecord.output}` : ""}`,
+						failureFallback,
+					);
 					return {
 						content: [
 							{
 								type: "text" as const,
-								text: `Subagent failed: ${message}${hint}${partialRecord?.output ? `\n\n${partialRecord.output}` : ""}`,
+								text: failureText,
 							},
 						],
 						isError: true,
-						details: undefined,
+						details: failureFallback ? { modelFallback: failureFallback } : undefined,
 					};
 				} finally {
 					// Single, guaranteed teardown for the reserved bus id — covers every
@@ -2080,15 +2521,11 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		check_timeout_ms: Type.Optional(Type.Integer({ minimum: 1000, maximum: 600000 })),
 	});
 
-	// Shared per-task/stage model guidance — same cost heuristic as `task`'s
-	// `model` field, so heterogeneous fan-out (cheap models for mechanical
-	// probes) works through the structured tools too, not only via manual spawns.
+	// Shared per-task/stage model guidance for structured tools.
 	const subModelFieldSchema = Type.Optional(
 		Type.String({
 			description:
-				"Model for this task — pick the smallest model that can do it well: 'haiku' for trivial/mechanical work, " +
-				"'sonnet' for focused analysis or simple code, OMIT to inherit the parent's model for hard reasoning. " +
-				"Pattern: 'haiku' | 'sonnet' | 'opus' | 'provider/id' (optionally ':level').",
+				"Model for this task. Omit to inherit the working parent model; otherwise use an available unambiguous id or canonical 'provider/id' (optionally ':level').",
 		}),
 	);
 	const subThinkingFieldSchema = Type.Optional(
@@ -2158,6 +2595,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		} else {
 			body = `[failed: ${r.error ?? "error"}]`;
 		}
+		body = withModelFallbackDiagnostic(body, r.modelFallback);
 		return `### ${r.taskName} [${status}]${gateNote}\n${body}`;
 	}
 
@@ -2171,6 +2609,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			...(r.usage ? { costUsd: r.usage.costUsd } : {}),
 			...(r.error ? { error: r.error } : {}),
 			...(r.gate ? { gate: r.gate } : {}),
+			...(r.modelFallback ? { modelFallback: r.modelFallback } : {}),
 		}));
 	}
 
@@ -2186,7 +2625,14 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				`Each result is a compact digest; recover a task's integral output with task({op:"${SUBAGENT_READ_OP}", name:"<taskName>"}).`,
 			parameters: parallelSchema,
 			sideEffect: "agent",
-			async execute(_id: string, params: unknown, signal?: AbortSignal): Promise<TaskOpResult> {
+			async execute(
+				_id: string,
+				params: unknown,
+				signal?: AbortSignal,
+				_onUpdate?: unknown,
+				executeContext?: AgentToolExecuteContext,
+			): Promise<TaskOpResult> {
+				const childSignal = coordinatorChildSignal(signal, executeContext);
 				const p = params as Static<typeof parallelSchema>;
 				if (!p.tasks?.length) {
 					return {
@@ -2249,7 +2695,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							thinkingLevel: subThinking,
 							cwd,
 							depth: childDepth,
-							signal,
+							signal: childSignal,
 						},
 						// Children surface in the TUI like any other subagent run.
 						onTaskStart: (h) => options.onSubagentStart?.(h),
@@ -2290,11 +2736,18 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				"Orchestrate scout → N reviewers → worker in one call. " +
 				"The scout determines how many reviewers run; each reviewer prompt uses {{target}} substitution. " +
 				"The worker receives collected reviews and may carry an acceptance gate. " +
-				"Each stage accepts its own agent `type` and `model` — run reviewers on a cheap tier ('haiku') and keep the worker strong. " +
+				"Each stage accepts its own agent `type` and `model`; omit a stage model to inherit the working parent. " +
 				`Outputs are compact digests; recover an integral output with task({op:"${SUBAGENT_READ_OP}", name:"<taskName>"}).`,
 			parameters: fanoutSchema,
 			sideEffect: "agent",
-			async execute(_id: string, params: unknown, signal?: AbortSignal): Promise<TaskOpResult> {
+			async execute(
+				_id: string,
+				params: unknown,
+				signal?: AbortSignal,
+				_onUpdate?: unknown,
+				executeContext?: AgentToolExecuteContext,
+			): Promise<TaskOpResult> {
+				const childSignal = coordinatorChildSignal(signal, executeContext);
 				const p = params as Static<typeof fanoutSchema>;
 				const model = options.getParentModel();
 				if (!model) {
@@ -2378,7 +2831,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							cwd,
 							model: subModel,
 							thinkingLevel: subThinking,
-							signal,
+							signal: childSignal,
 							// Stages surface in the TUI like any other subagent run.
 							onStageStart: (h) => options.onSubagentStart?.(h),
 							onStageEvent: (h, info) => options.onSubagentProgress?.(h, info),
@@ -2407,9 +2860,9 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						(fanoutResult.worker_output.usage?.costUsd ?? 0) +
 						fanoutResult.reviews.reduce((sum, review) => sum + (review.usage?.costUsd ?? 0), 0);
 					const text = [
-						`## Scout targets (${fanoutResult.targets.length}) [${scoutHandle}]\n${digestWithPointer(scoutOutput, scoutHandle)}`,
+						`## Scout targets (${fanoutResult.targets.length}) [${scoutHandle}]\n${withModelFallbackDiagnostic(digestWithPointer(scoutOutput, scoutHandle), fanoutResult.scout_model_fallback)}`,
 						`## Reviews\n${reviewSections.join("\n\n") || "(no reviewers ran)"}`,
-						`## Worker output [${workerHandle}]${fanoutResult.gate ? ` (gate ${fanoutResult.gate.passed ? "passed" : "failed"}, attempts=${fanoutResult.gate.attempts})` : ""}\n${digestWithPointer(fanoutResult.worker_output.text, workerHandle)}`,
+						`## Worker output [${workerHandle}]${fanoutResult.gate ? ` (gate ${fanoutResult.gate.passed ? "passed" : "failed"}, attempts=${fanoutResult.gate.attempts})` : ""}\n${withModelFallbackDiagnostic(digestWithPointer(fanoutResult.worker_output.text, workerHandle), fanoutResult.worker_output.result.modelFallback)}`,
 					].join("\n\n");
 					return {
 						content: [{ type: "text" as const, text }],
@@ -2417,8 +2870,10 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						details: {
 							targetCount: fanoutResult.targets.length,
 							scoutTaskName: scoutHandle,
+							scoutModelFallback: fanoutResult.scout_model_fallback,
 							reviews: summarizeChildResults(fanoutResult.reviews),
 							workerTaskName: workerHandle,
+							workerModelFallback: fanoutResult.worker_output.result.modelFallback,
 							gate: fanoutResult.gate,
 							depth: childDepth,
 							costUsd,
@@ -2426,10 +2881,16 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					};
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
+					const workerModelFallback = getSubagentErrorModelFallback(err);
 					return {
-						content: [{ type: "text" as const, text: `fanout failed: ${message}` }],
+						content: [
+							{
+								type: "text" as const,
+								text: withModelFallbackDiagnostic(`fanout failed: ${message}`, workerModelFallback),
+							},
+						],
 						isError: true,
-						details: undefined,
+						details: workerModelFallback ? { workerModelFallback } : undefined,
 					};
 				}
 			},
@@ -2438,6 +2899,111 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 
 	function makeCoordinatorTools(childDepth: number): AgentTool[] {
 		return [makeTaskTool(childDepth), makeParallelTool(childDepth), makeFanoutTool(childDepth)];
+	}
+
+	function hasAcceptance(raw: unknown): boolean {
+		return raw !== undefined;
+	}
+
+	function freshChildCatalog(depth: number): AgentTool[] {
+		return buildSubagentToolCatalog(options.getAvailableTools(), depth, maxDepth, makeCoordinatorTools);
+	}
+
+	function selectionIsReadOnly(
+		raw: { type?: string; allowed_tools?: string[] },
+		childTools: AgentTool[],
+		cwd: string,
+	): boolean {
+		const selected = selectChildTools(raw, childTools, cwd);
+		return "error" in selected ? false : isSideEffectFreeCatalog(selected.tools, selected.allowedTools);
+	}
+
+	function taskDelegationIsReadOnly(
+		raw: {
+			type?: string;
+			allowed_tools?: string[];
+			worktree?: unknown;
+			acceptance?: unknown;
+		},
+		childTools: AgentTool[],
+		cwd: string,
+	): boolean {
+		if (raw.worktree !== undefined && raw.worktree !== false) return false;
+		if (hasAcceptance(raw.acceptance)) return false;
+		return selectionIsReadOnly(raw, childTools, cwd);
+	}
+
+	async function resumeSelectionIsReadOnly(
+		op: "resume" | "continue",
+		input: Record<string, unknown>,
+	): Promise<boolean> {
+		const key =
+			typeof input.name === "string" && input.name.trim()
+				? input.name.trim()
+				: Array.isArray(input.handles) && typeof input.handles[0] === "string"
+					? input.handles[0].trim()
+					: "";
+		if (!key) return false;
+		const live = (op === "resume" ? resumable : continuable).get(key);
+		const cwd = options.getCwd ? options.getCwd() : process.cwd();
+		if (live) {
+			if (!live.resumeMetadata || live.resumeMetadata.cwd !== cwd) return false;
+			return isSideEffectFreeCatalog(live.agent.state.tools, undefined);
+		}
+		if (op === "continue") return false;
+		const state = await loadResumeState(cwd, key);
+		if (!state || state.cwd !== cwd) return false;
+		const childTools = freshChildCatalog(state.depth);
+		const scopedChildTools = isTruthyEnvFlag(process.env.PIT_NO_SCOPED_HINDSIGHT)
+			? childTools
+			: withAgentScope(childTools, state.agentScope, state.cwd, false);
+		return isSideEffectFreeCatalog(scopedChildTools, state.allowedTools);
+	}
+
+	async function resolveCoordinatorPermissionMetadata(
+		toolName: string,
+		input: Readonly<Record<string, unknown>>,
+		context: { isNativeCoordinator: boolean },
+	): Promise<{ readOnlyDelegation: true } | undefined> {
+		if (!context.isNativeCoordinator || !COORDINATOR_TOOL_NAMES.has(toolName)) return undefined;
+		const cwd = options.getCwd ? options.getCwd() : process.cwd();
+		if (toolName === TASK_TOOL_NAME) {
+			const op = typeof input.op === "string" ? input.op : "run";
+			if (["list", "agents", SUBAGENT_READ_OP, "poll", "join"].includes(op)) return { readOnlyDelegation: true };
+			if (op === "resume" || op === "continue") {
+				return (await resumeSelectionIsReadOnly(op, input as Record<string, unknown>))
+					? { readOnlyDelegation: true }
+					: undefined;
+			}
+			if (op !== "run" && op !== "spawn") return undefined;
+			return taskDelegationIsReadOnly(input, freshChildCatalog(1), cwd) ? { readOnlyDelegation: true } : undefined;
+		}
+
+		if (toolName === PARALLEL_TOOL_NAME) {
+			if (!Array.isArray(input.tasks) || input.tasks.length === 0 || input.worktree !== undefined) return undefined;
+			const childTools = freshChildCatalog(1);
+			for (const raw of input.tasks) {
+				if (!raw || typeof raw !== "object") return undefined;
+				const child = raw as { type?: string; allowed_tools?: string[]; acceptance?: unknown };
+				if (hasAcceptance(child.acceptance) || !selectionIsReadOnly(child, childTools, cwd)) return undefined;
+			}
+			return { readOnlyDelegation: true };
+		}
+
+		if (!input.scout || !input.reviewer || !input.worker || input.worktree !== undefined) return undefined;
+		const childTools = freshChildCatalog(1);
+		for (const raw of [input.scout, input.reviewer, input.worker]) {
+			if (!raw || typeof raw !== "object") return undefined;
+			const stage = raw as { type?: string; allowed_tools?: string[]; acceptance?: unknown; worktree?: unknown };
+			if (
+				stage.worktree !== undefined ||
+				hasAcceptance(stage.acceptance) ||
+				!selectionIsReadOnly(stage, childTools, cwd)
+			) {
+				return undefined;
+			}
+		}
+		return { readOnlyDelegation: true };
 	}
 
 	/**
@@ -2474,13 +3040,73 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			};
 		}
 		let subModel = model;
+		const selectableModels = buildSelectableModelView(
+			options.modelRegistry.getAll(),
+			options.getSelectableModels?.() ?? [],
+			model,
+		);
 		if (state.modelId) {
-			try {
-				const available = await options.modelRegistry.getAvailable();
-				const found = available.find((m) => m.id === state.modelId);
-				if (found) subModel = found;
-			} catch {
-				// Keep the parent model if the saved one can't be resolved.
+			if (state.modelProvider) {
+				// A parent model supplied programmatically may not itself be listed in
+				// ModelRegistry. Reusing it is still exact and safe when BOTH canonical
+				// identity fields match the persisted state.
+				if (
+					model.provider.toLowerCase() === state.modelProvider.toLowerCase() &&
+					model.id.toLowerCase() === state.modelId.toLowerCase()
+				) {
+					subModel = model;
+				} else {
+					// New resume files persist the complete identity. Resolve through the
+					// CLI path so an explicit provider can also synthesize a custom model
+					// id, exactly as the original task({model:"provider/id"}) did.
+					const resolved = resolveCliModel({
+						cliProvider: state.modelProvider,
+						cliModel: state.modelId,
+						modelRegistry: options.modelRegistry,
+						availableModels: selectableModels,
+					});
+					if (resolved.error || !resolved.model) {
+						return {
+							content: [
+								{
+									type: "text" as const,
+									text: `Cannot resume subagent "${key}": saved model ${state.modelProvider}/${state.modelId} could not be resolved (${resolved.error ?? "unknown model"}).`,
+								},
+							],
+							isError: true,
+							details: { handle: key, resumed: false, fromDisk: true },
+						};
+					}
+					subModel = resolved.model;
+				}
+			} else {
+				// Legacy files stored only modelId. Preserve compatibility when that id
+				// identifies exactly one registry model (or exactly matches the current
+				// synthesized parent), but never choose an arbitrary provider for a
+				// duplicate id and never silently replace an unavailable saved model.
+				const matches = selectableModels.filter(
+					(candidate) => candidate.id.toLowerCase() === state.modelId!.toLowerCase(),
+				);
+				if (matches.length === 1) {
+					subModel = matches[0];
+				} else if (matches.length === 0 && model.id.toLowerCase() === state.modelId.toLowerCase()) {
+					subModel = model;
+				} else {
+					const reason =
+						matches.length > 1
+							? `legacy saved model id "${state.modelId}" is ambiguous across providers (${[...new Set(matches.map((candidate) => candidate.provider))].sort().join(", ")})`
+							: `legacy saved model id "${state.modelId}" is no longer available`;
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `Cannot resume subagent "${key}": ${reason}. Re-run the task to choose a model explicitly.`,
+							},
+						],
+						isError: true,
+						details: { handle: key, resumed: false, fromDisk: true },
+					};
+				}
 			}
 		}
 		// Drop a trailing failed/aborted assistant turn from the seed transcript.
@@ -2537,6 +3163,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			});
 			budgetReservation.record(result.usage);
 			if (capturedAgent && agentEndedWithError(capturedAgent)) {
+				const effectiveModel = capturedAgent.state.model ?? subModel;
 				// Still unfinished — keep the on-disk transcript (do NOT delete) so a
 				// later attempt can resume again, and persist the latest progress so the
 				// next resume continues from here instead of replaying the old seed. Save
@@ -2546,7 +3173,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				await saveResumeState(cwd, {
 					handle: state.handle,
 					messages: capturedAgent.state.messages,
-					modelId: state.modelId,
+					modelProvider: effectiveModel.provider,
+					modelId: effectiveModel.id,
 					thinkingLevel: state.thinkingLevel,
 					systemPrompt: state.systemPrompt,
 					allowedTools: state.allowedTools,
@@ -2566,8 +3194,14 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					details: { handle: key, resumed: true, fromDisk: true, stillResumable: true },
 				};
 			}
-			if (capturedAgent)
-				await rememberContinuable(key, capturedAgent, result.record.id, metadataFromResumeState(state));
+			if (capturedAgent) {
+				const effectiveModel = capturedAgent.state.model ?? subModel;
+				await rememberContinuable(key, capturedAgent, result.record.id, {
+					...metadataFromResumeState(state),
+					modelProvider: effectiveModel.provider,
+					modelId: effectiveModel.id,
+				});
+			}
 			await outputStore.put(key, result.output);
 			const out = formatSpawnResult(result, undefined, key);
 			safeCallback(
@@ -2588,10 +3222,12 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			// otherwise the next process restart replays the stale seed and loses
 			// the partial progress from this attempt.
 			if (capturedAgent) {
+				const effectiveModel = capturedAgent.state.model ?? subModel;
 				await saveResumeState(cwd, {
 					handle: state.handle,
 					messages: capturedAgent.state.messages,
-					modelId: state.modelId,
+					modelProvider: effectiveModel.provider,
+					modelId: effectiveModel.id,
 					thinkingLevel: state.thinkingLevel,
 					systemPrompt: state.systemPrompt,
 					allowedTools: state.allowedTools,
@@ -2654,6 +3290,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		};
 	}
 
+	options.permissionChecker?.setMetadataResolver(resolveCoordinatorPermissionMetadata);
+
 	return (pi: ExtensionAPI) => {
 		for (const tool of makeCoordinatorTools(0)) {
 			// Definitions are built for registerTool; brandCoordinatorTool keeps the
@@ -2665,28 +3303,6 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		// Worktree paths are UUID-unique (no cross-session corruption), so after a short
 		// grace we stop blocking teardown even if a queued spawn hasn't settled yet.
 		// pi.on is optional-called: test stubs pass { registerTool } without `.on`.
-		pi.on?.("session_shutdown", async () => {
-			const inflight: Array<Promise<void>> = [];
-			for (const e of pending.values()) {
-				if (e.status === "running") {
-					e.controller.abort(new Error("aborted: session teardown"));
-					inflight.push(e.promise.catch(() => {}));
-				}
-			}
-			if (inflight.length > 0) {
-				let graceTimer: ReturnType<typeof setTimeout> | undefined;
-				const grace = new Promise<void>((r) => {
-					graceTimer = setTimeout(r, 1500);
-				});
-				try {
-					await Promise.race([Promise.all(inflight), grace]);
-				} finally {
-					if (graceTimer !== undefined) clearTimeout(graceTimer);
-				}
-			}
-			// N7: remove the on-disk integral-output store (session temp dir). Best-effort;
-			// once the parent session is gone, op:"read" recovery is moot.
-			await outputStore.dispose();
-		});
+		pi.on?.("session_shutdown", disposeCoordinator);
 	};
 }

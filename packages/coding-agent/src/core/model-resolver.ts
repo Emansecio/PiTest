@@ -56,6 +56,36 @@ export interface ScopedModel {
 	thinkingLevel?: ThinkingLevel;
 }
 
+function selectableModelKey(model: Model<any>): string {
+	return `${model.provider.toLowerCase()}\0${model.id.toLowerCase()}`;
+}
+
+/**
+ * Build the model surface available to coordinator requests. Registry order is
+ * retained, while SDK-scoped objects replace registry duplicates and the exact
+ * current parent object replaces either. This keeps provider/id identity stable
+ * without discarding SDK-only models.
+ */
+export function buildSelectableModelView(
+	registryModels: readonly Model<any>[],
+	scopedModels: readonly Model<any>[],
+	currentModel: Model<any> | undefined,
+): Model<any>[] {
+	const result: Model<any>[] = [];
+	const indexes = new Map<string, number>();
+	for (const model of [...registryModels, ...scopedModels, ...(currentModel ? [currentModel] : [])]) {
+		const key = selectableModelKey(model);
+		const existing = indexes.get(key);
+		if (existing === undefined) {
+			indexes.set(key, result.length);
+			result.push(model);
+		} else {
+			result[existing] = model;
+		}
+	}
+	return result;
+}
+
 /**
  * Helper to check if a model ID looks like an alias (no date suffix)
  * Dates are typically in format: -20241022 or -20250929
@@ -160,6 +190,32 @@ function tryMatchModel(modelPattern: string, availableModels: Model<Api>[]): Mod
 		datedVersions.sort((a, b) => b.id.localeCompare(a.id));
 		return datedVersions[0];
 	}
+}
+
+/**
+ * Return a canonical provider/id for a near-alias when there is exactly one
+ * unambiguous candidate. This is deliberately a hint only: callers still fail
+ * the request instead of silently changing the requested model.
+ */
+function suggestCanonicalModelReference(
+	modelPattern: string,
+	availableModels: readonly Model<Api>[],
+): string | undefined {
+	const normalized = modelPattern.trim().toLowerCase();
+	if (!normalized || normalized.includes("/")) return undefined;
+	const tokens = normalized.split(/[^a-z0-9]+/).filter((token) => token.length >= 2);
+	if (tokens.length === 0) return undefined;
+
+	const matches = availableModels.filter((model) => {
+		const searchable = `${model.id} ${model.name ?? ""}`.toLowerCase();
+		return tokens.every((token) => searchable.includes(token));
+	});
+	const unique = new Map(matches.map((model) => [`${model.provider}/${model.id}`.toLowerCase(), model]));
+	if (unique.size !== 1) return undefined;
+
+	const model = [...unique.values()][0];
+	const canonical = `${model.provider}/${model.id}`;
+	return canonical.toLowerCase() === normalized ? undefined : canonical;
 }
 
 export interface ParsedModelResult {
@@ -513,6 +569,8 @@ export function resolveCliModel(options: {
 	cliProvider?: string;
 	cliModel?: string;
 	modelRegistry: ModelRegistry;
+	/** Optional caller-owned exact selection surface (for example SDK scoped models). */
+	availableModels?: readonly Model<Api>[];
 }): ResolveCliModelResult {
 	const { cliProvider, cliModel, modelRegistry } = options;
 
@@ -522,7 +580,8 @@ export function resolveCliModel(options: {
 
 	// Important: use *all* models here, not just models with pre-configured auth.
 	// This allows "--api-key" to be used for first-time setup.
-	const availableModels = modelRegistry.getAll();
+	const registryModels = modelRegistry.getAll();
+	const availableModels = options.availableModels ? [...options.availableModels] : registryModels;
 	if (availableModels.length === 0) {
 		return {
 			model: undefined,
@@ -570,12 +629,30 @@ export function resolveCliModel(options: {
 	// If no provider was inferred from the slash, try exact matches without provider inference.
 	// This handles models whose IDs naturally contain slashes (e.g. OpenRouter-style IDs).
 	if (!provider) {
-		const lower = cliModel.toLowerCase();
-		const exact = availableModels.find(
-			(m) => m.id.toLowerCase() === lower || `${m.provider}/${m.id}`.toLowerCase() === lower,
-		);
+		const exact = findExactModelReferenceMatch(cliModel, availableModels);
 		if (exact) {
 			return { model: exact, warning: undefined, thinkingLevel: undefined, error: undefined };
+		}
+
+		// A bare exact id must never pick whichever provider happened to be listed
+		// first. Check both the full input and, when applicable, the base before a
+		// valid thinking suffix; parseModelPattern's fuzzy phase cannot distinguish
+		// an intentionally fuzzy pattern from an ambiguous exact id on its own.
+		const lastColon = cliModel.lastIndexOf(":");
+		const suffix = lastColon === -1 ? undefined : cliModel.substring(lastColon + 1);
+		const bareReferences = [cliModel];
+		if (suffix && isValidThinkingLevel(suffix)) bareReferences.push(cliModel.substring(0, lastColon));
+		for (const bareReference of bareReferences) {
+			const idMatches = availableModels.filter((m) => m.id.toLowerCase() === bareReference.toLowerCase());
+			if (idMatches.length > 1) {
+				const providers = [...new Set(idMatches.map((m) => m.provider))].sort().join(", ");
+				return {
+					model: undefined,
+					thinkingLevel: undefined,
+					warning: undefined,
+					error: `Model id "${bareReference}" is ambiguous across providers (${providers}). Use provider/model.`,
+				};
+			}
 		}
 	}
 
@@ -647,21 +724,44 @@ export function resolveCliModel(options: {
 	}
 
 	if (provider) {
-		const fallbackModel = buildFallbackModel(provider, pattern, availableModels);
+		// Once registry matching has failed, a trailing valid thinking level belongs
+		// to the request rather than the synthesized custom model id. Exact registered
+		// ids (including ids that literally end in `:high`) were already preferred by
+		// parseModelPattern above, so stripping here cannot shadow a real model.
+		let customModelId = pattern;
+		let customThinkingLevel: ThinkingLevel | undefined;
+		const lastColon = pattern.lastIndexOf(":");
+		if (lastColon !== -1) {
+			const suffix = pattern.substring(lastColon + 1);
+			if (isValidThinkingLevel(suffix)) {
+				customModelId = pattern.substring(0, lastColon);
+				customThinkingLevel = suffix;
+			}
+		}
+		// Custom ids are synthesized only from a registry-backed provider template.
+		// SDK-only models remain exactly selectable but do not implicitly define a
+		// whole custom provider surface.
+		const fallbackModel = buildFallbackModel(provider, customModelId, registryModels);
 		if (fallbackModel) {
 			const fallbackWarning = warning
-				? `${warning} Model "${pattern}" not found for provider "${provider}". Using custom model id.`
-				: `Model "${pattern}" not found for provider "${provider}". Using custom model id.`;
-			return { model: fallbackModel, thinkingLevel: undefined, warning: fallbackWarning, error: undefined };
+				? `${warning} Model "${customModelId}" not found for provider "${provider}". Using custom model id.`
+				: `Model "${customModelId}" not found for provider "${provider}". Using custom model id.`;
+			return {
+				model: fallbackModel,
+				thinkingLevel: customThinkingLevel,
+				warning: fallbackWarning,
+				error: undefined,
+			};
 		}
 	}
 
 	const display = provider ? `${provider}/${pattern}` : cliModel;
+	const suggestion = suggestCanonicalModelReference(cliModel, candidates);
 	return {
 		model: undefined,
 		thinkingLevel: undefined,
 		warning,
-		error: `Model "${display}" not found. Use --list-models to see available models.`,
+		error: `Model "${display}" not found.${suggestion ? ` Did you mean "${suggestion}"?` : ""} Use --list-models to see available models.`,
 	};
 }
 

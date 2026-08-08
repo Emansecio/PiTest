@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { resolveMaxVitestForks } from "../vitest.config.ts";
+import { resolveMaxVitestForks, resolveVitestWorkerHeapMb } from "../vitest.config.ts";
 
 describe("Vitest worker cap", () => {
-	it("caps large Windows hosts and considers RAM", () => {
+	it("caps large Windows hosts and budgets ~4 GiB RSS per worker", () => {
 		expect(
 			resolveMaxVitestForks({
 				cpuCount: 64,
@@ -10,7 +10,7 @@ describe("Vitest worker cap", () => {
 				platform: "win32",
 				env: {} as NodeJS.ProcessEnv,
 			}),
-		).toBe(12);
+		).toBe(6);
 		expect(
 			resolveMaxVitestForks({
 				cpuCount: 64,
@@ -18,7 +18,15 @@ describe("Vitest worker cap", () => {
 				platform: "linux",
 				env: {} as NodeJS.ProcessEnv,
 			}),
-		).toBe(4);
+		).toBe(2);
+		expect(
+			resolveMaxVitestForks({
+				cpuCount: 64,
+				totalMemoryBytes: 48 * 1024 ** 3,
+				platform: "linux",
+				env: {} as NodeJS.ProcessEnv,
+			}),
+		).toBe(12);
 	});
 
 	it("honors explicit overrides and the CI cap", () => {
@@ -38,5 +46,11 @@ describe("Vitest worker cap", () => {
 				env: { CI: "1" } as NodeJS.ProcessEnv,
 			}),
 		).toBe(3);
+	});
+
+	it("defaults worker heap above the 4 GiB V8 ceiling and honors overrides", () => {
+		expect(resolveVitestWorkerHeapMb({} as NodeJS.ProcessEnv)).toBe(8192);
+		expect(resolveVitestWorkerHeapMb({ PIT_VITEST_WORKER_HEAP_MB: "4096" } as NodeJS.ProcessEnv)).toBe(4096);
+		expect(resolveVitestWorkerHeapMb({ PIT_VITEST_WORKER_HEAP_MB: "100" } as NodeJS.ProcessEnv)).toBe(8192);
 	});
 });

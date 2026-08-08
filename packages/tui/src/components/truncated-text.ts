@@ -41,6 +41,7 @@ export class TruncatedText implements Component {
 	}
 
 	render(width: number): string[] {
+		if (width <= 0) return [];
 		if (this.cachedLines && this.cachedText === this.text && this.cachedWidth === width) {
 			return this.cachedLines;
 		}
@@ -54,7 +55,8 @@ export class TruncatedText implements Component {
 		}
 
 		// Calculate available width after horizontal padding
-		const availableWidth = Math.max(1, width - this.paddingX * 2);
+		const effectivePaddingX = Math.min(this.paddingX, Math.floor(Math.max(0, width - 1) / 2));
+		const availableWidth = Math.max(1, width - effectivePaddingX * 2);
 
 		// Take only the first line (stop at newline)
 		let singleLineText = this.text;
@@ -69,8 +71,8 @@ export class TruncatedText implements Component {
 		// Add horizontal padding. No pad-to-width: the renderer clears every
 		// line it rewrites, and trailing spaces overflow shells that prefix
 		// content (gutter + label) — see Text for the full rationale.
-		const leftPadding = " ".repeat(this.paddingX);
-		const rightPadding = " ".repeat(this.paddingX);
+		const leftPadding = " ".repeat(effectivePaddingX);
+		const rightPadding = " ".repeat(effectivePaddingX);
 		result.push(leftPadding + displayText + rightPadding);
 
 		// Add vertical padding below

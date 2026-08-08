@@ -52,6 +52,11 @@ function clampInt(raw: unknown, lo: number, hi: number, fallback: number): numbe
 	return Math.max(lo, Math.min(hi, Math.floor(raw)));
 }
 
+function planStepTimeoutMs(raw: unknown): number {
+	if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 1) return 60_000;
+	return Math.min(Math.floor(raw), 600_000);
+}
+
 /**
  * Return `raw` when it is one of the `allowed` string-literal values; otherwise
  * `fallback`. Mirrors the membership-check idiom in `getTreeFilterMode` so the
@@ -108,6 +113,8 @@ export interface VerificationSettings {
 	command?: string | null; // default: null → auto-detect from package.json scripts (check/typecheck/lint/test)
 	maxAttempts?: number; // default: 2 — fix attempts before giving up and reporting the failure to the user
 	timeoutMs?: number; // default: 180000
+	/** Timeout for a plan step's verify command. Default 60000; clamped to 1..600000. */
+	planStepTimeoutMs?: number;
 	visual?: boolean; // default: true — nudge to `preview` when a rendered artifact changed but was never viewed
 	/** Native functional web DoD (navigate/a11y/click/fill/console). Default true. */
 	functionalWeb?: boolean;
@@ -747,6 +754,7 @@ const KNOWN_NESTED_SETTINGS_KEYS: ReadonlyMap<string, ReadonlySet<string>> = new
 			"command",
 			"maxAttempts",
 			"timeoutMs",
+			"planStepTimeoutMs",
 			"visual",
 			"functionalWeb",
 			"functionalWebTimeoutMs",
@@ -1086,6 +1094,11 @@ export class SettingsManager {
 		const tc = tf?.todoCadenceReminder;
 		check("toolFeedback.todoCadenceReminder.threshold", tc?.threshold, posInt(tc?.threshold, 3));
 		check("toolFeedback.todoCadenceReminder.cooldownMs", tc?.cooldownMs, nonNegInt(tc?.cooldownMs, 30000));
+		check(
+			"verification.planStepTimeoutMs",
+			s.verification?.planStepTimeoutMs,
+			planStepTimeoutMs(s.verification?.planStepTimeoutMs),
+		);
 		const og = tf?.overthinkGuard;
 		if (og?.tokenThreshold !== undefined) {
 			check("toolFeedback.overthinkGuard.tokenThreshold", og.tokenThreshold, posInt(og.tokenThreshold, 1000));
@@ -1796,6 +1809,7 @@ export class SettingsManager {
 		command: string | null;
 		maxAttempts: number;
 		timeoutMs: number;
+		planStepTimeoutMs: number;
 		visual: boolean;
 		functionalWeb: boolean;
 		functionalWebTimeoutMs: number;
@@ -1815,6 +1829,7 @@ export class SettingsManager {
 			// Floor is a small sanity bound (not the old 1000ms) so an explicitly
 			// configured short timeout is honored — the default (180_000) is unchanged.
 			timeoutMs: Math.max(50, v?.timeoutMs ?? 180_000),
+			planStepTimeoutMs: planStepTimeoutMs(v?.planStepTimeoutMs),
 			visual: v?.visual ?? true,
 			functionalWeb: v?.functionalWeb ?? true,
 			functionalWebTimeoutMs: Math.max(5_000, v?.functionalWebTimeoutMs ?? 45_000),

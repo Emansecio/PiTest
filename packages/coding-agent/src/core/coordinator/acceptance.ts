@@ -12,8 +12,10 @@ import { mergeSubagentUsage } from "../token-usage.ts";
 import { truncateTail } from "../tools/truncate.ts";
 import { isCoordinatorTool } from "./brand.ts";
 import {
+	attachSubagentModelFallbackToError,
 	attachSubagentUsageToError,
 	cleanupSubagentWorktree,
+	getSubagentErrorModelFallback,
 	getSubagentErrorUsage,
 	type SpawnSubagentDependencies,
 	spawnSubagent,
@@ -351,6 +353,7 @@ export async function runWithAcceptance(
 	try {
 		while (attempt < maxAttempts) {
 			attempt++;
+			lastResult = undefined;
 			const workerHandle = lifecycleHandle(deps.acceptanceLifecycle, attempt, "worker");
 			emitLifecycle(deps.acceptanceLifecycle, "onStart", workerHandle ?? "");
 			const autoCleanup = usesAutoCleanupWorktree(spawnOpts.worktree);
@@ -448,6 +451,10 @@ export async function runWithAcceptance(
 		// error object, allowing every coordinator path to charge incurred spend.
 		addUsage(usage, getSubagentErrorUsage(error));
 		attachSubagentUsageToError(error, usage);
+		attachSubagentModelFallbackToError(
+			error,
+			lastResult ? lastResult.modelFallback : getSubagentErrorModelFallback(error),
+		);
 		throw error;
 	}
 

@@ -361,12 +361,17 @@ export interface ExtensionCommandContext extends ExtensionContext {
 		parentSession?: string;
 		setup?: (sessionManager: SessionManager) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+		signal?: AbortSignal;
 	}): Promise<{ cancelled: boolean }>;
 
 	/** Fork from a specific entry, creating a new session file. */
 	fork(
 		entryId: string,
-		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
+		options?: {
+			position?: "before" | "at";
+			withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+			signal?: AbortSignal;
+		},
 	): Promise<{ cancelled: boolean }>;
 
 	/** Navigate to a different point in the session tree. */
@@ -378,7 +383,7 @@ export interface ExtensionCommandContext extends ExtensionContext {
 	/** Switch to a different session file. */
 	switchSession(
 		sessionPath: string,
-		options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
+		options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void>; signal?: AbortSignal },
 	): Promise<{ cancelled: boolean }>;
 
 	/** Reload extensions, skills, prompts, and themes. */
@@ -638,6 +643,7 @@ export interface SessionBeforeSwitchEvent {
 	type: "session_before_switch";
 	reason: "new" | "resume";
 	targetSessionFile?: string;
+	signal?: AbortSignal;
 }
 
 /** Fired before forking a session (can be cancelled) */
@@ -645,6 +651,7 @@ export interface SessionBeforeForkEvent {
 	type: "session_before_fork";
 	entryId: string;
 	position: "before" | "at";
+	signal?: AbortSignal;
 }
 
 /** Fired before context compaction (can be cancelled or customized) */
@@ -1665,10 +1672,15 @@ export interface ExtensionCommandContextActions {
 		parentSession?: string;
 		setup?: (sessionManager: SessionManager) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+		signal?: AbortSignal;
 	}) => Promise<{ cancelled: boolean }>;
 	fork: (
 		entryId: string,
-		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
+		options?: {
+			position?: "before" | "at";
+			withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+			signal?: AbortSignal;
+		},
 	) => Promise<{ cancelled: boolean }>;
 	navigateTree: (
 		targetId: string,
@@ -1676,7 +1688,7 @@ export interface ExtensionCommandContextActions {
 	) => Promise<{ cancelled: boolean }>;
 	switchSession: (
 		sessionPath: string,
-		options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
+		options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void>; signal?: AbortSignal },
 	) => Promise<{ cancelled: boolean }>;
 	reload: () => Promise<void>;
 }

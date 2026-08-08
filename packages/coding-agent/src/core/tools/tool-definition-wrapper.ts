@@ -1,5 +1,6 @@
 import type { AgentTool, AgentToolResult } from "@pit/agent-core";
 import { estimateTextTokens, formatDeferredOutputPlaceholder } from "../compaction/compaction.ts";
+import { COORDINATOR_TOOL_BRAND, isCoordinatorTool } from "../coordinator/brand.ts";
 import { getCurrentDeferredOutputStore } from "../deferred-output-store.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 import {
@@ -226,7 +227,9 @@ export function wrapToolDefinition<TDetails = unknown>(
 	if (outputCap) passthrough.outputCap = outputCap;
 	if (activity !== undefined) passthrough.activity = activity;
 	if (definition.promptSnippet) passthrough.promptSnippet = definition.promptSnippet;
-	return Object.assign(tool, passthrough);
+	Object.assign(tool, passthrough);
+	if (isCoordinatorTool(definition)) Object.assign(tool, { [COORDINATOR_TOOL_BRAND]: true });
+	return tool;
 }
 
 /** Wrap multiple ToolDefinitions into AgentTools for the core runtime. */

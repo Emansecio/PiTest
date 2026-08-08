@@ -34,6 +34,25 @@ import { createRetryBudgetHintRule, retryBudgetTargetKey, ToolRetryBudgetTracker
 // tools is a strong "productive-looking loop" signal the same-call doom-loop misses.
 const REPEATING_PATTERN_THRESHOLD = 3;
 
+const POLLING_OPERATIONS = new Set(["poll", "join", "wait", "status", "get_status", "check_status"]);
+
+/** Polling can legitimately return the same state many times while work continues. */
+export function isKnownPollingCall(toolName: string, args: unknown): boolean {
+	if (!args || typeof args !== "object" || Array.isArray(args)) return false;
+	const input = args as Record<string, unknown>;
+	const operation =
+		typeof input.op === "string" ? input.op : typeof input.action === "string" ? input.action : undefined;
+	if (toolName === "task") return operation === "poll" || operation === "join";
+	if (toolName === "bash") {
+		return typeof input.jobId === "string" && input.jobId.trim().length > 0 && operation !== "kill";
+	}
+	return (
+		operation !== undefined &&
+		POLLING_OPERATIONS.has(operation) &&
+		/(?:task|job|run|process|status|poll|wait)/i.test(toolName)
+	);
+}
+
 /**
  * Delivery callback the engine uses to inject steers/follow-ups. Mirrors
  * `AgentSession.sendCustomMessage` so the engine never reaches back into the
@@ -86,6 +105,7 @@ export class TurnSteeringEngine {
 	// looping still hits the hard safety abort (the throw stays reachable). Reset
 	// when the streak breaks (the model left the loop). See maybeInjectDoomLoop.
 	private _doomLoopRecoveryAttempts = 0;
+	private _lastDoomLoopSteerAt = 0;
 	// Signature of the last repeating multi-tool CYCLE we fired a reminder for
 	// ("<patternLength>:<cycle composition>"), so we steer once per detected pattern
 	// and re-arm only when the pattern grows or a different cycle/break supersedes it.
@@ -193,6 +213,14 @@ export class TurnSteeringEngine {
 		this._maybeInjectNarrationSteer();
 	}
 
+	/** Reserve the shared Tier 1/2/3 delivery window without mutating suppressed tier state. */
+	private _claimDoomLoopCooldownSlot(cooldownMs: number): boolean {
+		const now = Date.now();
+		if (this._lastDoomLoopSteerAt > 0 && now - this._lastDoomLoopSteerAt < cooldownMs) return false;
+		this._lastDoomLoopSteerAt = now;
+		return true;
+	}
+
 	/**
 	 * One-shot narration steer on each recovery escalation: a "narrate your
 	 * reasoning" nudge when the session first enters `guided`, and a distinct
@@ -236,12 +264,15 @@ export class TurnSteeringEngine {
 	 * Throws to abort the turn at the Tier-3 relapse — same propagation as the old
 	 * start-time throw, now gated on "same call AND same result".
 	 *
-	 * `_args` is unused: the steer no longer echoes the repeated arguments (P3.9 —
-	 * a doom-loop IS the same args repeated, so the JSON block duplicated what sits
-	 * a few lines above in the transcript). The parameter stays for call-site
-	 * compatibility with `agent-session`'s tool_execution_end handler.
+	 * Arguments are used only to distinguish known status polling from genuine
+	 * repeated work. They are never echoed into the reminder.
 	 */
-	maybeInjectDoomLoop(toolName: string, _args: unknown, errorMessage: string | undefined): void {
+	maybeInjectDoomLoop(toolName: string, args: unknown, errorMessage: string | undefined): void {
+		if (isTruthyEnvFlag(process.env.PIT_NO_DOOM_LOOP_GUARD)) {
+			this._doomLoopFiredTier = 0;
+			this._doomLoopRecoveryAttempts = 0;
+			return;
+		}
 		const cfg = this.deps.settingsManager.getToolFeedbackSettings().doomLoopReminder;
 		if (!cfg.enabled) return;
 		// Result-aware: only calls with identical name+args AND identical result count
@@ -260,6 +291,7 @@ export class TurnSteeringEngine {
 		const TIER3_THRESHOLD = Math.max(6, TIER1_THRESHOLD + 4);
 		const RECOVERY_LIMIT = this.deps.recovery.getDoomRecoveryLimit();
 		const identicalArgsStreak = this.deps.toolCallStats.getConsecutiveSimilarCount();
+		const pollingCall = isKnownPollingCall(toolName, args);
 
 		// CR5: result-only thrash signal — SEPARATE from the args-keyed ladder below
 		// and run on EVERY call (the ladder's early returns must not skip it). When the
@@ -282,8 +314,8 @@ export class TurnSteeringEngine {
 		}
 		if (consecutiveCount < TIER1_THRESHOLD) return;
 
-		// Tier 3: structured recovery, then a safety abort on relapse. The FIRST time a
-		// streak reaches this threshold we inject a recovery steer (decompose the step,
+		// Tier 3: structured recovery, then a safety abort on relapse. The first
+		// cooldown-eligible call at this threshold injects a recovery steer (decompose the step,
 		// switch approach) instead of killing the turn — a bare abort leaves the model
 		// mid-task and it tends to reopen the same loop next turn. Only a RELAPSE (the
 		// streak keeps climbing past Tier-3 because the model ignored the steer and
@@ -292,7 +324,22 @@ export class TurnSteeringEngine {
 		// recovery budget, and let the loop inject recovery forever — the safety throw
 		// must stay reachable, so the count is left climbing toward the relapse abort.
 		if (consecutiveCount >= TIER3_THRESHOLD) {
+			if (pollingCall) {
+				if (this._doomLoopFiredTier < 3) {
+					if (!this._claimDoomLoopCooldownSlot(cfg.cooldownMs)) return;
+					this._doomLoopFiredTier = 3;
+					const recovery = buildDoomLoopReminder({ toolName, consecutiveCount, tier: "recovery" });
+					this._fireReminder("pi.doom-loop-recovery", recovery, {
+						deliverAs: "steer",
+						display: true,
+						label: "doom-loop polling recovery",
+					});
+					this._noteRecoverySignal("doom_loop_tier3");
+				}
+				return;
+			}
 			if (this._doomLoopRecoveryAttempts < RECOVERY_LIMIT) {
+				if (!this._claimDoomLoopCooldownSlot(cfg.cooldownMs)) return;
 				this._doomLoopRecoveryAttempts++;
 				this._doomLoopFiredTier = 0;
 				// Tier-3 wording renders INSIDE the reminder block (see buildDoomLoopReminder):
@@ -326,6 +373,7 @@ export class TurnSteeringEngine {
 		// oscillating here forever.
 		if (consecutiveCount >= TIER2_THRESHOLD) {
 			if (this._doomLoopFiredTier >= 2) return;
+			if (!this._claimDoomLoopCooldownSlot(cfg.cooldownMs)) return;
 			this._doomLoopFiredTier = 2;
 			const remaining = TIER3_THRESHOLD - consecutiveCount;
 			const escalation = buildDoomLoopReminder({ toolName, consecutiveCount, tier: "pause", remaining });
@@ -342,6 +390,7 @@ export class TurnSteeringEngine {
 		// followUp would sit queued behind the still-running tool-call loop it is
 		// trying to break.
 		if (this._doomLoopFiredTier >= 1) return;
+		if (!this._claimDoomLoopCooldownSlot(cfg.cooldownMs)) return;
 		this._doomLoopFiredTier = 1;
 		const content = buildDoomLoopReminder({ toolName, consecutiveCount });
 		this._fireReminder("pi.doom-loop-reminder", content, {

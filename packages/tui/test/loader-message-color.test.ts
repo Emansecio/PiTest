@@ -27,10 +27,10 @@ function trackingTui(): { ui: TUI; tick: (now: number) => boolean; active: () =>
 	};
 }
 
-// Time-aware label color that only depends on `now`: red on odd ms, green on
-// even ms. Colors only — never changes the visible characters.
+// Time-aware label color that alternates at the loader's 80ms visible cadence.
+// Colors only — never changes the visible characters.
 function nowColor(text: string, now: number): string {
-	const code = Math.floor(now) % 2 === 0 ? 32 : 31;
+	const code = Math.floor(now / 80) % 2 === 0 ? 32 : 31;
 	return `\x1b[${code}m${text}\x1b[39m`;
 }
 
@@ -50,7 +50,7 @@ describe("Loader time-aware message color", () => {
 		assert.strictEqual(t.active(), 1);
 	});
 
-	it("repaints the label each frame from (text, now), not a memoized value", () => {
+	it("repaints the label at visible cadence rather than every ticker frame", () => {
 		const t = trackingTui();
 		const loader = new Loader(
 			t.ui,
@@ -61,14 +61,17 @@ describe("Loader time-aware message color", () => {
 		);
 		loader.setMessageColorAt(nowColor);
 
-		t.tick(0); // settle at an even ms → green
-		const even = loader.render(80).join("\n");
-		assert.match(even, /\x1b\[32mWorking…\x1b\[39m/);
+		t.tick(0); // settle in the first 80ms sample → green
+		const first = loader.render(80).join("\n");
+		assert.match(first, /\x1b\[32mWorking…\x1b\[39m/);
 
-		assert.strictEqual(t.tick(1), true); // odd ms → red: color changed → dirty
-		const odd = loader.render(80).join("\n");
-		assert.match(odd, /\x1b\[31mWorking…\x1b\[39m/);
-		assert.notStrictEqual(even, odd);
+		assert.strictEqual(t.tick(1), false, "an intermediate 60 Hz tick does not repaint color");
+		assert.strictEqual(loader.render(80).join("\n"), first);
+
+		assert.strictEqual(t.tick(80), true); // next visible sample → red
+		const second = loader.render(80).join("\n");
+		assert.match(second, /\x1b\[31mWorking…\x1b\[39m/);
+		assert.notStrictEqual(first, second);
 	});
 
 	it("coalesces frames whose time-aware color is unchanged", () => {

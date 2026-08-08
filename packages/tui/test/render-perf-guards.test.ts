@@ -102,6 +102,28 @@ describe("render perf guards", () => {
 		assert.ok(size >= N, `reset cache should hold the whole ${N}-line frame, held ${size}`);
 	});
 
+	it("shrinks both dynamic caches on cached and unchanged small frames", () => {
+		const terminal = new CollectTerminal(80, 24);
+		const tui = new TUI(terminal);
+		const comp = new LinesComponent();
+		const N = 5000;
+		comp.lines = Array.from({ length: N }, (_, i) => `large-frame-${i}`);
+		tui.addChild(comp);
+
+		render(tui);
+		assert.ok(tui.getResetCacheSizeForTest() >= N);
+		assert.ok(tui.getWidthCacheSizeForTest() >= N);
+
+		// Reuse a line already present in both maps, then render it unchanged. There
+		// is no insertion on either frame to trigger eviction: shrinking must happen
+		// before the cache-hit lookup and reset's whole-frame fast return.
+		comp.lines = [`large-frame-${N - 1}`];
+		render(tui);
+		render(tui);
+		assert.ok(tui.getResetCacheSizeForTest() <= 4096);
+		assert.ok(tui.getWidthCacheSizeForTest() <= 4096);
+	});
+
 	it("uses the last-line-only diff fast path when only the bottom line changes (#C)", () => {
 		const terminal = new CollectTerminal(80, 24);
 		const tui = new TUI(terminal);

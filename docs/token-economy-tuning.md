@@ -19,6 +19,7 @@ coluna **Convenção truthy**.
 | `PIT_NO_MID_TURN_PRESSURE_GUARD` | Desativa o alívio mid-turn de pressão de wire entre tool rounds. | OFF | `agent-session-compaction.ts` | `isTruthyEnvFlag` |
 | `PIT_NO_COMPACT_SIBLING_DEFAULT` | Desativa o default zero-config que roteia summarização de compactação para um sibling small-class do mesmo provider (haiku/mini/nano/flash/lite). | OFF | `agent-session-compaction.ts` | `isTruthyEnvFlag` |
 | `PIT_EXTENSION_HOOK_TIMEOUT_MS` | Timeout por handler de `before_agent_start` (ms). Handlers lentos são skipados (fail-open); o `ctx.signal` do handler é abortado no timeout. | `1000` | `extensions/runner.ts` | numérica |
+| `PIT_SESSION_BEFORE_HOOK_TIMEOUT_MS` | Timeout por handler serial de `session_before_switch`, `session_before_fork`, `session_before_compact` e `session_before_tree` (ms). Timeout/erro é reportado e o próximo handler continua; cancelamento por `AbortSignal` encerra o dispatch silenciosamente. | `30000` | `extensions/runner.ts` | numérica |
 | `PIT_EVENT_STREAM_WARN_DEPTH` | Watermark de warn do backlog do `EventStream` (eventos enfileirados). `<=0` desativa. | `50000` | `packages/ai/src/utils/event-stream.ts` | numérica |
 | `PIT_EVENT_STREAM_MAX_DEPTH` | Teto duro do backlog do `EventStream`; ao exceder, `push()` lança erro. `<=0` desativa. | `100000` | `packages/ai/src/utils/event-stream.ts` | numérica |
 | `PIT_NO_PRESEND_OVERFLOW_GUARD` | Desativa o guard que compacta antes de enviar mensagem quando o payload estimado excede `PRESEND_OVERFLOW_RATIO × janela`. | OFF | `agent-session-compaction.ts:386,505` | `isTruthyEnvFlag` |
@@ -72,7 +73,9 @@ coluna **Convenção truthy**.
 | `PIT_EVAL_MAX_OUTPUT_BYTES` | Teto em bytes da saída capturada por chamada do eval-kernel (JS e Python). Loops síncronos de runaway são cortados antes do timeout. | `8 388 608` (8 MB) | `eval-kernel/javascript.ts:33` · `eval-kernel/python.ts:29` | numérica (inteiro positivo) |
 | `PIT_CODE_MODE_MAX_RESULT_BYTES` | Teto em bytes do resultado de ferramenta reinjetado na VM do code-mode por chamada. | `262 144` (256 KB) | `code-mode/bridge.ts:78` | numérica (inteiro positivo) |
 | `PIT_SUBAGENT_MAX_BYTES` | Teto em bytes do DIGEST head+tail que um subagente injeta no contexto pai; a íntegra fica no registry em memória + espelho em disco (redigido) e é recuperável via `task({op:"read"})`. | `4 096` (4 KB) | `built-ins/coordinator-extension.ts:~240` | numérica (inteiro positivo) |
-| `PIT_VITEST_MAX_WORKERS` | Teto explícito de workers forkados do Vitest; sem override, o limite combina CPU disponível, RAM, plataforma e CI. | adaptativo (máx. 12 no Windows, 16 em outras plataformas; CI=3) | `packages/coding-agent/vitest.config.ts` | inteiro positivo |
+| `PIT_VITEST_MAX_WORKERS` | Teto explícito de workers forkados do Vitest; sem override, o limite combina CPU disponível, RAM (~4 GiB/worker), plataforma e CI. | adaptativo (máx. 6 no Windows, 12 em outras plataformas; CI=3) | `packages/coding-agent/vitest.config.ts` | inteiro positivo |
+| `PIT_VITEST_WORKER_HEAP_MB` | `max-old-space-size` (MB) injetado em cada fork do Vitest via `poolOptions.forks.execArgv`. Evita OOM no teto default ~4 GiB do V8 ao coletar o grafo do coding-agent. Valores &lt; 512 são ignorados. | `8192` | `packages/coding-agent/vitest.config.ts` `resolveVitestWorkerHeapMb` | inteiro ≥ 512 |
+| `PIT_VITEST_SHARDS` | Número de shards sequenciais do Vitest no `check` / `check:fast` (suite unit completa). `1` desliga. Default Windows=3. | adaptativo | `scripts/vitest-shards.mjs` · `scripts/check-parallel.mjs` | inteiro ≥ 1 |
 | `PIT_DEFERRED_STORE_MEMORY_CAP_BYTES` | Cap agregado de memória do deferred-output store; acima dele as entradas mais antigas fazem spill para disco (redigidas via `redactForDisk`), com `get()` híbrido memória→disco. | `16 777 216` (16 MB) | `deferred-output-store.ts` (parse no load do módulo) | numérica (inteiro ≥ 0) |
 | `PIT_CACHE_RETENTION` | Kill-switch da retenção do cache de prompt (Anthropic 1 h / OpenAI 24 h vs 5 min). Tem precedência sobre QUALQUER valor decidido no call-site (env > opção explícita > default). Sem a env, o default é adaptativo: `"long"` só para a sessão interativa principal; `"short"` para subagentes (`coordinator/spawn.ts`) e runs one-shot print/JSON/RPC (`main.ts`) — write de cache long custa 2,0× o preço de input vs 1,25× do short, e leituras renovam o TTL de graça. Esse 2,0× agora é efetivamente cobrado: o provider Anthropic lê o detalhamento `usage.cache_creation.ephemeral_1h/5m` e `calculateCost` escala a fatia de 1h por `LONG_CACHE_WRITE_MULTIPLIER` (1,6× o preço listado, que é o de 5 min) — antes todo write era precificado no tier curto. | adaptativo (`"long"` interativo, `"short"` one-shot/subagente) | `packages/ai/src/providers/simple-options.ts` `resolveCacheRetention` (env-first) · defaults em `sdk.ts` (streamFn), `main.ts`, `coordinator/spawn.ts` | enum string: `"short"` \| `"long"` \| `"none"` |
 | `PIT_NO_CONTEXT_COMPOSER` | Desativa o bloco de contexto dinâmico inteiro (outline do projeto P1 + exemplar de estilo P3). | OFF | `conditioning/context-composer.ts:543,635` | `isTruthyEnvFlag` |
@@ -118,7 +121,7 @@ coluna **Convenção truthy**.
 | `PIT_NO_READ_DEDUPE` | Desativa o de-dup por sessão de leituras idênticas repetidas (`ReadDedupeStore`, content-hashed + LRU): cada `read` repetido volta a reenviar o conteúdo inteiro para o contexto. **Alias legado:** `PIT_READ_DEDUPE=0` (única flag de polaridade invertida que o repo já teve) continua funcionando — qualquer uma das duas desliga. | OFF (dedupe ligado) | `agent-session.ts:628` (`isReadDedupeDisabled`) | `isTruthyEnvFlag` (alias legado `PIT_READ_DEDUPE=0` é literal) |
 | `PIT_NO_STALE_READ_WARNING` | Desativa o `FileMtimeStore` por sessão e, com ele, o aviso de leitura obsoleta em `edit`/`write` (arquivo mudou em disco desde o `read` do modelo). | OFF (aviso ligado) | `agent-session.ts:637` (`isStaleReadWarningDisabled`) | `isTruthyEnvFlag` |
 | `PIT_NO_SCOPED_HINDSIGHT` | Desativa o escopo de memória por tipo de subagente: `retain` dentro de um subagente tipado volta a gravar global (`agentScope` undefined) e as tools de memória deixam de ser auto-adicionadas ao filho. Afeta tanto o gate de sessão quanto o rebind de tools no resume Tier-2. | OFF (escopo ligado) | `built-ins/coordinator-extension.ts:461,2032` | `isTruthyEnvFlag` |
-| `PIT_NO_PENDING_CHECKS` | Força `pendingChecks.enabled: false` (env vence a setting): checks em background não são drenados no fim do turno — sem espera, sem tentativas de fix automáticas. | OFF (drain ligado) | `settings-manager.ts:1825` (`getPendingChecksSettings`) | `isTruthyEnvFlag` |
+| `PIT_NO_PENDING_CHECKS` | Força `pendingChecks.enabled: false` (env vence a setting): o drain de checks pendentes e suas tentativas automáticas de fix são pulados. Não desliga a promoção de comandos, a classificação de verdicts nem os gates de `goal_complete`. | OFF (drain ligado) | `settings-manager.ts:1825` (`getPendingChecksSettings`) | `isTruthyEnvFlag` |
 | `PIT_DEFER_MCP` | Legado, opt-in: força `defer: "always"` para **todos** os servidores MCP — nenhum schema de tool MCP entra no prefixo até ser pedido sob demanda. Precedência: `defer` por servidor → esta env → política global `mcp.defer` (default `"auto"`: difere só servidores com ≥ `deferThreshold` tools). | OFF (política `auto`) | `built-ins/mcp-extension.ts:97` (`shouldDeferMcpServer`) | `isTruthyEnvFlag` |
 | `PIT_NO_ADAPTIVE_THINKING` | Desativa a política adaptativa de thinking por turno: o nível nunca é rebaixado após rodadas de tools bem-sucedidas e triviais, ficando sempre no nível do usuário. | OFF (política ligada) | `turn-thinking-policy.ts:44` (`resolveNextTurnThinkingLevel`) | `isTruthyEnvFlag` |
 | `PIT_NO_OMISSION_CHECK` | Desativa a varredura pós-`write`/`edit` que detecta omissão preguiçosa (`// ... rest of the code`) e anexa o alerta ao resultado da tool. | OFF (scan ligado) | `tools/lazy-omission.ts:180` (`isOmissionCheckEnabled`) · attach em `tools/lazy-omission-attach.ts` | `isTruthyEnvFlag` |
@@ -185,12 +188,12 @@ zero config; as variáveis abaixo são os kill-switches/knobs.
 | `PIT_NO_EDIT_BASE_CACHE` | Desativa o reuso, pelo `edit.execute()`, do base cache keyed por `(absolutePath, mtimeMs)` que o preview em streaming já popula — todo execute volta a ler o arquivo do disco. O reuso exige igualdade exata de `mtimeMs` (stat fresco); mismatch/miss cai no read de disco. Existe porque o reuso muda quais bytes o execute enxerga numa janela de corrida dentro do mesmo tick de mtime. | OFF (cache ligado) | `tools/edit.ts` (`baseCacheEnabled`) | `isTruthyEnvFlag` |
 | `PIT_BASH_SPARE_POOL` | Tamanho do pool de shells pré-aquecidos do tool `bash` (spares keyed por contexto shell+args+cwd+env, refill assíncrono após consumo, evicção LRU + TTL idle de 30 s — o TTL limita quanto tempo um processo ocioso segura handle de cwd no Windows). `0` (ou valor inválido/não positivo) desativa o pooling por completo. | `2` | `tools/bash.ts` `resolveSparePoolSize` | numérica (inteiro ≥ 0) |
 | `PIT_EXIT_STDIO_GRACE_MS` | Graça base (ms) pós-`exit` esperando o `end` de stdout/stderr antes de finalizar um comando (caso Windows de pipe herdado por descendente). A base curta é ESTENDIDA em fatias até o teto de 100 ms apenas enquanto output ainda chega (sinal de flush de daemon), então comando rápido finaliza em ~25 ms e flush de daemon nunca é clipado. Teto = `max(100, base)`. | `25` | `utils/child-process.ts` `resolveExitStdioBaseGraceMs` | numérica (ms ≥ 0) |
-| `PIT_BASH_AUTO_BACKGROUND_SECONDS` | Threshold (s) de auto-background do tool `bash`: comando SEM `timeout` explícito que ultrapassa o threshold é PROMOVIDO a job rastreado (`bg-N`, poll/kill via `jobId`) em vez de segurar o turno. `0`/não positivo desativa (comando sem timeout roda até terminar). Comandos de verificação (test/check/lint) nunca são promovidos. | `60` | `tools/bash.ts` `resolveAutoBackgroundSeconds` | numérica (s > 0) |
+| `PIT_BASH_AUTO_BACKGROUND_SECONDS` | Threshold (s) de auto-background do tool `bash` para comandos comuns SEM `timeout` explícito; ao ultrapassá-lo, o comando é PROMOVIDO a job rastreado (`bg-N`, poll/kill via `jobId`). `0`/não positivo desativa essa promoção comum (o comando sem timeout roda até terminar). Comandos de verificação usam o lifecycle próprio: foreground → promoção após 10s, com deadline absoluto. | `60` | `tools/bash.ts` `resolveAutoBackgroundSeconds` | numérica (s > 0) |
 | `PIT_BASH_BACKGROUND_STARTUP_MS` | Janela de startup (ms) do `background: true` explícito: o comando tem esse tempo para falhar rápido em foreground (flag errada, binário ausente) antes de ser destacado como job. | `250` | `tools/bash.ts` `resolveBackgroundStartupMs` | numérica (ms ≥ 0) |
 | `PIT_BASH_STALL_SECONDS` | Janela (s) de detecção de stall de job em background: job ainda rodando, que NÃO é watcher/dev-server, sem output há mais que a janela é marcado `stalled` — aparece no poll do modelo (com hint de kill), no chip `bg:N` do footer (warning) e como opção de kill no picker de Esc. Só detecção; nada é morto automaticamente. `0`/não positivo desativa. | `300` | `tools/bash.ts` `resolveBgStallSeconds` / `isBashBackgroundJobStalled` | numérica (s > 0) |
 | `PIT_COMPACT_SOFT_RATIO` | Multiplicador da banda soft preditiva que dispara a compactação em BACKGROUND (sibling model barato, durante idle) antes do hard wall síncrono. `1.0` = banda legada (`shouldCompactSoft`); maior dispara mais cedo, tornando mais provável que o resumo esteja pronto antes do próximo send (evita a espera visível de compactação síncrona). Clamp `[1.0, 4.0]`; não numérico cai no default. O caminho hard síncrono permanece intocado como safety net. | `1.5` | `agent-session-compaction.ts` `parseCompactSoftRatio` / `shouldStartBackgroundCompaction` | numérica |
 
-### LSP — memória de falha/silêncio (auditoria adversarial 2026-07-17)
+### LSP — memória de falha/silêncio
 
 Ambas on-by-default. Fecham dois impostos default-on do `diagnosticsOnWrite`:
 servidor travado no boot (até 30s/edição, agora capado em 4s + breaker) e
@@ -205,7 +208,7 @@ servidor/arquivo que nunca publica diagnostics (4s/edição, agora ~150ms após
 | `PIT_LSP_SILENCE_GRACE_MS` | Espera de graça (ms) usada quando o par arquivo+servidor foi marcado silencioso (≥2 misses consecutivos). | `150` | `lsp/utils.ts` | numérica |
 | `PIT_NO_LSP_CROSS_FILE_SURFACE` | Desativa o surfacing de diagnostics cross-file no apêndice do writethrough — volta a mostrar só o arquivo editado. Sem a flag, publishes de OUTROS arquivos que ganharam erros novos vs baseline (ex.: gopls publica por pacote) entram no apêndice do edit, limitados a 3 arquivos × 2 diagnostics, com no máximo uma janela de settle de 25 ms (liberada assim que qualquer publish adicional chega, e só paga quando o arquivo editado teve publish fresco). | OFF (surfacing ligado) | `lsp/writethrough.ts` `crossFileSurfaceDisabled` | `isTruthyEnvFlag` |
 
-### LSP — as duas esperas de diagnostics por edit (P1-3, 2026-07-31)
+### LSP — as duas esperas de diagnostics por edit
 
 Todo edit/write pagava DUAS esperas de publish em série (pré-write + pós-write,
 até 4s cada), e cada uma acordava por `sleep(100)` apesar de `publishDiagnostics`
@@ -223,7 +226,7 @@ inexistente ou cache vazio caem no caminho antigo.
 |---|---|---|---|---|
 | `PIT_NO_LSP_BASELINE_REUSE` | Desativa o reuso do último resultado pós-write como baseline pré-write — toda edição volta a pagar a espera de publish fresco do conteúdo ANTIGO antes de escrever. Sem a flag, o reuso exige igualdade exata de `(mtimeMs, size)` do arquivo e da assinatura dos servidores configurados; qualquer divergência descarta a entrada e cai na espera real. Cache LRU de 64 arquivos, só de sessão. | OFF (reuso ligado) | `lsp/writethrough.ts` `baselineReuseDisabled` | `isTruthyEnvFlag` |
 
-### Ledger de diagnostics cross-write (2026-08-01)
+### Ledger de diagnostics cross-write
 
 O filtro de baseline pré-write compara o diagnostic INCLUINDO o range, o que
 responde "isso já estava aqui antes deste write?" — a pergunta certa para
@@ -245,7 +248,7 @@ só de sessão.
 |---|---|---|---|---|
 | `PIT_NO_LSP_DIAG_LEDGER` | Desativa a supressão cross-write — todo write volta a reportar o diagnostic repetido cujo range mudou. | OFF (ledger ligado) | `lsp/diagnostics-ledger.ts` `ledgerDisabled` | `isTruthyEnvFlag` |
 
-### Pull diagnostics (LSP 3.17) (2026-08-01)
+### Pull diagnostics (LSP 3.17)
 
 A espera de diagnostics era só push (`textDocument/publishDiagnostics`). Servidor
 que só responde `textDocument/diagnostic` sob demanda era indistinguível de um
@@ -267,7 +270,7 @@ method-not-found, então só a capability estática vale.
 |---|---|---|---|---|
 | `PIT_NO_LSP_PULL_DIAGNOSTICS` | Desativa o probe de pull — a espera volta a ser só push, e servidor pull-only volta a parecer mudo. | OFF (pull ligado) | `lsp/client.ts` `supportsDocumentDiagnostics` | `isTruthyEnvFlag` |
 
-### Janela de quiescência para publishes sem versão (2026-08-01)
+### Janela de quiescência para publishes sem versão
 
 Servidor que carimba o publish com a versão do documento é fácil: casamento
 exato é autoritativo e aceito na hora. Servidor que publica SEM versão — todos os
@@ -300,7 +303,7 @@ cima disso.
 | `PIT_NO_LSP_DIAG_SETTLE` | Desativa a janela — volta a aceitar o primeiro publish sem versão, com o risco de stale. | OFF (janela ligada) | `lsp/utils.ts` `settleDisabled` | `isTruthyEnvFlag` |
 | `PIT_LSP_DIAG_SETTLE_MS` | Largura da janela em ms. | `75` | `lsp/utils.ts` `unversionedSettleMs` | inteiro >= 0 |
 
-### Absorções do forgecode — onda 1 (2026-07-17)
+### Absorções do forgecode
 
 Quatro mecanismos portados/adaptados da análise do forgecode, todos
 on-by-default. Snapshots preenchem o gap de checkpoint/rewind de arquivos;
@@ -313,17 +316,21 @@ doom-loop cíclico e retry budget endurecem o loop contra repetição improdutiv
 | `PIT_SNAPSHOT_MAX_PER_FILE` | Cap de snapshots retidos por arquivo (LRU — o mais antigo é descartado). | `20` | `core/file-snapshots.ts` | numérica (inteiro ≥ 1) |
 | `PIT_SNAPSHOT_MAX_AGE_DAYS` | Idade máxima (dias) antes do GC preguiçoso descartar um snapshot (roda na captura). `0` = sem GC por idade. | `7` | `core/file-snapshots.ts` | numérica (≥ 0) |
 | `PIT_NO_TOOLCALL_REPAIR` | Desativa a camada nativa de reparo de tool calls (tier estrutural `jsonrepair` + coerção dirigida pelo schema: `"42"`→42, `""`→null em opcionais, array/objeto stringificado, JSON duplo-encodado ≤4 níveis, extração de array, enum case-insensitive). Roda entre os rewrite registries (que continuam vencendo) e a validação — sem round-trip de modelo. Stats via `getToolArgRepairStats()`. | OFF (reparo ligado) | `packages/agent/src/tool-arg-repair.ts` (wired em `agent-loop.ts` `prepareToolCall`) | `isTruthyEnvFlag` |
-| `PIT_NO_DOOM_LOOP_GUARD` | Desativa o detector de doom-loop CÍCLICO (n-gram no tail das tool calls: mesmo bloco de período 1..N repetido 3× com args idênticos → steering reminder único, com escalada se o ciclo persistir). Complementa `PIT_NO_REPEATING_PATTERN` (repetição simples), que também o desativa. | OFF (guard ligado) | `core/turn-steering-engine.ts` (detector puro em `core/doom-loop-cycle.ts`) | `isTruthyEnvFlag` |
+| `PIT_NO_DOOM_LOOP_GUARD` | Desativa os dois guards de loop do steering engine: a escada de chamadas idênticas com resultado idêntico (reminder → pause → recovery/abort, exceto polling conhecido) e o detector de padrões multi-tool repetidos. `PIT_NO_REPEATING_PATTERN` desativa apenas o segundo detector. | OFF (guards ligados) | `core/turn-steering-engine.ts` | `isTruthyEnvFlag` |
 | `PIT_NO_TOOL_RETRY_BUDGET` | Desativa o contador de retry budget por (tool, alvo) anexado inline a resultados de erro ("attempts on `edit` for this target: 2/3"), com escalada textual na exaustão (nunca bloqueia — steering apenas). Consecutivo; reseta em sucesso do par ou novo turno do usuário. | OFF (budget ligado) | `core/tool-retry-budget.ts` via Tier-4 error-hint registry (`turn-steering-engine.ts`) | `isTruthyEnvFlag` |
 | `PIT_TOOL_RETRY_BUDGET` | Tamanho do budget de falhas consecutivas por (tool, alvo) antes da escalada. Inválido/≤0 cai no default (nunca zero — seria bloqueio permanente). | `3` | `core/tool-retry-budget.ts` | numérica (inteiro ≥ 1) |
 
-### Navegador nativo (chrome devtools) — auditoria 2026-07-16
+### Navegador nativo (chrome devtools)
 
 | Variável | Efeito | Default | Onde é lida | Convenção |
 |---|---|---|---|---|
 | `PIT_NO_CHROME_DEVTOOLS` | Desativa o subsistema chrome_devtools inteiro, independentemente de `chromeDevtools.enabled` nas settings — kill-switch rápido por invocação. | OFF (subsistema ligado) | `settings-manager.ts` `getChromeDevtoolsSettings` | `isTruthyEnvFlag` |
 | `PIT_NO_CHROME_SCREENSHOT_COMPRESS` | Restaura o comportamento legado de screenshot quando a call não especifica `format`/`quality`: PNG, escala cheia em device pixels, sem cap de dimensão. Sem a flag, o default é JPEG q60 com clip em resolução CSS-pixel (scale `1/devicePixelRatio`) e cap de 4000 CSS px de altura em fullPage (com nota de truncamento no resultado) — corta o custo em tokens do caminho de imagem mais caro do agente. `format`/`quality` explícitos na call sempre vencem. | OFF (compressão ligada) | `chrome-devtools-manager.ts` `screenshot` | `isTruthyEnvFlag` |
 | `PIT_NO_CHROME_ELEMENT_SOURCE_FETCH` | Desativa o fetch de source maps EXTERNOS no `element_to_source` (restrito a origens loopback, com limites de 16 MB/4 s). Source maps inline (`data:`) e o refinamento LSP (quando injetado) continuam funcionando. | OFF (fetch loopback ligado) | `chrome-devtools-manager.ts` `createElementSourceFetchText` | `isTruthyEnvFlag` |
+
+### Ciclo de verificação não bloqueante
+
+Comandos reconhecidos como `test`, `check`, `lint` ou `typecheck` começam em foreground e são promovidos automaticamente após 10s se ainda estiverem ativos. A promoção preserva o deadline absoluto contado de `startedAt` (180s por padrão, ou o `timeout` explícito), registra `deadlineAt`/`timedOut` no job e deduplica por sessão, cwd canônico e comando normalizado. O caminho `!` não opta por essa promoção silenciosa; `PIT_BASH_AUTO_BACKGROUND_SECONDS` continua afetando apenas comandos comuns.
 
 ### Harness de desenvolvimento (não são economia de tokens, mas `PIT_*`)
 

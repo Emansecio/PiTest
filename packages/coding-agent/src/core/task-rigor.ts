@@ -27,19 +27,23 @@ const MEDIUM_PATTERN =
 const HIGH_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
 	{ pattern: /\b(refactor|refatorar|migrate|migrar|migration|rename|renomear)\b/i, reason: "refactor/migration" },
 	{
-		pattern: /\b(cross-file|multi-file|multiple files|varios arquivos|muitos arquivos|monorepo)\b/i,
+		pattern:
+			/\b(cross-file|multi-file|multiple files|multi-module|multiple modules|across (?:multiple |two )?(?:files|modules)|varios arquivos|muitos arquivos|monorepo)\b/i,
 		reason: "cross-file change",
 	},
 	{
-		pattern: /\b(permission|permissions|auth|oauth|security|sandbox|permissao|permissoes|seguranca)\b/i,
+		pattern:
+			/\b(permission|permissions|auth|authentication|authorization|oauth|security|sandbox|permissao|permissoes|seguranca)\b/i,
 		reason: "permission/security surface",
 	},
 	{
-		pattern: /\b(lsp|provider|settings|config|agent loop|session|mcp|tools?|verification|verificacao)\b/i,
+		pattern:
+			/\b(lsp|agent loop|agent lifecycle|session lifecycle|provider integration|model provider integration|mcp integration|tool registry|tool execution lifecycle|verification pipeline|verification lifecycle|verificacao do agent loop)\b/i,
 		reason: "agent/config surface",
 	},
 	{
-		pattern: /\b(api contract|schema|database|breaking|release|public type|tipo publico)\b/i,
+		pattern:
+			/\b(api contract|public api|public contract|schema|database migration|breaking change|release contract|public type|tipo publico)\b/i,
 		reason: "contract surface",
 	},
 ];

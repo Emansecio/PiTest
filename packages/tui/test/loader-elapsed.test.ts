@@ -3,12 +3,17 @@ import { describe, it } from "node:test";
 import { Loader } from "../src/components/loader.js";
 import type { TUI } from "../src/tui.js";
 
-function trackingTui(): { ui: TUI; tick: (now: number) => boolean; active: () => number } {
-	const cbs = new Set<(now: number) => boolean>();
+function trackingTui(): {
+	ui: TUI;
+	tick: (now: number) => boolean;
+	active: () => number;
+	cadences: () => number[];
+} {
+	const cbs = new Map<(now: number) => boolean, number>();
 	const ui = {
 		requestRender() {},
-		addAnimationCallback(fn: (now: number) => boolean) {
-			cbs.add(fn);
+		addAnimationCallback(fn: (now: number) => boolean, intervalMs = 16) {
+			cbs.set(fn, intervalMs);
 			return () => {
 				cbs.delete(fn);
 			};
@@ -17,9 +22,10 @@ function trackingTui(): { ui: TUI; tick: (now: number) => boolean; active: () =>
 	return {
 		ui,
 		active: () => cbs.size,
+		cadences: () => [...cbs.values()],
 		tick: (now: number) => {
 			let dirty = false;
-			for (const fn of [...cbs]) {
+			for (const fn of cbs.keys()) {
 				if (fn(now)) dirty = true;
 			}
 			return dirty;
@@ -55,6 +61,23 @@ describe("Loader elapsed with frozen indicator", () => {
 		assert.strictEqual(t.tick(0), true);
 		const text = loader.render(80).join("\n");
 		assert.match(text, /5s/);
+	});
+
+	it("advances elapsed with an empty indicator", () => {
+		const t = trackingTui();
+		const loader = new Loader(
+			t.ui,
+			(s) => s,
+			(s) => s,
+			"Working…",
+			{ frames: [] },
+		);
+		loader.setElapsedEnabled(true);
+		(loader as unknown as { startedAtMs: number }).startedAtMs = Date.now() - 5000;
+		assert.strictEqual(t.active(), 1);
+		assert.deepEqual(t.cadences(), [1000], "elapsed-only empty loaders request a one-second ticker cadence");
+		assert.strictEqual(t.tick(0), true);
+		assert.match(loader.render(80).join("\n"), /5s/);
 	});
 
 	it("appends a trailing suffix independent of setMessage", () => {

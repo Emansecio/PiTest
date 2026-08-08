@@ -33,7 +33,9 @@ export interface ResumeState {
 	handle: string;
 	/** Partial transcript captured at interruption (trailing failure turn dropped on resume). */
 	messages: AgentMessage[];
-	/** Model id, re-resolved against the registry on resume (falls back to parent). */
+	/** Model provider. Optional only for backwards compatibility with legacy resume files. */
+	modelProvider?: string;
+	/** Model id, re-resolved together with modelProvider on resume. */
 	modelId?: string;
 	thinkingLevel?: string;
 	systemPrompt?: string;

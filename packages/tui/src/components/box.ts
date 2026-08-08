@@ -90,11 +90,13 @@ export class Box implements Component {
 	}
 
 	render(width: number): string[] {
+		if (width <= 0) return [];
 		if (this.children.length === 0) {
 			return [];
 		}
 
-		const contentWidth = Math.max(1, width - this.paddingX * 2);
+		const effectivePaddingX = Math.min(this.paddingX, Math.floor(Math.max(0, width - 1) / 2));
+		const contentWidth = Math.max(1, width - effectivePaddingX * 2);
 
 		// Render all children, but hold onto their returned array *references*
 		// only — don't materialize the left-padded lines yet. The cache check
@@ -114,7 +116,7 @@ export class Box implements Component {
 		}
 
 		// Cache miss: materialize the left-padded content lines now.
-		const leftPad = " ".repeat(this.paddingX);
+		const leftPad = " ".repeat(effectivePaddingX);
 		const childLines: string[] = [];
 		for (const lines of childRefs) {
 			for (const line of lines) {

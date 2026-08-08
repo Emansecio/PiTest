@@ -3,6 +3,7 @@
  */
 
 import type { Component, TUI } from "@pit/tui";
+import { isReducedMotion } from "../../../utils/env-flags.ts";
 import { theme } from "../theme/theme.ts";
 
 // XBM image: 31x36 pixels, LSB first, 1=background, 0=foreground
@@ -75,6 +76,12 @@ export class ArminComponent implements Component {
 		this.effect = EFFECTS[Math.floor(Math.random() * EFFECTS.length)];
 		this.finalGrid = buildFinalGrid();
 		this.currentGrid = this.createEmptyGrid();
+
+		if (isReducedMotion()) {
+			this.currentGrid = this.finalGrid.map((row) => [...row]);
+			this.updateDisplay();
+			return;
+		}
 
 		this.initEffect();
 		this.startAnimation();

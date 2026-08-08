@@ -148,21 +148,17 @@ export class SlotLease {
 
 	/**
 	 * Mark one descendant settled. Only the final 1→0 transition re-takes the
-	 * physical slot. Bypasses the queue cap (not new work) and swallows an abort —
-	 * an aborting agent that fails to re-take simply finishes unaccounted rather
-	 * than throwing from a finally.
+	 * physical slot. Bypasses the queue cap (not new work) and is deliberately not
+	 * abortable: even a cancelled parent remains live until its callback settles,
+	 * so it must re-enter accounting before it can finish and close its lease.
 	 */
-	reacquire(signal?: AbortSignal): Promise<void> {
+	reacquire(): Promise<void> {
 		return this.enqueue(async () => {
 			if (this.closed) return;
 			if (this.suspendedByDescendants > 0) this.suspendedByDescendants--;
 			if (this.suspendedByDescendants > 0 || this.held) return;
-			try {
-				await acquireOne(signal, { bypassQueueCap: true });
-				this.held = true;
-			} catch {
-				// Aborted while re-taking: stay unheld; close() stays a no-op for us.
-			}
+			await acquireOne(undefined, { bypassQueueCap: true });
+			this.held = true;
 		});
 	}
 
@@ -236,14 +232,14 @@ export function slotStats(): { active: number; queued: number } {
  * so a nested child at concurrency=1 would otherwise queue behind its parent
  * while that parent blocks in join — another nested-semaphore deadlock.
  */
-export async function yieldRunSlotWhile<T>(signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<T> {
+export async function yieldRunSlotWhile<T>(_signal: AbortSignal | undefined, fn: () => Promise<T>): Promise<T> {
 	const lease = currentLease();
 	if (!lease) return await fn();
 	await lease.yieldSlot();
 	try {
 		return await fn();
 	} finally {
-		await lease.reacquire(signal);
+		await lease.reacquire();
 	}
 }
 
@@ -268,7 +264,6 @@ export async function withRunSlot<T>(signal: AbortSignal | undefined, fn: () => 
 		return await leaseContext.run(lease, fn);
 	} finally {
 		if (lease) await lease.close();
-		// reacquire never rejects (aborts are swallowed inside the lease op).
-		if (enclosing) await enclosing.reacquire(signal);
+		if (enclosing) await enclosing.reacquire();
 	}
 }

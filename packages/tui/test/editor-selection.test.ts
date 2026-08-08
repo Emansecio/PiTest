@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import { Editor } from "../src/components/editor.js";
+import { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "../src/keybindings.js";
 import type { MouseEvent } from "../src/keys.js";
 import { TUI } from "../src/tui.js";
 import { defaultEditorTheme } from "./test-themes.js";
@@ -283,6 +284,28 @@ describe("Editor selection — highlight render", () => {
 		assert.ok(raw.includes("\x1b[7m你好\x1b[0m"), `expected reverse-video "你好", got: ${JSON.stringify(raw)}`);
 	});
 
+	it("emits no inverse selection SGR under NO_COLOR", () => {
+		const previousNoColor = process.env.NO_COLOR;
+		const previousForceColor = process.env.FORCE_COLOR;
+		process.env.NO_COLOR = "1";
+		delete process.env.FORCE_COLOR;
+		try {
+			const editor = newEditor();
+			editor.setText("hello world");
+			editor.render(80);
+			editor.onMouse(mouse("press"), 0, 0);
+			editor.onMouse(mouse("drag"), 0, 5);
+			const raw = editor.render(80)[0]!;
+			assert.ok(!raw.includes("\x1b[7m"));
+			assert.equal(stripVTControlCharacters(raw).trimEnd(), "hello world");
+		} finally {
+			if (previousNoColor === undefined) delete process.env.NO_COLOR;
+			else process.env.NO_COLOR = previousNoColor;
+			if (previousForceColor === undefined) delete process.env.FORCE_COLOR;
+			else process.env.FORCE_COLOR = previousForceColor;
+		}
+	});
+
 	it("has no selection escape once the selection collapses", () => {
 		const editor = newEditor();
 		editor.setText("hello world");
@@ -295,6 +318,52 @@ describe("Editor selection — highlight render", () => {
 		editor.handleInput("\x1b[C");
 		const raw = editor.render(80)[0]!;
 		assert.ok(!raw.includes("\x1b[7mhello"), "no selection highlight after collapse");
+	});
+});
+
+describe("Editor selection — keyboard", () => {
+	it("extends and shrinks with Shift+Arrow", () => {
+		const editor = newEditor();
+		editor.setText("hello");
+		editor.handleInput("\x1b[H");
+		editor.handleInput("\x1b[1;2C");
+		editor.handleInput("\x1b[1;2C");
+		assert.equal(editor.getSelectedText(), "he");
+		editor.handleInput("\x1b[1;2D");
+		assert.equal(editor.getSelectedText(), "h");
+	});
+
+	it("respects remapped keyboard-selection bindings", () => {
+		setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS, { "tui.editor.selectRight": "ctrl+x" }));
+		try {
+			const editor = newEditor();
+			editor.setText("hello");
+			editor.handleInput("\x1b[H");
+			editor.handleInput("\x1b[1;2C");
+			assert.equal(editor.getSelectedText(), "");
+			editor.handleInput("\x18");
+			assert.equal(editor.getSelectedText(), "h");
+		} finally {
+			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+		}
+	});
+
+	it("supports Shift+Home/End, word navigation, and PageUp/PageDown", () => {
+		const editor = newEditor(80, 10);
+		editor.setText("alpha beta\ngamma delta\nthird line\nfourth line\nfifth line\nsixth line");
+		editor.handleInput("\x1b[1;2H"); // Shift+Home
+		assert.equal(editor.getSelectedText(), "sixth line");
+		editor.handleInput("\x1b[1;2F"); // Shift+End shrinks back to the original end
+		assert.equal(editor.getSelectedText(), "");
+		editor.handleInput("\x1b[1;6D"); // Ctrl+Shift+Left
+		assert.equal(editor.getSelectedText(), "line");
+
+		const beforePage = editor.getCursor();
+		editor.handleInput("\x1b[5;2~");
+		assert.ok(editor.hasActiveSelection());
+		assert.notDeepEqual(editor.getCursor(), beforePage);
+		editor.handleInput("\x1b[6;2~");
+		assert.deepEqual(editor.getCursor(), beforePage);
 	});
 });
 
@@ -313,6 +382,21 @@ describe("Editor selection — copy callback", () => {
 		editor.handleInput("\x1bc"); // alt+c
 
 		assert.deepEqual(copied, ["hello"]);
+	});
+
+	it("expands a selected large-paste marker before copying", () => {
+		const copied: string[] = [];
+		const editor = new Editor(createTestTUI(), defaultEditorTheme, {
+			embedded: true,
+			copySelection: (text) => copied.push(text),
+		});
+		const paste = Array.from({ length: 12 }, (_, i) => `line ${i}`).join("\n");
+		editor.handleInput(`\x1b[200~${paste}\x1b[201~`);
+		editor.render(80);
+		editor.onMouse(mouse("press"), 0, 0);
+		editor.onMouse(mouse("press"), 0, 0);
+		editor.handleInput("\x1bc");
+		assert.deepEqual(copied, [paste]);
 	});
 
 	it("does not fire copySelection when there is no selection", () => {

@@ -307,8 +307,14 @@ export class ProcessTerminal implements Terminal {
 	 * handles the case where the response arrives split across multiple stdin events.
 	 */
 	private queryAndEnableKittyProtocol(): void {
+		// Even a dumb terminal still needs the input splitter/listener so normal
+		// keystrokes and bracketed-paste payloads are delivered safely. It must not,
+		// however, receive capability queries (nor the delayed modifyOtherKeys
+		// fallback): TERM=dumb consumers commonly treat escape output as literal.
 		this.setupStdinBuffer();
 		process.stdin.on("data", this.stdinDataHandler!);
+		if (process.env.TERM?.toLowerCase() === "dumb") return;
+
 		process.stdout.write("\x1b[?u");
 		this.kittyFallbackTimer = setTimeout(() => {
 			this.kittyFallbackTimer = undefined;

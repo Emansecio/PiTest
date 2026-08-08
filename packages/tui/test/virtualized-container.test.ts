@@ -237,6 +237,46 @@ describe("VirtualizedContainer", () => {
 		assert.deepEqual(container.render(20), ["a ", "c "]);
 	});
 
+	it("sanitizes and width-clamps a throwing child message", () => {
+		const container = new VirtualizedContainer();
+		container.addChild({
+			render: () => {
+				throw new Error(`\x1b[31mbad\n${"x".repeat(100)}`);
+			},
+			invalidate() {},
+		});
+		const line = container.render(24)[0]!;
+		assert.ok(!line.includes("\x1b[31m"));
+		assert.ok(!line.includes("\n"));
+		assert.ok(line.length < 60);
+	});
+
+	it("does not rethrow hostile error message conversion", () => {
+		const hostileMessage = new Error("unreadable");
+		Object.defineProperty(hostileMessage, "message", {
+			get() {
+				throw new Error("message getter exploded");
+			},
+		});
+		const hostileString = {
+			toString() {
+				throw new Error("toString exploded");
+			},
+		};
+
+		for (const thrown of [hostileMessage, hostileString]) {
+			const container = new VirtualizedContainer();
+			container.addChild({
+				render: () => {
+					throw thrown;
+				},
+				invalidate() {},
+			});
+			assert.doesNotThrow(() => container.render(40));
+			assert.match(container.render(40)[0]!, /unknown error/);
+		}
+	});
+
 	it("isolates a throwing child so siblings still render (M3)", () => {
 		const container = new VirtualizedContainer();
 		const ok = new StableText("ok");

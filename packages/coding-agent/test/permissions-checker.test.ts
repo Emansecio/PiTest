@@ -343,6 +343,27 @@ describe("PermissionChecker — plan mode blocks side-effecting tools", () => {
 		expect(c.check(describeToolAction("memory_append", { scope: "project", entry: "x" })).decision).toBe("deny");
 	});
 
+	it.each(["plan", "ask"] as const)(
+		"allows coordinator delegation in %s only with trusted read-only metadata",
+		(mode) => {
+			const c = new PermissionChecker({ cwd, mode, settings: {} });
+			for (const toolName of ["task", "parallel", "fanout"]) {
+				const action = describeToolAction(toolName, { prompt: "research only" });
+				expect(c.check(action).decision, `${toolName}:missing`).toBe("deny");
+				expect(c.check(action, { readOnlyDelegation: true }).decision, `${toolName}:proven`).toBe("allow");
+			}
+		},
+	);
+
+	it("does not let read-only delegation metadata authorize MCP, exec, writes, or non-coordinator agent tools", () => {
+		const c = new PermissionChecker({ cwd, mode: "plan", settings: {} });
+		const metadata = { readOnlyDelegation: true } as const;
+		expect(c.check(describeToolAction("mcp__github__list_issues", {}), metadata).decision).toBe("deny");
+		expect(c.check(describeToolAction("bash", { command: "git status" }), metadata).decision).toBe("deny");
+		expect(c.check(describeToolAction("write", { path: "notes.txt", content: "x" }), metadata).decision).toBe("deny");
+		expect(c.check(describeToolAction("goal_complete", {}), metadata).decision).toBe("deny");
+	});
+
 	it("allows exit_plan in plan mode (sideEffect none)", () => {
 		const c = new PermissionChecker({ cwd, mode: "plan", settings: {} });
 		expect(c.check(describeToolAction("exit_plan", { title: "t" })).decision).toBe("allow");

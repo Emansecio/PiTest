@@ -550,6 +550,10 @@ export type AgentToolUpdateCallback<T = any> = (partialResult: AgentToolResult<T
  * structured question mid-turn).
  */
 export interface AgentToolExecuteContext {
+	/** The current agent-run signal, excluding per-tool cancellation. */
+	runSignal?: AbortSignal;
+	/** The signal raised by an individual `cancelTool(id)` request. */
+	cancelSignal?: AbortSignal;
 	/**
 	 * Bus for tools that need to request structured input from the user
 	 * during execution (e.g. the `ask` tool).

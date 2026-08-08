@@ -11,6 +11,7 @@ import {
 	getSegmenter,
 	isWhitespaceChar,
 	sliceByColumn,
+	truncateToUtf8Bytes,
 	truncateToWidth,
 	visibleWidth,
 } from "../utils.ts";
@@ -233,6 +234,11 @@ interface EditorState {
 	cursorCol: number;
 }
 
+interface EditorSnapshot extends EditorState {
+	pasteEntries: Array<[number, string]>;
+	pasteCounter: number;
+}
+
 interface LayoutLine {
 	text: string;
 	/** Visible width of `text`; precomputed so render() doesn't rescan per frame. */
@@ -271,8 +277,9 @@ export interface EditorOptions {
 	/**
 	 * Called when a paste exceeds MAX_PASTE_BYTES and is truncated. The editor has
 	 * no warning surface of its own, so the consumer plumbs this to its own warning
-	 * mechanism (e.g. showWarning). `originalBytes` is the pre-truncation length,
-	 * `keptBytes` the length actually inserted.
+	 * mechanism (e.g. showWarning). `originalBytes` is the complete raw payload
+	 * size when the pre-normalization cap applies, otherwise the normalized,
+	 * filtered pre-truncation size; `keptBytes` is the length actually inserted.
 	 */
 	onPasteTruncated?: (info: { originalBytes: number; keptBytes: number }) => void;
 	/**
@@ -365,9 +372,30 @@ const SYMBOL_COMPLETION_CONTEXT_RE = /(?:^|[\s])[@#][^\s]*$/;
 // Control chars to strip from a paste, EXCEPT newline (0x0A): 0x00-0x09 and
 // 0x0B-0x1F. Equivalent to the old `char === "\n" || charCode >= 32` filter.
 const CONTROL_CHARS_EXCEPT_NEWLINE_RE = /[\x00-\x09\x0b-\x1f]/g;
-// Hard cap on a single paste (10 MiB) applied before any full-string pass, so a
-// huge blob can't freeze the event loop or OOM the TUI.
+// Hard cap on a single normalized paste (10 MiB). Tabs and line endings are
+// normalized before measuring so expansion cannot bypass the byte limit.
 const MAX_PASTE_BYTES = 10 * 1024 * 1024;
+const BRACKETED_PASTE_END = "\x1b[201~";
+
+/** Exclude a possible chunk-split end-marker prefix from the buffered payload. */
+function bufferedPastePayloadBytes(buffer: string, totalBytes: number): number {
+	for (let length = BRACKETED_PASTE_END.length - 1; length > 0; length--) {
+		const suffix = buffer.slice(-length);
+		if (BRACKETED_PASTE_END.startsWith(suffix)) return totalBytes - length;
+	}
+	return totalBytes;
+}
+
+/** Match the repository theme's NO_COLOR/FORCE_COLOR precedence without
+ * coupling the TUI package to the coding-agent Theme implementation. */
+function ansiStylesEnabled(): boolean {
+	const force = process.env.FORCE_COLOR;
+	if (force !== undefined) {
+		const normalized = force.toLowerCase();
+		return force !== "0" && normalized !== "false";
+	}
+	return !("NO_COLOR" in process.env);
+}
 
 export class Editor implements Component, Focusable, MouseTarget {
 	private state: EditorState = {
@@ -476,6 +504,8 @@ export class Editor implements Component, Focusable, MouseTarget {
 	private autocompleteState: "regular" | "force" | null = null;
 	private autocompletePrefix: string = "";
 	private autocompleteMaxVisible: number = 5;
+	private autocompleteMouseStartRow = -1;
+	private autocompleteMouseRows = 0;
 	private autocompleteAbort?: AbortController;
 	private autocompleteDebounceTimer?: ReturnType<typeof setTimeout>;
 	private autocompleteRequestTask: Promise<void> = Promise.resolve();
@@ -505,6 +535,7 @@ export class Editor implements Component, Focusable, MouseTarget {
 
 	// Bracketed paste mode buffering
 	private pasteBuffer: string = "";
+	private pasteBufferBytes = 0;
 	private isInPaste: boolean = false;
 
 	// Prompt history for up/down navigation
@@ -534,13 +565,17 @@ export class Editor implements Component, Focusable, MouseTarget {
 	// vertical move can resolve it to a visual column on whatever VL it belongs
 	// to.
 	private snappedFromCursorCol: number | null = null;
+	// A requested visible column may fall inside a wide grapheme and therefore
+	// snap to its leading cell. Preserve the unsnapped cell for the next vertical
+	// move (e.g. ASCII col 3 → CJK col 2 → ASCII col 3).
+	private snappedFromVisualCol: number | null = null;
 
 	// Undo support. The redo stack mirrors the undo stack: undo pushes the current
 	// state here before applying a popped snapshot; redo pops from here. Any NEW
 	// edit (via pushUndoSnapshot) clears the redo stack, since the future being
 	// redone no longer applies once history diverges.
-	private undoStack = new UndoStack<EditorState>();
-	private redoStack = new UndoStack<EditorState>();
+	private undoStack = new UndoStack<EditorSnapshot>();
+	private redoStack = new UndoStack<EditorSnapshot>();
 	// Set while undo()/redo() apply a snapshot so pushUndoSnapshot — which they do
 	// NOT call — stays the single place that clears the redo stack on real edits.
 	private applyingHistory = false;
@@ -637,11 +672,46 @@ export class Editor implements Component, Focusable, MouseTarget {
 
 	private touchBuffer(): void {
 		this.bufferRevision++;
+		this.prunePasteMetadata();
 		// Central invariant: every buffer mutation clears the selection. Selection
 		// gestures (press/drag/release) mutate cursor/anchor only and never call
 		// touchBuffer, so a live drag is unaffected; deleteSelectionInternal reads
 		// the range before its own touchBuffer runs.
 		this.selectionAnchor = null;
+	}
+
+	private pasteMarker(pasteId: number, pasteContent: string): string {
+		const lineCount = pasteContent.split("\n").length;
+		return lineCount > 10
+			? `[paste #${pasteId} +${lineCount} lines]`
+			: `[paste #${pasteId} ${pasteContent.length} chars]`;
+	}
+
+	/** Remove payloads whose exact generated marker no longer exists. Undo/redo
+	 * snapshots carry the map, so pruning stale IDs does not break restoration. */
+	private prunePasteMetadata(): void {
+		if (this.pastes.size === 0) return;
+		const text = this.state.lines.join("\n");
+		let changed = false;
+		for (const [id, content] of this.pastes) {
+			if (!text.includes(this.pasteMarker(id, content))) {
+				this.pastes.delete(id);
+				changed = true;
+			}
+		}
+		if (changed) {
+			this.validPasteIdsCache = undefined;
+			this.wrapCache.clear();
+			this.wrapCacheWidth = -1;
+		}
+	}
+
+	private clearPasteMetadata(): void {
+		if (this.pastes.size === 0) return;
+		this.pastes.clear();
+		this.validPasteIdsCache = undefined;
+		this.wrapCache.clear();
+		this.wrapCacheWidth = -1;
 	}
 
 	/**
@@ -818,6 +888,9 @@ export class Editor implements Component, Focusable, MouseTarget {
 
 	/** Internal setText that doesn't reset history state - used by navigateHistory */
 	private setTextInternal(text: string): void {
+		// Whole-buffer replacements are not provenance for historical marker-like
+		// text. The undo snapshot (when any) retains the prior live payload map.
+		this.clearPasteMetadata();
 		const lines = text.split("\n");
 		this.state.lines = lines.length === 0 ? [""] : lines;
 		this.state.cursorLine = this.state.lines.length - 1;
@@ -894,6 +967,7 @@ export class Editor implements Component, Focusable, MouseTarget {
 	}
 
 	render(width: number): string[] {
+		const useAnsiStyles = ansiStylesEnabled();
 		const framed = this.closedFrame && width >= 3;
 		const frameWidth = framed ? 2 : 0;
 		const innerWidth = Math.max(1, width - frameWidth);
@@ -1072,7 +1146,7 @@ export class Editor implements Component, Focusable, MouseTarget {
 				const colorize = this.theme.placeholderColor ?? ((t: string) => t);
 				const marker = emitCursorMarker ? CURSOR_MARKER : "";
 				const blinkOff = this.cursorBlinkEnabled && !this.cursorBlinkVisible;
-				const reverse = (s: string) => (blinkOff ? s : `\x1b[7m${s}\x1b[0m`);
+				const reverse = (s: string) => (blinkOff || !useAnsiStyles ? s : `\x1b[7m${s}\x1b[0m`);
 				// Reserve 1 col for the cursor so the hint never overflows contentWidth.
 				const hintBudget = Math.max(0, contentWidth - 1);
 				const truncated = hintBudget > 0 ? truncateToWidth(this.placeholder!, hintBudget) : "";
@@ -1100,7 +1174,15 @@ export class Editor implements Component, Focusable, MouseTarget {
 				const cursorPos = layoutLine.hasCursor && layoutLine.cursorPos !== undefined ? layoutLine.cursorPos : null;
 				const marker = emitCursorMarker && cursorPos !== null ? CURSOR_MARKER : "";
 				const blinkOff = this.cursorBlinkEnabled && !this.cursorBlinkVisible;
-				const composed = this.composeSelectedLine(displayText, selRange.a, selRange.b, cursorPos, marker, blinkOff);
+				const composed = this.composeSelectedLine(
+					displayText,
+					selRange.a,
+					selRange.b,
+					cursorPos,
+					marker,
+					blinkOff,
+					useAnsiStyles,
+				);
 				displayText = composed.text;
 				lineVisibleWidth += composed.extraWidth;
 				if (composed.extraWidth > 0 && lineVisibleWidth > contentWidth && paddingX > 0) {
@@ -1124,12 +1206,12 @@ export class Editor implements Component, Focusable, MouseTarget {
 					// only the first cluster is read.
 					const firstGrapheme = this.segment(after)[Symbol.iterator]().next().value?.segment || "";
 					const restAfter = after.slice(firstGrapheme.length);
-					const cursor = blinkOff ? firstGrapheme : `\x1b[7m${firstGrapheme}\x1b[0m`;
+					const cursor = blinkOff || !useAnsiStyles ? firstGrapheme : `\x1b[7m${firstGrapheme}\x1b[0m`;
 					displayText = before + marker + cursor + restAfter;
 					// lineVisibleWidth stays the same - we're replacing, not adding
 				} else {
 					// Cursor is at the end - add highlighted space
-					const cursor = blinkOff ? " " : "\x1b[7m \x1b[0m";
+					const cursor = blinkOff || !useAnsiStyles ? " " : "\x1b[7m \x1b[0m";
 					displayText = before + marker + cursor;
 					lineVisibleWidth = lineVisibleWidth + 1;
 					// If cursor overflows content width into the padding, flag it
@@ -1181,8 +1263,12 @@ export class Editor implements Component, Focusable, MouseTarget {
 		}
 
 		// Add autocomplete list if active
+		this.autocompleteMouseStartRow = -1;
+		this.autocompleteMouseRows = 0;
 		if (this.autocompleteState && this.autocompleteList) {
+			this.autocompleteMouseStartRow = result.length;
 			const autocompleteResult = this.autocompleteList.render(contentWidth);
+			this.autocompleteMouseRows = autocompleteResult.length;
 			for (const line of autocompleteResult) {
 				const lineWidth = visibleWidth(line);
 				const linePadding = " ".repeat(Math.max(0, contentWidth - lineWidth));
@@ -1318,6 +1404,7 @@ export class Editor implements Component, Focusable, MouseTarget {
 		if (data.includes("\x1b[200~")) {
 			this.isInPaste = true;
 			this.pasteBuffer = "";
+			this.pasteBufferBytes = 0;
 			data = data.replace("\x1b[200~", "");
 		}
 
@@ -1329,6 +1416,7 @@ export class Editor implements Component, Focusable, MouseTarget {
 			// Mirrors the windowed search in stdin-buffer.ts.
 			const prevLen = this.pasteBuffer.length;
 			this.pasteBuffer += data;
+			this.pasteBufferBytes += Buffer.byteLength(data, "utf8");
 			const searchFrom = Math.max(0, prevLen - 5); // "\x1b[201~".length - 1 = 5
 			const endIndex = this.pasteBuffer.indexOf("\x1b[201~", searchFrom);
 			if (endIndex !== -1) {
@@ -1339,6 +1427,7 @@ export class Editor implements Component, Focusable, MouseTarget {
 				this.isInPaste = false;
 				const remaining = this.pasteBuffer.substring(endIndex + 6);
 				this.pasteBuffer = "";
+				this.pasteBufferBytes = 0;
 				if (remaining.length > 0) {
 					this.handleInput(remaining);
 				}
@@ -1351,10 +1440,13 @@ export class Editor implements Component, Focusable, MouseTarget {
 			// swallowed because we stay in paste mode forever). Once we have clearly
 			// exceeded the cap with no end marker in sight, flush what we have
 			// (handlePaste truncates at MAX_PASTE_BYTES) and exit paste mode.
-			if (this.pasteBuffer.length > MAX_PASTE_BYTES) {
+			// Ignore only an actual chunk-split prefix of the end marker. A fixed
+			// five-byte allowance would fail to flush a UTF-8 payload just over cap.
+			if (bufferedPastePayloadBytes(this.pasteBuffer, this.pasteBufferBytes) > MAX_PASTE_BYTES) {
 				const pasteContent = this.pasteBuffer;
 				this.isInPaste = false;
 				this.pasteBuffer = "";
+				this.pasteBufferBytes = 0;
 				if (pasteContent.length > 0) {
 					this.handlePaste(pasteContent);
 				}
@@ -1378,7 +1470,7 @@ export class Editor implements Component, Focusable, MouseTarget {
 		// Consumes the key regardless so alt+c never leaks a stray character; a copy
 		// only happens when a selection is active and a consumer plumbed copySelection.
 		if (kb.matches(data, "tui.editor.copySelection")) {
-			const selected = this.getSelectedText();
+			const selected = this.getExpandedSelectedText();
 			if (selected) this.copySelection?.(selected);
 			return;
 		}
@@ -1405,6 +1497,8 @@ export class Editor implements Component, Focusable, MouseTarget {
 			return;
 		}
 
+		if (this.handleKeyboardSelection(data, kb)) return;
+
 		// Handle autocomplete mode
 		if (this.autocompleteState && this.autocompleteList) {
 			if (kb.matches(data, "tui.select.cancel")) {
@@ -1419,23 +1513,7 @@ export class Editor implements Component, Focusable, MouseTarget {
 
 			if (kb.matches(data, "tui.input.tab")) {
 				const selected = this.autocompleteList.getSelectedItem();
-				if (selected && this.autocompleteProvider) {
-					this.pushUndoSnapshot();
-					this.lastAction = null;
-					const result = this.autocompleteProvider.applyCompletion(
-						this.state.lines,
-						this.state.cursorLine,
-						this.state.cursorCol,
-						selected,
-						this.autocompletePrefix,
-					);
-					this.state.lines = result.lines;
-					this.state.cursorLine = result.cursorLine;
-					this.setCursorCol(result.cursorCol);
-					this.touchBuffer();
-					this.cancelAutocomplete();
-					if (this.onChange) this.onChange(this.getText());
-				}
+				if (selected) this.applyAutocompleteSelection(selected);
 				return;
 			}
 
@@ -1517,18 +1595,22 @@ export class Editor implements Component, Focusable, MouseTarget {
 
 		// Cursor movement actions
 		if (kb.matches(data, "tui.editor.cursorLineStart")) {
+			this.cancelAutocomplete();
 			this.moveToLineStart();
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorLineEnd")) {
+			this.cancelAutocomplete();
 			this.moveToLineEnd();
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorWordLeft")) {
+			this.cancelAutocomplete();
 			this.moveWordBackwards();
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorWordRight")) {
+			this.cancelAutocomplete();
 			this.moveWordForwards();
 			return;
 		}
@@ -1570,6 +1652,7 @@ export class Editor implements Component, Focusable, MouseTarget {
 
 		// Arrow key navigation (with history support)
 		if (kb.matches(data, "tui.editor.cursorUp")) {
+			this.cancelAutocomplete();
 			if (this.isEditorEmpty()) {
 				this.navigateHistory(-1);
 			} else {
@@ -1588,6 +1671,7 @@ export class Editor implements Component, Focusable, MouseTarget {
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorDown")) {
+			this.cancelAutocomplete();
 			const visualLines = this.buildVisualLineMap(this.lastWidth);
 			if (this.historyIndex > -1 && this.isOnLastVisualLine(visualLines)) {
 				this.navigateHistory(1);
@@ -1600,20 +1684,24 @@ export class Editor implements Component, Focusable, MouseTarget {
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorRight")) {
+			this.cancelAutocomplete();
 			this.moveCursor(0, 1);
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorLeft")) {
+			this.cancelAutocomplete();
 			this.moveCursor(0, -1);
 			return;
 		}
 
 		// Page up/down - scroll by page and move cursor
 		if (kb.matches(data, "tui.editor.pageUp")) {
+			this.cancelAutocomplete();
 			this.pageScroll(-1);
 			return;
 		}
 		if (kb.matches(data, "tui.editor.pageDown")) {
+			this.cancelAutocomplete();
 			this.pageScroll(1);
 			return;
 		}
@@ -1767,13 +1855,13 @@ export class Editor implements Component, Focusable, MouseTarget {
 	}
 
 	private expandPasteMarkers(text: string): string {
-		// Single pass: one combined regex matches every paste marker; the replacer
-		// looks up the stored content by id, falling back to the original match when
-		// the id is unknown. Avoids compiling N regexes / scanning the text N times.
-		const markerRegex = /\[paste #(\d+)( (?:\+\d+ lines|\d+ chars))?\]/g;
-		return text.replace(markerRegex, (match, id: string) => {
-			const pasteContent = this.pastes.get(Number(id));
-			return pasteContent === undefined ? match : pasteContent;
+		// Expand only the exact marker generated for a live payload. Marker-like text
+		// introduced by setText or typed after the original marker was deleted stays
+		// literal, even if it reuses a historical numeric ID.
+		return text.replace(PASTE_MARKER_REGEX, (match, id: string) => {
+			const pasteId = Number(id);
+			const pasteContent = this.pastes.get(pasteId);
+			return pasteContent !== undefined && match === this.pasteMarker(pasteId, pasteContent) ? pasteContent : match;
 		});
 	}
 
@@ -1831,6 +1919,11 @@ export class Editor implements Component, Focusable, MouseTarget {
 		for (let i = start.line + 1; i < end.line; i++) parts.push(this.state.lines[i] ?? "");
 		parts.push((this.state.lines[end.line] ?? "").slice(0, end.col));
 		return parts.join("\n");
+	}
+
+	/** Selected text with any complete large-paste markers restored. */
+	getExpandedSelectedText(): string {
+		return this.expandPasteMarkers(this.getSelectedText());
 	}
 
 	/** Drop any active selection (explicit clear — e.g. Esc). Repaints. */
@@ -1892,8 +1985,9 @@ export class Editor implements Component, Focusable, MouseTarget {
 		cursorPos: number | null,
 		marker: string,
 		blinkOff: boolean,
+		useAnsiStyles: boolean,
 	): { text: string; extraWidth: number } {
-		const rev = (s: string): string => `\x1b[7m${s}\x1b[0m`;
+		const rev = (s: string): string => (useAnsiStyles ? `\x1b[7m${s}\x1b[0m` : s);
 		const before = plain.slice(0, a);
 		const sel = plain.slice(a, b);
 		const after = plain.slice(b);
@@ -2093,37 +2187,36 @@ export class Editor implements Component, Focusable, MouseTarget {
 			this.deleteSelectionInternal();
 		}
 
-		// Cap the paste BEFORE any full-string pass. A multi-MB blob (base64, log,
-		// file dump) would otherwise block the event loop or OOM in the passes
-		// below — the marker branch only kicks in after the cost is already paid.
-		// The editor has no warning surface; the consumer's onPasteTruncated (if
-		// provided) surfaces the truncation, and the marker branch still summarizes.
-		const wasTruncated = pastedText.length > MAX_PASTE_BYTES;
-		const cappedText = wasTruncated ? pastedText.slice(0, MAX_PASTE_BYTES) : pastedText;
-		if (wasTruncated) {
-			this.onPasteTruncated?.({ originalBytes: pastedText.length, keptBytes: cappedText.length });
-		}
-
-		// Decode CSI-u-encoded control bytes some terminals inject into pastes
-		// (see decodeBracketedPasteCsiU) before the per-char filter below runs.
-		const decodedText = decodeBracketedPasteCsiU(cappedText);
-
-		// Clean the pasted text: normalize line endings, expand tabs
+		// Cap raw UTF-8 before decode/tab/line-ending normalization so those
+		// full-string passes cannot allocate in proportion to an arbitrarily large
+		// complete paste. Normalization can expand the bounded prefix, so a second
+		// cap is still applied below.
+		const rawOriginalBytes = Buffer.byteLength(pastedText, "utf8");
+		const rawWasTruncated = rawOriginalBytes > MAX_PASTE_BYTES;
+		const rawText = rawWasTruncated ? truncateToUtf8Bytes(pastedText, MAX_PASTE_BYTES) : pastedText;
+		const decodedText = decodeBracketedPasteCsiU(rawText);
 		const cleanText = this.normalizeText(decodedText);
-
-		// Strip control chars except newline (\n is kept; \r was already mapped to
-		// \n by normalizeText). Regex mirrors the old split/filter/join (charCode
-		// >= 32 kept, so 0x7F DEL stays) without materializing a 1-char-per-cell array.
 		let filteredText = cleanText.replace(CONTROL_CHARS_EXCEPT_NEWLINE_RE, "");
 
 		// If pasting a file path (starts with /, ~, or .) and the character before
-		// the cursor is a word character, prepend a space for better readability
+		// the cursor is a word character, prepend a space for better readability.
 		if (/^[/~.]/.test(filteredText)) {
 			const currentLine = this.state.lines[this.state.cursorLine] || "";
 			const charBeforeCursor = this.state.cursorCol > 0 ? currentLine[this.state.cursorCol - 1] : "";
 			if (charBeforeCursor && /\w/.test(charBeforeCursor)) {
 				filteredText = ` ${filteredText}`;
 			}
+		}
+
+		const normalizedBytes = Buffer.byteLength(filteredText, "utf8");
+		if (normalizedBytes > MAX_PASTE_BYTES) {
+			filteredText = truncateToUtf8Bytes(filteredText, MAX_PASTE_BYTES);
+		}
+		if (rawWasTruncated || normalizedBytes > MAX_PASTE_BYTES) {
+			this.onPasteTruncated?.({
+				originalBytes: rawWasTruncated ? rawOriginalBytes : normalizedBytes,
+				keptBytes: Buffer.byteLength(filteredText, "utf8"),
+			});
 		}
 
 		// Split into lines to check for large paste
@@ -2140,11 +2233,7 @@ export class Editor implements Component, Focusable, MouseTarget {
 			this.invalidateWrapCache();
 
 			// Insert marker like "[paste #1 +123 lines]" or "[paste #1 1234 chars]"
-			const marker =
-				pastedLines.length > 10
-					? `[paste #${pasteId} +${pastedLines.length} lines]`
-					: `[paste #${pasteId} ${totalChars} chars]`;
-			this.insertTextAtCursorInternal(marker);
+			this.insertTextAtCursorInternal(this.pasteMarker(pasteId, filteredText));
 			return;
 		}
 
@@ -2296,6 +2385,7 @@ export class Editor implements Component, Focusable, MouseTarget {
 		this.state.cursorCol = col;
 		this.preferredVisualCol = null;
 		this.snappedFromCursorCol = null;
+		this.snappedFromVisualCol = null;
 	}
 
 	/**
@@ -2320,7 +2410,45 @@ export class Editor implements Component, Focusable, MouseTarget {
 	 * `localCol - lastPaddingX` is the content column. A press above the text
 	 * (header/rule) is declined; below the text clamps to the last visual line.
 	 */
+	private handleKeyboardSelection(data: string, kb: ReturnType<typeof getKeybindings>): boolean {
+		let move: (() => void) | undefined;
+		if (kb.matches(data, "tui.editor.selectLeft")) move = () => this.moveCursor(0, -1, undefined, true);
+		if (kb.matches(data, "tui.editor.selectRight")) move = () => this.moveCursor(0, 1, undefined, true);
+		if (kb.matches(data, "tui.editor.selectUp")) move = () => this.moveCursor(-1, 0, undefined, true);
+		if (kb.matches(data, "tui.editor.selectDown")) move = () => this.moveCursor(1, 0, undefined, true);
+		if (kb.matches(data, "tui.editor.selectPageUp")) move = () => this.pageScroll(-1, true);
+		if (kb.matches(data, "tui.editor.selectPageDown")) move = () => this.pageScroll(1, true);
+		if (kb.matches(data, "tui.editor.selectLineStart")) move = () => this.moveToLineStart(true);
+		if (kb.matches(data, "tui.editor.selectLineEnd")) move = () => this.moveToLineEnd(true);
+		if (kb.matches(data, "tui.editor.selectWordLeft")) move = () => this.moveWordBackwards(true);
+		if (kb.matches(data, "tui.editor.selectWordLeft")) move = () => this.moveWordBackwards(true);
+		if (kb.matches(data, "tui.editor.selectWordRight")) move = () => this.moveWordForwards(true);
+		if (kb.matches(data, "tui.editor.selectWordRight")) move = () => this.moveWordForwards(true);
+		if (!move) return false;
+		this.cancelAutocomplete();
+		this.selectionAnchor ??= { line: this.state.cursorLine, col: this.state.cursorCol };
+		move();
+		return true;
+	}
+
 	onMouse(ev: MouseEvent, localRow: number, localCol: number): boolean {
+		const autocompleteRow = localRow - this.autocompleteMouseStartRow;
+		if (
+			this.autocompleteList &&
+			this.autocompleteMouseStartRow >= 0 &&
+			autocompleteRow >= 0 &&
+			autocompleteRow < this.autocompleteMouseRows
+		) {
+			// The dropdown owns its complete painted rectangle, including headers,
+			// scroll information and key hints. A selectable left press applies the
+			// item directly; all other events/rows are still consumed so they cannot
+			// leak through and reposition the editor cursor.
+			if (this.autocompleteList.onMouse(ev, autocompleteRow, localCol)) {
+				const selected = this.autocompleteList.getSelectedItem();
+				if (selected) this.applyAutocompleteSelection(selected);
+			}
+			return true;
+		}
 		const headerLines = this.jumpMode !== null || this.scrollOffset > 0 || !this.embedded ? 1 : 0;
 		const cellCol = localCol - this.lastPaddingX;
 
@@ -2332,7 +2460,7 @@ export class Editor implements Component, Focusable, MouseTarget {
 			// copySelection hook the keybinding uses). No selection → declined, so
 			// the press stays inert rather than moving the caret.
 			if (ev.button === "right") {
-				const selected = this.getSelectedText();
+				const selected = this.getExpandedSelectedText();
 				if (!selected) return false;
 				this.copySelection?.(selected);
 				return true;
@@ -2341,6 +2469,7 @@ export class Editor implements Component, Focusable, MouseTarget {
 			const textRow = localRow - headerLines;
 			if (textRow < 0) return false; // press on the rule / scroll indicator
 
+			this.cancelAutocomplete();
 			const now = performance.now();
 			const last = this.lastClickCell;
 			const isDouble =
@@ -2370,6 +2499,7 @@ export class Editor implements Component, Focusable, MouseTarget {
 
 		if (ev.type === "drag") {
 			if (!this.mouseSelecting) return false;
+			this.cancelAutocomplete();
 			const textRow = Math.max(0, localRow - headerLines);
 			this.visualToLogical(this.scrollOffset + textRow, cellCol);
 			this.tui.requestRender();
@@ -2429,7 +2559,8 @@ export class Editor implements Component, Focusable, MouseTarget {
 		const vlText = line.slice(vl.startCol, vl.startCol + vl.length);
 		const isLastSegmentOfLine =
 			idx === visualLines.length - 1 || visualLines[idx + 1]?.logicalLine !== vl.logicalLine;
-		const maxOffset = isLastSegmentOfLine ? vl.length : Math.max(0, vl.length - 1);
+		const lastSegment = [...this.segment(vlText)].at(-1);
+		const maxOffset = isLastSegmentOfLine ? vl.length : (lastSegment?.index ?? 0);
 		const offset = Math.min(maxOffset, sliceByColumn(vlText, 0, Math.max(0, cellCol), true).length);
 		// Fresh placement: leave history browsing; setCursorCol drops the sticky
 		// preferred column and any atomic-segment snap so the next vertical move
@@ -2443,6 +2574,12 @@ export class Editor implements Component, Focusable, MouseTarget {
 	 * Move cursor to a target visual line, applying sticky column logic.
 	 * Shared by moveCursor() and pageScroll().
 	 */
+	private visualCursorLimit(text: string, isLastSegment: boolean): number {
+		if (isLastSegment) return visibleWidth(text);
+		const last = [...this.segment(text)].at(-1);
+		return visibleWidth(text.slice(0, last?.index ?? 0));
+	}
+
 	private moveToVisualLine(
 		visualLines: Array<{ logicalLine: number; startCol: number; length: number }>,
 		currentVisualLine: number,
@@ -2455,30 +2592,40 @@ export class Editor implements Component, Focusable, MouseTarget {
 		// When the cursor was snapped to a segment start, resolve the pre-snap
 		// position against the VL it belongs to. This gives the correct visual
 		// column even after a resize reshuffles VLs.
+		const sourceLine = this.state.lines[currentVL.logicalLine] ?? "";
 		let currentVisualCol: number;
-		if (this.snappedFromCursorCol !== null) {
+		if (this.snappedFromVisualCol !== null) {
+			currentVisualCol = this.snappedFromVisualCol;
+		} else if (this.snappedFromCursorCol !== null) {
 			const vlIndex = this.findVisualLineAt(visualLines, currentVL.logicalLine, this.snappedFromCursorCol);
-			currentVisualCol = this.snappedFromCursorCol - visualLines[vlIndex].startCol;
+			const snappedVL = visualLines[vlIndex]!;
+			currentVisualCol = visibleWidth(sourceLine.slice(snappedVL.startCol, this.snappedFromCursorCol));
 		} else {
-			currentVisualCol = this.state.cursorCol - currentVL.startCol;
+			currentVisualCol = visibleWidth(sourceLine.slice(currentVL.startCol, this.state.cursorCol));
 		}
 
 		// For non-last segments, clamp to length-1 to stay within the segment
 		const isLastSourceSegment =
 			currentVisualLine === visualLines.length - 1 ||
 			visualLines[currentVisualLine + 1]?.logicalLine !== currentVL.logicalLine;
-		const sourceMaxVisualCol = isLastSourceSegment ? currentVL.length : Math.max(0, currentVL.length - 1);
+		const sourceText = sourceLine.slice(currentVL.startCol, currentVL.startCol + currentVL.length);
+		const sourceMaxVisualCol = this.visualCursorLimit(sourceText, isLastSourceSegment);
 
 		const isLastTargetSegment =
 			targetVisualLine === visualLines.length - 1 ||
 			visualLines[targetVisualLine + 1]?.logicalLine !== targetVL.logicalLine;
-		const targetMaxVisualCol = isLastTargetSegment ? targetVL.length : Math.max(0, targetVL.length - 1);
+		const targetLine = this.state.lines[targetVL.logicalLine] ?? "";
+		const targetText = targetLine.slice(targetVL.startCol, targetVL.startCol + targetVL.length);
+		const targetMaxVisualCol = this.visualCursorLimit(targetText, isLastTargetSegment);
 
 		const moveToVisualCol = this.computeVerticalMoveColumn(currentVisualCol, sourceMaxVisualCol, targetMaxVisualCol);
 
 		// Set cursor position
 		this.state.cursorLine = targetVL.logicalLine;
-		const targetCol = targetVL.startCol + moveToVisualCol;
+		const targetOffset = sliceByColumn(targetText, 0, moveToVisualCol, true).length;
+		const actualVisualCol = visibleWidth(targetText.slice(0, targetOffset));
+		this.snappedFromVisualCol = actualVisualCol === moveToVisualCol ? null : moveToVisualCol;
+		const targetCol = targetVL.startCol + targetOffset;
 		const logicalLine = this.state.lines[targetVL.logicalLine] || "";
 		this.state.cursorCol = Math.min(targetCol, logicalLine.length);
 
@@ -2489,7 +2636,7 @@ export class Editor implements Component, Focusable, MouseTarget {
 		for (const seg of segments) {
 			if (seg.index > this.state.cursorCol) break;
 			if (seg.segment.length <= 1) continue;
-			if (this.state.cursorCol < seg.index + seg.segment.length) {
+			if (this.state.cursorCol > seg.index && this.state.cursorCol < seg.index + seg.segment.length) {
 				const isContinuation = seg.index < targetVL.startCol;
 				const isMovingDown = targetVisualLine > currentVisualLine;
 
@@ -2516,6 +2663,7 @@ export class Editor implements Component, Focusable, MouseTarget {
 				// Store the pre-snap position so the next vertical move can
 				// resolve it to the correct visual column.
 				this.snappedFromCursorCol = this.state.cursorCol;
+				this.snappedFromVisualCol = null;
 				this.state.cursorCol = seg.index;
 				return;
 			}
@@ -2578,15 +2726,15 @@ export class Editor implements Component, Focusable, MouseTarget {
 		return result;
 	}
 
-	private moveToLineStart(): void {
+	private moveToLineStart(preserveSelection = false): void {
 		this.lastAction = null;
-		this.collapseSelection();
+		if (!preserveSelection) this.collapseSelection();
 		this.setCursorCol(0);
 	}
 
-	private moveToLineEnd(): void {
+	private moveToLineEnd(preserveSelection = false): void {
 		this.lastAction = null;
-		this.collapseSelection();
+		if (!preserveSelection) this.collapseSelection();
 		const currentLine = this.state.lines[this.state.cursorLine] || "";
 		this.setCursorCol(currentLine.length);
 	}
@@ -2916,10 +3064,10 @@ export class Editor implements Component, Focusable, MouseTarget {
 		deltaLine: number,
 		deltaCol: number,
 		precomputedVisualLines?: Array<{ logicalLine: number; startCol: number; length: number }>,
+		preserveSelection = false,
 	): void {
 		this.lastAction = null;
-		// A plain cursor move (no shift-select in this phase) drops any selection.
-		this.collapseSelection();
+		if (!preserveSelection) this.collapseSelection();
 
 		// Up/down navigation needs the full visual-line map. Left/right only needs
 		// it for the rare "at end of last line" preferred-column update, so build it
@@ -2954,7 +3102,7 @@ export class Editor implements Component, Focusable, MouseTarget {
 					const visualLines = precomputedVisualLines ?? this.buildVisualLineMap(this.lastWidth);
 					const currentVL = visualLines[this.findCurrentVisualLine(visualLines)];
 					if (currentVL) {
-						this.preferredVisualCol = this.state.cursorCol - currentVL.startCol;
+						this.preferredVisualCol = visibleWidth(currentLine.slice(currentVL.startCol, this.state.cursorCol));
 					}
 				}
 			} else {
@@ -2980,9 +3128,9 @@ export class Editor implements Component, Focusable, MouseTarget {
 	 * Scroll by a page (direction: -1 for up, 1 for down).
 	 * Moves cursor by the page size while keeping it in bounds.
 	 */
-	private pageScroll(direction: -1 | 1): void {
+	private pageScroll(direction: -1 | 1, preserveSelection = false): void {
 		this.lastAction = null;
-		this.collapseSelection();
+		if (!preserveSelection) this.collapseSelection();
 		const terminalRows = this.tui.terminal.rows;
 		const pageSize = Math.max(5, Math.floor(terminalRows * 0.3));
 
@@ -2993,9 +3141,9 @@ export class Editor implements Component, Focusable, MouseTarget {
 		this.moveToVisualLine(visualLines, currentVisualLine, targetVisualLine);
 	}
 
-	private moveWordBackwards(): void {
+	private moveWordBackwards(preserveSelection = false): void {
 		this.lastAction = null;
-		this.collapseSelection();
+		if (!preserveSelection) this.collapseSelection();
 		const currentLine = this.state.lines[this.state.cursorLine] || "";
 
 		// If at start of line, move to end of previous line
@@ -3135,8 +3283,25 @@ export class Editor implements Component, Focusable, MouseTarget {
 		}
 	}
 
+	private createSnapshot(): EditorSnapshot {
+		return {
+			...this.state,
+			pasteEntries: [...this.pastes.entries()],
+			pasteCounter: this.pasteCounter,
+		};
+	}
+
+	private applySnapshot(snapshot: EditorSnapshot): void {
+		this.state.lines = snapshot.lines;
+		this.state.cursorLine = snapshot.cursorLine;
+		this.state.cursorCol = snapshot.cursorCol;
+		this.pastes = new Map(snapshot.pasteEntries);
+		this.pasteCounter = snapshot.pasteCounter;
+		this.validPasteIdsCache = undefined;
+	}
+
 	private pushUndoSnapshot(): void {
-		this.undoStack.push(this.state);
+		this.undoStack.push(this.createSnapshot());
 		// A new edit invalidates the redo future. undo()/redo() set this flag so
 		// their own snapshot bookkeeping doesn't trip the clear.
 		if (!this.applyingHistory) {
@@ -3150,11 +3315,13 @@ export class Editor implements Component, Focusable, MouseTarget {
 		if (!snapshot) return;
 		// Push the current (pre-undo) state onto the redo stack before applying.
 		this.applyingHistory = true;
-		this.redoStack.push(this.state);
+		this.redoStack.push(this.createSnapshot());
 		this.applyingHistory = false;
-		Object.assign(this.state, snapshot);
+		this.applySnapshot(snapshot);
 		this.lastAction = null;
 		this.preferredVisualCol = null;
+		this.snappedFromCursorCol = null;
+		this.snappedFromVisualCol = null;
 		this.touchBuffer();
 		if (this.onChange) {
 			this.onChange(this.getText());
@@ -3170,9 +3337,11 @@ export class Editor implements Component, Focusable, MouseTarget {
 		this.applyingHistory = true;
 		this.pushUndoSnapshot();
 		this.applyingHistory = false;
-		Object.assign(this.state, snapshot);
+		this.applySnapshot(snapshot);
 		this.lastAction = null;
 		this.preferredVisualCol = null;
+		this.snappedFromCursorCol = null;
+		this.snappedFromVisualCol = null;
 		this.touchBuffer();
 		if (this.onChange) {
 			this.onChange(this.getText());
@@ -3221,9 +3390,9 @@ export class Editor implements Component, Focusable, MouseTarget {
 		// No match found - cursor stays in place
 	}
 
-	private moveWordForwards(): void {
+	private moveWordForwards(preserveSelection = false): void {
 		this.lastAction = null;
-		this.collapseSelection();
+		if (!preserveSelection) this.collapseSelection();
 		const currentLine = this.state.lines[this.state.cursorLine] || "";
 
 		// If at end of line, move to start of next line
@@ -3468,14 +3637,23 @@ export class Editor implements Component, Focusable, MouseTarget {
 				autocompleteTimeoutMs(),
 			);
 			if (settled === undefined) {
-				// Timed out: signal the (still-pending) provider to abort and stop
-				// here — but say so instead of leaving the user staring at nothing.
+				// Only the request that still owns the unchanged buffer may publish a
+				// timeout. A cancelled/stale request must not overwrite newer UI state.
+				const isCurrent = this.isAutocompleteRequestCurrent(
+					requestId,
+					controller,
+					snapshotText,
+					snapshotLine,
+					snapshotCol,
+				);
 				controller.abort();
 				if (this.autocompleteAbort === controller) this.autocompleteAbort = undefined;
-				if (options.force || options.explicitTab) {
-					this.showAutocompleteNotice("search timed out");
+				if (isCurrent) {
+					if (options.force || options.explicitTab) {
+						this.showAutocompleteNotice("search timed out");
+					}
+					this.tui.requestRender();
 				}
-				this.tui.requestRender();
 				return;
 			}
 			const suggestions = settled.value;
@@ -3543,6 +3721,27 @@ export class Editor implements Component, Focusable, MouseTarget {
 			this.state.cursorLine === snapshotLine &&
 			this.state.cursorCol === snapshotCol
 		);
+	}
+
+	/** Apply an already-selected dropdown item directly. Mouse acceptance must not
+	 * synthesize Tab because Tab may be remapped independently of list selection. */
+	private applyAutocompleteSelection(selected: AutocompleteItem): void {
+		if (!this.autocompleteProvider) return;
+		this.pushUndoSnapshot();
+		this.lastAction = null;
+		const result = this.autocompleteProvider.applyCompletion(
+			this.state.lines,
+			this.state.cursorLine,
+			this.state.cursorCol,
+			selected,
+			this.autocompletePrefix,
+		);
+		this.state.lines = result.lines;
+		this.state.cursorLine = result.cursorLine;
+		this.setCursorCol(result.cursorCol);
+		this.touchBuffer();
+		this.cancelAutocomplete();
+		if (this.onChange) this.onChange(this.getText());
 	}
 
 	private applyAutocompleteSuggestions(suggestions: AutocompleteSuggestions, state: "regular" | "force"): void {

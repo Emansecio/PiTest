@@ -27,8 +27,10 @@ describe("InteractiveMode headless (injected terminal)", () => {
 
 		expect(harness.hasWorkingLoader()).toBe(true);
 		expect(harness.workingPhase()).toBe("Thinking…");
-		// The frame really reached the xterm-backed terminal.
-		expect(await harness.screen()).toContain("Thinking…");
+		// The frame really reached the xterm-backed terminal; the spinner carries the live cue.
+		const screen = await harness.screen();
+		expect(screen).toContain("Thinking");
+		expect(screen).not.toContain("Thinking…");
 	});
 
 	test("tool_execution_start drives the loader phase and builds a transcript block", async () => {

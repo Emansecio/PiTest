@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
+import { buildVitestShardTasks, resolveVitestShardCount } from "./vitest-shards.mjs";
 
 // Overlapped parallel gate (wall-time tuned for Windows):
 //   Gate — biome + tsgo (~1.2s). Must pass before vitest starts.
@@ -150,6 +151,18 @@ const vitestTask = {
 	command: vitestUnitPlan ? vitestUnitPlan.command : "npx vitest --run",
 	cwd: "packages/coding-agent",
 };
+// Full suites (pre-push vitest, or check:fast when high-fan-in forces the full
+// unit suite) run as sequential shards on Windows so peak fork RSS stays under
+// the host heap. Changed-only unit runs stay single-shot — they are small.
+const vitestNeedsShards =
+	!skipVitest &&
+	(!vitestUnitPlan || !vitestUnitPlan.command.includes("--changed"));
+const vitestTasks = vitestNeedsShards
+	? buildVitestShardTasks(vitestTask, resolveVitestShardCount())
+	: [vitestTask];
+if (!skipVitest && vitestTasks.length > 1) {
+	console.log(`vitest: ${vitestTasks.length} sequential shard(s) (PIT_VITEST_SHARDS=1 disables)`);
+}
 
 const smokeTasks = [
 	{ name: "browser-smoke", command: "node scripts/check-browser-smoke.mjs" },
@@ -163,11 +176,20 @@ const smokeTasks = [
 // Vitest on Windows often prints the final summary then keeps fork workers alive;
 // the parent shell never gets `close`. Once the summary shows all files passed,
 // reap the tree after a short grace period so the gate can finish.
+//
+// A second hang mode exists: every file reports ✓ but the runner never emits the
+// Test Files summary (tinypool parent stuck with no workers). Silence reaping
+// covers that path without mistaking a long multi-second file for a hang.
 const VITEST_SUMMARY_PASSED_RE = /Test Files\s+\d+ passed/;
 const VITEST_SUMMARY_FAILED_RE = /\bFAIL\b|Test Files\s+.*\bfailed\b/;
 // Any Test Files summary line at all — its absence on a non-zero exit means the
 // vitest process died (crash), not that tests failed (audit 6.1).
 const VITEST_SUMMARY_ANY_RE = /Test Files\s+\d+/;
+// File-level result lines (✓ |unit| test/foo.test.ts …) prove the suite is live.
+const VITEST_FILE_RESULT_RE = /(?:✓|×|FAIL)\s+(?:\|[^|]+\|\s+)?test\//;
+// Longer than the slowest single unit file (~30s) so we never reap mid-file.
+const VITEST_SILENCE_REAP_MS = 90_000;
+const VITEST_SUMMARY_REAP_MS = 2500;
 
 function runVitest(name, command, cwd, onFirstOutput) {
 	const started = Date.now();
@@ -177,14 +199,41 @@ function runVitest(name, command, cwd, onFirstOutput) {
 		let out = "";
 		let settled = false;
 		let sawOutput = false;
-		let reapTimer;
+		let sawFileResult = false;
+		let summaryReapTimer;
+		let silenceReapTimer;
+
+		const clearReapTimers = () => {
+			if (summaryReapTimer) clearTimeout(summaryReapTimer);
+			if (silenceReapTimer) clearTimeout(silenceReapTimer);
+			summaryReapTimer = undefined;
+			silenceReapTimer = undefined;
+		};
 
 		const finish = (code) => {
 			if (settled) return;
 			settled = true;
-			if (reapTimer) clearTimeout(reapTimer);
+			clearReapTimers();
 			activeChildren.delete(child);
 			resolve({ name, code, out, ms: Date.now() - started });
+		};
+
+		const scheduleSilenceReap = () => {
+			if (silenceReapTimer) clearTimeout(silenceReapTimer);
+			// Only arm after real file results — boot/transform silence is normal.
+			if (!sawFileResult || settled || VITEST_SUMMARY_FAILED_RE.test(out)) return;
+			if (VITEST_SUMMARY_ANY_RE.test(out)) return;
+			silenceReapTimer = setTimeout(() => {
+				if (settled || VITEST_SUMMARY_ANY_RE.test(out)) return;
+				// No summary after prolonged silence: treat as Windows teardown hang.
+				// Infer pass/fail from the buffer (summary never arrived).
+				const failed = VITEST_SUMMARY_FAILED_RE.test(out) || /\n\s*×\s+/.test(out);
+				out +=
+					`\n[check-parallel] reaped silent vitest after ${VITEST_SILENCE_REAP_MS}ms ` +
+					`with no Test Files summary (Windows tinypool hang); treating as ${failed ? "failed" : "passed"}.\n`;
+				killTree(child);
+				finish(failed ? 1 : 0);
+			}, VITEST_SILENCE_REAP_MS);
 		};
 
 		const append = (chunk) => {
@@ -193,14 +242,20 @@ function runVitest(name, command, cwd, onFirstOutput) {
 				sawOutput = true;
 				onFirstOutput?.();
 			}
-			if (settled || VITEST_SUMMARY_FAILED_RE.test(out)) return;
-			if (VITEST_SUMMARY_PASSED_RE.test(out) && reapTimer === undefined) {
-				reapTimer = setTimeout(() => {
+			if (VITEST_FILE_RESULT_RE.test(chunk.toString())) {
+				sawFileResult = true;
+			}
+			if (settled) return;
+			// Keep the silence timer sliding while output continues.
+			scheduleSilenceReap();
+			if (VITEST_SUMMARY_FAILED_RE.test(out)) return;
+			if (VITEST_SUMMARY_PASSED_RE.test(out) && summaryReapTimer === undefined) {
+				summaryReapTimer = setTimeout(() => {
 					if (!settled) {
 						killTree(child);
 						finish(0);
 					}
-				}, 2500);
+				}, VITEST_SUMMARY_REAP_MS);
 			}
 		};
 
@@ -214,13 +269,17 @@ function runVitest(name, command, cwd, onFirstOutput) {
 // buffer — the process died before reporting) from "tests failed" (summary
 // present). Crashes get exactly one automatic re-run; real failures never do.
 // PIT_NO_CHECK_RETRY=1 restores the old fail-fast behavior.
+const VITEST_SILENCE_REAPED_RE = /\[check-parallel\] reaped silent vitest/;
+
 async function runVitestWithRetry(task, onFirstOutput) {
 	const first = await runVitest(task.name, task.command, task.cwd, onFirstOutput);
 	// Whatever happened, unblock anything gated on vitest's first output (a
 	// crash can die before emitting a single byte).
 	onFirstOutput?.();
 	if (first.code === 0 || noCheckRetry) return first;
-	if (VITEST_SUMMARY_ANY_RE.test(first.out)) return first;
+	// Real test failures (summary present) and intentional silence-reaps do not
+	// get a second run — only summary-less crashes do.
+	if (VITEST_SUMMARY_ANY_RE.test(first.out) || VITEST_SILENCE_REAPED_RE.test(first.out)) return first;
 	console.error("\nvitest crashed without summary — retrying once (PIT_NO_CHECK_RETRY=1 to disable)");
 	const retry = await runVitest(task.name, task.command, task.cwd);
 	const banner =
@@ -228,6 +287,17 @@ async function runVitestWithRetry(task, onFirstOutput) {
 		`--- first run (crashed, exit ${first.code}) last output ---\n${first.out.slice(-2000)}\n` +
 		"--- retry run ---\n";
 	return { ...retry, out: banner + retry.out, ms: first.ms + retry.ms };
+}
+
+async function runVitestSequenceWithRetry(tasks, onFirstOutput) {
+	const started = Date.now();
+	let out = "";
+	for (const task of tasks) {
+		const result = await runVitestWithRetry(task, onFirstOutput);
+		out += `${out ? "\n" : ""}--- ${task.name} ---\n${result.out}`;
+		if (result.code !== 0) return { name: "vitest", code: result.code, out, ms: Date.now() - started };
+	}
+	return { name: "vitest", code: 0, out, ms: Date.now() - started };
 }
 
 const gateStarted = Date.now();
@@ -296,7 +366,7 @@ const workspaceTestPromises = workspaceTests
 
 const heavyPromises = [
 	tokenBenchPromise,
-	...(skipVitest ? [] : [runVitestWithRetry(vitestTask, releaseTokenBench)]),
+	...(skipVitest ? [] : [runVitestSequenceWithRetry(vitestTasks, releaseTokenBench)]),
 	...workspaceTestPromises,
 	...smokeTasks.map((task) => run(task.name, task.command)),
 ];

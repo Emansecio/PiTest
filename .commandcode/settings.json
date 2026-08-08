@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "powershell",
+      "Shell(npx vitest --run test/agent-loop.test.ts -t P0 elided-args mutation guard 2 >& 1)"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}

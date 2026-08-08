@@ -9,6 +9,7 @@ import { CompactionController } from "../../src/core/agent-session-compaction.ts
 import type { AgentSessionEvent } from "../../src/core/agent-session-events.ts";
 import { type FusionHost, fusionVerify } from "../../src/core/agent-session-fusion.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
+import type { SubagentRequestPolicy } from "../../src/core/coordinator/types.ts";
 import type { JudgeAnalysis } from "../../src/core/fusion/types.ts";
 import { ModelRegistry } from "../../src/core/model-registry.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
@@ -51,6 +52,7 @@ function createHost(): {
 	host: FusionHost;
 	events: AgentSessionEvent[];
 	fusionSpend: ReturnType<typeof vi.fn>;
+	requestPolicy: SubagentRequestPolicy;
 } {
 	const authStorage = AuthStorage.inMemory();
 	authStorage.setRuntimeApiKey("anthropic", "test-key");
@@ -79,6 +81,7 @@ function createHost(): {
 	const modelRegistry = ModelRegistry.inMemory(authStorage);
 	const events: AgentSessionEvent[] = [];
 	const fusionSpend = vi.fn();
+	const requestPolicy: SubagentRequestPolicy = { streamFn: vi.fn() as never, transport: "sse" };
 	let fusionAbort: AbortController | undefined;
 	const host: FusionHost = {
 		model,
@@ -118,13 +121,14 @@ function createHost(): {
 			events.push(event);
 		},
 		getRequiredRequestAuth: async () => ({}),
+		getSubagentRequestPolicy: () => requestPolicy,
 		setLastAssistantMessage: () => {},
 		recordFusionSpend: fusionSpend,
 		prepareFusionContextEconomy: async () => {},
 		evaluateFusionBudget: () => ({ allowed: true }),
 		getContextUsage: () => undefined,
 	};
-	return { host, events, fusionSpend };
+	return { host, events, fusionSpend, requestPolicy };
 }
 
 describe("fusionVerify", () => {
@@ -145,6 +149,19 @@ describe("fusionVerify", () => {
 		expect(result).toEqual(report);
 		expect(events.some((e) => e.type === "fusion_stage" && (e as { stage?: string }).stage === "verify")).toBe(true);
 		expect(spawnSubagent).toHaveBeenCalledOnce();
+	});
+
+	it("passes the session request policy to its verifier subagent", async () => {
+		spawnSubagent.mockResolvedValue({ value: { findings: [] } });
+		const { host, requestPolicy } = createHost();
+
+		await fusionVerify(host, "Q", [], emptyAnalysis, model);
+
+		const requestPolicyFactory = spawnSubagent.mock.calls[0]?.[0]?.requestPolicy as
+			| ((signal: AbortSignal) => SubagentRequestPolicy | undefined)
+			| undefined;
+		const signal = new AbortController().signal;
+		expect(requestPolicyFactory?.(signal)).toBe(requestPolicy);
 	});
 
 	it("charges verifier usage before failing open on spawn failure", async () => {

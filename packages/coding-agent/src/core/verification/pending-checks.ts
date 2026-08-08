@@ -54,6 +54,14 @@ export function isVerificationJobCommand(command: string): boolean {
 }
 
 /** Background jobs that are STILL running and are verification commands. */
+export type VerificationJobVerdict = "pending" | "passed" | "failed" | "timed-out";
+
+export function verificationJobVerdict(job: BashBackgroundJob): VerificationJobVerdict {
+	if (!job.exited) return "pending";
+	if (job.timedOut) return "timed-out";
+	return job.exitCode === 0 ? "passed" : "failed";
+}
+
 export function pendingVerificationJobs(jobs: readonly BashBackgroundJob[]): BashBackgroundJob[] {
-	return jobs.filter((j) => !j.exited && isVerificationJobCommand(j.command));
+	return jobs.filter((j) => isVerificationJobCommand(j.command) && verificationJobVerdict(j) === "pending");
 }

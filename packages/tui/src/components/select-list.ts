@@ -171,7 +171,8 @@ export class SelectList implements Component, MouseTarget {
 		// If no items match filter, show message
 		if (this.filteredItems.length === 0) {
 			this.lastRenderRows = [];
-			lines.push(this.theme.noMatch(`  ${this.layout.emptyText ?? "No matches"}`));
+			const emptyLine = this.theme.noMatch(`  ${this.layout.emptyText ?? "No matches"}`);
+			lines.push(truncateToWidth(emptyLine, Math.max(0, width), ""));
 			return lines;
 		}
 
@@ -206,7 +207,9 @@ export class SelectList implements Component, MouseTarget {
 			const item = this.filteredItems[i];
 			if (!item) continue;
 			if (item.section && (i === startIndex || item.section !== this.filteredItems[i - 1]?.section)) {
-				lines.push(this.theme.section?.(`  ${item.section}`) ?? this.theme.description(`  ${item.section}`));
+				const sectionLine =
+					this.theme.section?.(`  ${item.section}`) ?? this.theme.description(`  ${item.section}`);
+				lines.push(truncateToWidth(sectionLine, Math.max(0, width), ""));
 				this.lastRenderRows.push(null);
 			}
 
@@ -408,7 +411,7 @@ export class SelectList implements Component, MouseTarget {
 				const truncatedDesc = truncateToWidth(descriptionSingleLine, remainingWidth);
 				if (isSelected) {
 					return this.paintSelected(
-						this.theme.selectedText(`${prefix}${truncatedValue}${spacing}${truncatedDesc}`),
+						`${this.theme.selectedPrefix(arrow)}${this.theme.selectedText(`${ordinalPlain}${truncatedValue}${spacing}${truncatedDesc}`)}`,
 						width,
 					);
 				}
@@ -418,21 +421,26 @@ export class SelectList implements Component, MouseTarget {
 			}
 		}
 
-		const maxWidth = width - prefixWidth - 2;
+		const maxWidth = Math.max(0, width - prefixWidth - 2);
 		const truncatedValue = this.truncatePrimary(item, isSelected, maxWidth, maxWidth);
 		if (isSelected) {
-			return this.paintSelected(this.theme.selectedText(`${prefix}${truncatedValue}`), width);
+			return this.paintSelected(
+				`${this.theme.selectedPrefix(arrow)}${this.theme.selectedText(`${ordinalPlain}${truncatedValue}`)}`,
+				width,
+			);
 		}
 
-		return prefixDisplay + truncatedValue;
+		return truncateToWidth(prefixDisplay + truncatedValue, Math.max(0, width), "");
 	}
 
-	/** Pad selected row to width and apply optional selectedBg. */
+	/** Clamp/pad the selected row to width and apply optional selectedBg. */
 	private paintSelected(line: string, width: number): string {
+		const safeWidth = Math.max(0, width);
+		const clamped = truncateToWidth(line, safeWidth, "");
 		if (!this.theme.selectedBg) {
-			return line;
+			return clamped;
 		}
-		const padded = line + " ".repeat(Math.max(0, width - visibleWidth(line)));
+		const padded = clamped + " ".repeat(Math.max(0, safeWidth - visibleWidth(clamped)));
 		return this.theme.selectedBg(padded);
 	}
 
@@ -466,17 +474,18 @@ export class SelectList implements Component, MouseTarget {
 
 	private truncatePrimary(item: SelectItem, isSelected: boolean, maxWidth: number, columnWidth: number): string {
 		const displayValue = this.getDisplayValue(item);
+		const safeMaxWidth = Math.max(0, maxWidth);
 		const truncatedValue = this.layout.truncatePrimary
 			? this.layout.truncatePrimary({
 					text: displayValue,
-					maxWidth,
-					columnWidth,
+					maxWidth: safeMaxWidth,
+					columnWidth: Math.max(0, columnWidth),
 					item,
 					isSelected,
 				})
-			: truncateToWidth(displayValue, maxWidth);
+			: truncateToWidth(displayValue, safeMaxWidth);
 
-		return truncateToWidth(truncatedValue, maxWidth);
+		return truncateToWidth(truncatedValue, safeMaxWidth);
 	}
 
 	private getDisplayValue(item: SelectItem): string {

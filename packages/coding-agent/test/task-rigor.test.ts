@@ -57,6 +57,28 @@ describe("classifyTaskRigor", () => {
 		expect(rigor).toMatchObject({ risk: "high", rigor: 3 });
 		expect(rigor.reasons).toContain("agent/config surface");
 	});
+
+	it.each([
+		"review the tool output",
+		"update this config value",
+		"review the current session notes",
+		"change the settings label",
+	])("does not classify an ordinary short request as rigor 3 solely for generic surface words: %s", (prompt) => {
+		expect(classifyTaskRigor(prompt).rigor).toBeLessThan(3);
+	});
+
+	it.each([
+		"fix the authentication bug",
+		"fix the authentication permissions bug",
+		"migrate the database schema",
+		"refactor the parser",
+		"change the public API contract",
+		"update multiple modules across the package",
+		"fix the agent session lifecycle",
+		"wire the provider integration",
+	])("preserves rigor 3 for an explicitly high-risk surface: %s", (prompt) => {
+		expect(classifyTaskRigor(prompt).rigor).toBe(3);
+	});
 });
 
 describe("task rigor prompt helpers", () => {

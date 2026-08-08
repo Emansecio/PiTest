@@ -3,6 +3,8 @@
  * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
  */
 
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -68,10 +70,10 @@ import {
 	visibleWidth,
 } from "@pit/tui";
 import chalk from "chalk";
-import { spawn } from "child_process";
 import { APP_NAME, APP_TITLE, getAgentDir, getAuthPath, getDebugLogPath, VERSION } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
+import { COORDINATOR_TOOL_NAMES } from "../../core/coordinator/brand.ts";
 import type {
 	AutocompleteProviderFactory,
 	EditorFactory,
@@ -158,6 +160,7 @@ import {
 	setCurrentUserInputBus,
 	type UserInputBus,
 } from "../../core/user-input-bus.ts";
+import { spawnProcess } from "../../utils/child-process.ts";
 import { copyToClipboard } from "../../utils/clipboard.ts";
 import { type ClipboardImage, readClipboardImage } from "../../utils/clipboard-image.ts";
 import { isOfflineMode, isReducedMotion, isTruthyEnvFlag } from "../../utils/env-flags.ts";
@@ -192,7 +195,12 @@ import { DaxnutsComponent } from "./components/daxnuts.ts";
 import { DiagnosticsBlockComponent } from "./components/diagnostics-block.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
 import { EarendilAnnouncementComponent } from "./components/earendil-announcement.ts";
-import { ExtensionEditorComponent } from "./components/extension-editor.ts";
+import {
+	ExtensionEditorComponent,
+	externalEditorExitMessage,
+	resolveEditorSpawn,
+	writeExternalEditorTempFile,
+} from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent } from "./components/footer.ts";
@@ -568,6 +576,8 @@ export class InteractiveMode {
 	private footerDataProvider: FooterDataProvider;
 	/** Unsubscribe for the background-job → footer repaint listener. */
 	private unsubscribeBashJobEvents: (() => void) | undefined;
+	/** Whether the footer's bg:N chip currently owns keyboard navigation. */
+	private backgroundJobsFooterFocused = false;
 	// Stored so the same manager can be injected into custom editors, selectors, and extension UI.
 	private keybindings: KeybindingsManager;
 	private version: string;
@@ -1018,6 +1028,10 @@ export class InteractiveMode {
 		// getting killed repaints immediately — even while the session is idle,
 		// when no turn-driven render would otherwise pick the change up.
 		this.unsubscribeBashJobEvents = onBashBackgroundJobEvent(() => {
+			if (this.backgroundJobsFooterFocused && listBashBackgroundJobs(this.session.sessionId).length === 0) {
+				this.backgroundJobsFooterFocused = false;
+				this.footer.setBackgroundJobsFocused(false);
+			}
 			this.footer.invalidate();
 			this.ui.requestRender();
 		});
@@ -2324,6 +2338,11 @@ export class InteractiveMode {
 		return this.workingMessage ?? this.defaultWorkingMessage;
 	}
 
+	/** Keep the active thinking label compact; the spinner already communicates motion. */
+	private getWorkingLoaderDisplayMessage(message: string): string {
+		return message === "Thinking…" ? "Thinking" : message;
+	}
+
 	/**
 	 * Set the working-loader phase label (e.g. "Thinking…", "Running bash…") from
 	 * the live agent events, so the status line reflects what is actually
@@ -2334,7 +2353,7 @@ export class InteractiveMode {
 	private setWorkingPhase(label: string): void {
 		if (this.userInputPauseDepth > 0) return;
 		this.workingMessage = label;
-		this.loadingAnimation?.setMessage(label);
+		this.loadingAnimation?.setMessage(this.getWorkingLoaderDisplayMessage(label));
 	}
 
 	/** When the working loader is up, freeze activity spinners so only one zone animates. */
@@ -2355,7 +2374,7 @@ export class InteractiveMode {
 
 	/**
 	 * Dim separator between working-loader meta chips (elapsed is separate).
-	 * Flanking spaces on both sides — `3s · esc interrupt · ↑1.2k` — so chips
+	 * Flanking spaces on both sides — `3s · esc to interrupt · ↑1.2k` — so chips
 	 * never weld to the clock or each other. One constant only: mixing `" ·"`
 	 * with `" · "` used to read as a broken edge on the same line. Matches the
 	 * turn-done line's ` · ` convention (see turn-done-format.ts).
@@ -2368,6 +2387,10 @@ export class InteractiveMode {
 	 * See `cachedLoaderInterruptSuffix` for why this is worth memoizing.
 	 */
 	private getLoaderInterruptSuffix(): string {
+		const interruptKey = keyText("app.interrupt");
+		// Headless/test transports may not install keybindings. Do not leave a
+		// dangling separator and an empty key in that environment.
+		if (!interruptKey) return "";
 		// With TWO OR MORE cancellable tools in flight, Esc opens the stop/cancel
 		// picker instead of interrupting on the spot (onEscape's `<= 1` branch
 		// interrupts directly) — the hint must tell that story, and credit
@@ -2377,7 +2400,7 @@ export class InteractiveMode {
 			if (this.cachedLoaderInterruptToolsSuffix === null) {
 				this.cachedLoaderInterruptToolsSuffix = theme.fg(
 					"muted",
-					`${InteractiveMode.LOADER_META_SEP}${keyText("app.interrupt")} stop/cancel${InteractiveMode.LOADER_META_SEP}ctrl+c interrupt`,
+					`${InteractiveMode.LOADER_META_SEP}${interruptKey} to stop/cancel${InteractiveMode.LOADER_META_SEP}ctrl+c to interrupt`,
 				);
 			}
 			return this.cachedLoaderInterruptToolsSuffix;
@@ -2385,7 +2408,7 @@ export class InteractiveMode {
 		if (this.cachedLoaderInterruptSuffix === null) {
 			this.cachedLoaderInterruptSuffix = theme.fg(
 				"muted",
-				`${InteractiveMode.LOADER_META_SEP}${keyText("app.interrupt")} interrupt`,
+				`${InteractiveMode.LOADER_META_SEP}${interruptKey} to interrupt`,
 			);
 		}
 		return this.cachedLoaderInterruptSuffix;
@@ -2433,7 +2456,7 @@ export class InteractiveMode {
 	private thinkingPreviewMaxWidth(): number {
 		const columns = this.ui.terminal.columns || 0;
 		if (columns <= 0) return InteractiveMode.THINKING_PREVIEW_MAX_WIDTH;
-		// Spinner + phase + elapsed + spaced meta chips (` · esc interrupt` and
+		// Spinner + phase + elapsed + spaced meta chips (` · esc to interrupt` and
 		// optional ↑/↓). Spaced LOADER_META_SEP is wider than the old tight `·`,
 		// so reserve a bit more than the historical 30.
 		const reservedForChrome = 36;
@@ -2444,8 +2467,8 @@ export class InteractiveMode {
 	 * to the CURRENT loader instance (reset in createWorkingLoader on rebuild).
 	 *
 	 * Display contract (footer working line):
-	 *   no tail  →  `⠋ Thinking… 3s · esc interrupt`
-	 *   with tail →  `⠋ Thinking  reviewing the auth path… 3s · esc interrupt`
+	 *   no tail  →  `⠋ Thinking 3s · esc to interrupt`
+	 *   with tail →  `⠋ Thinking  reviewing the auth path… 3s · esc to interrupt`
 	 *
 	 * Choices, each earning its place:
 	 * - Soft gap (`  `), not a middot. Middots are meta-chip chrome
@@ -2467,9 +2490,9 @@ export class InteractiveMode {
 
 		if (tail.length === 0) {
 			loader.setDetailSuffix("");
-			// Restore the full phase label if we shortened it for a live preview.
+			// Restore the plain phase label after hiding the live preview.
 			if (this.userInputPauseDepth === 0 && this.workingMessage === "Thinking…") {
-				loader.setMessage("Thinking…");
+				loader.setMessage("Thinking");
 			}
 			return;
 		}
@@ -2477,7 +2500,7 @@ export class InteractiveMode {
 		// Soft gap + italic thinkingText. Pre-colored so the Loader does not
 		// rewrap the monologue in the muted phase painter.
 		loader.setDetailSuffix(`  ${theme.italic(theme.fg("thinkingText", tail))}`);
-		// Drop the phase ellipsis only while we are still in the thinking phase
+		// Keep the phase label compact while the live preview is visible
 		// and not paused for user input (pause owns the label).
 		if (this.userInputPauseDepth === 0 && this.workingMessage === "Thinking…") {
 			loader.setMessage("Thinking");
@@ -2543,7 +2566,7 @@ export class InteractiveMode {
 			this.ui,
 			workingPulsePalette(),
 			(text) => theme.fg("muted", text),
-			this.getWorkingLoaderMessage(),
+			this.getWorkingLoaderDisplayMessage(this.getWorkingLoaderMessage()),
 			reducedMotionLoaderIndicator(this.workingIndicatorOptions),
 			// paddingX 0: align the working label at column 0 with the transcript
 			// gutters (❯ / ● / │) instead of the default 1-column indent.
@@ -2577,7 +2600,7 @@ export class InteractiveMode {
 		this.lastAppliedLoaderSuffix = interruptSuffix;
 		// Mid-turn rebuild (retry backoff, compaction): rehydrate a live thinking
 		// monologue onto THIS instance immediately — waiting for the next delta
-		// left a blank detail gap and restored the full "Thinking…" ellipsis.
+		// left a blank detail gap and restored the compact "Thinking" label.
 		if (this.thinkingPreviewRaw.length > 0) {
 			this.thinkingPreviewLastAppliedAt = 0;
 			this.flushThinkingPreview();
@@ -2925,7 +2948,7 @@ export class InteractiveMode {
 			this.loadingAnimation.setElapsedPaused(true);
 			this.loadingAnimation.setMessage(this.userInputPauseMessage ?? this.awaitingUserInputMessage);
 		} else {
-			this.loadingAnimation.setMessage(this.getWorkingLoaderMessage());
+			this.loadingAnimation.setMessage(this.getWorkingLoaderDisplayMessage(this.getWorkingLoaderMessage()));
 			this.loadingAnimation.setElapsedPaused(false);
 		}
 		this.ui.requestRender();
@@ -3167,7 +3190,9 @@ export class InteractiveMode {
 			setWorkingMessage: (message) => {
 				this.workingMessage = message;
 				if (this.loadingAnimation) {
-					this.loadingAnimation.setMessage(message ?? this.defaultWorkingMessage);
+					this.loadingAnimation.setMessage(
+						this.getWorkingLoaderDisplayMessage(message ?? this.defaultWorkingMessage),
+					);
 				}
 			},
 			setWorkingVisible: (visible) => this.setWorkingVisible(visible),
@@ -3365,6 +3390,8 @@ export class InteractiveMode {
 					this.hideExtensionEditor();
 					resolve(undefined);
 				},
+				undefined,
+				(message) => this.showWarning(message),
 			);
 
 			this.editorContainer.clear();
@@ -3392,8 +3419,8 @@ export class InteractiveMode {
 	private setCustomEditorComponent(factory: EditorFactory | undefined): void {
 		this.editorComponentFactory = factory;
 
-		// Save text from current editor before switching
-		const currentText = this.editor.getText();
+		// Preserve the payload behind collapsed large-paste markers when swapping editors.
+		const currentText = this.editor.getExpandedText?.() ?? this.editor.getText();
 
 		this.editorContainer.clear();
 
@@ -3433,6 +3460,19 @@ export class InteractiveMode {
 				}
 				if (!customEditor.onPasteImage) {
 					customEditor.onPasteImage = () => this.defaultEditor.onPasteImage?.();
+				}
+				if (!customEditor.onNavigateToRunningWork) {
+					customEditor.onNavigateToRunningWork = () => this.defaultEditor.onNavigateToRunningWork?.() ?? false;
+				}
+				if (!customEditor.onNavigateToBackgroundJobs) {
+					customEditor.onNavigateToBackgroundJobs = () =>
+						this.defaultEditor.onNavigateToBackgroundJobs?.() ?? false;
+				}
+				if (!customEditor.onOpenBackgroundJobs) {
+					customEditor.onOpenBackgroundJobs = () => this.defaultEditor.onOpenBackgroundJobs?.() ?? false;
+				}
+				if (!customEditor.onBlurBackgroundJobs) {
+					customEditor.onBlurBackgroundJobs = () => this.defaultEditor.onBlurBackgroundJobs?.();
 				}
 				if (!customEditor.onExtensionShortcut) {
 					customEditor.onExtensionShortcut = (data: string) => this.defaultEditor.onExtensionShortcut?.(data);
@@ -3652,7 +3692,7 @@ export class InteractiveMode {
 		}
 		const jobId = labelToJobId.get(picked);
 		if (jobId) {
-			const job = getBashBackgroundJob(jobId);
+			const job = getBashBackgroundJob(jobId, this.session.sessionId);
 			await this.interruptRunningWorkItem({
 				kind: "background",
 				id: jobId,
@@ -3689,8 +3729,36 @@ export class InteractiveMode {
 	private setupKeyHandlers(): void {
 		// Set up handlers on defaultEditor - they use this.editor for text access
 		// so they work correctly regardless of which editor is active
-		this.defaultEditor.onNavigateToRunningWork = () => this.showRunningWorkSelector();
+		this.defaultEditor.onNavigateToRunningWork = () => {
+			this.defaultEditor.onBlurBackgroundJobs?.();
+			return this.showRunningWorkSelector();
+		};
+		this.defaultEditor.onNavigateToBackgroundJobs = () => {
+			if (listBashBackgroundJobs(this.session.sessionId).length === 0) return false;
+			this.backgroundJobsFooterFocused = true;
+			this.footer.setBackgroundJobsFocused(true);
+			this.ui.requestRender();
+			return true;
+		};
+		this.defaultEditor.onOpenBackgroundJobs = () => {
+			if (!this.backgroundJobsFooterFocused) return false;
+			this.backgroundJobsFooterFocused = false;
+			this.footer.setBackgroundJobsFocused(false);
+			this.showJobsSelector();
+			return true;
+		};
+		this.defaultEditor.onBlurBackgroundJobs = () => {
+			if (!this.backgroundJobsFooterFocused) return;
+			this.backgroundJobsFooterFocused = false;
+			this.footer.setBackgroundJobsFocused(false);
+		};
 		this.defaultEditor.onEscape = () => {
+			if (this.backgroundJobsFooterFocused) {
+				this.backgroundJobsFooterFocused = false;
+				this.footer.setBackgroundJobsFocused(false);
+				this.ui.requestRender();
+				return;
+			}
 			if (this.session.isBusy) {
 				// Per-tool interruption: only with TWO OR MORE tools in flight is
 				// there a real choice between stopping the WHOLE task (default —
@@ -3704,7 +3772,9 @@ export class InteractiveMode {
 				// A stalled background job (hung, not a watcher/server) widens the
 				// choice: killing IT may be all the user wants. Healthy jobs never
 				// trigger the picker — the common Esc stays a one-keystroke stop.
-				const stalledJobs = listBashBackgroundJobs().filter((job) => isBashBackgroundJobStalled(job));
+				const stalledJobs = listBashBackgroundJobs(this.session.sessionId).filter((job) =>
+					isBashBackgroundJobStalled(job),
+				);
 				if (interruptible.length <= 1 && stalledJobs.length === 0) {
 					this.restoreQueuedMessagesToEditor();
 					this.session.interrupt();
@@ -4164,6 +4234,9 @@ export class InteractiveMode {
 		const parts = trimmed.split(/\s+/);
 		const sub = parts[0] ?? "";
 		switch (sub) {
+			case "receipt":
+				this.showStatus(this.session.goalReceiptText());
+				return;
 			case "status":
 				this.showStatus(this.session.goalSummaryText());
 				return;
@@ -4381,9 +4454,10 @@ export class InteractiveMode {
 				this._stopGoalSpinner();
 				return false;
 			}
-			// Only ask for a render when the 80ms spinner frame would actually
-			// change, not on every animation frame.
-			const bucket = Math.floor(now / SPINNER_FRAME_MS);
+			// Reduced motion freezes the spinner, but the goal overlay still owns an
+			// elapsed clock. Repaint it once per second instead of disabling its ticker.
+			const repaintMs = isReducedMotion() ? 1000 : SPINNER_FRAME_MS;
+			const bucket = Math.floor(now / repaintMs);
 			if (bucket === this._goalSpinnerBucket) return false;
 			this._goalSpinnerBucket = bucket;
 			return true;
@@ -6192,7 +6266,15 @@ export class InteractiveMode {
 		let cancelledTools = 0;
 		if (steersActiveTurn) {
 			for (const tool of this.getInterruptiblePendingTools()) {
-				if (this.session.cancelTool(tool.id)) cancelledTools++;
+				// Release a coordinator call for the primary agent, but keep its child
+				// signal alive so Send now does not stop the subagents it owns.
+				const cancelOptions = COORDINATOR_TOOL_NAMES.has(tool.name)
+					? { preserveCoordinatorChildren: true }
+					: undefined;
+				const cancelled = cancelOptions
+					? this.session.cancelTool(tool.id, cancelOptions)
+					: this.session.cancelTool(tool.id);
+				if (cancelled) cancelledTools++;
 			}
 		}
 
@@ -6579,7 +6661,7 @@ export class InteractiveMode {
 		}
 
 		const currentText = this.editor.getExpandedText?.() ?? this.editor.getText();
-		const tmpFile = path.join(os.tmpdir(), `pi-editor-${Date.now()}.pit.md`);
+		const tmpFile = path.join(os.tmpdir(), `pi-editor-${randomUUID()}.pit.md`);
 
 		// Only restart the TUI if we actually stopped it. A failure before
 		// ui.stop() (e.g. writeFileSync) must not double-attach stdin/resize
@@ -6587,14 +6669,13 @@ export class InteractiveMode {
 		let stopped = false;
 		try {
 			// Write current content to temp file
-			fs.writeFileSync(tmpFile, currentText, "utf-8");
+			writeExternalEditorTempFile(tmpFile, currentText);
 
 			// Stop TUI to release terminal
 			this.ui.stop();
 			stopped = true;
 
-			// Split by space to support editor arguments (e.g., "code --wait")
-			const [editor, ...editorArgs] = editorCmd.split(" ");
+			const editorPlan = resolveEditorSpawn(editorCmd, tmpFile);
 
 			process.stdout.write(
 				`Launching external editor: ${editorCmd}\n${APP_NAME} will resume when the editor exits.\n`,
@@ -6603,21 +6684,29 @@ export class InteractiveMode {
 			// Do not use spawnSync here. On Windows, synchronous child_process calls can keep
 			// Node/libuv's console input read active after ui.stop() pauses stdin, racing
 			// vim/nvim for the console input buffer until Ctrl+C cancels the pending read.
+			let spawnError: Error | undefined;
 			const status = await new Promise<number | null>((resolve) => {
-				const child = spawn(editor, [...editorArgs, tmpFile], {
+				const child = spawnProcess(editorPlan.command, editorPlan.args, {
 					stdio: "inherit",
-					shell: process.platform === "win32",
+					shell: editorPlan.shell,
 				});
-				child.on("error", () => resolve(null));
+				child.on("error", (error) => {
+					spawnError = error;
+					resolve(null);
+				});
 				child.on("close", (code) => resolve(code));
 			});
 
-			// On successful exit (status 0), replace editor content
 			if (status === 0) {
 				const newContent = fs.readFileSync(tmpFile, "utf-8").replace(/\n$/, "");
 				this.editor.setText(newContent);
+			} else {
+				this.showWarning(
+					spawnError ? `External editor failed: ${spawnError.message}` : externalEditorExitMessage(status)!,
+				);
 			}
-			// On non-zero exit, keep original text (no action needed)
+		} catch (error) {
+			this.showWarning(`External editor failed: ${errMsg(error)}`);
 		} finally {
 			// Clean up temp file
 			try {
@@ -8283,6 +8372,7 @@ export class InteractiveMode {
 		await new Promise((resolve) => process.nextTick(resolve));
 		try {
 			const result = await this.runtimeHost.switchSession(sessionPath, {
+				signal: options?.signal,
 				withSession: options?.withSession,
 			});
 			if (result.cancelled) {
@@ -8300,6 +8390,7 @@ export class InteractiveMode {
 				}
 				const result = await this.runtimeHost.switchSession(sessionPath, {
 					cwdOverride: selectedCwd,
+					signal: options?.signal,
 					withSession: options?.withSession,
 				});
 				if (result.cancelled) {

@@ -9,8 +9,8 @@
  *  - fanout emits stage callbacks for scout/reviewers/worker.
  */
 
-import type { AgentMessage } from "@pit/agent-core";
-import { type FauxProviderRegistration, fauxAssistantMessage, registerFauxProvider } from "@pit/ai";
+import type { AgentMessage, AgentTool } from "@pit/agent-core";
+import { type FauxProviderRegistration, fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@pit/ai";
 import { type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 import { afterEach, describe, expect, it } from "vitest";
@@ -129,6 +129,11 @@ describe("parallel tool parity (extension level)", () => {
 		responses: Parameters<FauxProviderRegistration["setResponses"]>[0],
 		throwLifecycle = false,
 		onAsyncSettled?: (handle: string, text: string, status: "done" | "error" | "cancelled") => boolean,
+		availableTools: AgentTool[] = [],
+		configureRegistry?: (
+			registry: ModelRegistry,
+			model: NonNullable<ReturnType<FauxProviderRegistration["getModel"]>>,
+		) => void,
 	) {
 		faux = registerFauxProvider();
 		faux.setResponses(responses);
@@ -136,13 +141,15 @@ describe("parallel tool parity (extension level)", () => {
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(model.provider, "faux-key");
 		const modelRegistry = ModelRegistry.inMemory(authStorage);
+		configureRegistry?.(modelRegistry, model!);
 		const started: string[] = [];
 		const completed: string[] = [];
 		const completionStatuses: Array<{ handle: string; status: string }> = [];
+		let abortDetached: (() => void) | undefined;
 		const ext = createCoordinatorExtension({
 			modelRegistry,
 			getParentModel: () => model,
-			getAvailableTools: () => [],
+			getAvailableTools: () => availableTools,
 			convertToLlm: (messages) => convertToLlm(messages),
 			onSubagentStart: (h) => {
 				started.push(h);
@@ -157,18 +164,41 @@ describe("parallel tool parity (extension level)", () => {
 				if (throwLifecycle) throw new Error("broken async-complete sink");
 				return onAsyncSettled?.(handle, text, status) ?? false;
 			},
+			registerAbortDetached: (abort) => {
+				abortDetached = abort;
+			},
 		});
 		const defs = new Map<string, { execute: (...a: unknown[]) => Promise<unknown>; parameters: TSchema }>();
 		ext({
 			registerTool: (def: { name: string }) => defs.set(def.name, def as never),
 		} as never);
-		return { defs, started, completed, completionStatuses };
+		return { defs, started, completed, completionStatuses, abortDetached: () => abortDetached?.() };
 	}
 
 	const exec = (tool: { execute: (...a: unknown[]) => Promise<unknown> }, params: Record<string, unknown>) =>
 		tool.execute("call", params, undefined, undefined, {});
 	const textOf = (r: unknown): string => (r as { content: { text: string }[] }).content[0].text;
 	const isErr = (r: unknown): boolean => (r as { isError: boolean }).isError;
+	const configureRequestedModel =
+		(id: string) =>
+		(registry: ModelRegistry, model: NonNullable<ReturnType<FauxProviderRegistration["getModel"]>>) => {
+			registry.registerProvider(model.provider, {
+				apiKey: "faux-key",
+				api: model.api,
+				baseUrl: model.baseUrl,
+				models: [
+					{
+						id,
+						name: id,
+						reasoning: model.reasoning,
+						input: model.input,
+						cost: model.cost,
+						contextWindow: model.contextWindow,
+						maxTokens: model.maxTokens,
+					},
+				],
+			});
+		};
 
 	it.each([
 		["task", { op: "run", prompt: "p", acceptance: { criteria: "x", max_attempts: 0 } }],
@@ -186,6 +216,28 @@ describe("parallel tool parity (extension level)", () => {
 		const tool = defs.get(toolName);
 		if (!tool) throw new Error(`${toolName} not registered`);
 		expect(Value.Check(tool.parameters, params)).toBe(false);
+	});
+
+	it("requires max_turns to be a positive integer without imposing an arbitrary maximum", () => {
+		const { defs } = buildTools([]);
+		const task = defs.get("task");
+		if (!task) throw new Error("task not registered");
+		for (const max_turns of [0, -1, -100, 0.5, 1.5]) {
+			expect(Value.Check(task.parameters, { op: "run", prompt: "p", max_turns })).toBe(false);
+		}
+		for (const max_turns of [1, 50, 1_000_000]) {
+			expect(Value.Check(task.parameters, { op: "run", prompt: "p", max_turns })).toBe(true);
+		}
+		expect(faux?.state.callCount).toBe(0);
+	});
+
+	it("rejects an unknown explicit model instead of silently using the parent", async () => {
+		const { defs } = buildTools([]);
+		const task = defs.get("task");
+		if (!task) throw new Error("task not registered");
+		const result = await exec(task, { op: "run", prompt: "p", model: "faux/does-not-exist" });
+		expect(isErr(result)).toBe(true);
+		expect(textOf(result)).toContain("not found");
 	});
 
 	it("exposes and validates acceptance check timeout on task", () => {
@@ -222,6 +274,264 @@ describe("parallel tool parity (extension level)", () => {
 		const joined = await exec(task, { op: "join", handles: ["slow"] });
 		expect(isErr(joined)).toBe(false);
 		expect(textOf(joined)).toMatch(/slow[\s\S]*cancelled[\s\S]*cancelled by parent/);
+	});
+
+	it("publishes detached cancellation immediately even when the provider ignores abort", async () => {
+		let release: (() => void) | undefined;
+		let markStarted: (() => void) | undefined;
+		const started = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		const blocked = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const { defs } = buildTools([
+			async () => {
+				markStarted?.();
+				await blocked;
+				return fauxAssistantMessage("late result");
+			},
+		]);
+		const task = defs.get("task");
+		if (!task) throw new Error("task not registered");
+
+		await exec(task, { op: "spawn", name: "abort-lag", prompt: "p" });
+		await started;
+		const cancelled = await exec(task, { op: "cancel", handles: ["abort-lag"] });
+		expect(isErr(cancelled)).toBe(false);
+
+		const poll = await exec(task, { op: "poll", handles: ["abort-lag"] });
+		expect(textOf(poll)).toContain("abort-lag: cancelled");
+		const listed = await exec(task, { op: "list" });
+		expect(textOf(listed)).toMatch(/abort-lag \[cancelled\]/);
+
+		release?.();
+		await exec(task, { op: "join", handles: ["abort-lag"] });
+	});
+
+	it("publishes detached cancellation immediately when the parent aborts the session", async () => {
+		let release: (() => void) | undefined;
+		let markStarted: (() => void) | undefined;
+		const started = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		const blocked = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const { defs, abortDetached } = buildTools([
+			async () => {
+				markStarted?.();
+				await blocked;
+				return fauxAssistantMessage("late session result");
+			},
+		]);
+		const task = defs.get("task");
+		if (!task) throw new Error("task not registered");
+
+		await exec(task, { op: "spawn", name: "session-abort", prompt: "p" });
+		await started;
+		abortDetached();
+
+		const poll = await exec(task, { op: "poll", handles: ["session-abort"] });
+		expect(textOf(poll)).toContain("session-abort: cancelled");
+		const listed = await exec(task, { op: "list" });
+		expect(textOf(listed)).toMatch(/session-abort \[cancelled\]/);
+
+		release?.();
+		await exec(task, { op: "join", handles: ["session-abort"] });
+	});
+
+	it("cancels join promptly without stopping or consuming detached handles", async () => {
+		let markStarted: (() => void) | undefined;
+		const started = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		let release: (() => void) | undefined;
+		const released = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const { defs } = buildTools([
+			async () => {
+				markStarted?.();
+				await released;
+				return fauxAssistantMessage("detached result survived cancelled join");
+			},
+		]);
+		const task = defs.get("task");
+		if (!task) throw new Error("task not registered");
+		await exec(task, { op: "spawn", name: "join-abort", prompt: "p" });
+		await started;
+		const controller = new AbortController();
+		const joining = task.execute("call", { op: "join", handles: ["join-abort"] }, controller.signal);
+		controller.abort(new Error("aborted: stop waiting only"));
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			const cancelled = await Promise.race([
+				joining,
+				new Promise<undefined>((resolve) => {
+					timer = setTimeout(() => resolve(undefined), 500);
+				}),
+			]);
+			expect(cancelled).toBeDefined();
+			if (cancelled) {
+				expect(isErr(cancelled)).toBe(true);
+				expect(textOf(cancelled)).toBe("task: join cancelled; detached subagents continue in the background.");
+				expect((cancelled as { details?: unknown }).details).toEqual({ joined: 0, cancelled: true });
+			}
+			const poll = await exec(task, { op: "poll", handles: ["join-abort"] });
+			expect(textOf(poll)).toContain("join-abort: running");
+		} finally {
+			if (timer) clearTimeout(timer);
+			release?.();
+			await joining;
+		}
+		const joined = await exec(task, { op: "join", handles: ["join-abort"] });
+		expect(textOf(joined)).toContain("detached result survived cancelled join");
+	});
+
+	it("join only consumes the exact detached generation it awaited", async () => {
+		let releaseOriginal: (() => void) | undefined;
+		const originalGate = new Promise<void>((resolve) => {
+			releaseOriginal = resolve;
+		});
+		let releaseBlocker: (() => void) | undefined;
+		const blockerGate = new Promise<void>((resolve) => {
+			releaseBlocker = resolve;
+		});
+		let markOriginalDelivered: (() => void) | undefined;
+		const originalDelivered = new Promise<void>((resolve) => {
+			markOriginalDelivered = resolve;
+		});
+		let markReplacementSettled: (() => void) | undefined;
+		const replacementSettled = new Promise<void>((resolve) => {
+			markReplacementSettled = resolve;
+		});
+		let generationCompletions = 0;
+		const { defs } = buildTools(
+			[
+				async () => {
+					await originalGate;
+					return fauxAssistantMessage("original generation");
+				},
+				async () => {
+					await blockerGate;
+					return fauxAssistantMessage("blocker done");
+				},
+				fauxAssistantMessage("replacement generation"),
+			],
+			false,
+			(handle) => {
+				if (handle !== "generation-race") return false;
+				generationCompletions++;
+				if (generationCompletions === 1) {
+					markOriginalDelivered?.();
+					return true;
+				}
+				markReplacementSettled?.();
+				return false;
+			},
+		);
+		const task = defs.get("task");
+		if (!task) throw new Error("task not registered");
+		await exec(task, { op: "spawn", name: "generation-race", prompt: "old" });
+		await exec(task, { op: "spawn", name: "join-blocker", prompt: "block" });
+		const joining = exec(task, { op: "join", handles: ["generation-race", "join-blocker"] });
+
+		releaseOriginal?.();
+		await originalDelivered;
+		const replacement = await exec(task, { op: "spawn", name: "generation-race", prompt: "new" });
+		expect(isErr(replacement)).toBe(false);
+		await replacementSettled;
+		releaseBlocker?.();
+		await joining;
+
+		const poll = await exec(task, { op: "poll", handles: ["generation-race"] });
+		expect(textOf(poll)).toContain('generation-race: done (collect with op:"join")');
+		const joinedReplacement = await exec(task, { op: "join", handles: ["generation-race"] });
+		expect(textOf(joinedReplacement)).toContain("replacement generation");
+	});
+
+	it("join only renders the detached generation captured before handle reuse", async () => {
+		const fillerCount = 64;
+		let releaseBlocker: (() => void) | undefined;
+		const blockerGate = new Promise<void>((resolve) => {
+			releaseBlocker = resolve;
+		});
+		let markOriginalDelivered: (() => void) | undefined;
+		const originalDelivered = new Promise<void>((resolve) => {
+			markOriginalDelivered = resolve;
+		});
+		let markFillersSettled: (() => void) | undefined;
+		const fillersSettled = new Promise<void>((resolve) => {
+			markFillersSettled = resolve;
+		});
+		let markReplacementSettled: (() => void) | undefined;
+		const replacementSettled = new Promise<void>((resolve) => {
+			markReplacementSettled = resolve;
+		});
+		let generationCompletions = 0;
+		let fillerCompletions = 0;
+		const { defs } = buildTools(
+			[
+				fauxAssistantMessage("original generation"),
+				...Array.from({ length: fillerCount }, (_, i) => fauxAssistantMessage(`filler-${i}`)),
+			],
+			false,
+			(handle) => {
+				if (handle === "generation-render-race") {
+					generationCompletions++;
+					if (generationCompletions === 1) {
+						markOriginalDelivered?.();
+						return true;
+					}
+					markReplacementSettled?.();
+					return false;
+				}
+				if (handle.startsWith("generation-filler-")) {
+					fillerCompletions++;
+					if (fillerCompletions === fillerCount) markFillersSettled?.();
+				}
+				return false;
+			},
+		);
+		const task = defs.get("task");
+		if (!task) throw new Error("task not registered");
+
+		await exec(task, { op: "spawn", name: "generation-render-race", prompt: "old" });
+		await originalDelivered;
+		for (let i = 0; i < fillerCount; i += 1) {
+			await exec(task, { op: "spawn", name: `generation-filler-${i}`, prompt: "fill" });
+		}
+		await fillersSettled;
+		const evicted = await exec(task, { op: "poll", handles: ["generation-render-race"] });
+		expect(textOf(evicted)).toContain("evicted (done)");
+		faux?.setResponses([
+			async () => {
+				await blockerGate;
+				return fauxAssistantMessage("blocker done");
+			},
+			fauxAssistantMessage("replacement generation"),
+		]);
+
+		await exec(task, { op: "spawn", name: "generation-render-blocker", prompt: "block" });
+		const joining = exec(task, {
+			op: "join",
+			handles: ["generation-render-race", "generation-render-blocker"],
+		});
+		const replacement = await exec(task, { op: "spawn", name: "generation-render-race", prompt: "new" });
+		expect(isErr(replacement)).toBe(false);
+		await replacementSettled;
+		releaseBlocker?.();
+
+		const staleJoin = await joining;
+		const staleText = textOf(staleJoin);
+		expect(staleText).not.toContain("replacement generation");
+		expect(staleText).toContain("already delivered to chat");
+		expect(staleText).toContain('op:"read"');
+		const poll = await exec(task, { op: "poll", handles: ["generation-render-race"] });
+		expect(textOf(poll)).toContain('done (collect with op:"join")');
+		const joinedReplacement = await exec(task, { op: "join", handles: ["generation-render-race"] });
+		expect(textOf(joinedReplacement)).toContain("replacement generation");
 	});
 
 	it("bounds uncollected detached completions and exposes evictions without losing readable output", async () => {
@@ -325,6 +635,61 @@ describe("parallel tool parity (extension level)", () => {
 		});
 	});
 
+	it("retains terminal fallback provenance in an evicted detached tombstone", async () => {
+		const successful = 64;
+		let resolveErrored!: () => void;
+		const errored = new Promise<void>((resolve) => {
+			resolveErrored = resolve;
+		});
+		let resolveSettled!: () => void;
+		const settled = new Promise<void>((resolve) => {
+			resolveSettled = resolve;
+		});
+		let completed = 0;
+		const { defs } = buildTools(
+			[
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "401 Unauthorized" }),
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "evicted parent failure" }),
+				...Array.from({ length: successful }, (_, i) => fauxAssistantMessage(`later-${i}`)),
+			],
+			false,
+			(handle) => {
+				completed += 1;
+				if (handle === "evicted-fallback") resolveErrored();
+				if (completed === successful + 1) resolveSettled();
+				return false;
+			},
+			[],
+			configureRequestedModel("evicted-terminal-child"),
+		);
+		const task = defs.get("task")!;
+		await exec(task, {
+			op: "spawn",
+			name: "evicted-fallback",
+			prompt: "p",
+			model: "faux/evicted-terminal-child",
+		});
+		await errored;
+		for (let i = 0; i < successful; i++) {
+			await exec(task, { op: "spawn", name: `later-${i}`, prompt: "p" });
+		}
+		await settled;
+
+		const joined = (await exec(task, { op: "join", handles: ["evicted-fallback"] })) as {
+			details?: { results?: Array<{ handle: string; modelFallback?: { from: string; to: string } }> };
+		};
+
+		expect(textOf(joined)).toContain("[model fallback: faux/evicted-terminal-child -> faux/faux-1");
+		expect(joined.details?.results).toContainEqual({
+			handle: "evicted-fallback",
+			modelFallback: {
+				from: "faux/evicted-terminal-child",
+				to: "faux/faux-1",
+				reason: "401 Unauthorized",
+			},
+		});
+	});
+
 	it("bounds identity reservations after detached tombstones are evicted", async () => {
 		const count = 270;
 		let resolveSettled!: () => void;
@@ -379,6 +744,305 @@ describe("parallel tool parity (extension level)", () => {
 		expect(textOf(read)).toContain(MIDDLE_SENTINEL);
 	});
 
+	it("exposes model fallback provenance in parallel output and details", async () => {
+		const configureRegistry = (
+			registry: ModelRegistry,
+			model: NonNullable<ReturnType<FauxProviderRegistration["getModel"]>>,
+		) => {
+			registry.registerProvider(model.provider, {
+				apiKey: "faux-key",
+				api: model.api,
+				baseUrl: model.baseUrl,
+				models: [
+					{
+						id: "requested-child",
+						name: "requested-child",
+						reasoning: model.reasoning,
+						input: model.input,
+						cost: model.cost,
+						contextWindow: model.contextWindow,
+						maxTokens: model.maxTokens,
+					},
+				],
+			});
+		};
+		const { defs } = buildTools(
+			[
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "No API key for provider child" }),
+				fauxAssistantMessage("parallel fallback worked"),
+			],
+			false,
+			undefined,
+			[],
+			configureRegistry,
+		);
+		const parallel = defs.get("parallel")!;
+
+		const result = (await exec(parallel, {
+			tasks: [{ name: "fallback-child", prompt: "p", model: "faux/requested-child" }],
+		})) as { content: Array<{ text: string }>; details?: { results?: Array<Record<string, unknown>> } };
+
+		expect(textOf(result)).toContain("[model fallback: faux/requested-child -> faux/faux-1");
+		expect(result.details?.results?.[0]?.modelFallback).toMatchObject({
+			from: "faux/requested-child",
+			to: "faux/faux-1",
+		});
+	});
+
+	it("preserves model fallback provenance when a parallel child fails after fallback", async () => {
+		const { defs } = buildTools(
+			[
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "401 Unauthorized" }),
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "parallel parent failure" }),
+			],
+			false,
+			undefined,
+			[],
+			configureRequestedModel("parallel-terminal-child"),
+		);
+		const parallel = defs.get("parallel")!;
+
+		const result = (await exec(parallel, {
+			tasks: [{ name: "parallel-terminal", prompt: "p", model: "faux/parallel-terminal-child" }],
+		})) as { details?: { results?: Array<Record<string, unknown>> } };
+
+		expect(textOf(result)).toContain("[model fallback: faux/parallel-terminal-child -> faux/faux-1");
+		expect(result.details?.results?.[0]?.modelFallback).toMatchObject({
+			from: "faux/parallel-terminal-child",
+			to: "faux/faux-1",
+		});
+	});
+
+	it("exposes reviewer model fallback provenance in fanout output and details", async () => {
+		const configureRegistry = (
+			registry: ModelRegistry,
+			model: NonNullable<ReturnType<FauxProviderRegistration["getModel"]>>,
+		) => {
+			registry.registerProvider(model.provider, {
+				apiKey: "faux-key",
+				api: model.api,
+				baseUrl: model.baseUrl,
+				models: [
+					{
+						id: "requested-reviewer",
+						name: "requested-reviewer",
+						reasoning: model.reasoning,
+						input: model.input,
+						cost: model.cost,
+						contextWindow: model.contextWindow,
+						maxTokens: model.maxTokens,
+					},
+				],
+			});
+		};
+		const { defs } = buildTools(
+			[
+				fauxAssistantMessage('```json\n{"targets":["a"]}\n```'),
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "403 Unauthorized" }),
+				fauxAssistantMessage("review fallback worked"),
+				fauxAssistantMessage("worker done"),
+			],
+			false,
+			undefined,
+			[],
+			configureRegistry,
+		);
+		const fanout = defs.get("fanout")!;
+
+		const result = (await exec(fanout, {
+			scout: { prompt: "s" },
+			reviewer: { prompt_template: "review {{target}}", model: "faux/requested-reviewer" },
+			worker: { prompt: "w" },
+		})) as { details?: { reviews?: Array<Record<string, unknown>> } };
+
+		expect(textOf(result)).toContain("[model fallback: faux/requested-reviewer -> faux/faux-1");
+		expect(result.details?.reviews?.[0]?.modelFallback).toMatchObject({
+			from: "faux/requested-reviewer",
+			to: "faux/faux-1",
+		});
+	});
+
+	it("exposes final worker fallback provenance for an acceptance-gated blocking task", async () => {
+		const { defs } = buildTools(
+			[
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "401 Unauthorized" }),
+				fauxAssistantMessage("gated fallback worker"),
+			],
+			false,
+			undefined,
+			[],
+			configureRequestedModel("gated-child"),
+		);
+		const task = defs.get("task")!;
+
+		const result = (await exec(task, {
+			op: "run",
+			name: "gated-blocking",
+			prompt: "p",
+			model: "faux/gated-child",
+			acceptance: { check: 'node -e "process.exit(0)"', max_attempts: 1 },
+		})) as { details?: { modelFallback?: { from: string; to: string } } };
+
+		expect(textOf(result)).toContain("[model fallback: faux/gated-child -> faux/faux-1");
+		expect(result.details?.modelFallback).toMatchObject({
+			from: "faux/gated-child",
+			to: "faux/faux-1",
+		});
+	});
+
+	it("preserves model fallback provenance when the blocking parent attempt fails", async () => {
+		const { defs } = buildTools(
+			[
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "401 Unauthorized" }),
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "parent terminal failure" }),
+			],
+			false,
+			undefined,
+			[],
+			configureRequestedModel("terminal-child"),
+		);
+		const task = defs.get("task")!;
+
+		const result = (await exec(task, {
+			op: "run",
+			name: "terminal-blocking",
+			prompt: "p",
+			model: "faux/terminal-child",
+		})) as { details?: { modelFallback?: { from: string; to: string } } };
+
+		expect(isErr(result)).toBe(true);
+		expect(textOf(result)).toContain("[model fallback: faux/terminal-child -> faux/faux-1");
+		expect(result.details?.modelFallback).toMatchObject({
+			from: "faux/terminal-child",
+			to: "faux/faux-1",
+		});
+	});
+
+	it("exposes final worker fallback provenance when joining an acceptance-gated detached task", async () => {
+		const { defs } = buildTools(
+			[
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "401 Unauthorized" }),
+				fauxAssistantMessage("detached gated fallback worker"),
+			],
+			false,
+			undefined,
+			[],
+			configureRequestedModel("detached-gated-child"),
+		);
+		const task = defs.get("task")!;
+		await exec(task, {
+			op: "spawn",
+			name: "gated-detached",
+			prompt: "p",
+			model: "faux/detached-gated-child",
+			acceptance: { check: 'node -e "process.exit(0)"', max_attempts: 1 },
+		});
+
+		const joined = (await exec(task, { op: "join", handles: ["gated-detached"] })) as {
+			details?: { results?: Array<{ handle: string; modelFallback?: { from: string; to: string } }> };
+		};
+
+		expect(textOf(joined)).toContain("[model fallback: faux/detached-gated-child -> faux/faux-1");
+		expect(joined.details?.results).toContainEqual({
+			handle: "gated-detached",
+			modelFallback: {
+				from: "faux/detached-gated-child",
+				to: "faux/faux-1",
+				reason: "401 Unauthorized",
+			},
+		});
+	});
+
+	it("preserves model fallback provenance when joining a detached terminal failure", async () => {
+		const { defs } = buildTools(
+			[
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "401 Unauthorized" }),
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "detached parent failure" }),
+			],
+			false,
+			undefined,
+			[],
+			configureRequestedModel("detached-terminal-child"),
+		);
+		const task = defs.get("task")!;
+		await exec(task, {
+			op: "spawn",
+			name: "detached-terminal",
+			prompt: "p",
+			model: "faux/detached-terminal-child",
+		});
+
+		const joined = (await exec(task, { op: "join", handles: ["detached-terminal"] })) as {
+			details?: { results?: Array<{ handle: string; modelFallback?: { from: string; to: string } }> };
+		};
+
+		expect(textOf(joined)).toContain("[model fallback: faux/detached-terminal-child -> faux/faux-1");
+		expect(joined.details?.results).toContainEqual({
+			handle: "detached-terminal",
+			modelFallback: {
+				from: "faux/detached-terminal-child",
+				to: "faux/faux-1",
+				reason: "401 Unauthorized",
+			},
+		});
+	});
+
+	it("attributes gated provenance only to the final worker attempt, not earlier workers or judges", async () => {
+		const { defs } = buildTools(
+			[
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "401 Unauthorized" }),
+				fauxAssistantMessage("first worker used fallback"),
+				fauxAssistantMessage('```json\n{"pass":false,"reasons":"retry"}\n```'),
+				fauxAssistantMessage("final worker stayed requested"),
+				fauxAssistantMessage('```json\n{"pass":true,"reasons":"ok"}\n```'),
+			],
+			false,
+			undefined,
+			[],
+			configureRequestedModel("retry-gated-child"),
+		);
+		const task = defs.get("task")!;
+
+		const result = (await exec(task, {
+			op: "run",
+			name: "gated-retry",
+			prompt: "p",
+			model: "faux/retry-gated-child",
+			acceptance: { criteria: "must pass", max_attempts: 2 },
+		})) as { details?: { modelFallback?: unknown } };
+
+		expect(textOf(result)).toContain("final worker stayed requested");
+		expect(textOf(result)).not.toContain("[model fallback:");
+		expect(result.details?.modelFallback).toBeUndefined();
+	});
+
+	it("does not misattribute a terminal judge fallback to the successful worker", async () => {
+		const { defs } = buildTools(
+			[
+				fauxAssistantMessage("worker stayed on requested model"),
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "401 Unauthorized" }),
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "judge parent failure" }),
+			],
+			false,
+			undefined,
+			[],
+			configureRequestedModel("judge-terminal-child"),
+		);
+		const task = defs.get("task")!;
+
+		const result = (await exec(task, {
+			op: "run",
+			name: "judge-terminal",
+			prompt: "p",
+			model: "faux/judge-terminal-child",
+			acceptance: { criteria: "must pass", max_attempts: 1 },
+		})) as { details?: { modelFallback?: unknown } };
+
+		expect(isErr(result)).toBe(true);
+		expect(textOf(result)).not.toContain("[model fallback:");
+		expect(result.details?.modelFallback).toBeUndefined();
+	});
+
 	it("isolates throwing lifecycle callbacks for direct and detached task runs", async () => {
 		const { defs, started, completed } = buildTools(
 			[fauxAssistantMessage("direct done"), fauxAssistantMessage("detached done")],
@@ -425,6 +1089,41 @@ describe("parallel tool parity (extension level)", () => {
 		const continued = await exec(task, { op: "continue", name: "gate-failed", prompt: "try again" });
 		expect(isErr(continued)).toBe(true);
 		expect(textOf(continued)).toContain("no continuable");
+	});
+
+	it("keeps a turn-capped acceptance worker resumable", async () => {
+		const readTool: AgentTool = {
+			name: "read",
+			label: "read",
+			description: "read",
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
+		};
+		const { defs } = buildTools(
+			[
+				fauxAssistantMessage([fauxToolCall("read", {})], { stopReason: "toolUse" }),
+				fauxAssistantMessage("finished after resume"),
+			],
+			false,
+			undefined,
+			[readTool],
+		);
+		const task = defs.get("task");
+		if (!task) throw new Error("task not registered");
+		const capped = await exec(task, {
+			op: "run",
+			name: "turn-capped-gate",
+			prompt: "inspect",
+			max_turns: 1,
+			acceptance: { criteria: "must finish", max_attempts: 1 },
+		});
+		expect(isErr(capped)).toBe(true);
+		expect(textOf(capped)).toContain('task({op:"resume", name:"turn-capped-gate"})');
+		const listed = await exec(task, { op: "list" });
+		expect(textOf(listed)).toMatch(/Resumable[\s\S]*turn-capped-gate/);
+		const resumed = await exec(task, { op: "resume", name: "turn-capped-gate" });
+		expect(isErr(resumed)).toBe(false);
+		expect(textOf(resumed)).toContain("finished after resume");
 	});
 
 	it("applies acceptance gates to detached spawns and does not expose failed work as continuable", async () => {
@@ -477,6 +1176,34 @@ describe("parallel tool parity (extension level)", () => {
 		expect(text).toContain('name:"fanout-scout"');
 		const read = await exec(task, { op: SUBAGENT_READ_OP, name: "fanout-scout" });
 		expect(textOf(read)).toContain(MIDDLE_SENTINEL);
+	});
+
+	it("preserves final worker fallback provenance when fanout terminates in failure", async () => {
+		const { defs } = buildTools(
+			[
+				fauxAssistantMessage('```json\n{"targets":[]}\n```'),
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "401 Unauthorized" }),
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "fanout parent failure" }),
+			],
+			false,
+			undefined,
+			[],
+			configureRequestedModel("fanout-terminal-child"),
+		);
+		const fanout = defs.get("fanout")!;
+
+		const result = (await exec(fanout, {
+			scout: { prompt: "find targets" },
+			reviewer: { prompt_template: "review {{target}}" },
+			worker: { prompt: "synthesize", model: "faux/fanout-terminal-child" },
+		})) as { details?: { workerModelFallback?: { from: string; to: string } } };
+
+		expect(isErr(result)).toBe(true);
+		expect(textOf(result)).toContain("[model fallback: faux/fanout-terminal-child -> faux/faux-1");
+		expect(result.details?.workerModelFallback).toMatchObject({
+			from: "faux/fanout-terminal-child",
+			to: "faux/faux-1",
+		});
 	});
 
 	it("rejects an unknown per-task agent type loudly", async () => {

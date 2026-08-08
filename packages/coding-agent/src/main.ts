@@ -174,16 +174,17 @@ function reportDiagnostics(diagnostics: readonly AgentSessionRuntimeDiagnostic[]
 	}
 }
 
-type AppMode = "interactive" | "print" | "json" | "rpc";
+export type AppMode = "interactive" | "print" | "json" | "rpc";
 
-function resolveAppMode(parsed: Args, stdinIsTTY: boolean): AppMode {
+/** Pure CLI-mode selection, exported so explicit --mode contracts stay regression-tested. */
+export function resolveAppMode(parsed: Pick<Args, "mode" | "print">, stdinIsTTY: boolean): AppMode {
 	if (parsed.mode === "rpc") {
 		return "rpc";
 	}
 	if (parsed.mode === "json") {
 		return "json";
 	}
-	if (parsed.print || !stdinIsTTY) {
+	if (parsed.print || parsed.mode === "text" || !stdinIsTTY) {
 		return "print";
 	}
 	return "interactive";

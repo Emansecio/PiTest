@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import { type AutocompleteProvider, CombinedAutocompleteProvider } from "../src/autocomplete.js";
 import { Editor, type EditorTheme, wordWrapLine } from "../src/components/editor.js";
+import type { MouseEvent } from "../src/keys.js";
 import { TUI } from "../src/tui.js";
 import { visibleWidth } from "../src/utils.js";
 import { defaultEditorTheme } from "./test-themes.js";
@@ -40,6 +41,20 @@ async function flushAutocomplete(): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, 45));
 }
 
+function leftMouse(type: MouseEvent["type"] = "press"): MouseEvent {
+	return {
+		type,
+		button: "left",
+		wheel: undefined,
+		x: 0,
+		y: 0,
+		ctrl: false,
+		alt: false,
+		shift: false,
+		raw: "",
+	};
+}
+
 describe("Editor placeholder", () => {
 	const placeholderTheme: EditorTheme = {
 		...defaultEditorTheme,
@@ -55,6 +70,23 @@ describe("Editor placeholder", () => {
 		const plain = stripVTControlCharacters(raw).replace(/<\/?PH>/g, "");
 		assert.ok(plain.includes("Describe a task…"), `expected placeholder, got: ${JSON.stringify(plain)}`);
 		assert.ok(raw.includes("<PH>"), "placeholder should be colorized");
+	});
+
+	it("emits no inverse SGR for the placeholder cursor under NO_COLOR", () => {
+		const previousNoColor = process.env.NO_COLOR;
+		const previousForceColor = process.env.FORCE_COLOR;
+		process.env.NO_COLOR = "";
+		delete process.env.FORCE_COLOR;
+		try {
+			const editor = new Editor(createTestTUI(80, 24), placeholderTheme);
+			editor.setPlaceholder("Describe a task…");
+			assert.ok(!editor.render(80).join("\n").includes("\x1b[7m"));
+		} finally {
+			if (previousNoColor === undefined) delete process.env.NO_COLOR;
+			else process.env.NO_COLOR = previousNoColor;
+			if (previousForceColor === undefined) delete process.env.FORCE_COLOR;
+			else process.env.FORCE_COLOR = previousForceColor;
+		}
 	});
 
 	it("clears the placeholder when the user types", () => {
@@ -2355,6 +2387,107 @@ describe("Editor component", () => {
 			}
 		});
 
+		it("does not publish a timeout notice after the request becomes stale", async () => {
+			const previous = process.env.PIT_AUTOCOMPLETE_TIMEOUT_MS;
+			process.env.PIT_AUTOCOMPLETE_TIMEOUT_MS = "20";
+			try {
+				const editor = new Editor(createTestTUI(), defaultEditorTheme);
+				editor.setAutocompleteProvider({
+					getSuggestions: async () => new Promise(() => {}),
+					applyCompletion,
+				});
+
+				editor.handleInput("\t");
+				await new Promise((resolve) => setImmediate(resolve)); // provider captured the empty snapshot
+				editor.handleInput("x"); // makes that in-flight snapshot stale
+				await new Promise((resolve) => setTimeout(resolve, 60));
+
+				const rendered = editor.render(80).map(stripVTControlCharacters).join("\n");
+				assert.ok(!rendered.includes("search timed out"), "stale request must not publish a timeout");
+			} finally {
+				if (previous === undefined) delete process.env.PIT_AUTOCOMPLETE_TIMEOUT_MS;
+				else process.env.PIT_AUTOCOMPLETE_TIMEOUT_MS = previous;
+			}
+		});
+
+		it("PageUp/PageDown and their Shift variants cancel autocomplete", async () => {
+			for (const key of ["\x1b[5~", "\x1b[6~", "\x1b[5;2~", "\x1b[6;2~"]) {
+				const editor = new Editor(createTestTUI(), defaultEditorTheme);
+				editor.setAutocompleteProvider({
+					getSuggestions: async () => ({
+						items: [
+							{ value: "alpha", label: "alpha" },
+							{ value: "beta", label: "beta" },
+						],
+						prefix: "",
+					}),
+					applyCompletion,
+				});
+				editor.handleInput("\t");
+				await flushAutocomplete();
+				assert.equal(editor.isShowingAutocomplete(), true, `precondition for ${JSON.stringify(key)}`);
+
+				editor.handleInput(key);
+				assert.equal(editor.isShowingAutocomplete(), false, `${JSON.stringify(key)} should cancel`);
+			}
+		});
+
+		it("text mouse press and drag cancel autocomplete", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme, { embedded: true });
+			editor.setText("src");
+			editor.setAutocompleteProvider({
+				getSuggestions: async () => ({
+					items: [
+						{ value: "src/", label: "src/" },
+						{ value: "src.ts", label: "src.ts" },
+					],
+					prefix: "src",
+				}),
+				applyCompletion,
+			});
+
+			editor.handleInput("\t");
+			await flushAutocomplete();
+			editor.render(80);
+			assert.equal(editor.onMouse(leftMouse(), 0, 0), true);
+			assert.equal(editor.isShowingAutocomplete(), false, "text press cancels");
+
+			// Keep a drag gesture open, then reopen completion before moving its head.
+			editor.handleInput("\t");
+			await flushAutocomplete();
+			editor.render(80);
+			assert.equal(editor.onMouse(leftMouse("drag"), 0, 1), true);
+			assert.equal(editor.isShowingAutocomplete(), false, "text drag cancels");
+		});
+
+		it("dropdown owns non-selectable rows and applies clicks without synthesizing Tab", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme, { embedded: true });
+			editor.setAutocompleteProvider({
+				getSuggestions: async () => ({
+					items: [
+						{ value: "/one", label: "one" },
+						{ value: "/two", label: "two" },
+					],
+					prefix: "/",
+				}),
+				applyCompletion,
+			});
+			editor.handleInput("/");
+			await flushAutocomplete();
+			const rendered = editor.render(80);
+			assert.ok(rendered.at(-1)?.includes("apply"), "slash dropdown should include a non-selectable hint row");
+			assert.equal(editor.onMouse(leftMouse(), rendered.length - 1, 0), true, "hint row is consumed");
+			assert.equal(editor.isShowingAutocomplete(), true, "hint row does not choose an item");
+
+			// If the implementation synthesized raw Tab this override would throw.
+			editor.handleInput = () => {
+				throw new Error("dropdown click synthesized keyboard input");
+			};
+			assert.equal(editor.onMouse(leftMouse(), 2, 0), true); // second dropdown item (text row is 0)
+			assert.equal(editor.getText(), "/two");
+			assert.equal(editor.isShowingAutocomplete(), false);
+		});
+
 		it("auto-applies single force-file suggestion without showing menu", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 
@@ -3252,6 +3385,30 @@ describe("Editor component", () => {
 			assert.deepStrictEqual(editor.getCursor(), { line: 2, col: 10 });
 		});
 
+		it("restores an odd visual column after snapping to a wide grapheme", () => {
+			for (const up of ["\x1b[A", "\x1b[1;2A"]) {
+				for (const [wideLine, snappedCol] of [
+					["你好", 1],
+					["😀😀", 2],
+				] as const) {
+					const editor = new Editor(createTestTUI(), defaultEditorTheme);
+					editor.setText(`abcd\n${wideLine}\nabcd`);
+					editor.handleInput("\x01");
+					for (let i = 0; i < 3; i++) editor.handleInput("\x1b[C");
+					assert.deepStrictEqual(editor.getCursor(), { line: 2, col: 3 });
+
+					editor.handleInput(up);
+					assert.deepStrictEqual(
+						editor.getCursor(),
+						{ line: 1, col: snappedCol },
+						"visual col 3 snaps to visual col 2",
+					);
+					editor.handleInput(up);
+					assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 3 }, "ASCII visual col 3 is restored");
+				}
+			}
+		});
+
 		it("resets sticky column on horizontal movement (left arrow)", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 
@@ -3997,6 +4154,36 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.getExpandedText(), pastedText);
 		});
 
+		it("prunes deleted marker IDs without breaking undo/redo restoration", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const pastedText = "x".repeat(2000);
+			editor.handleInput(`\x1b[200~${pastedText}\x1b[201~`);
+			const marker = editor.getText();
+			assert.strictEqual(editor.getExpandedText(), pastedText);
+
+			editor.handleInput("\x7f");
+			assert.strictEqual(editor.getText(), "");
+			editor.handleInput("\x1b[45;5u");
+			assert.strictEqual(editor.getText(), marker);
+			assert.strictEqual(editor.getExpandedText(), pastedText, "undo restores payload metadata");
+			editor.handleInput("\x1b[45;6u");
+			for (const ch of marker) editor.handleInput(ch);
+			assert.strictEqual(editor.getExpandedText(), marker, "retyped historical marker stays literal");
+		});
+
+		it("setText treats historical marker text as literal while undo restores the live marker", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const pastedText = "y".repeat(2000);
+			editor.handleInput(`\x1b[200~${pastedText}\x1b[201~`);
+			const marker = editor.getText();
+
+			editor.setText(`prefix ${marker}`);
+			assert.strictEqual(editor.getExpandedText(), `prefix ${marker}`);
+			editor.handleInput("\x1b[45;5u");
+			assert.strictEqual(editor.getText(), marker);
+			assert.strictEqual(editor.getExpandedText(), pastedText);
+		});
+
 		it("snaps to the paste marker start when navigating down into it", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 
@@ -4268,22 +4455,46 @@ describe("Editor component", () => {
 			assert.ok(elapsed < 4000, `paste handling took ${elapsed}ms`);
 		});
 
-		it("fires onPasteTruncated with original/kept bytes when a paste is truncated", () => {
+		it("pre-caps complete raw payloads before normalization and reports raw/kept bytes", () => {
 			const calls: Array<{ originalBytes: number; keptBytes: number }> = [];
 			const editor = new Editor(createTestTUI(), defaultEditorTheme, {
 				onPasteTruncated: (info) => calls.push(info),
 			});
-			const originalLen = 12 * 1024 * 1024;
-			const huge = "a".repeat(originalLen);
-			editor.handleInput(`\x1b[200~${huge}\x1b[201~`);
+			// The tab falls just beyond the raw cap. If normalization ran first it would
+			// expand and report four bytes rather than the one raw byte reported here.
+			const originalLen = MAX_PASTE_BYTES + 1;
+			editor.handleInput(`\x1b[200~${"a".repeat(MAX_PASTE_BYTES)}\t\x1b[201~`);
 
 			assert.strictEqual(calls.length, 1, "callback should fire exactly once");
-			assert.strictEqual(calls[0]!.originalBytes, originalLen, "originalBytes is the pre-truncation length");
+			assert.strictEqual(calls[0]!.originalBytes, originalLen, "originalBytes is the complete raw payload");
 			assert.strictEqual(calls[0]!.keptBytes, MAX_PASTE_BYTES, "keptBytes is the cap");
 			// And the inserted text was actually truncated to the cap.
 			const marker = editor.getText().match(/\[paste #\d+ (\d+) chars\]/);
 			assert.ok(marker, "oversized paste still summarized as a marker");
 			assert.strictEqual(Number(marker![1]), MAX_PASTE_BYTES, "kept text equals the cap");
+		});
+
+		it("applies the byte cap after tab expansion", () => {
+			const calls: Array<{ originalBytes: number; keptBytes: number }> = [];
+			const editor = new Editor(createTestTUI(), defaultEditorTheme, {
+				onPasteTruncated: (info) => calls.push(info),
+			});
+			const tabs = "\t".repeat(Math.floor(MAX_PASTE_BYTES / 4) + 1);
+			editor.handleInput(`\x1b[200~${tabs}\x1b[201~`);
+
+			const marker = editor.getText().match(/\[paste #\d+ (\d+) chars\]/);
+			assert.ok(marker);
+			assert.strictEqual(Number(marker[1]), MAX_PASTE_BYTES);
+			assert.deepStrictEqual(calls, [{ originalBytes: tabs.length * 4, keptBytes: MAX_PASTE_BYTES }]);
+		});
+
+		it("uses UTF-8 bytes for the unterminated-paste guard", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const wide = "你".repeat(Math.floor(MAX_PASTE_BYTES / 3) + 3);
+			editor.handleInput(`\x1b[200~${wide}`); // no end marker: byte guard must flush
+			assert.match(editor.getText(), /\[paste #\d+ \d+ chars\]/);
+			editor.handleInput("z");
+			assert.ok(editor.getText().endsWith("z"), "guard exited paste mode instead of swallowing later input");
 		});
 
 		it("does not fire onPasteTruncated for a normal (sub-cap) paste", () => {

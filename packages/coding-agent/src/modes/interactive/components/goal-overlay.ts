@@ -13,6 +13,7 @@ import { type Component, truncateToWidth, visibleWidth } from "@pit/tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import { formatElapsed, formatTokens, type GoalSnapshot } from "../../../core/goal/goal-manager.ts";
 import { theme } from "../theme/theme.ts";
+import { resolveTreeConnectors, toAsciiUiGlyphs } from "./glyph-resolver.ts";
 import { spinnerGlyphAt } from "./spinner-ticker.ts";
 
 /** A completed goal lingers this long before the overlay auto-hides. */
@@ -24,11 +25,16 @@ export const GOAL_COMPLETE_SOFT_EXIT_MS = 400;
 const CONNECTOR_WIDTH = 3;
 
 function fitWidth(text: string, width: number): string {
-	return visibleWidth(text) > width ? truncateToWidth(text, width, "…") : text;
+	const safeWidth = Math.max(0, width);
+	return visibleWidth(text) > safeWidth ? truncateToWidth(text, safeWidth, "…") : text;
 }
 
 function rowBudget(width: number): number {
-	return Math.max(4, width - CONNECTOR_WIDTH);
+	return Math.max(0, width - CONNECTOR_WIDTH);
+}
+
+function finalizeGoalLines(lines: string[]): string[] {
+	return lines.map((line) => toAsciiUiGlyphs(line));
 }
 
 function statusWord(status: GoalSnapshot["status"]): string {
@@ -110,7 +116,7 @@ function buildGoalHeaderLine(snapshot: GoalSnapshot, width: number): string {
 function buildGoalObjectiveLine(snapshot: GoalSnapshot, width: number): string {
 	const budget = rowBudget(width);
 	const obj = fitWidth(snapshot.objective, budget);
-	return `${theme.fg("dim", "├─ ")}${obj}`;
+	return fitWidth(`${theme.fg("dim", resolveTreeConnectors().branchPad)}${obj}`, width);
 }
 
 function buildGoalMetricsLine(snapshot: GoalSnapshot, width: number): string {
@@ -132,7 +138,7 @@ function buildGoalMetricsLine(snapshot: GoalSnapshot, width: number): string {
 			: "";
 	const metricsText = `iter ${snapshot.iterations} · tokens ${formatTokens(snapshot.tokensUsed)}${budgetPart}${splitPart}${nearBudget} · ${formatElapsed(snapshot.elapsedMs)}`;
 	const metricsBody = fitWidth(metricsText, budget);
-	return `${theme.fg("dim", "├─ ")}${theme.fg("muted", metricsBody)}`;
+	return fitWidth(`${theme.fg("dim", resolveTreeConnectors().branchPad)}${theme.fg("muted", metricsBody)}`, width);
 }
 
 function buildGoalHintLine(
@@ -144,7 +150,7 @@ function buildGoalHintLine(
 ): string {
 	const hint = hintForStatus(snapshot.status, continuing, spinner, snapshot.summary, completeAgeMs);
 	const hintText = fitWidth(hint.text, rowBudget(width));
-	return `${theme.fg("dim", "└─ ")}${hint.colorize(hintText)}`;
+	return fitWidth(`${theme.fg("dim", resolveTreeConnectors().lastPad)}${hint.colorize(hintText)}`, width);
 }
 
 interface GoalOverlayRenderCache {
@@ -207,12 +213,12 @@ export function renderGoalOverlay(
 		return [];
 	}
 	const cache = seedGoalOverlayCache(snapshot, width, continuing);
-	return [
+	return finalizeGoalLines([
 		cache.headerLine,
 		cache.objLine,
 		cache.metricsLine,
 		buildGoalHintLine(snapshot, width, continuing, spinner, completeAgeMs),
-	];
+	]);
 }
 
 class GoalOverlayComponent implements Component {
@@ -264,10 +270,14 @@ class GoalOverlayComponent implements Component {
 		const structuralKey = goalStructuralKey(snapshot);
 		const cache = this.renderCache;
 		if (cache && cache.structuralKey === structuralKey && cache.width === width && cache.continuing === continuing) {
-			return materializeGoalOverlayCache(cache, snapshot, width, continuing, spinner, completeAgeMs);
+			return finalizeGoalLines(
+				materializeGoalOverlayCache(cache, snapshot, width, continuing, spinner, completeAgeMs),
+			);
 		}
 		this.renderCache = seedGoalOverlayCache(snapshot, width, continuing);
-		return materializeGoalOverlayCache(this.renderCache, snapshot, width, continuing, spinner, completeAgeMs);
+		return finalizeGoalLines(
+			materializeGoalOverlayCache(this.renderCache, snapshot, width, continuing, spinner, completeAgeMs),
+		);
 	}
 }
 

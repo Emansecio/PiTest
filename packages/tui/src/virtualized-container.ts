@@ -1,4 +1,5 @@
-import type { Component, MouseHitContainer, MouseHitTarget } from "./tui.ts";
+import { type Component, errorToMessage, type MouseHitContainer, type MouseHitTarget } from "./tui.ts";
+import { truncateToWidth } from "./utils.ts";
 
 /** Default hot-zone: re-render this many trailing lines every frame. */
 export const DEFAULT_VIRTUALIZED_TAIL_LINE_BUDGET = 200;
@@ -16,8 +17,9 @@ function renderChild(child: Component, width: number): string[] {
 	try {
 		return child.render(width);
 	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		return [`\x1b[2m[render error: ${message}]\x1b[22m`];
+		const message = errorToMessage(error, Math.max(1, width));
+		const line = truncateToWidth(`[render error: ${message}]`, Math.max(0, width), "…");
+		return [`\x1b[2m${line}\x1b[22m`];
 	}
 }
 

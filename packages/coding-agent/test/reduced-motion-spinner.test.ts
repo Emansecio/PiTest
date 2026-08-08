@@ -36,15 +36,45 @@ describe("reduced motion spinner freeze (#E)", () => {
 		expect(spinnerGlyphAt(10_000)).toBe(SPINNER_FRAMES[0]);
 	});
 
-	it("TERM=dumb enables reduced motion without PIT_NO_MOTION", () => {
+	it("TERM=dumb keeps ASCII glyphs animated without PIT_NO_MOTION", () => {
 		for (const key of ENV_KEYS) {
 			savedEnv[key] = process.env[key];
 		}
 		delete process.env.PIT_NO_MOTION;
 		delete process.env.PIT_REDUCED_MOTION;
 		process.env.TERM = "dumb";
-		// TERM=dumb also selects the ASCII-safe glyph set, whose static frame is `|`.
-		expect(spinnerGlyphAt(5000)).toBe("|");
+		// TERM=dumb selects the ASCII-safe glyph set, but the interactive TUI still
+		// needs repainting to provide progress feedback.
+		expect(spinnerGlyphAt(80)).toBe("/");
+	});
+
+	it("TERM=dumb emits true ASCII decorative chrome in goal and todo overlays", () => {
+		for (const key of ENV_KEYS) savedEnv[key] = process.env[key];
+		delete process.env.PIT_NO_MOTION;
+		delete process.env.PIT_REDUCED_MOTION;
+		process.env.TERM = "dumb";
+		const goalSession = {
+			goalSnapshot: () => ({
+				id: "g1",
+				objective: "ship it",
+				status: "active",
+				tokensUsed: 0,
+				iterations: 0,
+				startedAt: 0,
+				elapsedMs: 0,
+			}),
+			goalIsDriving: () => true,
+		} as unknown as AgentSession;
+		const todoSession = {
+			todoForOverlay: () => ({ items: [{ id: 1, subject: "task", status: "in_progress" }], done: 0, total: 1 }),
+		} as unknown as AgentSession;
+		const output = stripAnsi(
+			[
+				...createGoalOverlay(goalSession, () => 0).render(80),
+				...createTodoOverlay(todoSession, () => 0).render(80),
+			].join("\n"),
+		);
+		expect(output).not.toMatch(/[^\x00-\x7f]/);
 	});
 
 	it("todo overlay keeps a static in_progress glyph across clock steps", () => {

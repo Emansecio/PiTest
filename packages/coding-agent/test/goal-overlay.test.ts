@@ -127,6 +127,13 @@ describe("renderGoalOverlay", () => {
 describe("renderGoalOverlay width safety", () => {
 	beforeAll(() => initTheme(undefined, false));
 
+	it("stays width-safe at degenerate terminal widths 0 through 6", () => {
+		for (let width = 0; width <= 6; width++) {
+			const lines = renderGoalOverlay(snapshot({ objective: "long objective" }), width, true, SPINNER);
+			expectFitsWidth(lines, width, `goal-overlay tiny@${width}`);
+		}
+	});
+
 	it("never emits a line wider than the terminal, across widths x adversarial content", () => {
 		for (const [name, text] of Object.entries(ADVERSARIAL_TEXT)) {
 			const snap = snapshot({ objective: text, summary: text });

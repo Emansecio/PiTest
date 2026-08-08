@@ -12,7 +12,8 @@
 import type { AgentTool } from "@pit/agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@pit/ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { isKnownPollingCall } from "../src/core/turn-steering-engine.js";
 import { createHarness, type Harness } from "./suite/harness.js";
 
 function errorMessageOf(message: unknown): string {
@@ -22,12 +23,29 @@ function errorMessageOf(message: unknown): string {
 describe("doom-loop escalation", () => {
 	const harnesses: Harness[] = [];
 	afterEach(async () => {
+		delete process.env.PIT_NO_DOOM_LOOP_GUARD;
+		vi.restoreAllMocks();
 		while (harnesses.length > 0) await harnesses.pop()?.cleanup();
+	});
+
+	function customMessageCount(harness: Harness, customType: string): number {
+		return harness.session.messages.filter(
+			(m) => m.role === "custom" && (m as { customType?: string }).customType === customType,
+		).length;
+	}
+
+	it("recognizes coordinator, bash-job, and status polling without exempting mutations", () => {
+		expect(isKnownPollingCall("task", { op: "poll", handles: ["a"] })).toBe(true);
+		expect(isKnownPollingCall("task", { op: "join", handles: ["a"] })).toBe(true);
+		expect(isKnownPollingCall("task", { op: "run", prompt: "work" })).toBe(false);
+		expect(isKnownPollingCall("bash", { jobId: "bg-1", action: "wait" })).toBe(true);
+		expect(isKnownPollingCall("bash", { jobId: "bg-1", action: "kill" })).toBe(false);
+		expect(isKnownPollingCall("run_status", { action: "status" })).toBe(true);
 	});
 
 	it("aborts the turn once identical tool calls reach the Tier-3 threshold", async () => {
 		const harness = await createHarness({
-			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 2 } } },
+			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 2, cooldownMs: 0 } } },
 		});
 		harnesses.push(harness);
 
@@ -84,7 +102,7 @@ describe("doom-loop escalation", () => {
 		// the abort. The pre-fix literals (4/6) would have inverted the order: the pause
 		// at 4 and abort at 6 both fire before the configured tier-1 threshold of 5.
 		const harness = await createHarness({
-			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 5 } } },
+			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 5, cooldownMs: 0 } } },
 		});
 		harnesses.push(harness);
 
@@ -141,5 +159,88 @@ describe("doom-loop escalation", () => {
 		// All twelve steps ran — the loop was NOT cut short.
 		const stepResults = harness.session.messages.filter((m) => m.role === "toolResult").length;
 		expect(stepResults).toBe(12);
+	});
+
+	it("never hard-aborts identical bash background-job polling results", async () => {
+		const harness = await createHarness({
+			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 2, cooldownMs: 0 } } },
+		});
+		harnesses.push(harness);
+
+		const poll = fauxAssistantMessage([fauxToolCall("bash", { jobId: "missing-job", action: "poll" })], {
+			stopReason: "toolUse",
+		});
+		harness.setResponses([...Array.from({ length: 10 }, () => poll), fauxAssistantMessage("still pending")]);
+		await harness.session.prompt("wait for the background job");
+
+		expect(harness.session.messages.some((m) => errorMessageOf(m).includes("Doom loop abort"))).toBe(false);
+		expect(harness.session.messages.filter((m) => m.role === "toolResult")).toHaveLength(10);
+	});
+
+	it("honors the configured cooldown before repeating identical-call reminders", async () => {
+		const harness = await createHarness({
+			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 2, cooldownMs: 60_000 } } },
+		});
+		harnesses.push(harness);
+		const callA = () =>
+			fauxAssistantMessage([fauxToolCall("read", { path: "missing-a.txt" })], { stopReason: "toolUse" });
+		const callB = fauxAssistantMessage([fauxToolCall("read", { path: "missing-b.txt" })], { stopReason: "toolUse" });
+		harness.setResponses([callA(), callA(), callB, callA(), callA(), fauxAssistantMessage("done")]);
+
+		await harness.session.prompt("read the files");
+
+		expect(customMessageCount(harness, "pi.doom-loop-reminder")).toBe(1);
+	});
+
+	it("spaces every same-streak escalation and never aborts before suppressed recovery is delivered", async () => {
+		let now = 10_000;
+		let executions = 0;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const probe: AgentTool = {
+			name: "probe",
+			label: "Probe",
+			description: "Returns the same stalled result",
+			parameters: Type.Object({}),
+			execute: async () => {
+				executions++;
+				if (executions === 8 || executions === 10) now += 60_000;
+				return { content: [{ type: "text", text: "still stalled" }], details: undefined };
+			},
+		};
+		const harness = await createHarness({
+			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 2, cooldownMs: 60_000 } } },
+			tools: [probe],
+		});
+		harnesses.push(harness);
+		const fixated = fauxAssistantMessage([fauxToolCall("probe", {})], { stopReason: "toolUse" });
+		harness.setResponses([...Array.from({ length: 12 }, () => fixated), fauxAssistantMessage("done")]);
+
+		await harness.session.prompt("keep probing");
+
+		expect(customMessageCount(harness, "pi.doom-loop-reminder")).toBe(1);
+		expect(customMessageCount(harness, "pi.doom-loop-pause")).toBe(0);
+		expect(customMessageCount(harness, "pi.doom-loop-recovery")).toBe(1);
+		const abort = harness.session.messages.find(
+			(message) => message.role === "assistant" && errorMessageOf(message).includes("Doom loop abort"),
+		);
+		expect(errorMessageOf(abort)).toContain("9 consecutive");
+	});
+
+	it("PIT_NO_DOOM_LOOP_GUARD disables the identical-call guard", async () => {
+		process.env.PIT_NO_DOOM_LOOP_GUARD = "1";
+		const harness = await createHarness({
+			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 2, cooldownMs: 0 } } },
+		});
+		harnesses.push(harness);
+		const fixated = fauxAssistantMessage([fauxToolCall("read", { path: "missing.txt" })], {
+			stopReason: "toolUse",
+		});
+		harness.setResponses([...Array.from({ length: 10 }, () => fixated), fauxAssistantMessage("done")]);
+
+		await harness.session.prompt("read the file");
+
+		expect(harness.session.messages.some((m) => errorMessageOf(m).includes("Doom loop abort"))).toBe(false);
+		expect(customMessageCount(harness, "pi.doom-loop-reminder")).toBe(0);
+		expect(harness.session.messages.filter((m) => m.role === "toolResult")).toHaveLength(10);
 	});
 });

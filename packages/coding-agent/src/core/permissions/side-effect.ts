@@ -9,6 +9,28 @@
 
 export type ToolSideEffect = "none" | "workspace" | "agent" | "exec" | "opaque";
 
+/**
+ * Trusted, host-computed authorization facts for one permission check. This is
+ * deliberately separate from model-supplied tool arguments: only the
+ * coordinator may prove that a delegation's effective child catalog is
+ * side-effect-free and that it will not create a worktree.
+ */
+export interface PermissionCheckMetadata {
+	readonly readOnlyDelegation?: true;
+}
+
+/** Trusted identity facts derived from the host's live active tool definition. */
+export interface PermissionMetadataContext {
+	readonly isNativeCoordinator: boolean;
+}
+
+/** Host-only resolver installed by the coordinator on its session checker. */
+export type PermissionMetadataResolver = (
+	toolName: string,
+	input: Readonly<Record<string, unknown>>,
+	context: PermissionMetadataContext,
+) => PermissionCheckMetadata | undefined | Promise<PermissionCheckMetadata | undefined>;
+
 /** Side effects that plan mode must block on the defensive `type:"tool"` branch. */
 const PLAN_BLOCKING: ReadonlySet<ToolSideEffect> = new Set(["workspace", "agent", "exec", "opaque"]);
 

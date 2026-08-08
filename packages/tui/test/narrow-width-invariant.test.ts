@@ -11,14 +11,33 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { Box } from "../src/components/box.js";
+import { Input } from "../src/components/input.js";
 import { Markdown } from "../src/components/markdown.js";
 import { Text } from "../src/components/text.js";
-import { visibleWidth } from "../src/utils.js";
+import { TruncatedText } from "../src/components/truncated-text.js";
+import { truncateToUtf8Bytes, visibleWidth } from "../src/utils.js";
 import { defaultMarkdownTheme } from "./test-themes.js";
 
 const SAMPLES = ["hello world", "日本語のテキスト", "a", "mixed 日本 text with ascii"];
 
 describe("narrow-width invariant", () => {
+	it("truncates at UTF-8 boundaries", () => {
+		assert.equal(truncateToUtf8Bytes("a😀b", 4), "a");
+		assert.equal(truncateToUtf8Bytes("a😀b", 5), "a😀");
+		assert.equal(truncateToUtf8Bytes("界b", 3), "界");
+	});
+	it("base components stay width-safe at 0–3 columns", () => {
+		const box = new Box(4, 0);
+		box.addChild(new Text("hello"));
+		const components = [box, new Input(), new TruncatedText("hello", 4, 0)];
+		for (let width = 0; width <= 3; width++) {
+			for (const component of components) {
+				for (const line of component.render(width)) assert.ok(visibleWidth(line) <= width);
+			}
+		}
+	});
+
 	it("Text never exceeds the width it was given", () => {
 		for (const paddingX of [0, 1, 2, 4]) {
 			for (const sample of SAMPLES) {

@@ -39,7 +39,7 @@ describe("doom-loop Tier-3 structured recovery (CR6)", () => {
 
 	it("injects a recovery steer (not an abort) the first time a streak reaches Tier-3", async () => {
 		const harness = await createHarness({
-			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 2 } } },
+			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 2, cooldownMs: 0 } } },
 		});
 		harnesses.push(harness);
 
@@ -60,7 +60,7 @@ describe("doom-loop Tier-3 structured recovery (CR6)", () => {
 
 	it("aborts on relapse — the streak keeps climbing past Tier-3 after the recovery steer", async () => {
 		const harness = await createHarness({
-			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 2 } } },
+			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 2, cooldownMs: 0 } } },
 		});
 		harnesses.push(harness);
 
@@ -86,7 +86,7 @@ describe("doom-loop Tier-3 structured recovery (CR6)", () => {
 
 	it("resets the recovery budget when a different call breaks the streak", async () => {
 		const harness = await createHarness({
-			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 2 } } },
+			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 2, cooldownMs: 0 } } },
 		});
 		harnesses.push(harness);
 

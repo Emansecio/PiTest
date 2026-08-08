@@ -16,6 +16,7 @@ import { type FauxProviderRegistration, fauxAssistantMessage, registerFauxProvid
 import { afterEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { createCoordinatorExtension } from "../src/core/built-ins/coordinator-extension.js";
+import { slotStats } from "../src/core/coordinator/slots.js";
 import { convertToLlm } from "../src/core/messages.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { TokenBudgetGovernor } from "../src/core/token-governor.js";
@@ -23,7 +24,12 @@ import { TokenBudgetGovernor } from "../src/core/token-governor.js";
 describe("coordinator op:resume", () => {
 	let faux: FauxProviderRegistration | undefined;
 	let governor: TokenBudgetGovernor;
-	afterEach(() => faux?.unregister());
+	let abortCoordinator: (() => void) | undefined;
+	afterEach(() => {
+		abortCoordinator?.();
+		abortCoordinator = undefined;
+		faux?.unregister();
+	});
 
 	function buildTask(responses: Parameters<FauxProviderRegistration["setResponses"]>[0]) {
 		faux = registerFauxProvider();
@@ -39,6 +45,9 @@ describe("coordinator op:resume", () => {
 			getAvailableTools: () => [],
 			convertToLlm: (messages) => convertToLlm(messages),
 			getTokenGovernor: () => governor,
+			registerAbortDetached: (abort) => {
+				abortCoordinator = abort;
+			},
 		});
 		const tools: Record<string, { execute: (...a: unknown[]) => Promise<unknown> }> = {};
 		ext({
@@ -49,10 +58,33 @@ describe("coordinator op:resume", () => {
 		return tools.task;
 	}
 
-	const exec = (task: { execute: (...a: unknown[]) => Promise<unknown> }, params: Record<string, unknown>) =>
-		task.execute("call", params, undefined, undefined, {});
+	const exec = (
+		task: { execute: (...a: unknown[]) => Promise<unknown> },
+		params: Record<string, unknown>,
+		signal?: AbortSignal,
+	) => task.execute("call", params, signal, undefined, {});
 	const textOf = (r: unknown): string => (r as { content: { text: string }[] }).content[0].text;
 	const isErr = (r: unknown): boolean => (r as { isError: boolean }).isError;
+	const settleWithin = async <T>(promise: Promise<T>, ms = 500): Promise<T | undefined> => {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			return await Promise.race([
+				promise,
+				new Promise<undefined>((resolve) => {
+					timer = setTimeout(() => resolve(undefined), ms);
+				}),
+			]);
+		} finally {
+			if (timer) clearTimeout(timer);
+		}
+	};
+	const waitForNoActiveSlot = async (): Promise<void> => {
+		const deadline = Date.now() + 1000;
+		while (slotStats().active > 0 && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		expect(slotStats().active).toBe(0);
+	};
 
 	it("charges an in-memory resume once and merges its usage into the original record", async () => {
 		const task = buildTask([
@@ -117,6 +149,151 @@ describe("coordinator op:resume", () => {
 		const [a, b] = await Promise.all([first, second]);
 		expect(isErr(a)).toBe(false);
 		expect(textOf(b)).toBe(textOf(a));
+	});
+
+	it("composes the caller signal with the coordinator-owned resume controller", async () => {
+		let markStarted: (() => void) | undefined;
+		const started = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		const task = buildTask([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "drop" }),
+			async (_context, options) => {
+				markStarted?.();
+				return await new Promise((resolve) => {
+					const finish = () => resolve(fauxAssistantMessage("late resume output"));
+					if (options?.signal?.aborted) finish();
+					else options?.signal?.addEventListener("abort", finish, { once: true });
+				});
+			},
+		]);
+		await exec(task, { op: "run", name: "parent-abort", prompt: "start" });
+		const controller = new AbortController();
+		const resume = exec(task, { op: "resume", name: "parent-abort" }, controller.signal);
+		await started;
+		controller.abort(new Error("aborted: caller interrupted resume"));
+		try {
+			const result = await settleWithin(resume);
+			expect(result).toBeDefined();
+			if (result) {
+				expect(isErr(result)).toBe(true);
+				expect(textOf(result)).toMatch(/cancel|abort|did not complete|failed/i);
+			}
+		} finally {
+			abortCoordinator?.();
+			await settleWithin(resume);
+		}
+	});
+
+	it("session-wide abort stops an in-memory resume promptly", async () => {
+		let markStarted: (() => void) | undefined;
+		const started = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		const task = buildTask([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "drop" }),
+			async (_context, options) => {
+				markStarted?.();
+				return await new Promise((resolve) => {
+					const finish = () => resolve(fauxAssistantMessage("late resume output"));
+					if (options?.signal?.aborted) finish();
+					else options?.signal?.addEventListener("abort", finish, { once: true });
+				});
+			},
+		]);
+		await exec(task, { op: "run", name: "session-abort", prompt: "start" });
+		const resume = exec(task, { op: "resume", name: "session-abort" });
+		await started;
+		abortCoordinator?.();
+		const result = await settleWithin(resume);
+		expect(result).toBeDefined();
+		if (result) expect(isErr(result)).toBe(true);
+	});
+
+	it.each(["caller", "session"] as const)(
+		"%s abort interrupts the pre-resume idle wait without starting another prompt",
+		async (abortSource) => {
+			let markStarted: (() => void) | undefined;
+			const started = new Promise<void>((resolve) => {
+				markStarted = resolve;
+			});
+			let releaseProvider: (() => void) | undefined;
+			const task = buildTask([
+				async () => {
+					markStarted?.();
+					return await new Promise((resolve) => {
+						releaseProvider = () => resolve(fauxAssistantMessage("late original output"));
+					});
+				},
+				fauxAssistantMessage("must not start"),
+			]);
+			const initialController = new AbortController();
+			const initialRun = exec(
+				task,
+				{ op: "run", name: `idle-${abortSource}`, prompt: "start" },
+				initialController.signal,
+			);
+			await started;
+			initialController.abort(new Error("aborted: initial run"));
+			expect(await settleWithin(initialRun)).toBeDefined();
+
+			const resumeController = new AbortController();
+			const resume = exec(
+				task,
+				{ op: "resume", name: `idle-${abortSource}` },
+				abortSource === "caller" ? resumeController.signal : undefined,
+			);
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			if (abortSource === "caller") resumeController.abort(new Error("aborted: stop idle wait"));
+			else abortCoordinator?.();
+			try {
+				const result = await settleWithin(resume);
+				expect(result).toBeDefined();
+				if (result) expect(isErr(result)).toBe(true);
+				expect(faux?.state.callCount).toBe(1);
+			} finally {
+				releaseProvider?.();
+				await settleWithin(resume, 1000);
+				await waitForNoActiveSlot();
+			}
+		},
+	);
+
+	it("gives up the pre-resume idle wait at a finite deadline and does not start a new prompt", async () => {
+		let markStarted: (() => void) | undefined;
+		const started = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		let releaseProvider: (() => void) | undefined;
+		const task = buildTask([
+			async () => {
+				markStarted?.();
+				return await new Promise((resolve) => {
+					releaseProvider = () => resolve(fauxAssistantMessage("late original output"));
+				});
+			},
+			fauxAssistantMessage("must not start"),
+		]);
+		const initialController = new AbortController();
+		const initialRun = exec(task, { op: "run", name: "idle-deadline", prompt: "start" }, initialController.signal);
+		await started;
+		initialController.abort(new Error("aborted: initial run"));
+		expect(await settleWithin(initialRun)).toBeDefined();
+
+		const resume = exec(task, { op: "resume", name: "idle-deadline" });
+		try {
+			const result = await settleWithin(resume, 2000);
+			expect(result).toBeDefined();
+			if (result) {
+				expect(isErr(result)).toBe(true);
+				expect(textOf(result)).toMatch(/previous run.*idle|idle.*deadline/i);
+			}
+			expect(faux?.state.callCount).toBe(1);
+		} finally {
+			releaseProvider?.();
+			await settleWithin(resume, 1000);
+			await waitForNoActiveSlot();
+		}
 	});
 
 	it("resume accepts a continuation prompt", async () => {

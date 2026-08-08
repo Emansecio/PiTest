@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@pit/ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
@@ -159,6 +159,169 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		expect(result.cancelled).toBe(true);
 		expect(runtimeHost.session.sessionFile).toBe(originalSessionFile);
 		expect(events).toEqual([{ type: "session_before_switch", reason: "new", targetSessionFile: undefined }]);
+	});
+
+	it("pre-aborted switch invokes no session_before_switch handlers", async () => {
+		let handlerCalls = 0;
+		const { runtimeHost } = await createRuntimeHost((pi) => {
+			pi.on("session_before_switch", () => {
+				handlerCalls++;
+				return { cancel: true };
+			});
+		});
+		const abort = new AbortController();
+		abort.abort(new Error("switch cancelled"));
+
+		const result = await runtimeHost.switchSession("unused-session.jsonl", { signal: abort.signal });
+
+		expect(result).toEqual({ cancelled: true });
+		expect(handlerCalls).toBe(0);
+	});
+
+	it("abort during session_before_switch prevents later handlers and cancels replacement", async () => {
+		const previousTimeout = process.env.PIT_EXTENSION_HOOK_TIMEOUT_MS;
+		process.env.PIT_EXTENSION_HOOK_TIMEOUT_MS = "80";
+		try {
+			const abort = new AbortController();
+			const handlerOrder: string[] = [];
+			const { runtimeHost } = await createRuntimeHost((pi) => {
+				pi.on("session_before_switch", async () => {
+					handlerOrder.push("first");
+					abort.abort(new Error("switch cancelled"));
+					await new Promise(() => {});
+				});
+				pi.on("session_before_switch", () => {
+					handlerOrder.push("second");
+				});
+			});
+			const oldSession = runtimeHost.session;
+			const errors: string[] = [];
+			oldSession.extensionRunner.onError((error) => errors.push(error.error));
+
+			const result = await runtimeHost.newSession({ signal: abort.signal });
+
+			expect(result).toEqual({ cancelled: true });
+			expect(runtimeHost.session).toBe(oldSession);
+			expect(handlerOrder).toEqual(["first"]);
+			expect(errors).toEqual([]);
+		} finally {
+			if (previousTimeout === undefined) delete process.env.PIT_EXTENSION_HOOK_TIMEOUT_MS;
+			else process.env.PIT_EXTENSION_HOOK_TIMEOUT_MS = previousTimeout;
+		}
+	});
+
+	it("times out a never-settling session_before_switch handler and continues replacement", async () => {
+		const previousTimeout = process.env.PIT_SESSION_BEFORE_HOOK_TIMEOUT_MS;
+		process.env.PIT_SESSION_BEFORE_HOOK_TIMEOUT_MS = "80";
+		try {
+			const handlerOrder: string[] = [];
+			const { runtimeHost } = await createRuntimeHost((pi) => {
+				pi.on("session_before_switch", async () => {
+					handlerOrder.push("hung");
+					await new Promise(() => {});
+				});
+				pi.on("session_before_switch", () => {
+					handlerOrder.push("next");
+				});
+			});
+			const oldSession = runtimeHost.session;
+			const errors: Array<{ event: string; error: string }> = [];
+			oldSession.extensionRunner.onError((error) => {
+				errors.push({ event: error.event, error: error.error });
+			});
+
+			const start = Date.now();
+			const result = await Promise.race([
+				runtimeHost.newSession(),
+				new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 500)),
+			]);
+
+			expect(result).toBeDefined();
+			if (!result) return;
+			expect(Date.now() - start).toBeLessThan(2000);
+			expect(result.cancelled).toBe(false);
+			expect(runtimeHost.session).not.toBe(oldSession);
+			expect(handlerOrder).toEqual(["hung", "next"]);
+			expect(errors).toHaveLength(1);
+			expect(errors[0]).toMatchObject({ event: "session_before_switch" });
+			expect(errors[0]?.error).toMatch(/timed out.*80ms/i);
+		} finally {
+			if (previousTimeout === undefined) delete process.env.PIT_SESSION_BEFORE_HOOK_TIMEOUT_MS;
+			else process.env.PIT_SESSION_BEFORE_HOOK_TIMEOUT_MS = previousTimeout;
+		}
+	});
+
+	it("does not apply the before_agent_start timeout to session_before handlers", async () => {
+		const previousExtensionTimeout = process.env.PIT_EXTENSION_HOOK_TIMEOUT_MS;
+		const previousSessionTimeout = process.env.PIT_SESSION_BEFORE_HOOK_TIMEOUT_MS;
+		process.env.PIT_EXTENSION_HOOK_TIMEOUT_MS = "20";
+		process.env.PIT_SESSION_BEFORE_HOOK_TIMEOUT_MS = "500";
+		try {
+			const { runtimeHost } = await createRuntimeHost((pi) => {
+				pi.on("session_before_switch", async () => {
+					await new Promise((resolve) => setTimeout(resolve, 60));
+				});
+			});
+			const errors: string[] = [];
+			runtimeHost.session.extensionRunner.onError((error) => errors.push(error.error));
+
+			const result = await runtimeHost.newSession();
+
+			expect(result.cancelled).toBe(false);
+			expect(errors).toEqual([]);
+		} finally {
+			if (previousExtensionTimeout === undefined) delete process.env.PIT_EXTENSION_HOOK_TIMEOUT_MS;
+			else process.env.PIT_EXTENSION_HOOK_TIMEOUT_MS = previousExtensionTimeout;
+			if (previousSessionTimeout === undefined) delete process.env.PIT_SESSION_BEFORE_HOOK_TIMEOUT_MS;
+			else process.env.PIT_SESSION_BEFORE_HOOK_TIMEOUT_MS = previousSessionTimeout;
+		}
+	});
+
+	it("wires and awaits idempotent coordinator cleanup during direct dispose", async () => {
+		const { runtimeHost } = await createRuntimeHost(() => {});
+		expect(typeof runtimeHost.session._disposeCoordinator).toBe("function");
+		let releaseCleanup!: () => void;
+		const cleanupGate = new Promise<void>((resolve) => {
+			releaseCleanup = resolve;
+		});
+		const disposeCoordinator = vi.fn(async () => cleanupGate);
+		runtimeHost.session._disposeCoordinator = disposeCoordinator;
+
+		const pending = runtimeHost.session.dispose();
+		const settledEarly = await Promise.race([
+			pending.then(() => true),
+			new Promise<false>((resolve) => setTimeout(() => resolve(false), 30)),
+		]);
+		expect(settledEarly).toBe(false);
+		releaseCleanup();
+		await Promise.all([pending, runtimeHost.session.dispose()]);
+		expect(disposeCoordinator).toHaveBeenCalledTimes(1);
+	});
+
+	it("direct dispose aborts the registered coordinator callback once before waiting for principal idle", async () => {
+		const { runtimeHost } = await createRuntimeHost(() => {});
+		const phases: string[] = [];
+		let releaseIdle!: () => void;
+		const idle = new Promise<void>((resolve) => {
+			releaseIdle = resolve;
+		});
+		runtimeHost.session._abortDetachedSubagents = () => {
+			phases.push("coordinator-abort");
+		};
+		vi.spyOn(runtimeHost.session.agent, "waitForIdle").mockImplementation(async () => {
+			phases.push("principal-idle");
+			await idle;
+		});
+
+		const firstDispose = runtimeHost.session.dispose();
+		const secondDispose = runtimeHost.session.dispose();
+		const phasesBeforeIdleSettled = [...phases];
+		releaseIdle();
+		await Promise.all([firstDispose, secondDispose]);
+		await runtimeHost.dispose();
+
+		expect(phasesBeforeIdleSettled).toEqual(["coordinator-abort", "principal-idle"]);
+		expect(phases.filter((phase) => phase === "coordinator-abort")).toHaveLength(1);
 	});
 
 	it("runs beforeSessionInvalidate after session_shutdown and before rebindSession", async () => {

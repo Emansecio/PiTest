@@ -11,7 +11,7 @@ import { truncateHeadTail } from "../tools/truncate.ts";
 import { type AcceptanceConfig, type AcceptanceDependencies, runWithAcceptance } from "./acceptance.ts";
 import { type ParallelTaskResult, resolveMaxSubagentConcurrency, spawnAll, type TaskReservation } from "./parallel.ts";
 import { attachSubagentUsageToError, getSubagentErrorUsage, spawnSubagent } from "./spawn.ts";
-import type { SpawnSubagentOptions, SubagentProgressInfo, SubagentUsage } from "./types.ts";
+import type { SpawnSubagentOptions, SubagentModelFallback, SubagentProgressInfo, SubagentUsage } from "./types.ts";
 
 /** Lifecycle telemetry is best-effort and must never alter pipeline semantics. */
 function safeNotify(fn: (() => void) | undefined): void {
@@ -78,6 +78,7 @@ export interface FanoutResult {
 	/** Integral scout output + canonical name, for digest/op:"read" recovery. */
 	scout_output?: string;
 	scout_task_name?: string;
+	scout_model_fallback?: SubagentModelFallback;
 	/** Collision-resolved registry name of the worker run (for op:"read" recovery). */
 	worker_task_name?: string;
 }
@@ -268,6 +269,7 @@ export async function runFanout(
 		scout_usage: scoutResult.usage,
 		scout_output: scoutResult.output,
 		scout_task_name: scoutResult.record.taskName,
+		scout_model_fallback: scoutResult.modelFallback,
 		worker_task_name: workerOutput.result.record.taskName,
 	};
 }

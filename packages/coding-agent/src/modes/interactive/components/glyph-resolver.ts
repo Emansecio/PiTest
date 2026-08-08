@@ -16,6 +16,24 @@ export function isAsciiGlyphMode(env: NodeJS.ProcessEnv = process.env): boolean 
 	return isTruthyEnvFlag(env.PIT_ASCII) || isTruthyEnvFlag(env.PIT_ASCII_GAUGE) || env.TERM === "dumb";
 }
 
+/** Replace decorative UI glyphs with width-safe, single-cell ASCII equivalents. */
+export function toAsciiUiGlyphs(text: string, env: NodeJS.ProcessEnv = process.env): string {
+	if (!isAsciiGlyphMode(env)) return text;
+	return text
+		.replace(/[●🎯]/gu, "*")
+		.replace(/[○◦]/gu, "o")
+		.replace(/[✓✔]/gu, "+")
+		.replace(/[✗✘]/gu, "x")
+		.replace(/⚠/gu, "!")
+		.replace(/▶/gu, ">")
+		.replace(/[·•]/gu, "|")
+		.replace(/[—–]/gu, "-")
+		.replace(/…/gu, ".")
+		.replace(/×/gu, "x")
+		.replace(/[▰█]/gu, "#")
+		.replace(/[▱░]/gu, ".");
+}
+
 // --- Gauge (footer / todo fill) ------------------------------------------------
 
 export const GAUGE_FILLED = "▰";
@@ -26,7 +44,7 @@ export function resolveGaugeGlyphs(env: NodeJS.ProcessEnv = process.env): {
 	empty: string;
 } {
 	if (isAsciiGlyphMode(env)) {
-		return { filled: "●", empty: "○" };
+		return { filled: "#", empty: "." };
 	}
 	return { filled: GAUGE_FILLED, empty: GAUGE_EMPTY };
 }

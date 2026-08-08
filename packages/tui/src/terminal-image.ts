@@ -403,6 +403,15 @@ export function getPngDimensions(base64Data: string): ImageDimensions | null {
 	}
 }
 
+function isJpegStartOfFrame(marker: number): boolean {
+	return (
+		(marker >= 0xc0 && marker <= 0xc3) ||
+		(marker >= 0xc5 && marker <= 0xc7) ||
+		(marker >= 0xc9 && marker <= 0xcb) ||
+		(marker >= 0xcd && marker <= 0xcf)
+	);
+}
+
 export function getJpegDimensions(base64Data: string): ImageDimensions | null {
 	try {
 		const maxBase64Chars = 131072;
@@ -418,28 +427,42 @@ export function getJpegDimensions(base64Data: string): ImageDimensions | null {
 		}
 
 		let offset = 2;
-		while (offset < buffer.length - 9) {
+		while (offset < buffer.length) {
 			if (buffer[offset] !== 0xff) {
 				offset++;
 				continue;
 			}
 
-			const marker = buffer[offset + 1];
+			// JPEG permits any number of 0xFF fill bytes before the marker code.
+			// Find the first non-fill byte so segment offsets remain relative to the
+			// actual code rather than the first prefix byte.
+			let markerOffset = offset + 1;
+			while (markerOffset < buffer.length && buffer[markerOffset] === 0xff) markerOffset++;
+			if (markerOffset >= buffer.length) return null;
+			const marker = buffer[markerOffset]!;
 
-			if (marker >= 0xc0 && marker <= 0xc2) {
-				const height = buffer.readUInt16BE(offset + 5);
-				const width = buffer.readUInt16BE(offset + 7);
+			if (isJpegStartOfFrame(marker)) {
+				if (markerOffset + 8 >= buffer.length) return null;
+				const height = buffer.readUInt16BE(markerOffset + 4);
+				const width = buffer.readUInt16BE(markerOffset + 6);
 				return { widthPx: width, heightPx: height };
 			}
 
-			if (offset + 3 >= buffer.length) {
-				return null;
+			// Stuffed zero and standalone markers have no segment length.
+			if (
+				marker === 0x00 ||
+				marker === 0x01 ||
+				marker === 0xd8 ||
+				marker === 0xd9 ||
+				(marker >= 0xd0 && marker <= 0xd7)
+			) {
+				offset = markerOffset + 1;
+				continue;
 			}
-			const length = buffer.readUInt16BE(offset + 2);
-			if (length < 2) {
-				return null;
-			}
-			offset += 2 + length;
+			if (markerOffset + 2 >= buffer.length) return null;
+			const length = buffer.readUInt16BE(markerOffset + 1);
+			if (length < 2) return null;
+			offset = markerOffset + 1 + length;
 		}
 
 		return null;

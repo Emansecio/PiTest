@@ -346,6 +346,25 @@ describe("Send-now chooser routing", () => {
 		expect(fakeThis.showStatus).toHaveBeenCalledWith("Cancelled 2 running tools — reading your message now");
 	});
 
+	test("confirming Send now releases the coordinator without cancelling its subagents", async () => {
+		const cancelTool = vi.fn((_id: string) => true);
+		const prompt = vi.fn().mockResolvedValue(undefined);
+		const { fakeThis } = createChooserThis({
+			session: { isStreaming: true, isFusing: false, prompt, cancelTool },
+			getInterruptiblePendingTools: () => [
+				{ id: "coordinator-task", name: "task" },
+				{ id: "tool-1", name: "preview" },
+			],
+		});
+		fakeThis.openSendNowChooser.call(fakeThis, "read this without stopping agents");
+		await fakeThis.confirmSendNowChooser.call(fakeThis);
+
+		expect(cancelTool).toHaveBeenCalledTimes(2);
+		expect(cancelTool).toHaveBeenNthCalledWith(1, "coordinator-task", { preserveCoordinatorChildren: true });
+		expect(cancelTool).toHaveBeenNthCalledWith(2, "tool-1");
+		expect(fakeThis.showStatus).toHaveBeenCalledWith("Cancelled 2 running tools — reading your message now");
+	});
+
 	test("confirming Send now with no tools in flight keeps the boundary wording", async () => {
 		const cancelTool = vi.fn(() => true);
 		const { fakeThis } = createChooserThis({

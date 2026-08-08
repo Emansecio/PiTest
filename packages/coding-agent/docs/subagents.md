@@ -1,8 +1,10 @@
 # Subagents (the `task` tool)
 
 The built-in `task` tool spawns a focused subagent to handle an isolated
-sub-task and returns its final answer as a string. The subagent reuses the
-parent's model, auth, and tool catalog (filtered) but runs in an in-memory
+sub-task and returns its final answer as a string. The subagent inherits the
+parent's working model by default, filtered tool catalog, and complete provider
+request policy (auth resolution, credential rotation, retry/timeouts, headers,
+transport, and provider request/response hooks). It runs in an in-memory
 session, so its turns never persist to the parent's session file.
 
 Sibling tools **`parallel`** and **`fanout`** (same coordinator extension) cover
@@ -45,8 +47,8 @@ task({
   op:            "run",                       // optional; default "run"
   prompt:        "Find all unused imports in src/ and list them by file.",
   name:          "find-dead-code",            // optional handle (for spawn/poll/join/resume + worktree path)
-  type:          "explorer",                  // optional reusable agent type from .pit/agents/<name>.md
-  model:         "haiku",                     // optional; scale to sub-task complexity. Omit to inherit parent.
+  type:          "explore",                   // optional reusable agent type from .pit/agents/<name>.md
+  model:         "provider/model-id",          // optional; omit to inherit the working parent model
   thinking_level:"medium",                    // optional; minimal|low|medium|high|xhigh
   allowed_tools: ["read", "grep", "find"],    // optional; omit to inherit the parent's FULL catalog (costly)
   max_turns:     50,                          // optional, default 50
@@ -103,6 +105,14 @@ handles (for `op:"continue"`).
 
 ## Constraints
 
+- Model overrides resolve against one selectable view: registry models, SDK
+  `scopedModels`, and the exact current parent model. Entries are deduplicated by
+  canonical provider/id while preserving SDK-scoped and current model objects.
+  Use an unambiguous registry/scoped id or canonical `provider/model`; custom
+  model ids are accepted when that provider has a registry template, including
+  a thinking suffix such as `provider/custom-id:high`. Unknown explicit models
+  fail loudly instead of silently using the parent. The stock `explore` type
+  does not pin a provider-specific small model; it inherits the working parent.
 - Subagents **always think**: thinking defaults to model-bucketed `low`/`medium` and `off` is coerced
   to a thinking level. Pass `thinking_level` to override per task.
 - Recursion is bounded by nesting depth. The default
@@ -167,14 +177,18 @@ agent owns can ask instead of guessing.
 
 ## Resume / continue
 
-A subagent interrupted by ESC or ended by a network drop (its last turn stopped
-with `error`/`aborted`) is kept **resumable**, addressed by its `name`/handle.
+A subagent interrupted by ESC, ended by a network drop, or stopped at `max_turns`
+is kept **resumable**, addressed by its `name`/handle. Turn-cap recovery also
+applies to workers that use an acceptance gate.
 `task({ op: "resume", name: "<handle>" })` re-drives it with its transcript
 intact (pass `prompt` to steer the continuation). Concurrent resumes are idempotent and share one in-flight lifecycle; `poll`, `join`, and `cancel` resolve the active handle. Two tiers back this:
 Tier 1 keeps the live `Agent` in memory for the session; Tier 2 persists the
 partial transcript to `<cwd>/.pit/subagents/<handle>.json`, so a resume survives
-a Pit restart. Persisted transcripts pass through the same disk-egress secret
-redactor as session artifacts and expire after seven days; stale files are
+a Pit restart. New resume files persist the canonical model provider and id, so
+Tier-2 resume reconstructs the same provider (including custom model ids) rather
+than selecting an ambiguous same-id model or switching to the parent provider.
+Legacy id-only files remain resumable when the id is unambiguous. Persisted
+transcripts pass through the same disk-egress secret redactor as session artifacts and expire after seven days; stale files are
 removed lazily on list/load. A kept worktree's isolated cwd is persisted too,
 so a Tier-2 resume after restart rebinds tools to that same checkout rather than
 the parent tree. (A subagent whose auto-cleanup worktree was removed on settle
@@ -185,12 +199,21 @@ A **successfully finished** subagent (no auto-cleanup worktree) stays
 follow-up on the same live Agent.
 
 Transport failures (5xx / overloaded / network) **before useful progress** get
-one automatic retry inside `spawnSubagent`; after that, use `resume`.
+one automatic retry inside `spawnSubagent`; after that, use `resume`. If an
+explicit child model is rejected for auth/OAuth policy before any tool call, Pit
+retries once on the working parent model and surfaces a `[model fallback: ...]`
+diagnostic in the result. Missing-key, expired/revoked OAuth, and provider
+401/403 failures are classified as auth failures. Fallback is never attempted
+after a tool call or useful assistant output. The effective working model is
+persisted for Tier-2 resume, and `parallel`/`fanout` expose the same provenance
+in both their text output and structured details.
 
 ## Acceptance / parallel / fanout
 
 - **`acceptance`** on `task` (and parallel/fanout worker entries): optional
-	`criteria` (judge subagent) and/or `check` (shell, exit 0). Retries up to
+	`criteria` (judge subagent) and/or `check` (shell, exit 0). Acceptance gates
+	require Auto permission mode; Plan and Ask delegation reject them fail-closed
+	until judge tool catalogs are included in the authorization proof. Retries up to
 	`max_attempts` (default 2); `check_timeout_ms` bounds each shell check
 	(default 120000, maximum 600000). On exhaustion the last output is returned
 	with `isError: true` and `details.gate.passed: false`, so it cannot be resumed
@@ -217,4 +240,6 @@ without the built-in tool wrapper. The function takes a `SubagentRegistry`,
 a parent model + tool list, and returns `{ record, output, value?, worktreePath? }`
 (`value` is the parsed structured result when a `resultSchema` was passed;
 `worktreePath` is set when a worktree was created). Higher-level helpers:
-`runWithAcceptance`, `spawnAll`, `runFanout`.
+`runWithAcceptance`, `spawnAll`, `runFanout`. Direct callers may provide a
+`requestPolicy`; when omitted, `spawnSubagent` retains its registry-backed auth
+and streaming fallback.

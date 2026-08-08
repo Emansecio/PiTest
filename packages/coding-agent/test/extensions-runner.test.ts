@@ -7,7 +7,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
-import { createExtensionRuntime, discoverAndLoadExtensions } from "../src/core/extensions/loader.js";
+import { createEventBus } from "../src/core/event-bus.js";
+import {
+	createExtensionRuntime,
+	discoverAndLoadExtensions,
+	loadExtensionFromFactory,
+} from "../src/core/extensions/loader.js";
 import { ExtensionRunner } from "../src/core/extensions/runner.js";
 import type { ExtensionActions, ExtensionContextActions, ProviderConfig } from "../src/core/extensions/types.js";
 import { KeybindingsManager, type KeyId } from "../src/core/keybindings.js";
@@ -839,6 +844,82 @@ describe("ExtensionRunner", () => {
 
 			expect(runner.hasHandlers("tool_call")).toBe(true);
 			expect(runner.hasHandlers("agent_end")).toBe(false);
+		});
+	});
+
+	describe("session_before lifecycle abort", () => {
+		const preparation = {
+			targetId: "target",
+			oldLeafId: null,
+			commonAncestorId: null,
+			entriesToSummarize: [],
+			userWantsSummary: false,
+		};
+
+		it("pre-aborted session_before_tree invokes no handlers", async () => {
+			let handlerCalls = 0;
+			const runtime = createExtensionRuntime();
+			const extension = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("session_before_tree", () => {
+						handlerCalls++;
+					});
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+				"tree-abort://pre-aborted",
+			);
+			const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
+			const errors: string[] = [];
+			runner.onError((error) => errors.push(error.error));
+			const abort = new AbortController();
+			abort.abort(new Error("tree cancelled"));
+
+			const result = await runner.emit({
+				type: "session_before_tree",
+				preparation,
+				signal: abort.signal,
+			});
+
+			expect(result).toEqual({ cancel: true });
+			expect(handlerCalls).toBe(0);
+			expect(errors).toEqual([]);
+		});
+
+		it("abort during session_before_tree prevents later handlers", async () => {
+			const abort = new AbortController();
+			const handlerOrder: string[] = [];
+			const runtime = createExtensionRuntime();
+			const extension = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("session_before_tree", async () => {
+						handlerOrder.push("first");
+						abort.abort(new Error("tree cancelled"));
+						await new Promise(() => {});
+					});
+					pi.on("session_before_tree", () => {
+						handlerOrder.push("second");
+					});
+				},
+				tempDir,
+				createEventBus(),
+				runtime,
+				"tree-abort://during-handler",
+			);
+			const runner = new ExtensionRunner([extension], runtime, tempDir, sessionManager, modelRegistry);
+			const errors: string[] = [];
+			runner.onError((error) => errors.push(error.error));
+
+			const result = await runner.emit({
+				type: "session_before_tree",
+				preparation,
+				signal: abort.signal,
+			});
+
+			expect(result).toEqual({ cancel: true });
+			expect(handlerOrder).toEqual(["first"]);
+			expect(errors).toEqual([]);
 		});
 	});
 

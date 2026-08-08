@@ -14,11 +14,11 @@
  *     at the parent's HEAD; cleans up on settle (unless `cleanup: "keep"`).
  */
 
-import { execFile } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { promisify } from "node:util";
 import {
 	Agent,
 	type AgentMessage,
@@ -35,6 +35,12 @@ import { areSubagentGuardsDisabled, createSubagentGuardChain } from "../built-in
 import type { ToolCallEvent, ToolResultEvent } from "../extensions/types.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { describeToolAction, type PermissionChecker, subagentConfirmDenyReason } from "../permissions/index.ts";
+import {
+	describeUnknownError,
+	isProviderAuthFailure,
+	ProviderAuthError,
+	providerAuthFailureDiagnostic,
+} from "../request-policy.ts";
 import { formatSkillsForPrompt, type Skill } from "../skills.ts";
 import { aggregateAssistantUsage, mergeSubagentUsage } from "../token-usage.ts";
 import type { SubagentRegistry } from "./registry.ts";
@@ -43,17 +49,19 @@ import type {
 	SpawnSubagentOptions,
 	SpawnSubagentResult,
 	SubagentExecutionManifest,
+	SubagentModelFallback,
 	SubagentMutationPolicy,
 	SubagentRecord,
+	SubagentRequestPolicy,
+	SubagentRequestPolicyFactory,
 	SubagentUsage,
 	WorktreeSpec,
 } from "./types.ts";
 import { retargetToolsForWorktree } from "./worktree-tools.ts";
 
-const execFileP = promisify(execFile);
-
 /** Wall-clock budget for git worktree add/remove (index.lock must not hang forever). */
 const DEFAULT_WORKTREE_GIT_TIMEOUT_MS = 60_000;
+const WORKTREE_QUIESCENCE_GRACE_MS = 1000;
 
 function resolveWorktreeGitTimeoutMs(): number {
 	const raw = process.env.PIT_WORKTREE_GIT_TIMEOUT_MS;
@@ -66,31 +74,115 @@ function resolveWorktreeGitTimeoutMs(): number {
 function execFileWithTimeout(
 	file: string,
 	args: string[],
-	options: { cwd: string },
+	options: { cwd: string; signal?: AbortSignal },
 	timeoutMs: number,
 ): Promise<{ stdout: string; stderr: string }> {
-	if (timeoutMs <= 0) {
-		return execFileP(file, args, options);
-	}
+	if (options.signal?.aborted) return Promise.reject(toAbortError(options.signal.reason));
 	return new Promise((resolve, reject) => {
-		const child = execFile(
-			file,
-			args,
-			{ ...options, timeout: timeoutMs, killSignal: "SIGKILL" },
-			(err, stdout, stderr) => {
-				if (err) {
-					reject(err);
-					return;
-				}
-				resolve({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
-			},
-		);
-		// Ensure timeout path never surfaces as uncaughtException.
-		child.on("error", () => {});
+		let abortReason: Error | undefined;
+		let timedOut = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let settled = false;
+		let stdout = "";
+		let stderr = "";
+		const child = spawn(file, args, {
+			cwd: options.cwd,
+			windowsHide: true,
+			detached: process.platform !== "win32",
+			stdio: "pipe",
+		});
+		child.stdout?.setEncoding("utf8");
+		child.stderr?.setEncoding("utf8");
+		child.stdout?.on("data", (chunk: string) => {
+			stdout += chunk;
+		});
+		child.stderr?.on("data", (chunk: string) => {
+			stderr += chunk;
+		});
+		const cleanup = () => {
+			if (timer) clearTimeout(timer);
+			options.signal?.removeEventListener("abort", onAbort);
+		};
+		const finish = (error?: Error) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			if (abortReason) reject(abortReason);
+			else if (timedOut) reject(new Error(`${file} ${args.join(" ")} timed out after ${timeoutMs}ms`));
+			else if (error) reject(error);
+			else resolve({ stdout, stderr });
+		};
+		const onAbort = () => {
+			if (abortReason) return;
+			abortReason = toAbortError(options.signal?.reason);
+			killProcessTree(child);
+		};
+		child.once("error", (error) => finish(error));
+		child.once("close", (code) => {
+			if (code === 0) finish();
+			else
+				finish(
+					new Error(
+						`${file} ${args.join(" ")} failed with exit code ${code}${stderr ? `: ${stderr.trim()}` : ""}`,
+					),
+				);
+		});
+		if (options.signal) {
+			options.signal.addEventListener("abort", onAbort, { once: true });
+			if (options.signal.aborted) onAbort();
+		}
+		if (timeoutMs > 0) {
+			timer = setTimeout(() => {
+				timedOut = true;
+				killProcessTree(child);
+			}, timeoutMs);
+			(timer as { unref?: () => void }).unref?.();
+		}
 	});
 }
 
+function killProcessTree(child: ChildProcess): void {
+	const pid = child.pid;
+	if (!pid) {
+		child.kill("SIGKILL");
+		return;
+	}
+	if (process.platform === "win32") {
+		const killer = execFile("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true }, (error) => {
+			if (error) child.kill("SIGKILL");
+		});
+		killer.on("error", () => child.kill("SIGKILL"));
+		return;
+	}
+	try {
+		// Git is started as a detached process-group leader on POSIX, so a negative
+		// pid terminates checkout hooks and their descendants as well as git itself.
+		process.kill(-pid, "SIGKILL");
+	} catch {
+		child.kill("SIGKILL");
+	}
+}
+
+async function settlesWithin(settlement: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			settlement.then(
+				() => true,
+				() => true,
+			),
+			new Promise<false>((resolve) => {
+				timer = setTimeout(() => resolve(false), timeoutMs);
+				(timer as { unref?: () => void }).unref?.();
+			}),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
 const SUBAGENT_ERROR_USAGE = Symbol("pit.subagentErrorUsage");
+const SUBAGENT_ERROR_MODEL_FALLBACK = Symbol("pit.subagentErrorModelFallback");
 
 /** Preserve incurred usage on exceptional exits without changing the public error type/message. */
 export function attachSubagentUsageToError(error: unknown, usage: SubagentUsage): void {
@@ -106,6 +198,25 @@ export function attachSubagentUsageToError(error: unknown, usage: SubagentUsage)
 export function getSubagentErrorUsage(error: unknown): SubagentUsage | undefined {
 	if ((typeof error !== "object" && typeof error !== "function") || error === null) return undefined;
 	return (error as { [SUBAGENT_ERROR_USAGE]?: SubagentUsage })[SUBAGENT_ERROR_USAGE];
+}
+
+/** Preserve final-worker model fallback provenance on exceptional exits. */
+export function attachSubagentModelFallbackToError(
+	error: unknown,
+	modelFallback: SubagentModelFallback | undefined,
+): void {
+	if ((typeof error !== "object" && typeof error !== "function") || error === null) return;
+	Object.defineProperty(error, SUBAGENT_ERROR_MODEL_FALLBACK, {
+		value: modelFallback ? { ...modelFallback } : undefined,
+		configurable: true,
+		writable: true,
+	});
+}
+
+/** Recover final-worker model fallback provenance attached by spawn/acceptance paths. */
+export function getSubagentErrorModelFallback(error: unknown): SubagentModelFallback | undefined {
+	if ((typeof error !== "object" && typeof error !== "function") || error === null) return undefined;
+	return (error as { [SUBAGENT_ERROR_MODEL_FALLBACK]?: SubagentModelFallback })[SUBAGENT_ERROR_MODEL_FALLBACK];
 }
 
 const DEFAULT_SYSTEM_PROMPT =
@@ -215,6 +326,25 @@ export function isTransportRetryableError(message: string): boolean {
 	return TRANSPORT_RETRYABLE_RE.test(message);
 }
 
+/** Auth/policy rejection from the model provider, safe to fail over before any tool call. */
+export function isSubagentAuthError(error: unknown): boolean {
+	return isProviderAuthFailure(error);
+}
+
+function hasUsefulAssistantProgress(messages: readonly AgentMessage[]): boolean {
+	return messages.some(
+		(message) =>
+			message.role === "assistant" &&
+			Array.isArray(message.content) &&
+			message.content.some(
+				(block) =>
+					block.type === "toolCall" ||
+					(block.type === "text" && block.text.trim().length > 0) ||
+					(block.type === "thinking" && block.thinking.trim().length > 0),
+			),
+	);
+}
+
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -279,6 +409,8 @@ export interface SpawnSubagentDependencies {
 	 * key, exactly like before this feature (legacy behavior).
 	 */
 	parentSessionId?: string;
+	/** Owning AgentSession request behavior. Direct callers may omit this. */
+	requestPolicy?: SubagentRequestPolicy | SubagentRequestPolicyFactory;
 }
 
 /**
@@ -429,7 +561,12 @@ interface WorktreeHandle {
 	cleanup: "auto" | "keep";
 }
 
-async function createWorktree(parentCwd: string, taskName: string, spec: WorktreeSpec): Promise<WorktreeHandle> {
+async function createWorktree(
+	parentCwd: string,
+	taskName: string,
+	spec: WorktreeSpec,
+	signal?: AbortSignal,
+): Promise<WorktreeHandle> {
 	const safeName = taskName.replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 40) || "task";
 	const dir = join(parentCwd, ".pit", "worktrees", `${safeName}-${randomUUID().slice(0, 8)}`);
 	await mkdir(join(parentCwd, ".pit", "worktrees"), { recursive: true });
@@ -438,7 +575,7 @@ async function createWorktree(parentCwd: string, taskName: string, spec: Worktre
 	const args = ["worktree", "add", "--detach", "--", dir, spec.branch ?? "HEAD"];
 	const timeoutMs = resolveWorktreeGitTimeoutMs();
 	try {
-		await execFileWithTimeout("git", args, { cwd: parentCwd }, timeoutMs);
+		await execFileWithTimeout("git", args, { cwd: parentCwd, signal }, timeoutMs);
 	} catch (err) {
 		// A failed `git worktree add` — a SIGKILL when the git timeout
 		// (PIT_WORKTREE_GIT_TIMEOUT_MS) fires mid-checkout, an index.lock, a bad
@@ -446,7 +583,7 @@ async function createWorktree(parentCwd: string, taskName: string, spec: Worktre
 		// .pit/worktrees and/or a dangling `.git/worktrees` admin entry. Left alone
 		// they accrete garbage and stale locks that trip later spawns. Clean both,
 		// best-effort, then re-throw the ORIGINAL error unchanged. (H20)
-		await cleanupPartialWorktree(parentCwd, dir);
+		await cleanupPartialWorktree(parentCwd, dir, signal);
 		throw err;
 	}
 	return { path: dir, cleanup: spec.cleanup ?? "auto" };
@@ -454,24 +591,12 @@ async function createWorktree(parentCwd: string, taskName: string, spec: Worktre
 
 /**
  * Best-effort teardown of a worktree whose creation failed partway. Runs the
- * existing removal (`git worktree remove --force`), then `git worktree prune` to
- * clear a dangling/prunable admin entry the remove could not, then deletes any
- * partial directory git left behind. Every step swallows its own error so this
- * never masks the caller's original failure.
+ * existing removal (`git worktree remove --force`), then deletes any partial
+ * directory and prunes the resulting dangling admin entry. Every step swallows
+ * its own error so this never masks the caller's original failure.
  */
-export async function cleanupPartialWorktree(parentCwd: string, dir: string): Promise<void> {
-	await cleanupSubagentWorktree(parentCwd, dir);
-	const timeoutMs = resolveWorktreeGitTimeoutMs();
-	try {
-		await execFileWithTimeout("git", ["worktree", "prune"], { cwd: parentCwd }, timeoutMs);
-	} catch {
-		// prune is best-effort; a missing/locked repo just means nothing to prune.
-	}
-	try {
-		await removeManagedWorktreeDirectory(parentCwd, dir);
-	} catch {
-		// dir may never have been created — nothing to remove.
-	}
+export async function cleanupPartialWorktree(parentCwd: string, dir: string, signal?: AbortSignal): Promise<void> {
+	await cleanupSubagentWorktree(parentCwd, dir, signal);
 }
 
 /** Whether a cleanup target is a child of this parent's managed worktree directory. */
@@ -493,22 +618,41 @@ async function removeManagedWorktreeDirectory(parentCwd: string, worktreePath: s
 	}
 }
 
-export async function cleanupSubagentWorktree(parentCwd: string, worktreePath: string): Promise<void> {
+export async function cleanupSubagentWorktree(
+	parentCwd: string,
+	worktreePath: string,
+	signal?: AbortSignal,
+): Promise<void> {
 	try {
 		const timeoutMs = resolveWorktreeGitTimeoutMs();
-		await execFileWithTimeout("git", ["worktree", "remove", "--force", worktreePath], { cwd: parentCwd }, timeoutMs);
+		await execFileWithTimeout(
+			"git",
+			["worktree", "remove", "--force", worktreePath],
+			{ cwd: parentCwd, signal },
+			timeoutMs,
+		);
 		return;
 	} catch {
 		// A failed remove can leave a stale git admin entry and checkout directory.
 		// Both fallback operations are best-effort and never mask task completion.
 	}
-	const timeoutMs = resolveWorktreeGitTimeoutMs();
-	try {
-		await execFileWithTimeout("git", ["worktree", "prune"], { cwd: parentCwd }, timeoutMs);
-	} catch {
-		// A locked or missing repository leaves the residual directory cleanup below.
-	}
 	await removeManagedWorktreeDirectory(parentCwd, worktreePath);
+	// Once the checkout directory is gone, prune can clear its now-prunable admin
+	// entry. Use a short cleanup-only signal even when the caller is already
+	// aborted; cleanup remains best-effort without reintroducing a 60s dead period.
+	const configuredTimeout = resolveWorktreeGitTimeoutMs();
+	const cleanupTimeoutMs = Math.min(configuredTimeout > 0 ? configuredTimeout : 2000, 2000);
+	const cleanupSignal = AbortSignal.timeout(cleanupTimeoutMs);
+	try {
+		await execFileWithTimeout(
+			"git",
+			["worktree", "prune"],
+			{ cwd: parentCwd, signal: cleanupSignal },
+			cleanupTimeoutMs,
+		);
+	} catch {
+		// A locked or missing repository may leave a stale admin entry for a later prune.
+	}
 }
 
 /** System-prompt preamble that points a worktree-isolated subagent at its checkout. */
@@ -525,6 +669,12 @@ export async function spawnSubagent(
 	deps: SpawnSubagentDependencies,
 	options: SpawnSubagentOptions,
 ): Promise<SpawnSubagentResult> {
+	if (
+		options.maxTurns !== undefined &&
+		(!Number.isFinite(options.maxTurns) || !Number.isInteger(options.maxTurns) || options.maxTurns < 1)
+	) {
+		throw new Error(`maxTurns must be a finite positive integer; received ${String(options.maxTurns)}`);
+	}
 	const record = deps.registry.create({
 		prompt: options.prompt,
 		systemPrompt: options.systemPrompt,
@@ -533,6 +683,19 @@ export async function spawnSubagent(
 		depth: options.depth,
 	});
 	deps.registry.update(record.id, { status: "running", startedAt: Date.now() });
+	// Own the run controller before queueing or creating a worktree so caller
+	// cancellation covers every setup phase, not only the Agent prompt.
+	const controller = new AbortController();
+	const onParentAbort = () => controller.abort(options.signal?.reason ?? new Error("aborted: parent signal"));
+	if (options.signal) {
+		if (options.signal.aborted) onParentAbort();
+		else options.signal.addEventListener("abort", onParentAbort, { once: true });
+	}
+	try {
+		options.onRecordCreated?.(record);
+	} catch {
+		// Identity publication is best-effort telemetry; never mask the spawn.
+	}
 
 	// Single concurrency chokepoint: every live subagent Agent — blocking runs,
 	// detached spawns, parallel/fanout children, acceptance judges — costs one
@@ -540,7 +703,7 @@ export async function spawnSubagent(
 	// enclosing agent's slot while their
 	// descendant runs (see slots.ts), so depth>=2 nesting cannot deadlock.
 	try {
-		return await withRunSlot(options.signal, () => runSpawned(deps, options, record));
+		return await withRunSlot(controller.signal, () => runSpawned(deps, options, record, controller));
 	} catch (err) {
 		// A pre-run failure (queue full, abort while queued) never reaches
 		// runSpawned's own bookkeeping — settle the registry record here. A still-
@@ -551,7 +714,7 @@ export async function spawnSubagent(
 		const current = deps.registry.get(record.id);
 		if (current && (current.status === "running" || current.status === "pending")) {
 			deps.registry.update(record.id, {
-				status: options.signal?.aborted ? "cancelled" : "failed",
+				status: controller.signal.aborted ? "cancelled" : "failed",
 				endedAt: Date.now(),
 				error: err instanceof Error ? err.message : String(err),
 			});
@@ -562,6 +725,8 @@ export async function spawnSubagent(
 			}
 		}
 		throw err;
+	} finally {
+		options.signal?.removeEventListener("abort", onParentAbort);
 	}
 }
 
@@ -569,7 +734,9 @@ async function runSpawned(
 	deps: SpawnSubagentDependencies,
 	options: SpawnSubagentOptions,
 	record: SubagentRecord,
+	controller: AbortController,
 ): Promise<SpawnSubagentResult> {
+	if (controller.signal.aborted) throw toAbortError(controller.signal.reason);
 	const parentCwd = options.cwd ?? process.cwd();
 	const worktreeSpec = normalizeWorktree(options.worktree);
 	// The registry guarantees a unique taskName even when callers reuse `name`
@@ -593,32 +760,23 @@ async function runSpawned(
 			throw new Error(message);
 		}
 		try {
-			worktree = await createWorktree(parentCwd, taskName, worktreeSpec);
+			worktree = await createWorktree(parentCwd, taskName, worktreeSpec, controller.signal);
 			try {
 				options.onWorktreeReady?.(worktree.path);
 			} catch {
 				// Readiness telemetry must not abort a successfully-created worktree.
 			}
 		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
+			const failure = controller.signal.aborted ? toAbortError(controller.signal.reason) : err;
+			const message = failure instanceof Error ? failure.message : String(failure);
 			deps.registry.update(record.id, {
-				status: "failed",
+				status: controller.signal.aborted ? "cancelled" : "failed",
 				endedAt: Date.now(),
-				error: `worktree setup failed: ${message}`,
+				error: controller.signal.aborted ? message : `worktree setup failed: ${message}`,
 			});
-			throw new Error(`worktree setup failed: ${message}`);
+			if (controller.signal.aborted) throw failure;
+			throw new Error(`worktree setup failed: ${message}`, { cause: err });
 		}
-	}
-
-	// Combine the caller's signal with the internally-derived turn cap. We own
-	// the controller so either source can abort the run.
-	const controller = new AbortController();
-	// Propagate the parent's abort reason so a parent-driven cancel stays
-	// distinguishable downstream (falls back to a generic note if unset).
-	const onParentAbort = () => controller.abort(options.signal?.reason ?? new Error("aborted: parent signal"));
-	if (options.signal) {
-		if (options.signal.aborted) controller.abort(options.signal.reason ?? new Error("aborted: parent signal"));
-		else options.signal.addEventListener("abort", onParentAbort, { once: true });
 	}
 
 	const systemPromptBase = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
@@ -649,7 +807,7 @@ async function runSpawned(
 				endedAt: Date.now(),
 				error: message,
 			});
-			if (worktree.cleanup === "auto") await cleanupSubagentWorktree(parentCwd, worktree.path);
+			if (worktree.cleanup === "auto") await cleanupSubagentWorktree(parentCwd, worktree.path, controller.signal);
 			throw error;
 		}
 	}
@@ -659,6 +817,7 @@ async function runSpawned(
 	deps.registry.update(record.id, { manifest });
 	const maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
 	let turnCount = 0;
+	let checkpointTail: Promise<void> = Promise.resolve();
 	// GAP #5 token accounting: sum each assistant turn's reported usage so the
 	// run's aggregate cost is available on the registry record and the result.
 	const usage: SubagentUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 };
@@ -687,12 +846,52 @@ async function runSpawned(
 		deps.parentSessionId && !isTruthyEnvFlag(process.env.PIT_NO_SUBAGENT_CACHE_KEY)
 			? deriveSubagentCacheKey(deps.parentSessionId, options.agentTypeLabel)
 			: undefined;
+	const selectedModel = options.model ?? deps.model;
+	const initialMessages = [...(options.initialMessages ?? [])];
+	const initialMessagesHaveProgress = hasUsefulAssistantProgress(initialMessages);
+	let modelFallback: SubagentModelFallback | undefined;
+	const requestPolicy =
+		typeof deps.requestPolicy === "function" ? deps.requestPolicy(controller.signal) : deps.requestPolicy;
+	const baseStreamFn =
+		requestPolicy?.streamFn ??
+		(async (
+			model: Model<any>,
+			context: Parameters<typeof streamSimple>[1],
+			streamOptions: Parameters<typeof streamSimple>[2],
+		) => {
+			const auth = await deps.modelRegistry.getApiKeyAndHeaders(model);
+			if (!auth.ok) throw new ProviderAuthError(model.provider, auth.error);
+			return streamSimple(model, context, {
+				...streamOptions,
+				apiKey: auth.apiKey,
+				headers: auth.headers,
+				cacheRetention: streamOptions?.cacheRetention ?? "short",
+			});
+		});
+	let currentAttemptAuthFailure: unknown;
+	const streamFn: NonNullable<SubagentRequestPolicy["streamFn"]> = async (model, context, streamOptions) => {
+		currentAttemptAuthFailure = undefined;
+		try {
+			return await baseStreamFn(model, context, {
+				...streamOptions,
+				cacheRetention: streamOptions?.cacheRetention ?? "short",
+			});
+		} catch (error) {
+			// Capture the original value before normalization so cross-realm plain
+			// objects still classify as auth via code/fields, not only message text.
+			if (isProviderAuthFailure(error)) currentAttemptAuthFailure = error;
+			// Agent-loop stringifies non-Error throws as "[object Object]". Normalize
+			// to Error with a structured message while preserving the original cause.
+			if (error instanceof Error) throw error;
+			throw new Error(describeUnknownError(error), { cause: error });
+		}
+	};
 	const agent = new Agent({
 		sessionId: subagentCacheKey,
 		initialState: {
 			systemPrompt,
 			// Heterogeneous spawn: a task may run on a cheaper model than the parent.
-			model: options.model ?? deps.model,
+			model: selectedModel,
 			// Subagents always think (never "off"). An explicit per-task override wins;
 			// otherwise the level is bucketed by the model (small-class → "low",
 			// everything else → "medium") so trivial fan-out on a cheap model doesn't
@@ -706,6 +905,13 @@ async function runSpawned(
 			messages: options.initialMessages,
 		},
 		convertToLlm: deps.convertToLlm,
+		streamFn,
+		onPayload: requestPolicy?.onPayload,
+		onResponse: requestPolicy?.onResponse,
+		transport: requestPolicy?.transport,
+		maxRetryDelayMs: requestPolicy?.maxRetryDelayMs,
+		idleTimeoutMs: requestPolicy?.idleTimeoutMs,
+		thinkingBudgets: requestPolicy?.thinkingBudgets,
 		// Gate every subagent tool call through the parent's permission policy.
 		// Without this, the subagent's raw Agent loop would bypass the parent's
 		// permissions extension entirely (deny rules, plan-mode mutation blocks).
@@ -773,23 +979,6 @@ async function runSpawned(
 			} as ToolResultEvent);
 			return undefined;
 		},
-		streamFn: async (model, context, streamOptions) => {
-			const auth = await deps.modelRegistry.getApiKeyAndHeaders(model);
-			if (!auth.ok) {
-				throw new Error(auth.error);
-			}
-			return streamSimple(model, context, {
-				...streamOptions,
-				apiKey: auth.apiKey,
-				headers: auth.headers,
-				// Subagents are one-shot: they run to completion and never sit idle
-				// past the 5-minute short cache TTL, so long-retention cache writes
-				// (2.0× input price vs 1.25×) buy them nothing — cache reads renew
-				// the TTL for free within the run. PIT_CACHE_RETENTION env still
-				// outranks this (resolved env-first in the provider layer).
-				cacheRetention: streamOptions?.cacheRetention ?? "short",
-			});
-		},
 	});
 
 	// Captured so it can be torn down on settle. The coordinator keeps this same
@@ -808,6 +997,17 @@ async function runSpawned(
 				Object.assign(usage, mergeSubagentUsage(usage, aggregateAssistantUsage([message])));
 			}
 			deps.registry.update(record.id, { turnCount, usage });
+			if (options.onTurnCheckpoint) {
+				const checkpoint = {
+					turn: turnCount,
+					messages: agent.state.messages.slice(),
+					model: agent.state.model,
+				};
+				checkpointTail = checkpointTail
+					.then(() => options.onTurnCheckpoint?.(checkpoint))
+					.then(() => undefined)
+					.catch(() => {});
+			}
 			// GAP #3: emit a lightweight per-turn progress signal (turn, last tool).
 			let lastTool: string | undefined;
 			if (message.role === "assistant" && Array.isArray(message.content)) {
@@ -859,11 +1059,12 @@ async function runSpawned(
 	// (post-abort) before removing the worktree it may still be writing to.
 	let runPromise: Promise<void> | undefined;
 	let settled = false;
-	const cleanup = async () => {
+	let cleanupDiagnostic: string | undefined;
+	const cleanup = async (): Promise<string | undefined> => {
 		// Idempotent-once: a second call (e.g. resultSchema failure paths cleanup +
 		// re-throw caught by the outer catch) must be a full no-op, otherwise the
 		// listener teardown and `git worktree remove --force` would run twice.
-		if (settled) return;
+		if (settled) return cleanupDiagnostic;
 		settled = true;
 		// Tear down this run's Agent wiring FIRST so a later continue/resume that
 		// reuses the SAME live Agent (the coordinator keeps it around) is never
@@ -871,18 +1072,35 @@ async function runSpawned(
 		// is the single settle point for success, error, AND abort. (H18)
 		unsubscribeTurns();
 		controller.signal.removeEventListener("abort", abortAgentOnController);
+		await checkpointTail;
 		try {
 			options.onSettle?.();
 		} catch {
 			// onSettle is best-effort teardown; never mask the task result.
 		}
-		if (options.signal) options.signal.removeEventListener("abort", onParentAbort);
 		if (worktree && worktree.cleanup === "auto") {
-			// Let an aborted run settle so it isn't still writing into the worktree
-			// while we delete it (the race may have returned via the abort branch).
-			if (runPromise) await runPromise.catch(() => {});
-			await cleanupSubagentWorktree(parentCwd, worktree.path);
+			if (runPromise && controller.signal.aborted) {
+				const quiescent = await settlesWithin(runPromise, WORKTREE_QUIESCENCE_GRACE_MS);
+				if (!quiescent) {
+					cleanupDiagnostic =
+						`Subagent did not become quiescent within ${WORKTREE_QUIESCENCE_GRACE_MS}ms after cancellation; ` +
+						`auto-cleanup was skipped and the residual worktree was retained at ${worktree.path}.`;
+					const retainedRun = runPromise;
+					const retainedPath = worktree.path;
+					void retainedRun
+						.then(
+							() => cleanupSubagentWorktree(parentCwd, retainedPath),
+							() => cleanupSubagentWorktree(parentCwd, retainedPath),
+						)
+						.catch(() => {});
+					return cleanupDiagnostic;
+				}
+			} else if (runPromise) {
+				await runPromise.catch(() => {});
+			}
+			await cleanupSubagentWorktree(parentCwd, worktree.path, controller.signal);
 		}
+		return cleanupDiagnostic;
 	};
 
 	try {
@@ -913,6 +1131,54 @@ async function runSpawned(
 				else throw err;
 			} else {
 				throw err;
+			}
+		}
+
+		// A requested child model can be catalog-valid but unusable for this account
+		// (for example organization policy rejects OAuth with 403). Before any tool
+		// call, fail over once to the already-working parent model instead of losing
+		// the task. Restore the seed transcript so the failed attempt is not replayed.
+		{
+			const messages = agent.state.messages;
+			const last = messages[messages.length - 1] as AgentMessage | undefined;
+			const errorMessage =
+				(last?.role === "assistant" && last.stopReason === "error" && last.errorMessage) ||
+				agent.state.errorMessage ||
+				"";
+			const authDiagnostic = providerAuthFailureDiagnostic(currentAttemptAuthFailure) ?? errorMessage;
+			const requestedDifferentModel =
+				selectedModel.provider !== deps.model.provider || selectedModel.id !== deps.model.id;
+			const hasToolCall =
+				last?.role === "assistant" &&
+				Array.isArray(last.content) &&
+				last.content.some((block) => block.type === "toolCall");
+			const hasUsefulText =
+				last?.role === "assistant" &&
+				Array.isArray(last.content) &&
+				last.content.some(
+					(block) =>
+						(block.type === "text" && block.text.trim().length > 0) ||
+						(block.type === "thinking" && block.thinking.trim().length > 0),
+				);
+			if (
+				requestedDifferentModel &&
+				turnCount <= 1 &&
+				!initialMessagesHaveProgress &&
+				!hasToolCall &&
+				!hasUsefulText &&
+				!controller.signal.aborted &&
+				(currentAttemptAuthFailure !== undefined || isSubagentAuthError(errorMessage))
+			) {
+				modelFallback = {
+					from: `${selectedModel.provider}/${selectedModel.id}`,
+					to: `${deps.model.provider}/${deps.model.id}`,
+					reason: authDiagnostic.slice(0, 500),
+				};
+				agent.state.messages = initialMessages;
+				agent.state.model = deps.model;
+				if (options.thinkingLevel === undefined) agent.state.thinkingLevel = resolveSubagentThinking(deps.model);
+				deps.registry.update(record.id, { modelFallback });
+				await racePrompt();
 			}
 		}
 
@@ -1027,15 +1293,17 @@ async function runSpawned(
 
 		await cleanup();
 		return {
-			record: deps.registry.get(record.id)!,
+			record,
 			output,
 			value,
 			usage,
 			worktreePath: worktree?.path,
+			modelFallback,
 		};
 	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
+		const message = describeUnknownError(err);
 		attachSubagentUsageToError(err, usage);
+		attachSubagentModelFallbackToError(err, modelFallback);
 		const transcriptOutput = extractAssistantText(agent.state.messages);
 		manifest.lastError = message;
 		manifest.filesTouched = [...manifestFiles];
@@ -1057,7 +1325,29 @@ async function runSpawned(
 			turnCount,
 			usage,
 		});
-		await cleanup();
+		const residualDiagnostic = await cleanup();
+		if (residualDiagnostic) {
+			const enrichedError = new Error(`${message}\n${residualDiagnostic}`, {
+				cause: controller.signal.reason ?? err,
+			});
+			attachSubagentUsageToError(enrichedError, usage);
+			attachSubagentModelFallbackToError(enrichedError, modelFallback);
+			manifest.lastError = enrichedError.message;
+			deps.registry.update(record.id, {
+				error: enrichedError.message,
+				output: formatPartialOutput(transcriptOutput, enrichedError.message, manifest.filesTouched),
+				manifest: { ...manifest, filesTouched: [...manifestFiles] },
+			});
+			throw enrichedError;
+		}
+		// Plain structured throws (cross-realm auth objects, etc.) rethrow as Error so
+		// callers and toThrow matchers see a readable message while cause keeps the original.
+		if (!(err instanceof Error)) {
+			const wrapped = new Error(message, { cause: err });
+			attachSubagentUsageToError(wrapped, usage);
+			attachSubagentModelFallbackToError(wrapped, modelFallback);
+			throw wrapped;
+		}
 		throw err;
 	}
 }
