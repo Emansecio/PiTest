@@ -34,6 +34,7 @@ import {
 import {
 	type AgentTypeDef,
 	createSubagentOutputStore,
+	DEFAULT_SUBAGENT_OUTPUT_PAGE_BYTES,
 	deleteResumeState,
 	extractAssistantText,
 	type GateDetails,
@@ -42,6 +43,7 @@ import {
 	listResumeHandlesSync,
 	loadAgentTypes,
 	loadResumeState,
+	MAX_SUBAGENT_OUTPUT_PAGE_BYTES,
 	type ParallelTaskResult,
 	type ResumeState,
 	resumeStateStem,
@@ -50,6 +52,7 @@ import {
 	runWithAcceptance,
 	SubagentRegistry,
 	saveResumeState,
+	sliceSubagentOutputPage,
 	slotStats,
 	spawnAll,
 	spawnSubagent,
@@ -271,7 +274,7 @@ const worktreeSchema = Type.Union(
 );
 
 /**
- * Op name for reading a settled subagent's integral output. Shared as a single
+ * Op name for reading bounded pages of a settled subagent output. Shared as a single
  * constant so the schema literal (below), the tool description, and the recovery
  * pointer text can never drift apart (lesson M18: placeholder + description +
  * schema bound to one source of truth, guarded by a consistency test). Declared
@@ -296,7 +299,7 @@ const taskSchema = Type.Object({
 			],
 			{
 				description:
-					"run (default, blocking — returns the answer) | spawn (non-blocking — returns a handle so you can keep working) | poll (status of handles) | join (await handles and collect their outputs) | cancel (request cancellation of running handles) | list (active + resumable subagents) | agents (list the reusable agent types loaded from .pit/agents) | resume (continue a subagent cut short by ESC or a network drop, by its `name`/handle, with its transcript intact; pass `prompt` to steer the continuation) | continue (ask a follow-up of a subagent that FINISHED successfully, by its `name`/handle, reusing its transcript; `prompt` required) | read (fetch a settled subagent's INTEGRAL output by its `name`/handle — the join payload is only a small head+tail digest, so use this to recover the elided middle instead of re-spawning). Use spawn+join to fan out N independent tasks in parallel and gather them.",
+					"run (default, blocking — returns the answer) | spawn (non-blocking — returns a handle so you can keep working) | poll (status of handles) | join (await handles and collect their outputs) | cancel (request cancellation of running handles) | list (active + resumable subagents) | agents (list the reusable agent types loaded from .pit/agents) | resume (continue a subagent cut short by ESC or a network drop, by its `name`/handle, with its transcript intact; pass `prompt` to steer the continuation) | continue (ask a follow-up of a subagent that FINISHED successfully, by its `name`/handle, reusing its transcript; `prompt` required) | read (fetch one bounded page of a settled subagent output by `name`; pass the returned `nextCursor` as `cursor` until `hasMore` is false). Use spawn+join to fan out N independent tasks in parallel and gather them.",
 			},
 		),
 	),
@@ -331,6 +334,19 @@ const taskSchema = Type.Object({
 	handles: Type.Optional(
 		Type.Array(Type.String(), {
 			description: "Task handles to poll or join (each is the `name`/handle returned by a prior op:'spawn').",
+		}),
+	),
+	cursor: Type.Optional(
+		Type.Integer({
+			minimum: 0,
+			description: "Byte cursor for op:'read'. Omit for the first page; use the previous page's nextCursor.",
+		}),
+	),
+	page_bytes: Type.Optional(
+		Type.Integer({
+			minimum: 4,
+			maximum: MAX_SUBAGENT_OUTPUT_PAGE_BYTES,
+			description: `Maximum UTF-8 bytes in one op:'read' page (default ${DEFAULT_SUBAGENT_OUTPUT_PAGE_BYTES}, maximum ${MAX_SUBAGENT_OUTPUT_PAGE_BYTES}).`,
 		}),
 	),
 	prompt: Type.Optional(
@@ -447,8 +463,8 @@ export function resolveMaxSubagentDepth(env: NodeJS.ProcessEnv = process.env): n
  * Default byte cap on the DIGEST of a subagent's final output as it lands in the
  * parent's context (N7). The parent no longer carries a 24KB tail permanently:
  * it gets a small head+tail digest (4KB default) plus a pointer to recover the
- * integral output via op:"read". The full text is persisted to disk (and stays
- * on the in-memory registry) so nothing is lost. `PIT_SUBAGENT_MAX_BYTES` still
+ * retained output through bounded op:"read" pages. A best-effort redacted copy
+ * is persisted to disk while the in-memory registry remains available. `PIT_SUBAGENT_MAX_BYTES` still
  * overrides this inline cap — same env var, smaller default.
  */
 const DEFAULT_SUBAGENT_DIGEST_BYTES = 4 * 1024; // 4KB
@@ -468,7 +484,7 @@ export function resolveSubagentMaxBytes(env: NodeJS.ProcessEnv = process.env): n
  * to fetch the untruncated output. Exported for the M18 consistency test.
  */
 export function subagentReadPointer(handle: string, totalBytes: number): string {
-	return `[digest only — full ${formatSize(totalBytes)} output persisted; recover it with task({op:"${SUBAGENT_READ_OP}", name:"${handle}"})]`;
+	return `[digest only — ${formatSize(totalBytes)} output retained for bounded, paged recovery; start with task({op:"${SUBAGENT_READ_OP}", name:"${handle}"})]`;
 }
 
 /**
@@ -603,14 +619,18 @@ function messagingPreamble(selfId: string, parentId: string | undefined): string
 }
 
 export function createCoordinatorExtension(options: CoordinatorExtensionOptions) {
-	const registry = new SubagentRegistry();
-	const maxDepth = resolveMaxSubagentDepth();
-	const maxOutputBytes = resolveSubagentMaxBytes();
-	// N7: full (integral) output of each settled subagent, persisted to disk so
-	// op:"read" can recover it after the inline digest. The registry stays the
+	// N7: retained output of each settled subagent, persisted best-effort so
+	// op:"read" can recover bounded pages after the inline digest. The registry stays the
 	// primary in-memory cache; this is the recovery + RAM-relief layer. Disposed
 	// on session teardown.
 	const outputStore = createSubagentOutputStore();
+	const registry = new SubagentRegistry({
+		onBeforeEvict: (record) => {
+			if (record.output !== undefined) void outputStore.put(record.taskName, record.output);
+		},
+	});
+	const maxDepth = resolveMaxSubagentDepth();
+	const maxOutputBytes = resolveSubagentMaxBytes();
 	const scopedHindsightEnabled = () => {
 		if (isTruthyEnvFlag(process.env.PIT_NO_SCOPED_HINDSIGHT)) return false;
 		return options.isScopedHindsightEnabled?.() ?? true;
@@ -622,7 +642,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	const checkpointWrites = new Map<string, Promise<void>>();
 	// When a settled pending entry is evicted, retain only enough state to make
 	// poll/join explicit and keep its name reserved until the caller acknowledges
-	// it with join. The integral output remains in outputStore for op:"read".
+	// it with join. Retained output remains page-readable while the store holds it.
 	const evictedPending = new Map<string, EvictedPendingTask>();
 	// Identity reservations outlive the compact tombstone display cache, up to a
 	// bounded cap. Preserve the last status too, so poll does not turn an evicted
@@ -638,8 +658,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	// temporarily puts `pending` over PENDING_MAX; settled entries move to a compact
 	// tombstone rather than retaining their digest/result indefinitely. Tombstones
 	// preserve a clear poll/join outcome and collision protection, while outputStore
-	// keeps full text recoverable through op:"read" when its best-effort disk write
-	// succeeded.
+	// keeps bounded recovery pages available when its best-effort disk write succeeded.
 	const PENDING_MAX = 64;
 	const EVICTED_PENDING_MAX = 64;
 	const RESERVED_ASYNC_MAX = 256;
@@ -719,10 +738,23 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	// parent session. Distinct from `resumable` (interrupted/errored runs).
 	const continuable = new Map<string, LiveAgentRecord>();
 	const CONTINUABLE_MAX = 8;
+	const LIFECYCLE_EVICTION_MARKER_MAX = 32;
+	const evictedContinuable = new Map<string, number>();
+	const evictedResumable = new Map<string, number>();
 	const lifecycleInFlight = new Set<string>();
 	const resumeInFlight = new Map<string, Promise<TaskOpResult>>();
 	const continueInFlight = new Map<string, Promise<TaskOpResult>>();
 	const lifecycleControllers = new Map<string, AbortController>();
+
+	function rememberLifecycleEviction(markers: Map<string, number>, handle: string): void {
+		markers.delete(handle);
+		markers.set(handle, Date.now());
+		while (markers.size > LIFECYCLE_EVICTION_MARKER_MAX) {
+			const oldest = markers.keys().next().value;
+			if (oldest === undefined) break;
+			markers.delete(oldest);
+		}
+	}
 
 	/** Record a successfully-finished Agent as continuable, evicting the oldest past the cap. */
 	async function rememberContinuable(
@@ -732,11 +764,16 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		resumeMetadata?: ResumeMetadata,
 	): Promise<void> {
 		resumable.delete(handle);
+		evictedContinuable.delete(handle);
+		evictedResumable.delete(handle);
 		continuable.set(handle, { agent, recordId, resumeMetadata });
 		await deleteResumeState(options.getCwd ? options.getCwd() : process.cwd(), handle);
 		if (continuable.size > CONTINUABLE_MAX) {
 			const oldest = continuable.keys().next().value;
-			if (oldest !== undefined) continuable.delete(oldest);
+			if (oldest !== undefined) {
+				continuable.delete(oldest);
+				rememberLifecycleEviction(evictedContinuable, oldest);
+			}
 		}
 	}
 
@@ -848,6 +885,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			lifecycleInFlight.clear();
 			resumable.clear();
 			continuable.clear();
+			evictedResumable.clear();
+			evictedContinuable.clear();
 			registry.clear();
 			await outputStore.dispose();
 		})();
@@ -863,10 +902,15 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	/** Record an interrupted Agent as resumable, evicting the oldest past the cap. */
 	function rememberResumable(handle: string, agent: Agent, recordId: string, resumeMetadata?: ResumeMetadata): void {
 		continuable.delete(handle);
+		evictedContinuable.delete(handle);
+		evictedResumable.delete(handle);
 		resumable.set(handle, { agent, recordId, resumeMetadata });
 		if (resumable.size > RESUMABLE_MAX) {
 			const oldest = resumable.keys().next().value;
-			if (oldest !== undefined && oldest !== handle) resumable.delete(oldest);
+			if (oldest !== undefined && oldest !== handle) {
+				resumable.delete(oldest);
+				rememberLifecycleEviction(evictedResumable, oldest);
+			}
 		}
 	}
 
@@ -1018,10 +1062,10 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	/**
 	 * The inline payload the parent sees for a settled subagent (N7): a head+tail
 	 * DIGEST of the full text capped at `maxOutputBytes` (4KB default), plus a
-	 * pointer citing op:"read" + the handle to recover the integral output. When
+	 * pointer citing op:"read" + the handle to start bounded paged recovery. When
 	 * the text already fits the cap the digest IS the full output, so no pointer
 	 * is appended (nothing to recover). `readHandle` is the name the model passes
-	 * back to op:"read" — the same key the full output is persisted under.
+	 * back to op:"read" — the same key the retained output is stored under.
 	 */
 	function digestWithPointer(rawText: string, readHandle: string): string {
 		const digest = truncateHeadTail(rawText, { maxBytes: maxOutputBytes });
@@ -1047,18 +1091,16 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	}
 
 	/**
-	 * op:"read" — return a settled subagent's INTEGRAL output by its handle. Prefers
-	 * the in-memory registry record (primary cache, keyed by taskName) and falls
-	 * back to the on-disk copy — which survives registry eviction and resume/
-	 * continue runs (those re-drive a live Agent and never write a registry record).
-	 *
-	 * The integral text is returned as-is; the task tool carries an `outputCap` of
-	 * RECALL_OUTPUT_CAP_BYTES (96KB, head+tail) so `wrapToolDefinition` bounds it at
-	 * the wrap layer exactly like `recall_tool_output` — a giant output can't flood
-	 * the parent, yet its head AND tail both survive (a head-only re-cut would drop
-	 * the tail the model recovered it for).
+	 * op:"read" — return one bounded page of retained subagent output. Prefers
+	 * the in-memory registry and falls back to the session-scoped, redacted,
+	 * best-effort disk copy. Recovery does not survive process restart or session
+	 * disposal; the wrapper cap remains only a final safety net.
 	 */
-	async function readOutput(handle: string | undefined): Promise<TaskOpResult> {
+	async function readOutput(
+		handle: string | undefined,
+		cursor = 0,
+		pageBytes = DEFAULT_SUBAGENT_OUTPUT_PAGE_BYTES,
+	): Promise<TaskOpResult> {
 		const key = handle?.trim();
 		if (!key) {
 			return {
@@ -1070,24 +1112,51 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			};
 		}
 		const record = registry.list().find((r) => r.taskName === key);
-		const full = record?.output ?? (await outputStore.get(key));
-		if (full === undefined) {
+		try {
+			const page =
+				record?.output !== undefined
+					? sliceSubagentOutputPage(record.output, cursor, pageBytes)
+					: await outputStore.getPage(key, cursor, pageBytes);
+			if (page === undefined) {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `task: no stored output for "${key}". Recovery is session-scoped and best-effort; use op:"list" to see tracked subagents.`,
+						},
+					],
+					isError: true,
+					details: undefined,
+				};
+			}
+			const content = [{ type: "text" as const, text: page.content }];
+			if (page.hasMore && page.nextCursor !== undefined) {
+				content.push({
+					type: "text" as const,
+					text: `[more output available — continue with task({op:"${SUBAGENT_READ_OP}", name:"${key}", cursor:${page.nextCursor}, page_bytes:${page.pageBytes}})]`,
+				});
+			}
 			return {
-				content: [
-					{
-						type: "text" as const,
-						text: `task: no stored output for "${key}". Use op:"list" to see tracked subagents.`,
-					},
-				],
+				content,
+				isError: false,
+				details: {
+					handle: key,
+					bytes: page.totalBytes,
+					totalBytes: page.totalBytes,
+					cursor: page.cursor,
+					pageBytes: page.pageBytes,
+					nextCursor: page.nextCursor,
+					hasMore: page.hasMore,
+				},
+			};
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return {
+				content: [{ type: "text" as const, text: `task: cannot read output "${key}": ${message}` }],
 				isError: true,
-				details: undefined,
+				details: { handle: key, cursor },
 			};
 		}
-		return {
-			content: [{ type: "text" as const, text: full }],
-			isError: false,
-			details: { handle: key, bytes: Buffer.byteLength(full, "utf8") },
-		};
 	}
 
 	function reserveSpawnBudget(estimatedTokens = 4096): SubagentTokenReservation | TaskOpResult {
@@ -1162,29 +1231,39 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	 * Agent's original spawn subscription from making this merge double-count the
 	 * same turn in the retained record.
 	 */
+	interface DirectAgentSettlementDelta {
+		assistantTurns: number;
+		usage: SubagentUsage;
+	}
+
 	function accountDirectAgentSettlement(
 		agent: Agent,
 		messageBoundary: number,
 		recordBaseline: DirectAgentRecordBaseline | undefined,
 		status: SubagentStatus,
 		error: string | undefined,
-	): void {
+		budgetReservation?: SubagentTokenReservation,
+	): DirectAgentSettlementDelta {
 		const appended = agent.state.messages.slice(messageBoundary);
 		const assistantTurns = appended.reduce((count, message) => count + (message.role === "assistant" ? 1 : 0), 0);
 		const usageDelta = aggregateAssistantUsage(appended);
-		// Exactly one ledger call per settled prompt. TokenBudgetGovernor treats a
-		// zero-token delta as a no-op.
-		recordSubagentSpend(usageDelta);
-		if (!recordBaseline) return;
-		const record = registry.get(recordBaseline.id);
-		if (!record) return;
-		registry.update(record.id, {
-			turnCount: recordBaseline.turnCount + assistantTurns,
-			usage: mergeSubagentUsage(recordBaseline.usage, usageDelta),
-			status,
-			endedAt: Date.now(),
-			error: status === "completed" ? undefined : error,
-		});
+		// Exactly one ledger call per settled prompt. A reservation consumes the
+		// conservative hold; direct callers without one retain the legacy path.
+		if (budgetReservation) budgetReservation.record(usageDelta);
+		else recordSubagentSpend(usageDelta);
+		if (recordBaseline) {
+			const record = registry.get(recordBaseline.id);
+			if (record) {
+				registry.update(record.id, {
+					turnCount: recordBaseline.turnCount + assistantTurns,
+					usage: mergeSubagentUsage(recordBaseline.usage, usageDelta),
+					status,
+					endedAt: Date.now(),
+					error: status === "completed" ? undefined : error,
+				});
+			}
+		}
+		return { assistantTurns, usage: usageDelta };
 	}
 
 	function directSettlementStatus(
@@ -1207,9 +1286,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 
 	/**
 	 * Digests a resume/continue body to the inline budget with a recovery pointer,
-	 * and persists the integral output so op:"read" can recover it. resume/continue
-	 * re-drive a live Agent (no registry record), so the disk copy is the ONLY way
-	 * their full output stays retrievable.
+	 * and persists a best-effort retained copy for paged op:"read" recovery.
+	 * resume/continue re-drive a live Agent without creating a registry record.
 	 */
 	async function cappedBody(output: string, readHandle: string): Promise<string> {
 		await outputStore.put(readHandle, output);
@@ -1307,16 +1385,33 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	/** op:"list" — summarize tracked subagents and live async handles. */
 	function listSubagents(): TaskOpResult {
 		const records = registry.list();
-		const recLines = records.map((r) => {
-			const usage = r.usage ? ` (${r.usage.totalTokens} tok)` : "";
-			const err = r.error ? ` (${r.error})` : "";
-			return `- ${r.taskName} [${r.status}] turns=${r.turnCount}${usage}${err}`;
+		const liveRecords = records.filter((record) => record.status === "pending" || record.status === "running");
+		const terminalRecords = records.filter((record) => record.status !== "pending" && record.status !== "running");
+		const terminalDisplayLimit = 20;
+		const displayedTerminal = terminalRecords.slice(-terminalDisplayLimit);
+		const omittedTerminal = terminalRecords.length - displayedTerminal.length;
+		const displayedRecords = [...liveRecords, ...displayedTerminal];
+		const recLines = displayedRecords.map((record) => {
+			const usage = record.usage ? ` (${record.usage.totalTokens} tok)` : "";
+			const cost = record.usage ? ` costUsd=${record.usage.costUsd.toFixed(6)}` : "";
+			const model = ` model=${record.model ?? "unknown"}`;
+			const manifest = record.manifest
+				? ` manifest=files:${record.manifest.filesTouched.length},commands:${record.manifest.commands.length}`
+				: "";
+			const worktree = record.manifest?.worktreePath ? ` worktree=${record.manifest.worktreePath}` : "";
+			const partial = record.partial ? " partial=true" : "";
+			const denied = record.deniedToolCalls?.length
+				? ` denied=${[...new Set(record.deniedToolCalls)].slice(0, 8).join(",")}`
+				: "";
+			const err = record.error ? ` error=${record.error.slice(0, 160)}` : "";
+			return `- ${record.taskName} [${record.status}] turns=${record.turnCount}${usage}${model} depth=${record.depth}${cost}${manifest}${worktree}${partial}${denied}${err}`;
 		});
+		if (omittedTerminal > 0) recLines.push(`- … ${omittedTerminal} more terminal records omitted`);
 		const handleLines = [...pending.values()].map(
 			(e) => `- ${e.handle} [${e.status}]${e.error ? ` (${e.error})` : ""}`,
 		);
 		const evictedHandleLines = [...evictedPending.values()].map(
-			(e) => `- ${e.handle} [${e.status}; evicted â€” use op:"read" then op:"join"]`,
+			(e) => `- ${e.handle} [${e.status}; evicted -- use op:"read" then op:"join"]`,
 		);
 		const sections: string[] = [];
 		sections.push(
@@ -1333,12 +1428,23 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		const diskHandles = listResumeHandlesSync(options.getCwd ? options.getCwd() : process.cwd()).filter(
 			(h) => !liveStems.has(h),
 		);
+		const persistedDisplayLimit = 32;
+		const displayedDiskHandles = diskHandles.slice(-persistedDisplayLimit);
+		const omittedPersisted = diskHandles.length - displayedDiskHandles.length;
 		const resumeLines = [
 			...[...resumable.keys()].map((h) => `- ${h}`),
-			...diskHandles.map((h) => `- ${h} (persisted)`),
+			...displayedDiskHandles.map((h) => `- ${h} (persisted-only)`),
+			...(omittedPersisted > 0 ? [`- … ${omittedPersisted} more persisted-only states omitted`] : []),
 		];
 		if (resumeLines.length > 0) {
-			sections.push(`Resumable (interrupted — continue with op:"resume"):\n${resumeLines.join("\n")}`);
+			sections.push(`Resumable (interrupted -- continue with op:"resume"):\n${resumeLines.join("\n")}`);
+		}
+		if (evictedResumable.size > 0) {
+			sections.push(
+				`Evicted resumable live transcripts (persisted-only recovery may remain):\n${[...evictedResumable.keys()]
+					.map((handle) => `- ${handle}`)
+					.join("\n")}`,
+			);
 		}
 		const continueLines = [...continuable.keys()].map((h) => `- ${h}`);
 		if (continueLines.length > 0) {
@@ -1346,23 +1452,68 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				`Continuable (follow-up with op:"continue"; FIFO cap ${CONTINUABLE_MAX}):\n${continueLines.join("\n")}`,
 			);
 		}
+		if (evictedContinuable.size > 0) {
+			sections.push(
+				`Evicted continuable live transcripts (re-run required):\n${[...evictedContinuable.keys()]
+					.map((handle) => `- ${handle}`)
+					.join("\n")}`,
+			);
+		}
 		const totalTokens = records.reduce((sum, r) => sum + (r.usage ? r.usage.totalTokens : 0), 0);
+		const totalCostUsd = records.reduce((sum, r) => sum + (r.usage ? r.usage.costUsd : 0), 0);
 		const slots = slotStats();
-		sections.push(`Slots (process-wide): active=${slots.active}, queued=${slots.queued}; totalTokens=${totalTokens}`);
+		const lifecycle = registry.stats();
+		const governor = options.getTokenGovernor?.()?.snapshot();
+		sections.push(
+			`Lifecycle: created=${lifecycle.created}, settled=${lifecycle.settled}, evicted=${lifecycle.evicted}, retained=${lifecycle.retained} (live=${lifecycle.live}, terminal=${lifecycle.terminal})`,
+		);
+		sections.push(
+			`Slots (process-wide): active=${slots.active}, queued=${slots.queued}, oldestQueuedMs=${slots.oldestQueuedMs}; totalTokens=${totalTokens}; totalCostUsd=${totalCostUsd.toFixed(6)}`,
+		);
+		if (governor) {
+			sections.push(
+				`Governor: remaining=${governor.remaining ?? "unlimited"}, reserved=${governor.reservedSubagentTokens}, subagentTokens=${governor.subagentTokens}, subagentCostUsd=${governor.subagentCostUsd.toFixed(6)}`,
+			);
+		}
 		return {
 			content: [{ type: "text" as const, text: sections.join("\n\n") }],
 			isError: false,
 			details: {
 				subagents: records.length,
+				records: records.map((record) => ({
+					taskName: record.taskName,
+					status: record.status,
+					model: record.model,
+					depth: record.depth,
+					turns: record.turnCount,
+					usage: record.usage,
+					manifest: record.manifest
+						? {
+								filesTouched: record.manifest.filesTouched.slice(0, 64),
+								commands: record.manifest.commands.slice(0, 32),
+								lastError: record.manifest.lastError?.slice(0, 160),
+								worktreePath: record.manifest.worktreePath,
+							}
+						: undefined,
+					partial: record.partial,
+					error: record.error?.slice(0, 160),
+					deniedToolCalls: record.deniedToolCalls?.slice(0, 8),
+				})),
+				lifecycle,
 				asyncHandles: pending.size,
 				evictedAsyncHandles: evictedPending.size,
 				reservedAsyncHandles: reservedAsyncHandles.size,
 				resumable: resumable.size + diskHandles.length,
 				continuable: continuable.size,
+				evictedResumable: evictedResumable.size,
+				evictedContinuable: evictedContinuable.size,
 				// active/queued are process-wide (slot budget shared across coordinator instances).
 				active: slots.active,
 				queued: slots.queued,
+				oldestQueuedMs: slots.oldestQueuedMs,
 				totalTokens,
+				totalCostUsd,
+				governor,
 			},
 		};
 	}
@@ -1512,12 +1663,12 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				const evicted = evictedSnapshot.get(h);
 				const reservation = reservationSnapshot.get(h);
 				if (!evicted && reservation) {
-					return `### ${h}\n[settled details were evicted from the detached-result cache. Use task({op:"${SUBAGENT_READ_OP}", name:"${h}"}) to recover any stored integral output.]`;
+					return `### ${h}\n[settled details were evicted from the detached-result cache. Use task({op:"${SUBAGENT_READ_OP}", name:"${h}"}) to start bounded recovery of retained output.]`;
 				}
 				if (!evicted) return `### ${h}\n(unknown handle)`;
 				const state = evicted.delivered ? "already delivered to chat" : `${evicted.status} result`;
 				return `### ${h}\n${withModelFallbackDiagnostic(
-					`[${state} was evicted from the detached-result cache. Use task({op:"${SUBAGENT_READ_OP}", name:"${h}"}) to recover any stored integral output.]`,
+					`[${state} was evicted from the detached-result cache. Use task({op:"${SUBAGENT_READ_OP}", name:"${h}"}) to start bounded recovery of retained output.]`,
 					evicted.modelFallback,
 				)}`;
 			}
@@ -1581,114 +1732,125 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			return await resumeFromDisk(key, continuation, signal);
 		}
 		const { agent, recordId } = live;
-		safeCallback(() => options.onSubagentStart?.(key), undefined);
-		// The interrupted run may still be settling (an aborted stream resolves
-		// async). Stop it and wait for idle before re-driving the same Agent.
-		agent.abort();
+		const budgetReservation = reserveSpawnBudget();
+		if ("content" in budgetReservation) return budgetReservation;
 		try {
-			await waitForResumeIdle(agent.waitForIdle(), signal);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			safeCallback(() => options.onSubagentComplete?.(key, signal?.aborted ? "cancelled" : "error"), undefined);
+			safeCallback(() => options.onSubagentStart?.(key), undefined);
+			// The interrupted run may still be settling (an aborted stream resolves
+			// async). Stop it and wait for idle before re-driving the same Agent.
+			agent.abort();
+			try {
+				await waitForResumeIdle(agent.waitForIdle(), signal);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				safeCallback(() => options.onSubagentComplete?.(key, signal?.aborted ? "cancelled" : "error"), undefined);
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Cannot resume "${key}": ${message}. No new prompt was started; it remains resumable.`,
+						},
+					],
+					isError: true,
+					details: { handle: key, resumed: false, stillResumable: true },
+				};
+			}
+			// Drop a trailing failed/aborted assistant turn so the model resumes from the
+			// last real work instead of from a dead-end error message.
+			const messages = agent.state.messages;
+			const last = messages[messages.length - 1] as AgentMessage | undefined;
+			if (last && last.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted")) {
+				agent.state.messages = messages.slice(0, -1);
+			}
+			// Capture the boundary only after removing the failed tail: that discarded
+			// response was already charged by the original run and must not be charged
+			// again by this resume.
+			const messageBoundary = agent.state.messages.length;
+			const recordBaseline = directAgentRecordBaseline(recordId);
+			// A fresh ESC during the resume aborts the same Agent (it stays resumable).
+			const cleanupAbort = wireAbort(agent, signal);
+			const text =
+				continuation?.trim() ||
+				"You were interrupted before finishing. Continue from where you left off using the conversation above, then give your final answer.";
+			// Respect the concurrency budget: a re-driven Agent is a live run like any
+			// spawn. withRunSlot also yields/reacquires an enclosing lease, so a resume
+			// issued from inside a nested subagent's turn can't deadlock the budget.
+			let promptFailed = false;
+			let promptError: unknown;
+			let settlementStatus: SubagentStatus = "running";
+			try {
+				await promptDirectAgent(agent, text, signal);
+			} catch (err) {
+				promptFailed = true;
+				promptError = err;
+			} finally {
+				cleanupAbort();
+				settlementStatus = directSettlementStatus(agent, promptFailed, signal);
+				const settlementDelta = accountDirectAgentSettlement(
+					agent,
+					messageBoundary,
+					recordBaseline,
+					settlementStatus,
+					directSettlementError(agent, promptError),
+					budgetReservation,
+				);
+				safeCallback(
+					() =>
+						options.onSubagentProgress?.(key, {
+							turn: agent.state.messages.filter((m) => m.role === "assistant").length,
+						}),
+					undefined,
+				);
+				safeCallback(
+					() =>
+						options.onSubagentComplete?.(
+							key,
+							settlementStatus === "completed"
+								? "done"
+								: settlementStatus === "cancelled"
+									? "cancelled"
+									: "error",
+							completeMetaFromUsage(settlementDelta.assistantTurns, settlementDelta.usage),
+						),
+					undefined,
+				);
+			}
+			if (promptFailed) {
+				const message = promptError instanceof Error ? promptError.message : String(promptError);
+				// A thrown prompt can still have appended partial messages. Keep the
+				// durable Tier-2 transcript in sync before exposing the retry path.
+				await persistLiveResumeState(rcwd, key, agent, live.resumeMetadata);
+				return {
+					content: [{ type: "text" as const, text: `Subagent resume failed: ${message}` }],
+					isError: true,
+					details: { handle: key, resumed: true },
+				};
+			}
+			if (agentEndedWithError(agent)) {
+				await persistLiveResumeState(rcwd, key, agent, live.resumeMetadata);
+				// Still unfinished — keep it resumable for another attempt.
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Resume of "${key}" did not complete (it erred again). It remains resumable.`,
+						},
+					],
+					isError: true,
+					details: { handle: key, resumed: true, stillResumable: true },
+				};
+			}
+			resumable.delete(key);
+			await rememberContinuable(key, agent, recordId, live.resumeMetadata);
+			const body = await cappedBody(extractAssistantText(agent.state.messages), key);
 			return {
-				content: [
-					{
-						type: "text" as const,
-						text: `Cannot resume "${key}": ${message}. No new prompt was started; it remains resumable.`,
-					},
-				],
-				isError: true,
-				details: { handle: key, resumed: false, stillResumable: true },
-			};
-		}
-		// Drop a trailing failed/aborted assistant turn so the model resumes from the
-		// last real work instead of from a dead-end error message.
-		const messages = agent.state.messages;
-		const last = messages[messages.length - 1] as AgentMessage | undefined;
-		if (last && last.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted")) {
-			agent.state.messages = messages.slice(0, -1);
-		}
-		// Capture the boundary only after removing the failed tail: that discarded
-		// response was already charged by the original run and must not be charged
-		// again by this resume.
-		const messageBoundary = agent.state.messages.length;
-		const recordBaseline = directAgentRecordBaseline(recordId);
-		// A fresh ESC during the resume aborts the same Agent (it stays resumable).
-		const cleanupAbort = wireAbort(agent, signal);
-		const text =
-			continuation?.trim() ||
-			"You were interrupted before finishing. Continue from where you left off using the conversation above, then give your final answer.";
-		// Respect the concurrency budget: a re-driven Agent is a live run like any
-		// spawn. withRunSlot also yields/reacquires an enclosing lease, so a resume
-		// issued from inside a nested subagent's turn can't deadlock the budget.
-		let promptFailed = false;
-		let promptError: unknown;
-		let settlementStatus: SubagentStatus = "running";
-		try {
-			await promptDirectAgent(agent, text, signal);
-		} catch (err) {
-			promptFailed = true;
-			promptError = err;
-		} finally {
-			cleanupAbort();
-			settlementStatus = directSettlementStatus(agent, promptFailed, signal);
-			accountDirectAgentSettlement(
-				agent,
-				messageBoundary,
-				recordBaseline,
-				settlementStatus,
-				directSettlementError(agent, promptError),
-			);
-			safeCallback(
-				() =>
-					options.onSubagentProgress?.(key, {
-						turn: agent.state.messages.filter((m) => m.role === "assistant").length,
-					}),
-				undefined,
-			);
-			safeCallback(
-				() =>
-					options.onSubagentComplete?.(
-						key,
-						settlementStatus === "completed" ? "done" : settlementStatus === "cancelled" ? "cancelled" : "error",
-						completeMetaFromUsage(undefined, undefined),
-					),
-				undefined,
-			);
-		}
-		if (promptFailed) {
-			const message = promptError instanceof Error ? promptError.message : String(promptError);
-			// A thrown prompt can still have appended partial messages. Keep the
-			// durable Tier-2 transcript in sync before exposing the retry path.
-			await persistLiveResumeState(rcwd, key, agent, live.resumeMetadata);
-			return {
-				content: [{ type: "text" as const, text: `Subagent resume failed: ${message}` }],
-				isError: true,
+				content: [{ type: "text" as const, text: body }],
+				isError: false,
 				details: { handle: key, resumed: true },
 			};
+		} finally {
+			budgetReservation.release();
 		}
-		if (agentEndedWithError(agent)) {
-			await persistLiveResumeState(rcwd, key, agent, live.resumeMetadata);
-			// Still unfinished — keep it resumable for another attempt.
-			return {
-				content: [
-					{
-						type: "text" as const,
-						text: `Resume of "${key}" did not complete (it erred again). It remains resumable.`,
-					},
-				],
-				isError: true,
-				details: { handle: key, resumed: true, stillResumable: true },
-			};
-		}
-		resumable.delete(key);
-		await rememberContinuable(key, agent, recordId, live.resumeMetadata);
-		const body = await cappedBody(extractAssistantText(agent.state.messages), key);
-		return {
-			content: [{ type: "text" as const, text: body }],
-			isError: false,
-			details: { handle: key, resumed: true },
-		};
 	}
 
 	/**
@@ -1732,76 +1894,91 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			};
 		}
 		const { agent, recordId } = live;
-		const messageBoundary = agent.state.messages.length;
-		safeCallback(() => options.onSubagentStart?.(key), undefined);
-		const recordBaseline = directAgentRecordBaseline(recordId);
-		// A fresh ESC during the follow-up aborts this Agent; it stays continuable.
-		const cleanupAbort = wireAbort(agent, signal);
-		// Respect the concurrency budget: a follow-up is a live run like any spawn.
-		let promptFailed = false;
-		let promptError: unknown;
-		let settlementStatus: SubagentStatus = "running";
+		const budgetReservation = reserveSpawnBudget();
+		if ("content" in budgetReservation) return budgetReservation;
 		try {
-			await promptDirectAgent(agent, text, signal);
-		} catch (err) {
-			promptFailed = true;
-			promptError = err;
+			const messageBoundary = agent.state.messages.length;
+			safeCallback(() => options.onSubagentStart?.(key), undefined);
+			const recordBaseline = directAgentRecordBaseline(recordId);
+			// A fresh ESC during the follow-up aborts this Agent; it stays continuable.
+			const cleanupAbort = wireAbort(agent, signal);
+			// Respect the concurrency budget: a follow-up is a live run like any spawn.
+			let promptFailed = false;
+			let promptError: unknown;
+			let settlementStatus: SubagentStatus = "running";
+			try {
+				await promptDirectAgent(agent, text, signal);
+			} catch (err) {
+				promptFailed = true;
+				promptError = err;
+			} finally {
+				cleanupAbort();
+				settlementStatus = directSettlementStatus(agent, promptFailed, signal);
+				const settlementDelta = accountDirectAgentSettlement(
+					agent,
+					messageBoundary,
+					recordBaseline,
+					settlementStatus,
+					directSettlementError(agent, promptError),
+					budgetReservation,
+				);
+				safeCallback(
+					() =>
+						options.onSubagentProgress?.(key, {
+							turn: agent.state.messages.filter((m) => m.role === "assistant").length,
+						}),
+					undefined,
+				);
+				safeCallback(
+					() =>
+						options.onSubagentComplete?.(
+							key,
+							settlementStatus === "completed"
+								? "done"
+								: settlementStatus === "cancelled"
+									? "cancelled"
+									: "error",
+							completeMetaFromUsage(settlementDelta.assistantTurns, settlementDelta.usage),
+						),
+					undefined,
+				);
+			}
+			if (promptFailed) {
+				const message = promptError instanceof Error ? promptError.message : String(promptError);
+				const rcwd = options.getCwd ? options.getCwd() : process.cwd();
+				continuable.delete(key);
+				rememberResumable(key, agent, recordId, live.resumeMetadata);
+				await persistLiveResumeState(rcwd, key, agent, live.resumeMetadata);
+				return {
+					content: [
+						{ type: "text" as const, text: `Subagent continue failed: ${message}. It remains resumable.` },
+					],
+					isError: true,
+					details: { handle: key, continued: true, stillResumable: true },
+				};
+			}
+			if (agentEndedWithError(agent)) {
+				const rcwd = options.getCwd ? options.getCwd() : process.cwd();
+				continuable.delete(key);
+				rememberResumable(key, agent, recordId, live.resumeMetadata);
+				await persistLiveResumeState(rcwd, key, agent, live.resumeMetadata);
+				return {
+					content: [
+						{ type: "text" as const, text: `Continue of "${key}" did not complete; it remains resumable.` },
+					],
+					isError: true,
+					details: { handle: key, continued: true, stillResumable: true },
+				};
+			}
+			const body = await cappedBody(extractAssistantText(agent.state.messages), key);
+			return {
+				content: [{ type: "text" as const, text: body }],
+				isError: false,
+				details: { handle: key, continued: true },
+			};
 		} finally {
-			cleanupAbort();
-			settlementStatus = directSettlementStatus(agent, promptFailed, signal);
-			accountDirectAgentSettlement(
-				agent,
-				messageBoundary,
-				recordBaseline,
-				settlementStatus,
-				directSettlementError(agent, promptError),
-			);
-			safeCallback(
-				() =>
-					options.onSubagentProgress?.(key, {
-						turn: agent.state.messages.filter((m) => m.role === "assistant").length,
-					}),
-				undefined,
-			);
-			safeCallback(
-				() =>
-					options.onSubagentComplete?.(
-						key,
-						settlementStatus === "completed" ? "done" : settlementStatus === "cancelled" ? "cancelled" : "error",
-						completeMetaFromUsage(undefined, undefined),
-					),
-				undefined,
-			);
+			budgetReservation.release();
 		}
-		if (promptFailed) {
-			const message = promptError instanceof Error ? promptError.message : String(promptError);
-			const rcwd = options.getCwd ? options.getCwd() : process.cwd();
-			continuable.delete(key);
-			rememberResumable(key, agent, recordId, live.resumeMetadata);
-			await persistLiveResumeState(rcwd, key, agent, live.resumeMetadata);
-			return {
-				content: [{ type: "text" as const, text: `Subagent continue failed: ${message}. It remains resumable.` }],
-				isError: true,
-				details: { handle: key, continued: true, stillResumable: true },
-			};
-		}
-		if (agentEndedWithError(agent)) {
-			const rcwd = options.getCwd ? options.getCwd() : process.cwd();
-			continuable.delete(key);
-			rememberResumable(key, agent, recordId, live.resumeMetadata);
-			await persistLiveResumeState(rcwd, key, agent, live.resumeMetadata);
-			return {
-				content: [{ type: "text" as const, text: `Continue of "${key}" did not complete; it remains resumable.` }],
-				isError: true,
-				details: { handle: key, continued: true, stillResumable: true },
-			};
-		}
-		const body = await cappedBody(extractAssistantText(agent.state.messages), key);
-		return {
-			content: [{ type: "text" as const, text: body }],
-			isError: false,
-			details: { handle: key, continued: true },
-		};
 	}
 
 	async function continueHandle(
@@ -1852,19 +2029,16 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				"Spawn a focused subagent to complete an isolated sub-task and return its final answer. " +
 				"Use this to delegate research, file exploration, or repetitive checks without polluting the main conversation. " +
 				"Pass `result_schema` for structured output, or `worktree: true` to run in an isolated git worktree. " +
-				`The run/join payload is a compact head+tail digest; call op:"${SUBAGENT_READ_OP}" with the task's name to recover a settled subagent's integral output without re-spawning. ` +
+				`The run/join payload is a compact head+tail digest; call op:"${SUBAGENT_READ_OP}" with the task's name, then follow nextCursor while hasMore, to recover bounded pages without re-spawning. ` +
 				"Scale the subagent's `model` to the sub-task's complexity (cheap for trivial fan-out, inherit the parent's for hard reasoning) — see the `model` field." +
 				(agentTypeSummary ? ` Reusable agent types (use the type field): ${agentTypeSummary}.` : ""),
 			promptSnippet:
 				"Spawn a subagent to handle an isolated sub-task. Supports structured output via result_schema and isolated git worktrees via worktree.",
 			parameters: taskSchema,
 			sideEffect: "agent",
-			// op:"read" can return up to RECALL_OUTPUT_CAP_BYTES (96KB) of integral
-			// output. Without a per-tool cap, wrapToolDefinition's generic 64KB
-			// HEAD-ONLY safety net would re-cut a large read result and drop its tail.
-			// Mirror recall_tool_output: raise this tool's ceiling to 96KB and keep
-			// head + tail. Inert for every other op — their payloads (4KB digests,
-			// status lines) sit well under the cap.
+			// op:"read" pages remain below 48KB. Keep the existing 96KB head+tail
+			// cap as a final safety net for every coordinator operation; paging, not
+			// this wrapper cap, is the recovery mechanism.
 			outputCap: { maxBytes: RECALL_OUTPUT_CAP_BYTES, mode: "headTail" as const },
 			// `params` is typed `unknown`, not `TaskInput`: this tool flows through the
 			// shared `(depth) => AgentTool` factory, whose `execute` is contravariantly
@@ -1882,7 +2056,9 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 
 				if (op === "list") return listSubagents();
 				if (op === "agents") return listAgentTypes();
-				if (op === SUBAGENT_READ_OP) return await readOutput(p.name ?? p.handles?.[0]);
+				if (op === SUBAGENT_READ_OP) {
+					return await readOutput(p.name ?? p.handles?.[0], p.cursor, p.page_bytes);
+				}
 				if (op === "poll") return pollHandles(p.handles ?? []);
 				if (op === "join") return await joinHandles(p.handles ?? [], childSignal);
 				if (op === "cancel") return cancelHandles(p.handles ?? (p.name ? [p.name] : []));
@@ -2240,7 +2416,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 								await deleteResumeState(cwd, handle);
 								entry.error = `acceptance gate failed after ${gated.gate?.attempts ?? 1} attempt(s)`;
 							}
-							// Persist the integral output for op:"read" recovery, then keep only a digest inline.
+							// Retain output for bounded op:"read" recovery, then keep only a digest inline.
 							await outputStore.put(handle, result.output);
 							const resultText = gated.gate
 								? withModelFallbackDiagnostic(digestWithPointer(gated.text, handle), result.modelFallback)
@@ -2580,7 +2756,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 
 	/**
 	 * Formats one settled parallel/fanout child for the parent's context: the
-	 * integral output is persisted for op:"read" recovery and only a head+tail
+	 * output is retained for bounded op:"read" recovery and only a head+tail
 	 * digest (plus the recovery pointer) is inlined — the same context economy
 	 * the single `task` op applies (N7). Its reservation already recorded the spend.
 	 */
@@ -2622,7 +2798,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				"Each task may carry its own acceptance gate, agent `type`, and `model` — " +
 				"scale each task's model to its complexity (cheap models for mechanical probes). " +
 				"Partial failures are isolated — one task's error does not abort the others. " +
-				`Each result is a compact digest; recover a task's integral output with task({op:"${SUBAGENT_READ_OP}", name:"<taskName>"}).`,
+				`Each result is a compact digest; start bounded paged recovery with task({op:"${SUBAGENT_READ_OP}", name:"<taskName>"}) and follow nextCursor while hasMore.`,
 			parameters: parallelSchema,
 			sideEffect: "agent",
 			async execute(
@@ -2737,7 +2913,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				"The scout determines how many reviewers run; each reviewer prompt uses {{target}} substitution. " +
 				"The worker receives collected reviews and may carry an acceptance gate. " +
 				"Each stage accepts its own agent `type` and `model`; omit a stage model to inherit the working parent. " +
-				`Outputs are compact digests; recover an integral output with task({op:"${SUBAGENT_READ_OP}", name:"<taskName>"}).`,
+				`Outputs are compact digests; start bounded paged recovery with task({op:"${SUBAGENT_READ_OP}", name:"<taskName>"}) and follow nextCursor while hasMore.`,
 			parameters: fanoutSchema,
 			sideEffect: "agent",
 			async execute(
@@ -2845,8 +3021,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						},
 					);
 					// Every pipeline stage records spend through its own reservation.
-					// Same context economy as `task` (N7): persist integral scout,
-					// reviewer, and worker outputs for op:"read"; inline only digests +
+					// Same context economy as `task` (N7): retain scout, reviewer, and
+					// worker outputs for bounded op:"read" pages; inline only digests +
 					// recovery pointers. Even a huge scout target list cannot flood the
 					// parent context now.
 					const scoutHandle = fanoutResult.scout_task_name ?? "fanout-scout";

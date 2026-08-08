@@ -30,6 +30,7 @@
  * PIT_NO_SUBAGENT_GUARDS.
  */
 
+import { recordDiagnostic } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import type { ToolCallEvent, ToolCallEventResult, ToolResultEvent } from "../extensions/types.ts";
 import { defaultLearnedErrorsDir } from "../learned-error-store.ts";
@@ -38,6 +39,27 @@ import { registerSubagentGroundingGuards } from "./grounding-guard-registry.ts";
 import { createLearnedErrorGuardExtension, type LearnedErrorGuardOptions } from "./learned-error-guard-extension.ts";
 
 type CollectedHandler = (event: unknown, ctx: unknown) => unknown;
+
+function recordReplayFailure(input: {
+	event: { toolName: string; toolCallId: string };
+	phase: "check" | "settle";
+	cause: unknown;
+}): void {
+	const note = (input.cause instanceof Error ? input.cause.message : String(input.cause)).slice(0, 300);
+	recordDiagnostic({
+		category: "guard.failed",
+		level: "error",
+		source: "subagent-guard-replay",
+		context: {
+			outcome: "failed",
+			phase: input.phase,
+			ruleId: "subagent-guard-replay",
+			toolName: input.event.toolName,
+			toolCallId: input.event.toolCallId,
+			note,
+		},
+	});
+}
 
 export interface SubagentGuardChain {
 	/** Run the guard chain for a tool call; resolves to the first block, else undefined. */
@@ -98,7 +120,8 @@ export function createSubagentGuardChain(options: CreateSubagentGuardChainOption
 				try {
 					const result = (await handler(event, undefined)) as ToolCallEventResult | undefined;
 					if (result?.block) return result;
-				} catch {
+				} catch (cause) {
+					recordReplayFailure({ event, phase: "check", cause });
 					// Fail-open: a guard throw must never hard-block the subagent — the
 					// parent's emitToolCall has the same per-handler swallow.
 				}
@@ -109,7 +132,8 @@ export function createSubagentGuardChain(options: CreateSubagentGuardChainOption
 			for (const handler of toolResultHandlers) {
 				try {
 					await handler(event, undefined);
-				} catch {
+				} catch (cause) {
+					recordReplayFailure({ event, phase: "settle", cause });
 					// Fail-open: post-exec bookkeeping must not break the subagent.
 				}
 			}

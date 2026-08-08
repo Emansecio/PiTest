@@ -7,7 +7,14 @@ export {
 export { type AgentTypeDef, loadAgentTypes } from "./agent-types.ts";
 export { brandCoordinatorTool, COORDINATOR_TOOL_BRAND, COORDINATOR_TOOL_NAMES, isCoordinatorTool } from "./brand.ts";
 export { type FanoutResult, type FanoutSpec, runFanout, substituteTarget } from "./fanout.ts";
-export { createSubagentOutputStore, type SubagentOutputStore } from "./output-store.ts";
+export {
+	createSubagentOutputStore,
+	DEFAULT_SUBAGENT_OUTPUT_PAGE_BYTES,
+	MAX_SUBAGENT_OUTPUT_PAGE_BYTES,
+	type SubagentOutputPage,
+	type SubagentOutputStore,
+	sliceSubagentOutputPage,
+} from "./output-store.ts";
 export {
 	DEFAULT_MAX_SUBAGENT_CONCURRENCY,
 	type ParallelTask,

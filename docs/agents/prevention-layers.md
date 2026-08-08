@@ -14,16 +14,17 @@ extensions in `packages/coding-agent/src/core/built-ins/`.
 ---
 
 ## Band A — Around the model (per turn)
+
 Applied before/while talking to the model, not per tool call.
 
 | layer | when | what | anchor |
-|-|-|-|-|
+| - | - | - | - |
 | transformContext | before send | last hook to mutate the message list before the model sees it | `agent-loop.ts:497` |
 | compaction / pre-send overflow guard | before send | keeps context under the window; summarizes + prunes. The presend phase fires at `assembled > window * 0.95` (`PRESEND_OVERFLOW_RATIO`) and **re-estimates after awaiting any in-flight background compaction** so it never double-compacts; opt out `PIT_NO_PRESEND_OVERFLOW_GUARD=1` | `core/compaction/`, `agent-session-compaction.ts:44,483` |
 | thinking cap | before send (compaction serialize) | trims stale assistant thinking blocks beyond the protected recent turns to head+tail (~1.5k chars) so old reasoning stops paying rent; opt out `PIT_NO_THINKING_CAP=1` | `capThinkingForContext` in `core/compaction/utils.ts`, applied `core/compaction/compaction.ts:1351` |
 | overthink guard | during stream | **permanently disabled for all models** — no longer interrupts streams on long reasoning or self-reversal rumination. Tracker + display helpers remain for historical transcripts; product path always returns `enabled: false` | `packages/agent/src/overthink-guard.ts`, `core/overthink-policy.ts` |
 | system-prompt build | before send | lean + conditional; volatile data kept in the suffix after `SYSTEM_PROMPT_DYNAMIC_MARKER`, out of the cached prefix. A custom prompt that omits the marker (or puts it at offset 0) triggers a warn-once `quality.cache-marker` diagnostic (`_checkDynamicMarkerPresence`). Every rebuild whose prefix actually changes content (compared byte-for-byte against the previous one, so suffix-only churn is free) records a `quality.cache-prefix-rewrite` diagnostic with `reason`/`rebuildCount`/`historyTokens` — `warn`, except deliberate transitions (`permission-mode`, `goal-lifecycle`) which record at `info` with `deliberate: true`. Session totals: `getCachePrefixDiagnostics()`, shown in `/session`, `/cache-status` and `/debug` | `core/system-prompt.ts`, `packages/ai/src/types.ts`, `agent-session.ts` `_trackPrefixStability` |
-| plan-mode prompt | before send (`before_agent_start`) | while permission mode is `plan`, the permissions extension appends a `<plan_mode>` section telling the model it is read-only and must research → build a DAG → call `exit_plan`; never invalidates the cached prefix | `core/built-ins/permissions-extension.ts`, `core/permissions/plan-mode-prompt.ts` |
+| plan-mode prompt | system-prompt build | while permission mode is `plan`, the host renders a `<plan_mode>` section into the cacheable prefix through `BuildSystemPromptOptions.permissionModeSection`; it rebuilds only when the mode or tool surface changes | `core/system-prompt.ts`, `core/permissions/plan-mode-prompt.ts` |
 | prompt cache breakpoints | on send | 4 Anthropic breakpoints + stable OpenAI `prompt_cache_key` | `packages/ai/src/providers/anthropic.ts` |
 | connect-guard | during connect | connect-phase timeout + instant abort (anti-wedge) | `packages/ai/src/utils/connect-guard.ts` |
 | idle-timeout | during stream | stalled-body watchdog (rearmed per chunk), retryable | `packages/ai/src/utils/idle-timeout.ts` |
@@ -31,6 +32,7 @@ Applied before/while talking to the model, not per tool call.
 | TTSR matcher | during stream | interrupts the stream when output matches a stop rule (`ttsrMatcher`) | `agent-loop.ts` |
 
 ## Band B — Before a tool runs (PREVENTIVE — these can block the wrong call)
+
 Fixed order inside `prepareSingleToolCall` (`agent-loop.ts:1066+`). Each step can short-circuit with an actionable error so the model recovers in one round-trip, never executing the wrong call.
 
 1. **Unknown-tool guard** (`agent-loop.ts:1067`) — invalid tool name → error + closest-tool suggestion.
@@ -48,6 +50,7 @@ Fixed order inside `prepareSingleToolCall` (`agent-loop.ts:1066+`). Each step ca
 **Contained guard faults.** Every guard built on `createGuard` (`built-ins/grounding-fire-once.ts`) fails OPEN: a throw in the kill-switch, the tool gate, `decide`, or the verdict application lets the call run. Silent fail-open is indistinguishable from "the guard had nothing to say", so each containment now emits a `guard.failed` diagnostic (`level:"error"`, `outcome:"failed"`) carrying the guard's `source`/`ruleId`, the `phase` that threw (`check` | `settle`) and the error message — the call ran UNVETTED and that hole is visible in the diagnostics ring buffer and the JSONL sink instead of being swallowed. `outcome:"failed"` is deliberately outside the `blocked`/`overridden` pair so a broken guard does not pollute its own acceptance-rate math.
 
 ## Band C — After a tool runs (CORRECTIVE — these catch/repair)
+
 1. **Tool-error-hint enrichment** (`agent-loop.ts:1221`, Tier 4) — runs **before** `afterToolCall` so a host override sees the enriched content. Appends recovery hints to error results (`core/tool-error-hint-rules.ts`): bash/read/edit/**edit_v2**, hashline-anchor-stale, ENOENT/path/permission/read-guard, navigation "Did you mean". Every fire emits a `hint.fired` diagnostic with its stable rule id; `HintFireTally` aggregates a per-rule count into the session summary (`hintFires`) so dead/noisy rules are measurable.
    - **Repair Node** (success-path counterpart, `core/tool-repair-note.ts`): when a **successful** call's args were silently auto-repaired (key alias, type coercion, array-from-string), appends a one-line `[repair]` note describing the fix so a weaker model emits the canonical shape next turn. **Auto-gated per current model** by `core/repair-note-policy.ts` (ON for weak/open providers, OFF for native frontier anthropic/google/openai/openai-codex), re-evaluated each run; `PIT_TOOL_REPAIR_NOTE=1/0` forces it. Compares what the model sent vs what actually ran (`buildRepairNote`).
 2. **afterToolCall / `tool_result` hooks** (`:1262`) — can rewrite the result:
@@ -62,6 +65,7 @@ Fixed order inside `prepareSingleToolCall` (`agent-loop.ts:1066+`). Each step ca
 4. **Pending-checks drain** (`core/verification/pending-checks.ts`, `_awaitPendingChecksBeforeHandoff` in `agent-session.ts`) — in post-turn, background verification-class jobs are drained before handoff and again after gate fix turns. Verification commands start foreground and are promoted after 10s; `background: true` is an explicit promotion path. Active jobs deduplicate by session + cwd + normalized command; the user `!` path is not silently promoted. A still-running check blocks "done"; a failed or timed-out check is re-injected for bounded fixes.
 
 ## Band D — Session / turn lifecycle
+
 - **before_agent_start**: task-rigor, clarify-nudge, mcp connect.
   - **clarify-nudge** (`core/clarify-nudge.ts` + `built-ins/clarify-nudge-extension.ts`): when a mutating prompt (rigor ≥2) is short (<160 chars) AND anchor-less (no path/extension/backtick/symbol/URL) and an interactive answer surface is bound (UserInputBus listener — never in print/CI/subagents), appends a `<clarify_first>` directive: the model may ask the user up to 3 targeted questions via the `ask` tool in ONE round before its first mutating action, must not ask what the codebase can answer, and proceeds without asking when the request is clear. Nudge-only (never blocks), parent-only, fail-open; telemetry `quality.clarify`; opt out `PIT_NO_CLARIFY_GATE=1`.
 - **turn_start**: edit-precondition reset.
@@ -135,6 +139,7 @@ behavior), Band P shapes what the model sees and intends BEFORE it generates:
 ---
 
 ## How to use this map
+
 - **Proposing a new check?** Place it in the right band first. A "validate args" idea → Band B already has rewrite + TypeBox. A "block dangerous X" → Band B firewall. A "warn after the fact" → Band C. A "run the tests/typecheck after edits" idea → Band C verification gate + pending-checks already do exactly that. If a band already covers it, the valuable move is to *strengthen the existing layer*, not add a parallel one.
 - **Ordering is load-bearing.** In Band B, rewrite runs before validation, validation before the firewall, and firewall handlers run in registration order. If a handler mutates args, a conditional post-firewall re-validation runs before execution — a new `tool_call` guard must assume earlier guards may have already rewritten the args.
 - **Preventive vs corrective.** Band B stops the error before it happens (cheapest); Band C only repairs after. Prefer adding prevention in B over detection in C when both are possible.

@@ -128,6 +128,13 @@ describe("read-only coordinator delegation metadata", () => {
 		).toBeUndefined();
 	});
 
+	it("denies worktree delegation explicitly in Ask mode", async () => {
+		const { preflight } = setup("ask");
+		expect(
+			await preflight("task", { op: "run", prompt: "inspect", allowed_tools: ["read"], worktree: true }),
+		).toMatchObject({ block: true });
+	});
+
 	it.each([
 		["general catalog", { op: "run", type: "general", prompt: "work" }],
 		["bash catalog", { op: "run", prompt: "work", allowed_tools: ["bash"] }],

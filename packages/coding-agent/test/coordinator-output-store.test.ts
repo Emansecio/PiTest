@@ -7,14 +7,16 @@
  * the temp dir so nothing leaks past the session.
  */
 
-import { existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { getRuntimeDiagnostics, resetRuntimeDiagnostics } from "@pit/ai";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createSubagentOutputStore } from "../src/core/coordinator/output-store.js";
 
 describe("createSubagentOutputStore (N7)", () => {
 	const dirs: string[] = [];
+	beforeEach(() => resetRuntimeDiagnostics());
 	function freshDir(): string {
 		const d = mkdtempSync(join(tmpdir(), "pit-subagent-test-"));
 		dirs.push(d);
@@ -63,6 +65,50 @@ describe("createSubagentOutputStore (N7)", () => {
 		await store.put("h", "second (after resume/continue)");
 		expect(await store.get("h")).toBe("second (after resume/continue)");
 		expect(readdirSync(dir).filter((f) => f.endsWith(".txt")).length).toBe(1);
+		await store.dispose();
+	});
+
+	it("reads deterministic UTF-8-safe byte pages without gaps or replacement characters", async () => {
+		const store = createSubagentOutputStore({ dir: freshDir() });
+		const expected = `head-${"é".repeat(20)}-${"🙂".repeat(20)}-tail`;
+		await store.put("paged", expected);
+		let cursor = 0;
+		let reconstructed = "";
+		for (let pages = 0; pages < 100; pages += 1) {
+			const page = await store.getPage("paged", cursor, 11);
+			expect(page).toBeDefined();
+			if (!page) break;
+			expect(page.content).not.toContain("�");
+			expect(Buffer.byteLength(page.content, "utf8")).toBeLessThanOrEqual(11);
+			reconstructed += page.content;
+			if (!page.hasMore) break;
+			expect(page.nextCursor).toBeGreaterThan(cursor);
+			cursor = page.nextCursor!;
+		}
+		expect(reconstructed).toBe(expected);
+		await store.dispose();
+	});
+
+	it("rejects a cursor inside a UTF-8 code point and returns undefined for missing handles", async () => {
+		const store = createSubagentOutputStore({ dir: freshDir() });
+		await store.put("utf8", "éclair");
+		await expect(store.getPage("utf8", 1, 8)).rejects.toThrow(/UTF-8 boundary/i);
+		expect(await store.getPage("missing", 0, 8)).toBeUndefined();
+		await store.dispose();
+	});
+
+	it("diagnoses an unexpected retention write failure without rejecting put", async () => {
+		const root = freshDir();
+		const blocked = join(root, "not-a-directory");
+		writeFileSync(blocked, "file");
+		const store = createSubagentOutputStore({ dir: blocked });
+
+		await expect(store.put("h", "content")).resolves.toBeUndefined();
+
+		const events = getRuntimeDiagnostics().recent.filter((event) => event.category === "subagent.retention-failed");
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({ level: "error", source: "subagent-output-store" });
+		expect(events[0]?.context?.mechanism).toBe("mkdir");
 		await store.dispose();
 	});
 

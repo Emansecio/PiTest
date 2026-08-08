@@ -8,11 +8,12 @@
  * stale handles stop resurfacing in op:"list" forever.
  */
 
-import { mkdtempSync, readFileSync, rmSync, utimesSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@pit/agent-core";
-import { afterEach, describe, expect, it } from "vitest";
+import { getRuntimeDiagnostics, resetRuntimeDiagnostics } from "@pit/ai";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	deleteResumeState,
 	listResumeHandlesSync,
@@ -47,6 +48,7 @@ function makeState(cwd: string, overrides: Partial<ResumeState> = {}): ResumeSta
 
 describe("resume-store disk hygiene", () => {
 	const dirs: string[] = [];
+	beforeEach(() => resetRuntimeDiagnostics());
 	afterEach(() => {
 		while (dirs.length > 0) {
 			const d = dirs.pop();
@@ -91,6 +93,26 @@ describe("resume-store disk hygiene", () => {
 		utimesSync(file, old, old);
 		expect(listResumeHandlesSync(cwd)).toEqual([]);
 		expect(await loadResumeState(cwd, "h1")).toBeUndefined();
+	});
+
+	it("diagnoses save and corrupt-read failures but ignores a normal missing state", async () => {
+		const cwd = tempCwd();
+		expect(await loadResumeState(cwd, "missing")).toBeUndefined();
+		expect(getRuntimeDiagnostics().recent).toHaveLength(0);
+
+		const blocked = join(cwd, "blocked");
+		writeFileSync(blocked, "file");
+		await expect(saveResumeState(blocked, makeState(blocked))).resolves.toBeUndefined();
+
+		const resumeDir = join(cwd, ".pit", "subagents");
+		mkdirSync(resumeDir, { recursive: true });
+		writeFileSync(join(resumeDir, `${resumeStateStem("corrupt")}.json`), "{not-json");
+		expect(await loadResumeState(cwd, "corrupt")).toBeUndefined();
+
+		const events = getRuntimeDiagnostics().recent.filter((event) => event.category === "subagent.retention-failed");
+		expect(events).toHaveLength(2);
+		expect(events.every((event) => event.source === "subagent-resume-store")).toBe(true);
+		expect(events.map((event) => event.context?.mechanism)).toEqual(["save", "parse"]);
 	});
 
 	it("keeps fresh states listable and loadable", async () => {

@@ -39,7 +39,7 @@ explicit fan-out and the scout → N reviewers → worker pattern.
 | `list` | List tracked subagents, live async handles, resumable (interrupted), and continuable (finished) ones. |
 | `resume` | Continue an interrupted subagent by handle; concurrent calls share one in-flight lifecycle. |
 | `continue` | Follow-up prompt on a **successfully finished** subagent (same live Agent / transcript). |
-| `read` | Recover the **integral** output for a handle when the inline digest was truncated. |
+| `read` | Recover one bounded output page by handle; follow `details.nextCursor` while `details.hasMore` is true. |
 | `agents` | List the reusable agent types loaded from `.pit/agents/`. |
 
 ```jsonc
@@ -64,7 +64,7 @@ task({
 
 ## Mutation policy
 
-`policy` is enforced before a tool marked `mutationGuard` executes. Paths are normalized before `allowedPaths`/`deniedPaths` checks; test-file, assertion-removal, and timeout-increase violations return an actionable tool error without applying the mutation. Custom tools must set `mutationGuard: true` and expose `path`, `file`, or `filePath` for path rules.
+`policy` is an edit-tool/path policy, not a filesystem sandbox. It is enforced before a tool marked `mutationGuard` executes. Paths are normalized before `allowedPaths`/`deniedPaths` checks; test-file, assertion-removal, and timeout-increase violations return an actionable tool error without applying the mutation. Custom tools must set `mutationGuard: true` and expose `path`, `file`, or `filePath` for path rules. Bash commands do not participate in `allowedPaths`/`deniedPaths`; they remain governed by permission and command-guard layers. Enforcing shell filesystem boundaries requires a separate sandbox or safe-exec design, not naive command parsing.
 
 Subagents have no wall-clock execution timeout. A detached run continues until it finishes, reaches `max_turns`, the session is aborted, or the parent explicitly calls `task({ op: "cancel", handles: ["name"] })`.
 
@@ -86,7 +86,8 @@ against it and the structured value is returned. Cancelled or failed runs retain
 | Nesting depth | `1` (subagents cannot spawn subagents) | `PIT_SUBAGENT_MAX_DEPTH` |
 | Concurrency | `4` live Agents (every worker, reviewer, scout, judge, resume) | `PIT_SUBAGENT_MAX_CONCURRENCY` |
 | Queued runs | `8 × concurrency` | `PIT_SUBAGENT_MAX_QUEUE` |
-| Inline digest | `4 KB` head+tail; full text via `op:"read"` | `PIT_SUBAGENT_MAX_BYTES` |
+| Inline digest | `4 KB` head+tail; bounded pages via `op:"read"` | `PIT_SUBAGENT_MAX_BYTES` |
+| Recovery page | `32 KB` default; `48 KB` maximum | per-call `page_bytes` |
 | Continuable / resumable memory | FIFO `8` live Agents | (fixed) |
 | Persisted resume TTL | `7 days` | (fixed) |
 | Max turns | `50` | per-call `max_turns` |
@@ -126,9 +127,14 @@ handles (for `op:"continue"`).
   Nested blocking delegation temporarily yields the parent's slot while its
   child runs, so `PIT_SUBAGENT_MAX_DEPTH >= 2` cannot deadlock the slot pool.
 - The output a subagent injects into the parent is a digest (`PIT_SUBAGENT_MAX_BYTES`,
-  default 4 KB head+tail) plus a pointer; recover the full text with `task({op:"read", name})`.
+  default 4 KB head+tail) plus a pointer. Start recovery with `task({op:"read", name})`,
+  then pass `details.nextCursor` as `cursor` until `details.hasMore` is false; optional
+  `page_bytes` is capped at 48 KB. Pages use byte cursors and never split UTF-8 code points.
   `parallel` and `fanout` apply the same rule per child/stage instead of dumping
-  every integral output into the parent's context.
+  retained outputs into the parent's context. Recovery is session-scoped and
+  best-effort: the in-memory registry is primary; the redacted temp-disk store is
+  capped at 256 entries/16 MiB, may evict or reject oversized output, and is removed
+  on session disposal. Process restart does not preserve final-output recovery.
 - `worktree: true` rebuilds cwd-sensitive native tools (`read`/write/edit/bash/
   search/AST/LSP/debug/eval tools) against the isolated checkout, preserving the
   parent session's configured shell/search/runtime options. Rebinding is
@@ -211,20 +217,20 @@ in both their text output and structured details.
 ## Acceptance / parallel / fanout
 
 - **`acceptance`** on `task` (and parallel/fanout worker entries): optional
-	`criteria` (judge subagent) and/or `check` (shell, exit 0). Acceptance gates
-	require Auto permission mode; Plan and Ask delegation reject them fail-closed
-	until judge tool catalogs are included in the authorization proof. Retries up to
-	`max_attempts` (default 2); `check_timeout_ms` bounds each shell check
-	(default 120000, maximum 600000). On exhaustion the last output is returned
-	with `isError: true` and `details.gate.passed: false`, so it cannot be resumed
-	as if it had passed. Spend includes every worker attempt and semantic judge.
-	For auto-cleanup worktrees, the checkout remains alive through judge/check
-	evaluation and is removed immediately afterwards.
+ `criteria` (judge subagent) and/or `check` (shell, exit 0). Acceptance gates
+ require Auto permission mode; Plan and Ask delegation reject them fail-closed
+ until judge tool catalogs are included in the authorization proof. Retries up to
+ `max_attempts` (default 2); `check_timeout_ms` bounds each shell check
+ (default 120000, maximum 600000). On exhaustion the last output is returned
+ with `isError: true` and `details.gate.passed: false`, so it cannot be resumed
+ as if it had passed. Spend includes every worker attempt and semantic judge.
+ For auto-cleanup worktrees, the checkout remains alive through judge/check
+ evaluation and is removed immediately afterwards.
 - **`parallel({ tasks, concurrency? })`**: run an explicit list concurrently
   (`allSettled` semantics). Each task accepts `type`, `model`,
   `thinking_level`, `allowed_tools`, `result_schema`, and `acceptance`. Child
   start/progress/complete events surface in the TUI, spend is recorded, and
-  integral outputs remain recoverable through `task({op:"read", name})`.
+  retained outputs support bounded paged recovery through `task({op:"read", name})`.
 - **`fanout({ scout, reviewer, worker, concurrency? })`**: scout lists
   `targets`, reviewers run per target (`{{target}}` in the template), then
   worker consumes the reviews (optional acceptance on the worker). Every stage

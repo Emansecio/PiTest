@@ -6,6 +6,7 @@
 import { splitSystemPromptOnDynamic } from "@pit/ai";
 import { describe, expect, it } from "vitest";
 import { createPermissionsExtension } from "../src/core/built-ins/permissions-extension.ts";
+import { COORDINATOR_TOOL_NAMES } from "../src/core/coordinator/brand.ts";
 import type { ExtensionAPI } from "../src/core/extensions/types.ts";
 import { BUILTIN_TOOL_SIDE_EFFECTS, PermissionChecker } from "../src/core/permissions/checker.ts";
 import { buildPermissionModeSection } from "../src/core/permissions/mode-prompt.ts";
@@ -73,16 +74,25 @@ describe("buildPlanModeSection", () => {
 		// an optional integration namespace — this is the guard that fails when a
 		// new mutating built-in is added but the prompt/derivation isn't updated.
 		const expected = Object.entries(BUILTIN_TOOL_SIDE_EFFECTS)
-			.filter(([name, effect]) => isPlanBlockingSideEffect(effect) && !/^(chrome_devtools_|security_)/.test(name))
+			.filter(
+				([name, effect]) =>
+					isPlanBlockingSideEffect(effect) &&
+					!/^(chrome_devtools_|security_)/.test(name) &&
+					!COORDINATOR_TOOL_NAMES.has(name),
+			)
 			.map(([name]) => name)
 			.sort();
 		expect(derived).toEqual(expected);
 	});
 
-	it("names the spawn/memory tools that the old hardcoded list omitted", () => {
+	it("describes coordinator tools conditionally instead of listing them as categorically blocked", () => {
 		const s = buildPlanModeSection();
-		for (const name of ["task", "parallel", "fanout", "goal_complete", "memory_append"]) {
-			expect(s, `expected the prompt to name "${name}"`).toContain(name);
+		for (const name of COORDINATOR_TOOL_NAMES) {
+			expect(planBlockedToolNames()).not.toContain(name);
+			expect(s, `expected the prompt to explain conditional delegation for "${name}"`).toContain(name);
+		}
+		for (const name of ["goal_complete", "memory_append"]) {
+			expect(planBlockedToolNames(), `expected "${name}" to remain categorically blocked`).toContain(name);
 		}
 	});
 
@@ -91,7 +101,7 @@ describe("buildPlanModeSection", () => {
 		// the extension entries — every plan-blocking EXTENSION tool is derived too.
 		const derived = new Set(planBlockedToolNames());
 		for (const [name, effect] of Object.entries(EXTENSION_TOOL_SIDE_EFFECTS)) {
-			if (!isPlanBlockingSideEffect(effect)) continue;
+			if (!isPlanBlockingSideEffect(effect) || COORDINATOR_TOOL_NAMES.has(name)) continue;
 			expect(derived.has(name), `expected "${name}" in the derived list`).toBe(true);
 		}
 		expect(derived.has("memory_append")).toBe(true);
@@ -102,7 +112,7 @@ describe("blocked-tool list narrowed to the session surface", () => {
 	it("drops tools the session never registered (no noise about ast_edit & co.)", () => {
 		const surface = ["read", "grep", "bash", "edit", "write", "task", "memory_append"];
 		const derived = planBlockedToolNames(surface);
-		expect(derived).toEqual(["bash", "edit", "memory_append", "task", "write"]);
+		expect(derived).toEqual(["bash", "edit", "memory_append", "write"]);
 		for (const absent of ["ast_edit", "edit_v2", "preview", "recipe", "resolve", "undo", "goal_complete"]) {
 			expect(derived).not.toContain(absent);
 		}
@@ -139,10 +149,13 @@ describe("blocked-tool list narrowed to the session surface", () => {
 		expect(buildPermissionModeSection("ask")).toContain("ast_edit");
 	});
 
-	it("makes the no-subagent-carve-out decision explicit", () => {
+	it("states the host-proven read-only delegation carve-out and its fail-closed limits", () => {
 		const s = buildPlanModeSection();
-		expect(s.toLowerCase()).toContain("subagent");
-		expect(s).toContain("carve-out");
+		expect(s).toContain("host-proven read-only delegation");
+		expect(s).toContain("worktree");
+		expect(s).toContain("acceptance");
+		expect(s).toContain("missing proof");
+		expect(s).not.toContain("there is no read-only carve-out");
 	});
 });
 

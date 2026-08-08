@@ -25,6 +25,11 @@ describe("coordinator op:resume", () => {
 	let faux: FauxProviderRegistration | undefined;
 	let governor: TokenBudgetGovernor;
 	let abortCoordinator: (() => void) | undefined;
+	let completionEvents: Array<{
+		handle: string;
+		status: string;
+		meta?: { turns?: number; totalTokens?: number; costUsd?: number };
+	}> = [];
 	afterEach(() => {
 		abortCoordinator?.();
 		abortCoordinator = undefined;
@@ -32,6 +37,7 @@ describe("coordinator op:resume", () => {
 	});
 
 	function buildTask(responses: Parameters<FauxProviderRegistration["setResponses"]>[0]) {
+		completionEvents = [];
 		faux = registerFauxProvider();
 		faux.setResponses(responses);
 		const model = faux.getModel();
@@ -45,6 +51,7 @@ describe("coordinator op:resume", () => {
 			getAvailableTools: () => [],
 			convertToLlm: (messages) => convertToLlm(messages),
 			getTokenGovernor: () => governor,
+			onSubagentComplete: (handle, status, meta) => completionEvents.push({ handle, status, meta }),
 			registerAbortDetached: (abort) => {
 				abortCoordinator = abort;
 			},
@@ -105,6 +112,12 @@ describe("coordinator op:resume", () => {
 		expect(textOf(resumed)).toContain("RESUMED: task complete");
 		const afterResume = governor.snapshot().subagentTokens;
 		expect(afterResume).toBeGreaterThan(baseline);
+		expect(completionEvents.at(-1)).toMatchObject({
+			handle: "probe",
+			status: "done",
+			meta: { turns: 1, totalTokens: afterResume - baseline },
+		});
+		expect(completionEvents.at(-1)?.meta?.costUsd).toBeGreaterThanOrEqual(0);
 
 		// Consumed: no longer offered as resumable; usage remains on the original run.
 		const list2 = await exec(task, { op: "list" });
@@ -136,6 +149,26 @@ describe("coordinator op:resume", () => {
 		const list = await exec(task, { op: "list" });
 		expect(textOf(list)).toContain(`retry [${expectedStatus}] turns=2 (${afterResume} tok)`);
 		expect(textOf(list)).toMatch(/[Rr]esumable[\s\S]*retry/);
+	});
+
+	it("rejects an in-memory resume before touching the Agent when the token budget is exhausted", async () => {
+		const task = buildTask([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "drop" }),
+			fauxAssistantMessage("must not run"),
+		]);
+		await exec(task, { op: "run", name: "budgeted-resume", prompt: "start" });
+		const before = governor.snapshot();
+		governor.setBudget(governor.committedTokens());
+		const callsBeforeResume = faux?.state.callCount;
+
+		const resumed = await exec(task, { op: "resume", name: "budgeted-resume" });
+
+		expect(isErr(resumed)).toBe(true);
+		expect(textOf(resumed)).toMatch(/token budget exhausted/i);
+		expect(faux?.state.callCount).toBe(callsBeforeResume);
+		expect(governor.snapshot().subagentTokens).toBe(before.subagentTokens);
+		expect(governor.snapshot().reservedSubagentTokens).toBe(0);
+		expect(textOf(await exec(task, { op: "list" }))).toMatch(/Resumable[\s\S]*budgeted-resume/);
 	});
 
 	it("deduplicates concurrent resumes onto one active lifecycle", async () => {
@@ -312,6 +345,23 @@ describe("coordinator op:resume", () => {
 		const followedUp = await exec(task, { op: "continue", name: "p2", prompt: "one more thing" });
 		expect(isErr(followedUp)).toBe(false);
 		expect(textOf(followedUp)).toContain("FOLLOW-UP AFTER RESUME");
+	});
+
+	it("keeps bounded visible markers when resumable live transcripts are evicted", async () => {
+		const responses = [];
+		for (let index = 0; index < 9; index += 1) {
+			responses.push(fauxAssistantMessage("partial", { stopReason: "error", errorMessage: `drop-${index}` }));
+		}
+		const task = buildTask(responses);
+		for (let index = 0; index < 9; index += 1) {
+			expect(isErr(await exec(task, { op: "run", name: `resume-fifo-${index}`, prompt: "go" }))).toBe(true);
+		}
+
+		const list = await exec(task, { op: "list" });
+		expect(textOf(list)).toMatch(/Evicted resumable live transcripts[\s\S]*resume-fifo-0/);
+		expect(textOf(list)).toMatch(/Resumable[\s\S]*resume-fifo-8/);
+		expect(textOf(list)).not.toContain("â");
+		expect((list as { details?: { evictedResumable?: number } }).details?.evictedResumable).toBe(1);
 	});
 
 	it("returns a clear error when resuming an unknown handle", async () => {

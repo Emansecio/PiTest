@@ -559,10 +559,23 @@ describe("parallel tool parity (extension level)", () => {
 		}
 		await settled;
 		const listed = await exec(task, { op: "list" });
-		expect((listed as { details?: { asyncHandles?: number; evictedAsyncHandles?: number } }).details).toMatchObject({
+		expect(
+			(
+				listed as {
+					details?: {
+						asyncHandles?: number;
+						evictedAsyncHandles?: number;
+						lifecycle?: { created: number; settled: number; evicted: number };
+					};
+				}
+			).details,
+		).toMatchObject({
 			asyncHandles: 64,
 			evictedAsyncHandles: 64,
+			lifecycle: { created: count, settled: count, evicted: count - 64 },
 		});
+		expect(textOf(listed)).toContain("Lifecycle: created=130, settled=130, evicted=66");
+		expect(textOf(listed)).toContain("more terminal records omitted");
 
 		// The oldest completion has moved out of both the 64-entry pending cache and
 		// the compact tombstone display cache. Its separate identity reservation keeps

@@ -97,4 +97,37 @@ describe("SubagentRegistry", () => {
 		expect(registry.get(slow.id)).toBe(settled);
 		expect(registry.get(slow.id)?.output).toBe("finished");
 	});
+
+	it("reports cumulative lifecycle and retained-record counters", () => {
+		const registry = new SubagentRegistry();
+		const live = registry.create({ prompt: "live" });
+		const done = registry.create({ prompt: "done" });
+		registry.setStatus(live.id, "running");
+		registry.setStatus(done.id, "completed");
+		registry.update(done.id, { output: "late metadata" });
+
+		expect(registry.stats()).toEqual({
+			created: 2,
+			settled: 1,
+			evicted: 0,
+			retained: 2,
+			live: 1,
+			terminal: 1,
+		});
+	});
+
+	it("publishes a settled record before terminal eviction", () => {
+		const evicted: Array<{ taskName: string; output?: string }> = [];
+		const registry = new SubagentRegistry({ onBeforeEvict: (record) => evicted.push(record) });
+		const records = Array.from({ length: 65 }, (_, index) =>
+			registry.create({ prompt: `prompt-${index}`, taskName: `task-${index}` }),
+		);
+		for (const [index, record] of records.entries()) {
+			registry.update(record.id, { status: "completed", output: `output-${index}` });
+		}
+
+		expect(evicted).toHaveLength(1);
+		expect(evicted[0]).toMatchObject({ taskName: "task-0", output: "output-0" });
+		expect(registry.stats().evicted).toBe(1);
+	});
 });

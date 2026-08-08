@@ -164,6 +164,7 @@ describe("spawnSubagent (faux model)", () => {
 		// The registry record returned matches the live registry entry.
 		expect(rig.registry.get(result.record.id)?.status).toBe("completed");
 		expect(result.record.output).toBe("the answer is 42");
+		expect(result.record.model).toBe(`${rig.model.provider}/${rig.model.id}`);
 		expect(result.record.turnCount).toBeGreaterThanOrEqual(1);
 	});
 
@@ -191,6 +192,45 @@ describe("spawnSubagent (faux model)", () => {
 		rig.faux.setResponses([fauxAssistantMessage("done")]);
 		const result = await spawnSubagent(rig.deps, { prompt: "p", taskName: "deep", depth: 3 });
 		expect(result.record.depth).toBe(3);
+	});
+
+	it("keeps a slot-waiting registry record pending until execution starts", async () => {
+		const previousConcurrency = process.env.PIT_SUBAGENT_MAX_CONCURRENCY;
+		process.env.PIT_SUBAGENT_MAX_CONCURRENCY = "1";
+		const rig = newRig();
+		let releaseFirst!: () => void;
+		let markStarted!: () => void;
+		const started = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		const blocker = new Promise<void>((resolve) => {
+			releaseFirst = resolve;
+		});
+		rig.faux.setResponses([
+			async () => {
+				markStarted();
+				await blocker;
+				return fauxAssistantMessage("first done");
+			},
+			fauxAssistantMessage("second done"),
+		]);
+		let first: Promise<unknown> | undefined;
+		let second: Promise<unknown> | undefined;
+		try {
+			first = spawnSubagent(rig.deps, { prompt: "first", taskName: "slot-holder" });
+			await started;
+			second = spawnSubagent(rig.deps, { prompt: "second", taskName: "slot-waiter" });
+			await new Promise((resolve) => setTimeout(resolve, 5));
+
+			const waitingRecord = rig.registry.list().find((record) => record.taskName === "slot-waiter");
+			expect(waitingRecord).toMatchObject({ status: "pending" });
+			expect(waitingRecord).not.toHaveProperty("startedAt");
+		} finally {
+			releaseFirst();
+			await Promise.allSettled([first, second].filter((promise): promise is Promise<unknown> => !!promise));
+			if (previousConcurrency === undefined) delete process.env.PIT_SUBAGENT_MAX_CONCURRENCY;
+			else process.env.PIT_SUBAGENT_MAX_CONCURRENCY = previousConcurrency;
+		}
 	});
 
 	it("resultSchema valid: parses the fenced JSON block into result.value", async () => {
@@ -337,7 +377,7 @@ describe("spawnSubagent (faux model)", () => {
 
 		const record = rig.registry.list().find((r) => r.prompt === "long task");
 		expect(createdRecordId).toBe(record?.id);
-		expect(createdStatus).toBe("running");
+		expect(createdStatus).toBe("pending");
 		expect(record?.status).toBe("cancelled");
 	});
 
@@ -639,6 +679,7 @@ describe("spawnSubagent (faux model)", () => {
 			to: `${rig.deps.model.provider}/${rig.deps.model.id}`,
 		});
 		expect(result.record.modelFallback).toEqual(result.modelFallback);
+		expect(result.record.model).toBe(`${rig.deps.model.provider}/${rig.deps.model.id}`);
 	});
 
 	it("does not fall back after the child produced useful text", async () => {
@@ -898,6 +939,41 @@ describe("deriveSubagentCacheKey", () => {
 	it("keeps distinct-type keys distinct even when the parent is truncated", () => {
 		const longParent = "x".repeat(200);
 		expect(deriveSubagentCacheKey(longParent, "aaa")).not.toBe(deriveSubagentCacheKey(longParent, "bbb"));
+	});
+});
+
+describe("mutation policy integration", () => {
+	const rigs: Rig[] = [];
+	afterEach(() => {
+		while (rigs.length > 0) rigs.pop()?.dispose();
+	});
+
+	it("blocks a real mutating tool call outside allowed paths before execution", async () => {
+		let executions = 0;
+		const mutate: AgentTool = {
+			...makeTool("mutate"),
+			execute: async () => {
+				executions++;
+				return { content: [{ type: "text", text: "mutated" }], details: {} };
+			},
+		};
+		const rig = createRig({ tools: [mutate] });
+		rigs.push(rig);
+		rig.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("mutate", { value: "x", path: "tests/forbidden.ts" })], {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("policy respected"),
+		]);
+
+		const result = await spawnSubagent(rig.deps, {
+			prompt: "change a file",
+			taskName: "policy-runtime",
+			mutationPolicy: { allowedPaths: ["src"] },
+		});
+
+		expect(result.output).toBe("policy respected");
+		expect(executions).toBe(0);
 	});
 });
 

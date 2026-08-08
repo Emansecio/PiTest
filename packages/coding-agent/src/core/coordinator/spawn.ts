@@ -675,14 +675,15 @@ export async function spawnSubagent(
 	) {
 		throw new Error(`maxTurns must be a finite positive integer; received ${String(options.maxTurns)}`);
 	}
+	const initialModel = options.model ?? deps.model;
 	const record = deps.registry.create({
 		prompt: options.prompt,
 		systemPrompt: options.systemPrompt,
 		allowedTools: options.allowedTools,
+		model: `${initialModel.provider}/${initialModel.id}`,
 		taskName: options.taskName,
 		depth: options.depth,
 	});
-	deps.registry.update(record.id, { status: "running", startedAt: Date.now() });
 	// Own the run controller before queueing or creating a worktree so caller
 	// cancellation covers every setup phase, not only the Agent prompt.
 	const controller = new AbortController();
@@ -703,7 +704,10 @@ export async function spawnSubagent(
 	// enclosing agent's slot while their
 	// descendant runs (see slots.ts), so depth>=2 nesting cannot deadlock.
 	try {
-		return await withRunSlot(controller.signal, () => runSpawned(deps, options, record, controller));
+		return await withRunSlot(controller.signal, () => {
+			deps.registry.update(record.id, { status: "running", startedAt: Date.now() });
+			return runSpawned(deps, options, record, controller);
+		});
 	} catch (err) {
 		// A pre-run failure (queue full, abort while queued) never reaches
 		// runSpawned's own bookkeeping — settle the registry record here. A still-
@@ -1177,7 +1181,7 @@ async function runSpawned(
 				agent.state.messages = initialMessages;
 				agent.state.model = deps.model;
 				if (options.thinkingLevel === undefined) agent.state.thinkingLevel = resolveSubagentThinking(deps.model);
-				deps.registry.update(record.id, { modelFallback });
+				deps.registry.update(record.id, { modelFallback, model: modelFallback.to });
 				await racePrompt();
 			}
 		}

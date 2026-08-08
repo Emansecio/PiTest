@@ -29,6 +29,10 @@ function bigOutput(): string {
 	return `HEAD-START\n${filler}\n${MIDDLE_SENTINEL}\n${filler}\nTAIL-END`;
 }
 
+function outputOverWrapperCap(): string {
+	return `HUGE-HEAD\n${"é".repeat(35_000)}\n${MIDDLE_SENTINEL}\n${"🙂".repeat(20_000)}\nHUGE-TAIL`;
+}
+
 describe("coordinator N7 digest + op:read", () => {
 	let faux: FauxProviderRegistration | undefined;
 	afterEach(() => faux?.unregister());
@@ -83,7 +87,7 @@ describe("coordinator N7 digest + op:read", () => {
 		expect(Buffer.byteLength(digest, "utf8")).toBeLessThan(8 * 1024);
 	});
 
-	it('op:"read" recovers the integral output including the elided middle', async () => {
+	it('op:"read" recovers the first page including the elided middle for outputs below the page cap', async () => {
 		const task = buildTask([fauxAssistantMessage(bigOutput())]);
 		await exec(task, { op: "run", name: "big", prompt: "produce a lot" });
 		const read = await exec(task, { op: SUBAGENT_READ_OP, name: "big" });
@@ -92,6 +96,46 @@ describe("coordinator N7 digest + op:read", () => {
 		expect(full).toContain("HEAD-START");
 		expect(full).toContain(MIDDLE_SENTINEL);
 		expect(full).toContain("TAIL-END");
+	});
+
+	it('op:"read" pages outputs larger than the wrapper cap without losing UTF-8 content', async () => {
+		const expected = outputOverWrapperCap();
+		const task = buildTask([fauxAssistantMessage(expected)]);
+		await exec(task, { op: "run", name: "huge", prompt: "produce much more" });
+		let cursor = 0;
+		let reconstructed = "";
+		for (let pages = 0; pages < 100; pages += 1) {
+			const read = (await exec(task, {
+				op: SUBAGENT_READ_OP,
+				name: "huge",
+				cursor,
+				page_bytes: 8191,
+			})) as {
+				content: Array<{ text: string }>;
+				isError: boolean;
+				details: { cursor: number; nextCursor?: number; hasMore: boolean; totalBytes: number };
+			};
+			expect(read.isError).toBe(false);
+			expect(read.details.cursor).toBe(cursor);
+			expect(Buffer.byteLength(read.content[0].text, "utf8")).toBeLessThanOrEqual(8191);
+			expect(read.content[0].text).not.toContain("�");
+			reconstructed += read.content[0].text;
+			if (!read.details.hasMore) break;
+			expect(read.content[1]?.text).toContain(`cursor:${read.details.nextCursor}`);
+			expect(read.details.nextCursor).toBeGreaterThan(cursor);
+			if (read.details.nextCursor === undefined) throw new Error("missing next cursor");
+			cursor = read.details.nextCursor;
+		}
+		expect(reconstructed).toBe(expected);
+		expect(reconstructed).toContain(MIDDLE_SENTINEL);
+	});
+
+	it('op:"read" rejects cursors outside UTF-8 boundaries', async () => {
+		const task = buildTask([fauxAssistantMessage("éclair")]);
+		await exec(task, { op: "run", name: "utf8", prompt: "brief" });
+		const read = await exec(task, { op: SUBAGENT_READ_OP, name: "utf8", cursor: 1, page_bytes: 8 });
+		expect(isErr(read)).toBe(true);
+		expect(textOf(read)).toMatch(/UTF-8 boundary/i);
 	});
 
 	it("a small output fits the digest verbatim with no pointer, and read still returns it", async () => {

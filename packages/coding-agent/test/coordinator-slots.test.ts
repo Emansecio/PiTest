@@ -195,10 +195,10 @@ describe("withRunSlot", () => {
 		await competitorStarted;
 		await sleep(20);
 		expect(parentSettled).toBe(false);
-		expect(slotStats()).toEqual({ active: 1, queued: 1 });
+		expect(slotStats()).toMatchObject({ active: 1, queued: 1 });
 		releaseCompetitor?.();
 		await Promise.all([parent, competitor]);
-		expect(slotStats()).toEqual({ active: 0, queued: 0 });
+		expect(slotStats()).toEqual({ active: 0, queued: 0, oldestQueuedMs: 0 });
 	});
 
 	it("reports active/queued in slotStats while a run is held", async () => {
@@ -217,8 +217,10 @@ describe("withRunSlot", () => {
 		const stats = slotStats();
 		expect(stats.active).toBeGreaterThanOrEqual(1);
 		expect(stats.queued).toBeGreaterThanOrEqual(1);
+		expect(stats.oldestQueuedMs).toBeGreaterThanOrEqual(0);
 		release();
 		await Promise.all([holdDone, queued]);
+		expect(slotStats()).toEqual({ active: 0, queued: 0, oldestQueuedMs: 0 });
 	});
 });
 

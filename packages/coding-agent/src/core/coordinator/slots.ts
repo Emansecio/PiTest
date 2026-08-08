@@ -44,6 +44,7 @@ function maxQueue(): number {
 /** A queued acquire. `wake()` grants the slot; `settled` guards double-settling. */
 interface SlotWaiter {
 	settled: boolean;
+	queuedAt: number;
 	wake(): void;
 }
 
@@ -73,7 +74,7 @@ function acquireOne(signal?: AbortSignal, opts?: { bypassQueueCap?: boolean }): 
 			new Error(`subagent queue full (${waiters.length} waiting); try again after running tasks settle`),
 		);
 	}
-	const w: SlotWaiter = { settled: false, wake: () => {} };
+	const w: SlotWaiter = { settled: false, queuedAt: Date.now(), wake: () => {} };
 	return new Promise<void>((resolve, reject) => {
 		const cleanup = () => {
 			if (signal) signal.removeEventListener("abort", onAbort);
@@ -222,8 +223,15 @@ export function withoutLease<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /** Read-only view of the budget, for `task({op:"list"})`. */
-export function slotStats(): { active: number; queued: number } {
-	return { active, queued: waiters.filter((w) => !w.settled).length };
+export function slotStats(): { active: number; queued: number; oldestQueuedMs: number } {
+	const liveWaiters = waiters.filter((waiter) => !waiter.settled);
+	let oldestQueuedAt = Number.POSITIVE_INFINITY;
+	for (const waiter of liveWaiters) oldestQueuedAt = Math.min(oldestQueuedAt, waiter.queuedAt);
+	return {
+		active,
+		queued: liveWaiters.length,
+		oldestQueuedMs: Number.isFinite(oldestQueuedAt) ? Math.max(0, Date.now() - oldestQueuedAt) : 0,
+	};
 }
 
 /**

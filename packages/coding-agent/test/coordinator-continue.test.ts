@@ -20,6 +20,11 @@ describe("coordinator op:continue", () => {
 	let faux: FauxProviderRegistration | undefined;
 	let governor: TokenBudgetGovernor;
 	let abortCoordinator: (() => void) | undefined;
+	let completionEvents: Array<{
+		handle: string;
+		status: string;
+		meta?: { turns?: number; totalTokens?: number; costUsd?: number };
+	}> = [];
 	afterEach(() => {
 		abortCoordinator?.();
 		abortCoordinator = undefined;
@@ -27,6 +32,7 @@ describe("coordinator op:continue", () => {
 	});
 
 	function buildTask(responses: Parameters<FauxProviderRegistration["setResponses"]>[0]) {
+		completionEvents = [];
 		faux = registerFauxProvider();
 		faux.setResponses(responses);
 		const model = faux.getModel();
@@ -40,6 +46,7 @@ describe("coordinator op:continue", () => {
 			getAvailableTools: () => [],
 			convertToLlm: (messages) => convertToLlm(messages),
 			getTokenGovernor: () => governor,
+			onSubagentComplete: (handle, status, meta) => completionEvents.push({ handle, status, meta }),
 			registerAbortDetached: (abort) => {
 				abortCoordinator = abort;
 			},
@@ -182,6 +189,23 @@ describe("coordinator op:continue", () => {
 		},
 	);
 
+	it("rejects continue before prompting when the token budget is exhausted", async () => {
+		const task = buildTask([fauxAssistantMessage("first"), fauxAssistantMessage("must not run")]);
+		await exec(task, { op: "run", name: "budgeted-continue", prompt: "first" });
+		const before = governor.snapshot();
+		governor.setBudget(governor.committedTokens());
+		const callsBeforeContinue = faux?.state.callCount;
+
+		const continued = await exec(task, { op: "continue", name: "budgeted-continue", prompt: "more" });
+
+		expect(isErr(continued)).toBe(true);
+		expect(textOf(continued)).toMatch(/token budget exhausted/i);
+		expect(faux?.state.callCount).toBe(callsBeforeContinue);
+		expect(governor.snapshot().subagentTokens).toBe(before.subagentTokens);
+		expect(governor.snapshot().reservedSubagentTokens).toBe(0);
+		expect(textOf(await exec(task, { op: "list" }))).toMatch(/Continuable[\s\S]*budgeted-continue/);
+	});
+
 	it("charges each follow-up once and merges only its new usage into the original record", async () => {
 		const task = buildTask([
 			fauxAssistantMessage("answer 1"),
@@ -196,6 +220,12 @@ describe("coordinator op:continue", () => {
 		expect(textOf(a2)).toContain("answer 2");
 		const afterFirstContinue = governor.snapshot().subagentTokens;
 		expect(afterFirstContinue - baseline).toBe(69);
+		expect(completionEvents.at(-1)).toMatchObject({
+			handle: "multi",
+			status: "done",
+			meta: { turns: 1, totalTokens: afterFirstContinue - baseline },
+		});
+		expect(completionEvents.at(-1)?.meta?.costUsd).toBeGreaterThanOrEqual(0);
 
 		const a3 = await exec(task, { op: "continue", name: "multi", prompt: "p3" });
 		expect(textOf(a3)).toContain("answer 3");
@@ -249,12 +279,54 @@ describe("coordinator op:continue", () => {
 		expect(textOf(res)).toContain("no continuable subagent");
 	});
 
+	it("keeps bounded visible markers when continuable transcripts are evicted", async () => {
+		const responses = [];
+		for (let index = 0; index < 9; index += 1) responses.push(fauxAssistantMessage(`answer-${index}`));
+		const task = buildTask(responses);
+		for (let index = 0; index < 9; index += 1) {
+			expect(isErr(await exec(task, { op: "run", name: `fifo-${index}`, prompt: "go" }))).toBe(false);
+		}
+
+		const list = await exec(task, { op: "list" });
+		expect(textOf(list)).toMatch(/Evicted continuable live transcripts[\s\S]*fifo-0/);
+		expect(textOf(list)).toMatch(/Continuable[\s\S]*fifo-8/);
+		expect(textOf(list)).not.toContain("â");
+		expect((list as { details?: { evictedContinuable?: number } }).details?.evictedContinuable).toBe(1);
+	});
+
 	it('op:"list" surfaces continuable handles after a successful run', async () => {
 		const task = buildTask([fauxAssistantMessage("first answer"), fauxAssistantMessage("follow-up")]);
 		await exec(task, { op: "run", name: "listed", prompt: "go" });
 		const list = await exec(task, { op: "list" });
 		expect(isErr(list)).toBe(false);
 		expect(textOf(list)).toMatch(/Continuable[\s\S]*listed/);
-		expect((list as { details?: { continuable?: number } }).details?.continuable).toBeGreaterThanOrEqual(1);
+		expect(textOf(list)).toMatch(
+			/listed \[completed\].*model=faux\/.*depth=1.*costUsd=.*manifest=files:0,commands:0/,
+		);
+		expect(textOf(list)).toMatch(/Governor: remaining=.*reserved=0, subagentTokens=/);
+		const details = (
+			list as {
+				details?: {
+					continuable?: number;
+					records?: Array<{
+						taskName: string;
+						model?: string;
+						depth: number;
+						usage?: { costUsd: number };
+						manifest?: { filesTouched: string[]; commands: string[] };
+					}>;
+					governor?: { reservedSubagentTokens: number; subagentTokens: number };
+				};
+			}
+		).details;
+		expect(details?.continuable).toBeGreaterThanOrEqual(1);
+		expect(details?.records?.find((record) => record.taskName === "listed")).toMatchObject({
+			model: expect.stringMatching(/^faux\//),
+			depth: 1,
+			usage: { costUsd: expect.any(Number) },
+			manifest: { filesTouched: [], commands: [] },
+		});
+		expect(details?.governor).toMatchObject({ reservedSubagentTokens: 0 });
+		expect(details?.governor?.subagentTokens).toBeGreaterThan(0);
 	});
 });

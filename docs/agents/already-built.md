@@ -21,6 +21,7 @@ open them to confirm before acting. Keep it updated when a subsystem lands.
 ---
 
 ## Token & context economy
+
 The expensive, "obvious" wins are done. This subsystem is mature.
 
 - **Prefix economy (K5)** — `tool-wire-schema.ts` (lazy wire schemas: compact descriptions + strip nested schema descriptions on provider wire; opt-out `PIT_NO_LAZY_TOOL_SCHEMAS`), `context-files.ts` (pointer dedupe AGENTS/CLAUDE E16, retrieval excerpt for large project context E6; opt-out `PIT_NO_CONTEXT_RETRIEVAL`), Anthropic/OpenAI-compat tools sorted by name with `cache_control` on first tool (E2).
@@ -44,23 +45,28 @@ The expensive, "obvious" wins are done. This subsystem is mature.
 - **Schema-error echo cap** — `packages/ai/src/utils/validation.ts` truncates long string values in the echoed args (keeps keys/hints).
 
 ## Tools (single registry)
+
 - **`core/tools/index.ts` `TOOL_REGISTRY` is the single source of truth.** Built-ins: `read`, `edit`, `edit_v2` (content-hash/hashline), `write`, `bash`, `grep`, `find`, `ls`, `symbol`, `find_symbol`, `repo_map`, `ast_grep`, `ast_edit`, `code` (code-mode), `lsp`, `debug`, `web_search`, `chrome_devtools_*` (+`preview`), `calc`, `recipe`, `inspect_image`, `render_mermaid`, `todo`, `plan`, `ask`, `resolve`, `search_skills`, `search_tool_bm25`, `recall_tool_output`, `recall_history`, `goal_complete`, and hindsight (`retain`/`recall`/`reflect`/`forget`).
 - **Search backends are native + in-process**: `grep` has an optional **fff** warm-index backend (`core/tools/fff-search.ts`, default with rg fallback; also serves `find` with fd fallback; prewarmed at session boot when enabled); `ast_grep` has **@ast-grep/napi** in-process (`core/tools/ast-grep-napi.ts`, default with CLI fallback). Don't propose "spawn rg/fd/ast-grep faster" — the spawn is already bypassed where the warm index applies.
 
 ## Plan mode — the full research → approve → execute loop
 
 Plan mode (the read-only permission mode) is a complete loop, not just a tool gate. Don't propose "make plan mode smarter" or "add an exit-plan tool" — it ships:
-- **Conditional system prompt** (`core/permissions/plan-mode-prompt.ts`): the permissions extension injects a `<plan_mode>` section from `before_agent_start` while the mode is `plan`, so the model knows UP FRONT it is read-only and must research → build a DAG with the `plan` tool (filling `brief`/`produces`/`verify`) → call `exit_plan`. Appended after the dynamic marker → no cached-prefix invalidation.
+
+- **Conditional system prompt** (`core/permissions/plan-mode-prompt.ts`): the host renders a `<plan_mode>` section into the cacheable system-prompt prefix through `BuildSystemPromptOptions.permissionModeSection`, so the model knows UP FRONT it is read-only and must research → build a DAG with the `plan` tool (filling `brief`/`produces`/`verify`) → call `exit_plan`. The prefix rebuilds only when the permission mode or exposed tool surface changes.
 - **`plan` DAG + brief** (`core/plan/plan-manager.ts`, `core/tools/plan.ts`): versioned DAG of steps (`depends_on`/`produces`/`verify`) plus a markdown `brief` (inherited by `revise`); an advisory note flags steps missing `verify`. Re-injected per turn via `systemPromptSection()` (compaction-safe).
 - **`exit_plan` tool** (`core/permissions/exit-plan-tool.ts`, registered by the permissions extension): the model calls it to present its DAG for user approval via the `UserInputBus`. On approval the checker flips `plan`→`auto` atomically (the model cannot change its own permission mode) and writes a durable artifact to `.pit/plans/<timestamp>-<slug>.md`. **Fail-closed**: no interactive listener → refuse to approve (never auto-answer). Fail-open: artifact write failure degrades with a note, approval still stands.
 - **Model role auto-swap** (`decideRoleForPermissionMode` in `core/model-resolver.ts`, bound in interactive mode via `services.bindPermissionModeChange`): entering plan mode swaps to the `plan` model role when configured; leaving restores `default` without clobbering a role the user picked manually.
 
 ## Quality guards (all shipped, `core/built-ins/`)
+
 Each is a wired extension. Don't propose adding any of these:
+
 - **read-guard** (must `read` before edit; clears on compaction) · **edit-precondition** · **grounding firewall**: symbol/import/path/pattern/bash (`grounding-guard`/`import-grounding`/`path-grounding`/`pattern-grounding`/`bash-grounding` + `grounding-fire-once`) — pre-exec grounding of symbols/imports/paths/regex/globs/commands · **compaction-band grounding** (`compaction/summary-grounding.ts` `groundSummaryPaths`): annotates summary-prose paths not in the operation lists nor on disk with `(unverified)` (deterministic, post-summariization) · **task-rigor** · **permissions** · **learned-error-guard** · **erasable-syntax-precondition** (tsgo `erasableSyntaxOnly` preflight) · **destructive-command-guard** (quote-aware) · **patch-audit** · **coordinator** + **subagent-guards** (subagent orchestration & guard propagation) · **mcp** · **hooks** · **memory**.
 - Loop/stagnation steering (doom-loop, stagnation, todo-cadence reminders) is wired in the session — don't propose "detect loops".
 
 ## TUI motion & animation
+
 Already shipped in the interactive TUI motion paths (`spinner-ticker`, loaders, reveal).
 Don't re-propose "unify spinners", "coalesce animation frames", or "add reduced motion"
 without reading the anchors below first.
@@ -79,6 +85,7 @@ without reading the anchors below first.
 - **Leak guards** — `dispose()` on animated chat rows; `activity-ticker-leak.test.ts`.
 
 ## Runtime robustness
+
 - **idle-timeout** — `packages/ai/src/utils/idle-timeout.ts` (`raceReadWithIdle`, `iterateWithIdleTimeout`): stalled-stream watchdog on every provider; fire-and-forget teardown so abort/idle never wedges.
 - **connect-guard** — `packages/ai/src/utils/connect-guard.ts`: connect-phase timeout + instant abort for openai-compat providers (the deepseek/opencode wedge fix). Body loop already covered by idle-timeout.
 - **abort-race** — `core/utils/abort-race.ts` (`settleOrAbort`): unblocks hook boundaries on ESC.
@@ -87,6 +94,7 @@ without reading the anchors below first.
 - Global `unhandledRejection` handler keeps the session alive; stdin EPIPE handled.
 
 ## Error recovery / self-correction
+
 - **Tool-call argument repair** — the "Tool Repair Harness" idea is already a layered subsystem; don't re-propose "fix malformed tool args / coerce types / alias keys". Coverage:
   - **Key aliases** (`core/tools/argument-prep.ts`): `file_path`/`filepath`/`filename`/`file`→`path`, `old_string`/`oldString`/`old_str`→`oldText` (+`new_*`), `cmd`/`script`→`command`, `text`/`body`→`content`. Canonical always wins. MCP/custom tools use `prepareArgsForLooseSchema` — **schema-aware** (only rewrites when the server's own schema declares the canonical, never blindly).
   - **JSON-string→array** (`coerceJsonArrayField`): a stringified `["a"]` / `[{…}]` becomes the native array (built-ins + schema-typed `array` fields on MCP).
@@ -101,17 +109,20 @@ without reading the anchors below first.
 - **Retry**: reason classification (`core/modes/interactive/retry-reason.ts`) labels the countdown (rate-limit/overload/network/timeout/server); auto-retry + **fallback chain** (downgrades model on rate-limit; `fallback_warning` surfaced — to stderr in `-p` text mode).
 
 ## Providers
+
 - **MCP**: ~full parity with Claude Code — stdio / http-streamable / sse transports, resources/prompts, OAuth PKCE, `.mcp.json` scopes, glob permissions, `pit mcp` CLI.
 - **OpenAI-compatible login** (`/login` URL+key+probe) + presets (zai/verboo); custom-URL providers persisted to `models.json` with `login:true`.
 - Multi-provider: anthropic / openai (responses & completions) / google / openai-codex / opencode / openrouter / zai.
 
 ## Subagents / orchestration
+
 - **coordinator** (`task` tool): spawn / `continue` / `resume` (survives restart via `.pit/subagents/`), curated agent types (`.pit/agents/*.md`), concurrency cap, per-turn observability, token accounting. Parallel / fanout, worktrees, digests + `op:read`, acceptance gates, process-wide slots with nested yield, and subagent guard propagation already ship — do not re-propose those basics.
 - **Improvement frontier (subagents):** read-only audit and ranked suggestions live in [`subagent-layer-review-2026-08-07.md`](subagent-layer-review-2026-08-07.md). Prefer that map over inventing a second coordinator.
 
 ---
 
 ## What does NOT exist (don't propose fixes for vaporware)
+
 - **Diff-limit extension** — ADR-0002 proposed, never implemented. No code.
 - **scoped-models** — orphaned UI; the decision is to *remove* it, not extend it.
 - **`pi-*` services** — `pi-autoresearch`, `pi-subagents`, `@tintinweb/pi-tasks` etc. are external npm packages, not Pit internals.
@@ -119,6 +130,7 @@ without reading the anchors below first.
 ---
 
 ## Where the frontier actually is
+
 Because the "basics" above are done, real value now lives in these angles — analyze from
 here, not from the checklist above:
 

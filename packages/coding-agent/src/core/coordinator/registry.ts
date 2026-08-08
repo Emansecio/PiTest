@@ -8,8 +8,29 @@ import type { SubagentRecord, SubagentStatus } from "./types.ts";
 
 const TERMINAL_STATUSES: ReadonlySet<SubagentStatus> = new Set(["completed", "failed", "cancelled"]);
 
+export interface SubagentRegistryStats {
+	created: number;
+	settled: number;
+	evicted: number;
+	retained: number;
+	live: number;
+	terminal: number;
+}
+
+export interface SubagentRegistryOptions {
+	onBeforeEvict?: (record: SubagentRecord) => void;
+}
+
 export class SubagentRegistry {
 	private records = new Map<string, SubagentRecord>();
+	private created = 0;
+	private settled = 0;
+	private evicted = 0;
+	private readonly options: SubagentRegistryOptions;
+
+	constructor(options: SubagentRegistryOptions = {}) {
+		this.options = options;
+	}
 	/** Live mirror of every record's taskName for O(1) collision checks in create(). */
 	private takenNames = new Set<string>();
 	/**
@@ -23,6 +44,7 @@ export class SubagentRegistry {
 		prompt: string;
 		systemPrompt?: string;
 		allowedTools?: string[];
+		model?: string;
 		taskName?: string;
 		depth?: number;
 	}): SubagentRecord {
@@ -34,11 +56,13 @@ export class SubagentRegistry {
 			prompt: input.prompt,
 			systemPrompt: input.systemPrompt,
 			allowedTools: input.allowedTools,
+			model: input.model,
 			status: "pending",
 			turnCount: 0,
 		};
 		this.records.set(id, record);
 		this.takenNames.add(record.taskName);
+		this.created++;
 		this.evictTerminal();
 		return record;
 	}
@@ -65,8 +89,14 @@ export class SubagentRegistry {
 		for (const [id, r] of this.records) {
 			if (terminal <= SubagentRegistry.MAX_TERMINAL_RECORDS) break;
 			if (TERMINAL_STATUSES.has(r.status)) {
+				try {
+					this.options.onBeforeEvict?.(r);
+				} catch {
+					// Eviction hooks are best-effort retention seams.
+				}
 				this.records.delete(id);
 				this.takenNames.delete(r.taskName);
+				this.evicted++;
 				terminal--;
 			}
 		}
@@ -82,16 +112,24 @@ export class SubagentRegistry {
 	update(id: string, patch: Partial<SubagentRecord>): SubagentRecord | undefined {
 		const record = this.records.get(id);
 		if (!record) return undefined;
+		const wasTerminal = TERMINAL_STATUSES.has(record.status);
 		Object.assign(record, patch);
-		if (TERMINAL_STATUSES.has(record.status)) this.settleRecord(id, record);
+		if (TERMINAL_STATUSES.has(record.status)) {
+			if (!wasTerminal) this.settled++;
+			this.settleRecord(id, record);
+		}
 		return record;
 	}
 
 	setStatus(id: string, status: SubagentStatus): void {
 		const record = this.records.get(id);
 		if (!record) return;
+		const wasTerminal = TERMINAL_STATUSES.has(record.status);
 		record.status = status;
-		if (TERMINAL_STATUSES.has(status)) this.settleRecord(id, record);
+		if (TERMINAL_STATUSES.has(status)) {
+			if (!wasTerminal) this.settled++;
+			this.settleRecord(id, record);
+		}
 	}
 
 	get(id: string): SubagentRecord | undefined {
@@ -100,6 +138,21 @@ export class SubagentRegistry {
 
 	list(): SubagentRecord[] {
 		return [...this.records.values()];
+	}
+
+	stats(): SubagentRegistryStats {
+		let terminal = 0;
+		for (const record of this.records.values()) {
+			if (TERMINAL_STATUSES.has(record.status)) terminal++;
+		}
+		return {
+			created: this.created,
+			settled: this.settled,
+			evicted: this.evicted,
+			retained: this.records.size,
+			live: this.records.size - terminal,
+			terminal,
+		};
 	}
 
 	remove(id: string): void {
@@ -111,5 +164,8 @@ export class SubagentRegistry {
 	clear(): void {
 		this.records.clear();
 		this.takenNames.clear();
+		this.created = 0;
+		this.settled = 0;
+		this.evicted = 0;
 	}
 }

@@ -22,7 +22,7 @@ implies Permission `plan`. From `Fusion · Plan` the cycle key returns to plain
 `Plan` (solo).
 
 | Permission | Enforcement | Stance expected of the model |
-|---|---|---|
+| --- | --- | --- |
 | `plan` | Read-only | Research, produce a Plan, present it for approval |
 | `ask` | Read-only — **identical checks to `plan`** | Q&A: answer directly, no Plan, no approval ritual; point at another Mode when asked to change code |
 | `confirm` | Guarded writes + a human gate: each uncovered mutation waits for approval | Work normally, but batch mutations (each one interrupts the user); no plan ritual; a denial is a decision, not a retry signal |
@@ -41,13 +41,13 @@ first.
 In `plan`/`ask`:
 
 - Any action typed `write` or `exec` (`bash`, `edit`, `write`, `eval`, `debug`, …).
-- Generic `type:"tool"` actions gated by their declared side effect: `agent`
-  (`task`, `parallel`, `fanout`, `goal_complete`), `workspace` (e.g.
-  `memory_append`) and `exec` are denied. Only side effect `none` passes. A tool
-  with no declared side effect is `opaque` and is denied **fail-closed**.
+- Generic `type:"tool"` actions gated by their declared side effect: `agent`,
+  `workspace`, `exec`, and unclassified `opaque` tools are denied fail-closed.
+  The one authorization seam is trusted host metadata on a native coordinator
+  tool proving every effective child catalog side-effect-free, with no `plan`
+  tool, worktree, acceptance gate, or default messaging tool. Missing or unsafe
+  proof remains denied; the model cannot self-authorize delegation.
 - All `mcp__*` tools — MCP cannot be re-opened via `allowTools` in read-only modes.
-- There is **no read-only carve-out for subagents**: delegation stays blocked, so
-  research is done by calling the read-only tools directly.
 
 Reads still honor deny rules in every mode.
 
@@ -55,7 +55,8 @@ Reads still honor deny rules in every mode.
 
 1. `denyTools[name]` → deny (all modes)
 2. plan/ask only: `write`/`exec` action types + `agent`/`workspace`/`exec`/`opaque`
-   side effects → deny
+   side effects → deny, except native coordinator calls carrying trusted
+   `readOnlyDelegation` proof for a fully side-effect-free child selection
 3. plan/ask only: `mcp__*` → deny
 4. `allowTools[name]` → allow (skips the rest; in plan/ask can reopen sensitive
    reads or non-MCP custom tools already past step 2)

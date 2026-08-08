@@ -78,6 +78,8 @@ export interface SubagentRecord {
 	prompt: string;
 	systemPrompt?: string;
 	allowedTools?: string[];
+	/** Canonical effective model identifier (`provider/id`), never the model object. */
+	model?: string;
 	status: SubagentStatus;
 	startedAt?: number;
 	endedAt?: number;

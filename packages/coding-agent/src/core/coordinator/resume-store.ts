@@ -16,6 +16,7 @@ import { readdirSync, statSync, unlinkSync } from "node:fs";
 import { mkdir, readFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentMessage } from "@pit/agent-core";
+import { recordDiagnostic } from "@pit/ai";
 import { writeFileAtomic } from "../../utils/atomic-write.ts";
 import { redactForDisk } from "../secret-redactor.ts";
 
@@ -49,6 +50,22 @@ export interface ResumeState {
 
 function storeDir(cwd: string): string {
 	return join(cwd, ".pit", "subagents");
+}
+
+function isMissingFile(cause: unknown): boolean {
+	return (
+		typeof cause === "object" && cause !== null && "code" in cause && (cause as { code?: unknown }).code === "ENOENT"
+	);
+}
+
+function resumeRetentionFailure(input: { mechanism: string; cause: unknown }): void {
+	const note = (input.cause instanceof Error ? input.cause.message : String(input.cause)).slice(0, 300);
+	recordDiagnostic({
+		category: "subagent.retention-failed",
+		level: "error",
+		source: "subagent-resume-store",
+		context: { mechanism: input.mechanism, note },
+	});
 }
 
 /**
@@ -108,7 +125,8 @@ export async function saveResumeState(cwd: string, state: ResumeState): Promise<
 		// JSON metacharacters, so the serialized state stays valid JSON.
 		const file = join(storeDir(cwd), `${resumeStateStem(state.handle)}.json`);
 		await writeFileAtomic(file, redactForDisk(JSON.stringify(state)));
-	} catch {
+	} catch (cause) {
+		resumeRetentionFailure({ mechanism: "save", cause });
 		// Best-effort: a persistence failure must not break the spawn/turn.
 	}
 }
@@ -121,11 +139,16 @@ export async function loadResumeState(cwd: string, handle: string): Promise<Resu
 			if (!parsed || !Array.isArray(parsed.messages)) continue;
 			// Expired: GC the stale state instead of resuming a week-old transcript.
 			if (typeof parsed.savedAt === "number" && Date.now() - parsed.savedAt > RESUME_STATE_TTL_MS) {
-				await unlink(file).catch(() => {});
+				await unlink(file).catch((cause) => {
+					if (!isMissingFile(cause)) resumeRetentionFailure({ mechanism: "gc", cause });
+				});
 				continue;
 			}
 			return parsed;
-		} catch {
+		} catch (cause) {
+			if (!isMissingFile(cause)) {
+				resumeRetentionFailure({ mechanism: cause instanceof SyntaxError ? "parse" : "load", cause });
+			}
 			// Missing/corrupt candidate — try the next.
 		}
 	}
@@ -136,7 +159,8 @@ export async function deleteResumeState(cwd: string, handle: string): Promise<vo
 	for (const file of candidateFiles(cwd, handle)) {
 		try {
 			await unlink(file);
-		} catch {
+		} catch (cause) {
+			if (!isMissingFile(cause)) resumeRetentionFailure({ mechanism: "delete", cause });
 			// Already gone / never written — fine.
 		}
 	}
@@ -159,13 +183,15 @@ export function listResumeHandlesSync(cwd: string): string[] {
 					unlinkSync(join(dir, n));
 					continue;
 				}
-			} catch {
+			} catch (cause) {
+				if (!isMissingFile(cause)) resumeRetentionFailure({ mechanism: "gc", cause });
 				// stat/unlink race — treat as live; load re-validates savedAt anyway.
 			}
 			live.push(n.replace(/\.json$/, ""));
 		}
 		return live;
-	} catch {
+	} catch (cause) {
+		if (!isMissingFile(cause)) resumeRetentionFailure({ mechanism: "list", cause });
 		return [];
 	}
 }

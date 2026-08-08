@@ -50,6 +50,10 @@ export type DiagnosticCategory =
 	// history rather than emitting none — and records this so the divergence is
 	// visible instead of showing up as context that quietly went missing.
 	| "session.compaction_anchor_missing"
+	// Best-effort subagent output/resume/checkpoint retention failed. The task
+	// continues, but recovery durability is degraded; `source` and `mechanism`
+	// identify the store and operation.
+	| "subagent.retention-failed"
 	| "error.isolated"
 	| "limit.evicted"
 	| "input.truncated"

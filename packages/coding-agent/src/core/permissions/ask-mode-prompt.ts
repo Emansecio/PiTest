@@ -15,7 +15,7 @@
  * rebuilds only when the permission mode (or the tool surface) changes.
  */
 
-import { blockedToolsBullet } from "./plan-mode-prompt.ts";
+import { blockedToolsBullet, readOnlyDelegationBullet } from "./plan-mode-prompt.ts";
 
 /**
  * The `<ask_mode>` block appended to the system prompt while ask mode is active.
@@ -27,7 +27,7 @@ export function buildAskModeSection(sessionToolNames?: readonly string[]): strin
 		"<ask_mode>",
 		"Ask mode is ACTIVE: this session is READ-ONLY.",
 		blockedToolsBullet(sessionToolNames),
-		"- Subagents/spawn (`task`, `parallel`, `fanout`) are also blocked — there is no read-only carve-out; do your own research with the read-only tools directly.",
+		readOnlyDelegationBullet(),
 		"Your job is to ANSWER the user's question, directly:",
 		"1. Investigate with read-only tools (read, grep, find, ls, symbol, lsp navigation) until the answer is grounded in the actual code — cite files/symbols you looked at.",
 		"2. Answer in prose. Explaining how a change would work is fine; describe it instead of writing it.",

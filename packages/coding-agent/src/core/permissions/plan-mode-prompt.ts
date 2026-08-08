@@ -10,12 +10,11 @@
  *
  * The blocked-tools list is DERIVED from the canonical side-effect
  * classification (`BUILTIN_TOOL_SIDE_EFFECTS` + `EXTENSION_TOOL_SIDE_EFFECTS` +
- * `isPlanBlockingSideEffect`) so the prompt can never drift from what `checkPlan`
- * actually denies — the bug this replaced was a hand-maintained string that had
- * gone stale (it omitted the spawn/memory tools). Both maps are read explicitly
- * here instead of relying on `BUILTIN_TOOL_SIDE_EFFECTS` re-exporting the
- * extension entries, so re-splitting the two maps can never silently drop
- * `memory_append` & co. from the prompt again.
+ * `isPlanBlockingSideEffect`). Native coordinator names are intentionally removed
+ * from that categorical list and explained by a separate host-proof bullet,
+ * matching the checker's trusted read-only delegation seam. Both maps are read
+ * explicitly here so re-splitting them cannot silently drop `memory_append` and
+ * other unconditionally blocked tools from the prompt.
  *
  * The list is then INTERSECTED with the session's tool surface when the caller
  * passes it: naming `ast_edit`/`recipe`/`goal_complete` to a model that was never
@@ -28,6 +27,7 @@
  * changes.
  */
 
+import { COORDINATOR_TOOL_NAMES } from "../coordinator/brand.ts";
 import { BUILTIN_TOOL_SIDE_EFFECTS } from "./checker.ts";
 import { EXTENSION_TOOL_SIDE_EFFECTS, isPlanBlockingSideEffect, type ToolSideEffect } from "./side-effect.ts";
 
@@ -45,10 +45,11 @@ function isIntegrationNamespaced(toolName: string): boolean {
 }
 
 /**
- * The tools plan mode blocks, derived from the canonical side-effect maps so the
- * prompt and the gating (`checker.ts` / `side-effect.ts`) share one source of
- * truth. Sorted for a stable, cache-friendly string. Optional integration
- * namespaces are folded into the general read-only rule (see above).
+ * The tools plan mode blocks unconditionally, derived from the canonical
+ * side-effect maps so the prompt and gating share one source of truth. Native
+ * coordinator tools are excluded because trusted host proof may authorize their
+ * side-effect-free selections. Sorted for a stable, cache-friendly string;
+ * optional integration namespaces are folded into the general read-only rule.
  *
  * `sessionToolNames` narrows the result to tools the session actually exposes.
  * Omit it (tests, callers without a surface) to get the full static derivation —
@@ -62,7 +63,9 @@ export function planBlockedToolNames(sessionToolNames?: readonly string[]): stri
 	};
 	return Object.entries(merged)
 		.filter(([name, effect]) => {
-			if (!isPlanBlockingSideEffect(effect) || isIntegrationNamespaced(name)) return false;
+			if (!isPlanBlockingSideEffect(effect) || isIntegrationNamespaced(name) || COORDINATOR_TOOL_NAMES.has(name)) {
+				return false;
+			}
 			return surface === undefined || surface.has(name);
 		})
 		.map(([name]) => name)
@@ -84,6 +87,11 @@ export function blockedToolsBullet(sessionToolNames?: readonly string[]): string
 	return `- Mutating tools (${inner}) are BLOCKED at the permission layer. Do not attempt them; do not promise edits.`;
 }
 
+/** Explain the one trusted exception without implying that models can self-authorize it. */
+export function readOnlyDelegationBullet(): string {
+	return "- Coordinator tools (`task`, `parallel`, `fanout`) are conditional: host-proven read-only delegation may run only when every effective child tool is side-effect-free. A worktree, an acceptance gate, unsafe child tools, or missing proof remains BLOCKED.";
+}
+
 /**
  * The `<plan_mode>` block appended to the system prompt while plan mode active.
  * Keep these invariants in the text: blocked-tools warning, numbered workflow,
@@ -94,7 +102,7 @@ export function buildPlanModeSection(sessionToolNames?: readonly string[]): stri
 		"<plan_mode>",
 		"Plan mode is ACTIVE: this session is READ-ONLY.",
 		blockedToolsBullet(sessionToolNames),
-		"- Subagents/spawn (`task`, `parallel`, `fanout`) are also blocked — there is no read-only carve-out; do your own research with the read-only tools directly.",
+		readOnlyDelegationBullet(),
 		"Workflow you MUST follow:",
 		"1. Research with read-only tools (read, grep, find, ls, symbol, lsp navigation).",
 		"2. Read files IN FULL before planning changes to them.",

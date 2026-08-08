@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getRuntimeDiagnostics, resetRuntimeDiagnostics } from "@pit/ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	bundleGroundingGuardChain,
@@ -21,6 +22,7 @@ describe("subagent guard chain", () => {
 	let dir: string;
 
 	beforeEach(() => {
+		resetRuntimeDiagnostics();
 		dir = mkdtempSync(join(tmpdir(), "pit-subguard-"));
 	});
 
@@ -99,6 +101,33 @@ describe("subagent guard chain", () => {
 		// Fire-once per (tool, args) per chain — immediate retry is allowed.
 		const second = await chain.beforeToolCall(call("bash", bashArgs, "le1"));
 		expect(second).toBeUndefined();
+	});
+
+	it("diagnoses an escaped replay-handler failure while remaining fail-open", async () => {
+		const chain = createSubagentGuardChain({
+			cwd: dir,
+			learnedErrorProvider: () => {
+				throw new Error("learned provider exploded");
+			},
+		});
+
+		await expect(
+			chain.beforeToolCall(call("bash", { command: "echo safe" }, "replay-fail")),
+		).resolves.toBeUndefined();
+
+		const events = getRuntimeDiagnostics().recent.filter((event) => event.category === "guard.failed");
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({
+			level: "error",
+			source: "subagent-guard-replay",
+			context: {
+				outcome: "failed",
+				phase: "check",
+				toolName: "bash",
+				toolCallId: "replay-fail",
+			},
+		});
+		expect(events[0]?.context?.note).toContain("learned provider exploded");
 	});
 
 	it("exposes the subagent-propagated guard chain in a fixed, NAMED order", () => {

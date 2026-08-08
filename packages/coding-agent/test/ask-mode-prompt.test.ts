@@ -82,6 +82,15 @@ describe("buildAskModeSection", () => {
 		expect(planBlockedToolNames(surface)).toEqual(["bash", "memory_append", "write"]);
 	});
 
+	it("states the host-proven read-only delegation carve-out without weakening Ask stance", () => {
+		const s = buildAskModeSection();
+		expect(s).toContain("host-proven read-only delegation");
+		expect(s).toContain("worktree");
+		expect(s).toContain("acceptance");
+		expect(s).toContain("missing proof");
+		expect(s).not.toContain("there is no read-only carve-out");
+	});
+
 	it("tells the model to answer directly with read-only research", () => {
 		const s = buildAskModeSection();
 		expect(s).toContain("ANSWER");
